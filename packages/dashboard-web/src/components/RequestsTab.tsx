@@ -53,6 +53,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "./ui/select";
+import { Switch } from "./ui/switch";
 
 // Helper function to generate deterministic color for account names
 function getAccountBadgeColor(accountName?: string): {
@@ -170,6 +171,9 @@ export function RequestsTab() {
 	const [withTokensOnly, setWithTokensOnly] = useState(false);
 	const [modelFilters, setModelFilters] = useState<Set<string>>(new Set());
 	const [projectFilters, setProjectFilters] = useState<Set<string>>(new Set());
+	const [use24HourFormat, setUse24HourFormat] = useState(() => {
+		return localStorage.getItem('ccflare-24h-time') === 'true';
+	});
 
 	const {
 		data: requestsData,
@@ -461,6 +465,24 @@ export function RequestsTab() {
 		});
 	};
 
+	const handleToggle24HourFormat = (checked: boolean) => {
+		setUse24HourFormat(checked);
+		localStorage.setItem('ccflare-24h-time', checked ? 'true' : 'false');
+	};
+
+	const formatTime = (timestamp: number | string): string => {
+		const date = new Date(timestamp);
+		if (use24HourFormat) {
+			return date.toLocaleTimeString('en-GB', {
+				hour: '2-digit',
+				minute: '2-digit',
+				second: '2-digit',
+				hour12: false,
+			});
+		}
+		return date.toLocaleTimeString();
+	};
+
 	const getStatusCodeColor = (code: number) => {
 		if (code >= 200 && code < 300) return "text-green-600";
 		if (code >= 400 && code < 500) return "text-yellow-600";
@@ -553,7 +575,17 @@ export function RequestsTab() {
 							{API_LIMITS.requestsDetail})
 						</CardDescription>
 					</div>
-					<div className="flex gap-2">
+					<div className="flex gap-2 items-center">
+						<div className="flex items-center gap-2">
+							<Label htmlFor="24h-format" className="text-sm font-medium cursor-pointer">
+								24h
+							</Label>
+							<Switch
+								id="24h-format"
+								checked={use24HourFormat}
+								onCheckedChange={handleToggle24HourFormat}
+							/>
+						</div>
 						<Button
 							onClick={() => setShowFilters(!showFilters)}
 							variant={showFilters ? "default" : "outline"}
@@ -1148,7 +1180,7 @@ export function RequestsTab() {
 												<ChevronRight className="h-4 w-4" />
 											)}
 											<span className="text-sm font-mono">
-												{new Date(request.meta.timestamp).toLocaleTimeString()}
+												{formatTime(request.meta.timestamp)}
 											</span>
 											{(request.meta.method || summary?.method) && (
 												<span className="text-sm font-medium">
