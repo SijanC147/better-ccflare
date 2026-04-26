@@ -75,9 +75,15 @@ try {
 }
 
 // Memory monitoring thresholds
+// Note: standalone Bun binaries have a higher RSS baseline than the dev runtime
+// because of JIT-compiled code, embedded WASM (tiktoken), and macOS malloc arena
+// retention. A 1GB growth from baseline does not necessarily indicate a leak —
+// it is common after hours of uptime under load. Heap-vs-RSS gap is the real
+// signal: if heap stays small while RSS grows, growth is native (JIT/WASM/arena)
+// rather than a JS object leak.
 const MEMORY_MONITOR_INTERVAL_MS = 60 * 1000;
-const MEMORY_GROWTH_WARN_BYTES = 512 * 1024 * 1024;
-const MEMORY_GROWTH_ERROR_BYTES = 1024 * 1024 * 1024;
+const MEMORY_GROWTH_WARN_BYTES = 1024 * 1024 * 1024; // 1GB warn
+const MEMORY_GROWTH_ERROR_BYTES = 2 * 1024 * 1024 * 1024; // 2GB error
 
 // Helper function to resolve dashboard assets with fallback
 function resolveDashboardAsset(assetPath: string): string | null {
@@ -969,10 +975,19 @@ export default async function startServer(options?: {
 		throw error;
 	}
 
-	// Memory monitoring - log RSS every 60s with warnings at growth thresholds
+	// Memory monitoring - log RSS every 60s with warnings at growth thresholds.
+	// Force a full GC before sampling so the warning reflects retained memory
+	// rather than uncollected garbage waiting on the next GC cycle. This makes
+	// the heap-vs-RSS gap a reliable signal for native (JIT/WASM/arena) growth
+	// vs an actual JS object leak.
 	const baselineRss = process.memoryUsage.rss();
 	const memLog = new Logger("MemoryMonitor");
 	memoryMonitorInterval = setInterval(() => {
+		// Bun.gc(true) forces a synchronous full GC. No-op on non-Bun runtimes.
+		if (typeof Bun !== "undefined" && typeof Bun.gc === "function") {
+			Bun.gc(true);
+		}
+
 		const mem = process.memoryUsage();
 		const rssMb = Math.round(mem.rss / 1024 / 1024);
 		const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
@@ -981,11 +996,11 @@ export default async function startServer(options?: {
 
 		if (growthBytes > MEMORY_GROWTH_ERROR_BYTES) {
 			memLog.error(
-				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>1GB growth - potential leak)`,
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>2GB growth - investigate)`,
 			);
 		} else if (growthBytes > MEMORY_GROWTH_WARN_BYTES) {
 			memLog.warn(
-				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>512MB growth)`,
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>1GB growth)`,
 			);
 		} else {
 			memLog.debug(
