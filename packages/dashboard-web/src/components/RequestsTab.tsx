@@ -506,7 +506,10 @@ export function RequestsTab() {
 
 	const handleToggleGroupByProject = (checked: boolean) => {
 		setGroupByProject(checked);
-		localStorage.setItem("ccflare-group-by-project", checked ? "true" : "false");
+		localStorage.setItem(
+			"ccflare-group-by-project",
+			checked ? "true" : "false",
+		);
 	};
 
 	const formatTime = (timestamp: number | string): string => {
@@ -699,12 +702,11 @@ export function RequestsTab() {
 								Plan
 							</Badge>
 						)}
-						{summary?.tokensPerSecond &&
-							summary.tokensPerSecond > 0 && (
-								<Badge variant="secondary" className="text-xs">
-									{formatTokensPerSecond(summary.tokensPerSecond)}
-								</Badge>
-							)}
+						{summary?.tokensPerSecond && summary.tokensPerSecond > 0 && (
+							<Badge variant="secondary" className="text-xs">
+								{formatTokensPerSecond(summary.tokensPerSecond)}
+							</Badge>
+						)}
 						{(request.meta.accountName || request.meta.accountId) && (
 							<span className="text-sm text-muted-foreground">
 								via{" "}
@@ -742,15 +744,12 @@ export function RequestsTab() {
 									: "--"}
 							</span>
 						)}
-						{request.meta.retry !== undefined &&
-							request.meta.retry > 0 && (
-								<span>Retry {request.meta.retry}</span>
-							)}
+						{request.meta.retry !== undefined && request.meta.retry > 0 && (
+							<span>Retry {request.meta.retry}</span>
+						)}
 						{(request.meta.accountName || request.meta.accountId) &&
 							(() => {
-								const color = getAccountBadgeColor(
-									request.meta.accountName,
-								);
+								const color = getAccountBadgeColor(request.meta.accountName);
 								return (
 									<Badge
 										variant="outline"
@@ -1468,10 +1467,7 @@ export function RequestsTab() {
 											<CardTitle className="text-base">
 												{project || "No Project"}
 											</CardTitle>
-											<Badge
-												variant="secondary"
-												className="ml-2 text-xs"
-											>
+											<Badge variant="secondary" className="ml-2 text-xs">
 												{requests.length}
 											</Badge>
 										</div>

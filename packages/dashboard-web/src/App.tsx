@@ -58,7 +58,7 @@ export function App() {
 	const location = useLocation();
 	const [showCombos, setShowCombos] = useState(false);
 	const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
-		localStorage.getItem("ccflare-sidebar-collapsed") === "true"
+		localStorage.getItem("ccflare-sidebar-collapsed") === "true",
 	);
 
 	// Build routes array dynamically based on feature flags
@@ -331,7 +331,12 @@ export function App() {
 					/>
 
 					{/* Main Content */}
-					<main className={cn("transition-all duration-300", isSidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}>
+					<main
+						className={cn(
+							"transition-all duration-300",
+							isSidebarCollapsed ? "lg:pl-16" : "lg:pl-64",
+						)}
+					>
 						{/* Mobile spacer */}
 						<div className="h-16 lg:hidden" />
 
