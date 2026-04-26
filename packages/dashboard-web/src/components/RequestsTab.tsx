@@ -178,6 +178,9 @@ export function RequestsTab() {
 	const [use24HourFormat, setUse24HourFormat] = useState(() => {
 		return localStorage.getItem("ccflare-24h-time") === "true";
 	});
+	const [groupByProject, setGroupByProject] = useState(() => {
+		return localStorage.getItem("ccflare-group-by-project") === "true";
+	});
 
 	const {
 		data: requestsData,
@@ -388,6 +391,33 @@ export function RequestsTab() {
 		projectFilters,
 	]);
 
+	// Group requests by project when toggle is enabled - memoized
+	const groupedRequests = useMemo(() => {
+		if (!groupByProject) return null;
+
+		const groups = new Map<string | null, typeof filteredRequests>();
+		for (const request of filteredRequests) {
+			const summary = data?.summaries.get(request.id);
+			const project = summary?.project || request.meta.project || null;
+			if (!groups.has(project)) {
+				groups.set(project, []);
+			}
+			groups.get(project)!.push(request);
+		}
+
+		// Sort groups: named projects alphabetically, then "No Project" last
+		const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
+			const aIsNull = a[0] === null || a[0] === "";
+			const bIsNull = b[0] === null || b[0] === "";
+			if (aIsNull && bIsNull) return 0;
+			if (aIsNull) return 1; // null/empty goes last
+			if (bIsNull) return -1;
+			return (a[0] || "").localeCompare(b[0] || "");
+		});
+
+		return sortedGroups;
+	}, [groupByProject, filteredRequests, data?.summaries]);
+
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
 			const next = new Set(prev);
@@ -474,6 +504,11 @@ export function RequestsTab() {
 		localStorage.setItem("ccflare-24h-time", checked ? "true" : "false");
 	};
 
+	const handleToggleGroupByProject = (checked: boolean) => {
+		setGroupByProject(checked);
+		localStorage.setItem("ccflare-group-by-project", checked ? "true" : "false");
+	};
+
 	const formatTime = (timestamp: number | string): string => {
 		const date = new Date(timestamp);
 		if (use24HourFormat) {
@@ -537,6 +572,255 @@ export function RequestsTab() {
 	 */
 	// copyRequest helper removed – handled inline by CopyButton
 
+	// Helper component to render a single request row
+	const RequestRow = ({
+		request,
+		isExpanded,
+		onToggleExpand,
+	}: {
+		request: RequestPayload;
+		isExpanded: boolean;
+		onToggleExpand: () => void;
+	}) => {
+		const isError = request.error || !request.meta.success;
+		const statusCode = request.response?.status;
+		const summary = data?.summaries.get(request.id);
+
+		return (
+			<div
+				key={request.id}
+				className={`border rounded-lg p-3 transition-all duration-300 ${
+					isError ? "border-destructive/50" : "border-border"
+				} ${request.meta.pending ? "animate-pulse opacity-70" : "opacity-100"}`}
+			>
+				<button
+					type="button"
+					className="flex items-center justify-between cursor-pointer w-full text-left"
+					onClick={onToggleExpand}
+				>
+					<div className="flex items-center gap-2 flex-wrap">
+						{isExpanded ? (
+							<ChevronDown className="h-4 w-4" />
+						) : (
+							<ChevronRight className="h-4 w-4" />
+						)}
+						<span className="text-sm font-mono">
+							{formatTime(request.meta.timestamp)}
+						</span>
+						{(request.meta.method || summary?.method) && (
+							<span className="text-sm font-medium">
+								{request.meta.method || summary?.method}
+							</span>
+						)}
+						{(request.meta.path || summary?.path) && (
+							<span className="text-sm text-muted-foreground font-mono">
+								{request.meta.path || summary?.path}
+							</span>
+						)}
+						{statusCode && (
+							<span
+								className={`text-sm font-medium ${
+									statusCode >= 200 && statusCode < 300
+										? "text-green-600"
+										: statusCode >= 400 && statusCode < 500
+											? "text-yellow-600"
+											: "text-red-600"
+								}`}
+							>
+								{statusCode}
+							</span>
+						)}
+						{summary?.model && (
+							<Badge
+								variant="outline"
+								className={`text-xs ${
+									getModelColor(summary.model).border
+								} ${getModelColor(summary.model).text}`}
+							>
+								{summary.model}
+							</Badge>
+						)}
+						{(summary?.project || request.meta.project) && (
+							<Badge
+								variant="outline"
+								className="text-xs border-violet-500 text-violet-600 dark:text-violet-400"
+							>
+								<FolderOpen className="h-3 w-3 mr-1" />
+								{summary?.project || request.meta.project}
+							</Badge>
+						)}
+						{(summary?.agentUsed || request.meta.agentUsed) && (
+							<Badge variant="secondary" className="text-xs">
+								Agent: {summary?.agentUsed || request.meta.agentUsed}
+							</Badge>
+						)}
+						{summary?.comboName && (
+							<Badge
+								variant="outline"
+								className="text-xs border-purple-500 text-purple-500"
+							>
+								Combo: {summary.comboName}
+							</Badge>
+						)}
+						{summary?.apiKeyName && (
+							<Badge variant="outline" className="text-xs">
+								<Key className="h-3 w-3 mr-1" />
+								{summary.apiKeyName}
+							</Badge>
+						)}
+						{(summary?.totalTokens || request.meta.pending) && (
+							<Badge variant="outline" className="text-xs">
+								{summary?.totalTokens
+									? formatTokens(summary.totalTokens)
+									: "--"}{" "}
+								tokens
+							</Badge>
+						)}
+						{(summary?.costUsd || request.meta.pending) && (
+							<Badge variant="default" className="text-xs">
+								{summary?.costUsd && summary.costUsd > 0
+									? formatCost(summary.costUsd)
+									: "--"}
+							</Badge>
+						)}
+						{summary?.billingType === "overage" && (
+							<Badge
+								variant="outline"
+								className="text-xs border-orange-500 text-orange-500"
+							>
+								Overage
+							</Badge>
+						)}
+						{summary?.billingType === "plan" && (
+							<Badge
+								variant="outline"
+								className="text-xs border-teal-500 text-teal-500"
+							>
+								Plan
+							</Badge>
+						)}
+						{summary?.tokensPerSecond &&
+							summary.tokensPerSecond > 0 && (
+								<Badge variant="secondary" className="text-xs">
+									{formatTokensPerSecond(summary.tokensPerSecond)}
+								</Badge>
+							)}
+						{(request.meta.accountName || request.meta.accountId) && (
+							<span className="text-sm text-muted-foreground">
+								via{" "}
+								{request.meta.accountName ||
+									`${request.meta.accountId?.slice(0, 8)}...`}
+							</span>
+						)}
+						{request.meta.rateLimited && (
+							<Badge variant="warning" className="text-xs">
+								Rate Limited
+							</Badge>
+						)}
+						{zaiAccountNames.has(request.meta.accountName ?? "") &&
+							isZaiPeakHour(request.meta.timestamp) && (
+								<Badge
+									variant="outline"
+									className="text-xs border-orange-500 text-orange-500"
+								>
+									Peak
+								</Badge>
+							)}
+						{oauthAccountNames.has(request.meta.accountName ?? "") &&
+							isAnthropicPeakHour(request.meta.timestamp) && (
+								<Badge
+									variant="outline"
+									className="text-xs border-orange-500 text-orange-500"
+								>
+									Peak
+								</Badge>
+							)}
+						{(summary?.responseTimeMs || request.meta.pending) && (
+							<span>
+								{summary?.responseTimeMs
+									? formatDuration(summary.responseTimeMs)
+									: "--"}
+							</span>
+						)}
+						{request.meta.retry !== undefined &&
+							request.meta.retry > 0 && (
+								<span>Retry {request.meta.retry}</span>
+							)}
+						{(request.meta.accountName || request.meta.accountId) &&
+							(() => {
+								const color = getAccountBadgeColor(
+									request.meta.accountName,
+								);
+								return (
+									<Badge
+										variant="outline"
+										className={`text-xs ${color.borderClass} ${color.textClass}`}
+									>
+										{request.meta.accountName ||
+											`${request.meta.accountId?.slice(0, 8)}...`}
+									</Badge>
+								);
+							})()}
+						<span>ID: {request.id.slice(0, 8)}...</span>
+					</div>
+				</button>
+
+				{/* Action buttons */}
+				<div className="flex justify-end gap-2 mt-2">
+					<Button
+						variant="ghost"
+						size="icon"
+						onClick={() => setModalRequest(request)}
+						title="View Details"
+					>
+						<Eye className="h-4 w-4" />
+					</Button>
+					<CopyButton
+						variant="ghost"
+						size="icon"
+						title="Copy as JSON"
+						getValue={() => {
+							const decoded: RequestPayload & { decoded?: true } = {
+								...request,
+								request: {
+									...request.request,
+									body: request.request.body
+										? decodeBase64(request.request.body)
+										: null,
+								},
+								response: request.response
+									? {
+											...request.response,
+											body: request.response.body
+												? decodeBase64(request.response.body)
+												: null,
+										}
+									: null,
+								decoded: true,
+							};
+							return JSON.stringify(decoded, null, 2);
+						}}
+					/>
+				</div>
+
+				{isExpanded && (
+					<div className="mt-3 space-y-3">
+						<TokenUsageDisplay summary={summary} />
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={() => setModalRequest(request)}
+							className="w-full"
+						>
+							<Eye className="h-4 w-4 mr-2" />
+							View More Details
+						</Button>
+					</div>
+				)}
+			</div>
+		);
+	};
+
 	if (loading) {
 		return (
 			<Card>
@@ -591,6 +875,19 @@ export function RequestsTab() {
 								id="24h-format"
 								checked={use24HourFormat}
 								onCheckedChange={handleToggle24HourFormat}
+							/>
+						</div>
+						<div className="flex items-center gap-2">
+							<Label
+								htmlFor="group-by-project"
+								className="text-sm font-medium cursor-pointer"
+							>
+								Group by Project
+							</Label>
+							<Switch
+								id="group-by-project"
+								checked={groupByProject}
+								onCheckedChange={handleToggleGroupByProject}
 							/>
 						</div>
 						<Button
@@ -1160,248 +1457,49 @@ export function RequestsTab() {
 					<p className="text-muted-foreground">
 						No requests match the selected filters
 					</p>
+				) : groupByProject && groupedRequests ? (
+					<div className="space-y-4">
+						{groupedRequests.map(([project, requests]) => (
+							<Card key={project || "no-project"} className="border">
+								<CardHeader className="pb-3">
+									<div className="flex items-center justify-between">
+										<div className="flex items-center gap-2">
+											<FolderOpen className="h-4 w-4 text-violet-600" />
+											<CardTitle className="text-base">
+												{project || "No Project"}
+											</CardTitle>
+											<Badge
+												variant="secondary"
+												className="ml-2 text-xs"
+											>
+												{requests.length}
+											</Badge>
+										</div>
+									</div>
+								</CardHeader>
+								<CardContent className="space-y-2 max-h-[400px] overflow-y-auto">
+									{requests.map((request) => (
+										<RequestRow
+											key={request.id}
+											request={request}
+											isExpanded={expandedRequests.has(request.id)}
+											onToggleExpand={() => toggleExpanded(request.id)}
+										/>
+									))}
+								</CardContent>
+							</Card>
+						))}
+					</div>
 				) : (
 					<div className="space-y-2">
-						{filteredRequests.map((request) => {
-							const isExpanded = expandedRequests.has(request.id);
-							const isError = request.error || !request.meta.success;
-							const statusCode = request.response?.status;
-							const summary = data?.summaries.get(request.id);
-
-							return (
-								<div
-									key={request.id}
-									className={`border rounded-lg p-3 transition-all duration-300 ${
-										isError ? "border-destructive/50" : "border-border"
-									} ${request.meta.pending ? "animate-pulse opacity-70" : "opacity-100"}`}
-								>
-									<button
-										type="button"
-										className="flex items-center justify-between cursor-pointer w-full text-left"
-										onClick={() => toggleExpanded(request.id)}
-									>
-										<div className="flex items-center gap-2 flex-wrap">
-											{isExpanded ? (
-												<ChevronDown className="h-4 w-4" />
-											) : (
-												<ChevronRight className="h-4 w-4" />
-											)}
-											<span className="text-sm font-mono">
-												{formatTime(request.meta.timestamp)}
-											</span>
-											{(request.meta.method || summary?.method) && (
-												<span className="text-sm font-medium">
-													{request.meta.method || summary?.method}
-												</span>
-											)}
-											{(request.meta.path || summary?.path) && (
-												<span className="text-sm text-muted-foreground font-mono">
-													{request.meta.path || summary?.path}
-												</span>
-											)}
-											{statusCode && (
-												<span
-													className={`text-sm font-medium ${
-														statusCode >= 200 && statusCode < 300
-															? "text-green-600"
-															: statusCode >= 400 && statusCode < 500
-																? "text-yellow-600"
-																: "text-red-600"
-													}`}
-												>
-													{statusCode}
-												</span>
-											)}
-											{summary?.model && (
-												<Badge
-													variant="outline"
-													className={`text-xs ${
-														getModelColor(summary.model).border
-													} ${getModelColor(summary.model).text}`}
-												>
-													{summary.model}
-												</Badge>
-											)}
-											{(summary?.project || request.meta.project) && (
-												<Badge
-													variant="outline"
-													className="text-xs border-violet-500 text-violet-600 dark:text-violet-400"
-												>
-													<FolderOpen className="h-3 w-3 mr-1" />
-													{summary?.project || request.meta.project}
-												</Badge>
-											)}
-											{(summary?.agentUsed || request.meta.agentUsed) && (
-												<Badge variant="secondary" className="text-xs">
-													Agent: {summary?.agentUsed || request.meta.agentUsed}
-												</Badge>
-											)}
-											{summary?.comboName && (
-												<Badge
-													variant="outline"
-													className="text-xs border-purple-500 text-purple-500"
-												>
-													Combo: {summary.comboName}
-												</Badge>
-											)}
-											{summary?.apiKeyName && (
-												<Badge variant="outline" className="text-xs">
-													<Key className="h-3 w-3 mr-1" />
-													{summary.apiKeyName}
-												</Badge>
-											)}
-											{(summary?.totalTokens || request.meta.pending) && (
-												<Badge variant="outline" className="text-xs">
-													{summary?.totalTokens
-														? formatTokens(summary.totalTokens)
-														: "--"}{" "}
-													tokens
-												</Badge>
-											)}
-											{(summary?.costUsd || request.meta.pending) && (
-												<Badge variant="default" className="text-xs">
-													{summary?.costUsd && summary.costUsd > 0
-														? formatCost(summary.costUsd)
-														: "--"}
-												</Badge>
-											)}
-											{summary?.billingType === "overage" && (
-												<Badge
-													variant="outline"
-													className="text-xs border-orange-500 text-orange-500"
-												>
-													Overage
-												</Badge>
-											)}
-											{summary?.billingType === "plan" && (
-												<Badge
-													variant="outline"
-													className="text-xs border-teal-500 text-teal-500"
-												>
-													Plan
-												</Badge>
-											)}
-											{summary?.tokensPerSecond &&
-												summary.tokensPerSecond > 0 && (
-													<Badge variant="secondary" className="text-xs">
-														{formatTokensPerSecond(summary.tokensPerSecond)}
-													</Badge>
-												)}
-											{(request.meta.accountName || request.meta.accountId) && (
-												<span className="text-sm text-muted-foreground">
-													via{" "}
-													{request.meta.accountName ||
-														`${request.meta.accountId?.slice(0, 8)}...`}
-												</span>
-											)}
-											{request.meta.rateLimited && (
-												<Badge variant="warning" className="text-xs">
-													Rate Limited
-												</Badge>
-											)}
-											{zaiAccountNames.has(request.meta.accountName ?? "") &&
-												isZaiPeakHour(request.meta.timestamp) && (
-													<Badge
-														variant="outline"
-														className="text-xs border-orange-500 text-orange-500"
-													>
-														Peak
-													</Badge>
-												)}
-											{oauthAccountNames.has(request.meta.accountName ?? "") &&
-												isAnthropicPeakHour(request.meta.timestamp) && (
-													<Badge
-														variant="outline"
-														className="text-xs border-orange-500 text-orange-500"
-													>
-														Peak
-													</Badge>
-												)}
-											{(summary?.responseTimeMs || request.meta.pending) && (
-												<span>
-													{summary?.responseTimeMs
-														? formatDuration(summary.responseTimeMs)
-														: "--"}
-												</span>
-											)}
-											{request.meta.retry !== undefined &&
-												request.meta.retry > 0 && (
-													<span>Retry {request.meta.retry}</span>
-												)}
-											{(request.meta.accountName || request.meta.accountId) &&
-												(() => {
-													const color = getAccountBadgeColor(
-														request.meta.accountName,
-													);
-													return (
-														<Badge
-															variant="outline"
-															className={`text-xs ${color.borderClass} ${color.textClass}`}
-														>
-															{request.meta.accountName ||
-																`${request.meta.accountId?.slice(0, 8)}...`}
-														</Badge>
-													);
-												})()}
-											<span>ID: {request.id.slice(0, 8)}...</span>
-										</div>
-									</button>
-
-									{/* Action buttons */}
-									<div className="flex justify-end gap-2 mt-2">
-										<Button
-											variant="ghost"
-											size="icon"
-											onClick={() => setModalRequest(request)}
-											title="View Details"
-										>
-											<Eye className="h-4 w-4" />
-										</Button>
-										<CopyButton
-											variant="ghost"
-											size="icon"
-											title="Copy as JSON"
-											getValue={() => {
-												const decoded: RequestPayload & { decoded?: true } = {
-													...request,
-													request: {
-														...request.request,
-														body: request.request.body
-															? decodeBase64(request.request.body)
-															: null,
-													},
-													response: request.response
-														? {
-																...request.response,
-																body: request.response.body
-																	? decodeBase64(request.response.body)
-																	: null,
-															}
-														: null,
-													decoded: true,
-												};
-												return JSON.stringify(decoded, null, 2);
-											}}
-										/>
-									</div>
-
-									{isExpanded && (
-										<div className="mt-3 space-y-3">
-											<TokenUsageDisplay summary={summary} />
-											<Button
-												variant="outline"
-												size="sm"
-												onClick={() => setModalRequest(request)}
-												className="w-full"
-											>
-												<Eye className="h-4 w-4 mr-2" />
-												View More Details
-											</Button>
-										</div>
-									)}
-								</div>
-							);
-						})}
+						{filteredRequests.map((request) => (
+							<RequestRow
+								key={request.id}
+								request={request}
+								isExpanded={expandedRequests.has(request.id)}
+								onToggleExpand={() => toggleExpanded(request.id)}
+							/>
+						))}
 					</div>
 				)}
 			</CardContent>
