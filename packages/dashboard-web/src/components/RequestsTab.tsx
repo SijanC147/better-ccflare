@@ -54,6 +54,37 @@ import {
 	SelectValue,
 } from "./ui/select";
 
+// Helper function to generate deterministic color for account names
+function getAccountBadgeColor(accountName?: string): {
+	borderClass: string;
+	textClass: string;
+} {
+	if (!accountName)
+		return { borderClass: "border-gray-400", textClass: "text-gray-600" };
+
+	// Simple hash function for deterministic color generation
+	let hash = 0;
+	for (let i = 0; i < accountName.length; i++) {
+		hash = ((hash << 5) - hash) + accountName.charCodeAt(i);
+		hash = hash & hash; // Convert to 32bit integer
+	}
+
+	const colors = [
+		{ borderClass: "border-blue-500", textClass: "text-blue-600" },
+		{ borderClass: "border-purple-500", textClass: "text-purple-600" },
+		{ borderClass: "border-pink-500", textClass: "text-pink-600" },
+		{ borderClass: "border-green-500", textClass: "text-green-600" },
+		{ borderClass: "border-yellow-600", textClass: "text-yellow-700" },
+		{ borderClass: "border-red-500", textClass: "text-red-600" },
+		{ borderClass: "border-indigo-500", textClass: "text-indigo-600" },
+		{ borderClass: "border-cyan-500", textClass: "text-cyan-600" },
+	];
+
+	const index = Math.abs(hash) % colors.length;
+	return colors[index];
+}
+
+
 export function RequestsTab() {
 	const [expandedRequests, setExpandedRequests] = useState<Set<string>>(
 		new Set(),
@@ -1165,13 +1196,6 @@ export function RequestsTab() {
 														Peak
 													</Badge>
 												)}
-											{request.error && (
-												<span className="text-sm text-destructive">
-													Error: {request.error}
-												</span>
-											)}
-										</div>
-										<div className="text-sm text-muted-foreground flex items-center gap-2">
 											{(summary?.responseTimeMs || request.meta.pending) && (
 												<span>
 													{summary?.responseTimeMs
