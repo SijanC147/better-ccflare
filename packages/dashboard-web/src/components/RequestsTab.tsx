@@ -85,8 +85,6 @@ function getAccountBadgeColor(accountName?: string): {
 	return colors[index];
 }
 
-
-
 // Deterministic color mapping for model badges
 function getModelColor(model: string): { border: string; text: string } {
 	if (!model) {
@@ -141,8 +139,14 @@ function getModelColor(model: string): { border: string; text: string } {
 		{ border: "border-red-500", text: "text-red-600 dark:text-red-400" },
 		{ border: "border-pink-500", text: "text-pink-600 dark:text-pink-400" },
 		{ border: "border-rose-500", text: "text-rose-600 dark:text-rose-400" },
-		{ border: "border-indigo-500", text: "text-indigo-600 dark:text-indigo-400" },
-		{ border: "border-violet-500", text: "text-violet-600 dark:text-violet-400" },
+		{
+			border: "border-indigo-500",
+			text: "text-indigo-600 dark:text-indigo-400",
+		},
+		{
+			border: "border-violet-500",
+			text: "text-violet-600 dark:text-violet-400",
+		},
 		{ border: "border-cyan-500", text: "text-cyan-600 dark:text-cyan-400" },
 		{ border: "border-sky-500", text: "text-sky-600 dark:text-sky-400" },
 		{ border: "border-amber-500", text: "text-amber-600 dark:text-amber-400" },
@@ -172,7 +176,7 @@ export function RequestsTab() {
 	const [modelFilters, setModelFilters] = useState<Set<string>>(new Set());
 	const [projectFilters, setProjectFilters] = useState<Set<string>>(new Set());
 	const [use24HourFormat, setUse24HourFormat] = useState(() => {
-		return localStorage.getItem('ccflare-24h-time') === 'true';
+		return localStorage.getItem("ccflare-24h-time") === "true";
 	});
 
 	const {
@@ -467,16 +471,16 @@ export function RequestsTab() {
 
 	const handleToggle24HourFormat = (checked: boolean) => {
 		setUse24HourFormat(checked);
-		localStorage.setItem('ccflare-24h-time', checked ? 'true' : 'false');
+		localStorage.setItem("ccflare-24h-time", checked ? "true" : "false");
 	};
 
 	const formatTime = (timestamp: number | string): string => {
 		const date = new Date(timestamp);
 		if (use24HourFormat) {
-			return date.toLocaleTimeString('en-GB', {
-				hour: '2-digit',
-				minute: '2-digit',
-				second: '2-digit',
+			return date.toLocaleTimeString("en-GB", {
+				hour: "2-digit",
+				minute: "2-digit",
+				second: "2-digit",
 				hour12: false,
 			});
 		}
@@ -577,7 +581,10 @@ export function RequestsTab() {
 					</div>
 					<div className="flex gap-2 items-center">
 						<div className="flex items-center gap-2">
-							<Label htmlFor="24h-format" className="text-sm font-medium cursor-pointer">
+							<Label
+								htmlFor="24h-format"
+								className="text-sm font-medium cursor-pointer"
+							>
 								24h
 							</Label>
 							<Switch
@@ -1216,7 +1223,10 @@ export function RequestsTab() {
 												</Badge>
 											)}
 											{(summary?.project || request.meta.project) && (
-												<Badge variant="outline" className="text-xs border-violet-500 text-violet-600 dark:text-violet-400">
+												<Badge
+													variant="outline"
+													className="text-xs border-violet-500 text-violet-600 dark:text-violet-400"
+												>
 													<FolderOpen className="h-3 w-3 mr-1" />
 													{summary?.project || request.meta.project}
 												</Badge>
