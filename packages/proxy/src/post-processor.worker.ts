@@ -151,20 +151,29 @@ function sanitizeProjectName(raw: string | undefined | null): string | null {
  * Extract a project name from a Claude API request.
  *
  * Resolution order:
- *  1. Case-insensitive `x-project` request header
- *  2. Workspace path embedded in the system prompt
+ *  1. Pre-extracted `startMessage.project` (set by request-handler from
+ *     the `X-CCFlare-Project` header — fork-specific project tracking)
+ *  2. Case-insensitive `x-ccflare-project` or `x-project` request header
+ *     (defensive fallback if the field wasn't populated upstream)
+ *  3. Workspace path embedded in the system prompt
  *     (e.g. /Users/me/Desktop/MyProj/...)
- *  3. First Markdown H1 heading in the system prompt (if reasonable)
+ *  4. First Markdown H1 heading in the system prompt (if reasonable)
  *
  * All return values are sanitized (control chars stripped, length-capped).
  * Returns null when no project can be inferred.
  */
 function extractProjectFromRequest(startMessage: StartMessage): string | null {
+	const sanitizedPreset = sanitizeProjectName(startMessage.project);
+	if (sanitizedPreset) return sanitizedPreset;
+
 	if (startMessage.requestHeaders) {
 		// The Web Headers API normalizes keys to lowercase, but defensively
 		// match case-insensitively in case the worker receives a plain object.
 		const headerProject = Object.entries(startMessage.requestHeaders).find(
-			([k]) => k.toLowerCase() === "x-project",
+			([k]) => {
+				const lower = k.toLowerCase();
+				return lower === "x-ccflare-project" || lower === "x-project";
+			},
 		)?.[1];
 		const sanitizedHeader = sanitizeProjectName(headerProject);
 		if (sanitizedHeader) return sanitizedHeader;
