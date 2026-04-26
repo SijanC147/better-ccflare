@@ -36,24 +36,14 @@ interface ApiResponse {
 const BUNDLED_PRICING: ApiResponse = {
 	anthropic: {
 		models: {
-			[CLAUDE_MODEL_IDS.HAIKU_3_5]: {
-				id: CLAUDE_MODEL_IDS.HAIKU_3_5,
-				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.HAIKU_3_5],
+			[CLAUDE_MODEL_IDS.HAIKU_4_5]: {
+				id: CLAUDE_MODEL_IDS.HAIKU_4_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.HAIKU_4_5],
 				cost: {
-					input: 0.8,
-					output: 4,
-					cache_read: 0.08,
-					cache_write: 1,
-				},
-			},
-			[CLAUDE_MODEL_IDS.SONNET_3_5]: {
-				id: CLAUDE_MODEL_IDS.SONNET_3_5,
-				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_3_5],
-				cost: {
-					input: 3,
-					output: 15,
-					cache_read: 0.3,
-					cache_write: 3.75,
+					input: 1,
+					output: 5,
+					cache_read: 0.1,
+					cache_write: 1.25,
 				},
 			},
 			[CLAUDE_MODEL_IDS.SONNET_4]: {
@@ -69,6 +59,16 @@ const BUNDLED_PRICING: ApiResponse = {
 			[CLAUDE_MODEL_IDS.SONNET_4_5]: {
 				id: CLAUDE_MODEL_IDS.SONNET_4_5,
 				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_4_5],
+				cost: {
+					input: 3,
+					output: 15,
+					cache_read: 0.3,
+					cache_write: 3.75,
+				},
+			},
+			[CLAUDE_MODEL_IDS.SONNET_4_6]: {
+				id: CLAUDE_MODEL_IDS.SONNET_4_6,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_4_6],
 				cost: {
 					input: 3,
 					output: 15,
@@ -99,6 +99,16 @@ const BUNDLED_PRICING: ApiResponse = {
 			[CLAUDE_MODEL_IDS.OPUS_4_5]: {
 				id: CLAUDE_MODEL_IDS.OPUS_4_5,
 				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_4_5],
+				cost: {
+					input: 5,
+					output: 25,
+					cache_read: 0.5,
+					cache_write: 6.25,
+				},
+			},
+			[CLAUDE_MODEL_IDS.OPUS_4_6]: {
+				id: CLAUDE_MODEL_IDS.OPUS_4_6,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_4_6],
 				cost: {
 					input: 5,
 					output: 25,
@@ -688,11 +698,13 @@ export function resetNanoGPTPricingCacheForTest(): void {
  * This function should be called with access to the AccountRepository
  */
 export async function initializeNanoGPTPricingIfAccountsExist(
-	accountRepository: { hasAccountsForProvider: (provider: string) => boolean },
+	accountRepository: {
+		hasAccountsForProvider: (provider: string) => boolean | Promise<boolean>;
+	},
 	logger: Logger | null = null,
 ): Promise<void> {
 	const hasNanoGPTAccounts =
-		accountRepository.hasAccountsForProvider("nanogpt");
+		await accountRepository.hasAccountsForProvider("nanogpt");
 
 	if (hasNanoGPTAccounts) {
 		logger?.debug("NanoGPT accounts detected, initializing pricing refresh");

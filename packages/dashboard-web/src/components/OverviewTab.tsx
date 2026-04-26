@@ -10,13 +10,11 @@ import React, { useCallback, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
 import { ChartsSection } from "./overview/ChartsSection";
-import { DataRetentionCard } from "./overview/DataRetentionCard";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { SystemStatus } from "./overview/SystemStatus";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
-import { StrategyCard } from "./StrategyCard";
 
 export const OverviewTab = React.memo(() => {
 	// Fetch all data using React Query hooks
@@ -71,6 +69,8 @@ export const OverviewTab = React.memo(() => {
 			successRate: point.successRate,
 			responseTime: Math.round(point.avgResponseTime),
 			cost: point.costUsd.toFixed(2),
+			planCost: point.planCostUsd ?? 0,
+			apiCost: point.apiCostUsd ?? 0,
 			tokensPerSecond: point.avgTokensPerSecond || 0,
 		}));
 	}, [analytics]);
@@ -154,6 +154,9 @@ export const OverviewTab = React.memo(() => {
 	// Use analytics data for account health
 	const accountHealthData = analytics?.accountPerformance || [];
 
+	const accountModelUsageData = analytics?.accountModelUsage || [];
+	const apiKeyPerformanceData = analytics?.apiKeyPerformance || [];
+
 	return (
 		<div className="space-y-6">
 			{/* Header with Time Range Selector */}
@@ -163,7 +166,7 @@ export const OverviewTab = React.memo(() => {
 			</div>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals.requests || 0)}
@@ -199,10 +202,20 @@ export const OverviewTab = React.memo(() => {
 					icon={Clock}
 				/>
 				<MetricCard
-					title="Total Cost"
+					title="Plan Value"
 					value={
-						analytics?.totals.totalCostUsd
-							? formatCost(analytics.totals.totalCostUsd)
+						analytics?.totals.planCostUsd
+							? formatCost(analytics.totals.planCostUsd)
+							: "$0.0000"
+					}
+					trendPeriod={trendPeriod}
+					icon={DollarSign}
+				/>
+				<MetricCard
+					title="API Cost"
+					value={
+						analytics?.totals.apiCostUsd
+							? formatCost(analytics.totals.apiCostUsd)
 							: "$0.0000"
 					}
 					change={trends.deltaCost !== null ? trends.deltaCost : undefined}
@@ -228,18 +241,14 @@ export const OverviewTab = React.memo(() => {
 				timeSeriesData={timeSeriesData}
 				modelData={modelData}
 				accountHealthData={accountHealthData}
+				accountModelUsageData={accountModelUsageData}
+				apiKeyPerformanceData={apiKeyPerformanceData}
 				loading={loading}
 			/>
 
 			<SystemStatus recentErrors={stats?.recentErrors} />
 
 			{accounts && <RateLimitInfo accounts={accounts} />}
-
-			{/* Configuration Row */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-				<StrategyCard />
-				<DataRetentionCard />
-			</div>
 		</div>
 	);
 });

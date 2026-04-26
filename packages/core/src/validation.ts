@@ -333,7 +333,7 @@ export const patterns = {
 	alphanumericWithSpaces: /^[a-zA-Z0-9\s]+$/,
 	// Account name: alphanumeric with spaces, hyphens, and underscores
 	// Spaces are allowed for better UX - CLI command suggestions will quote names properly
-	accountName: /^[a-zA-Z0-9\s\-_]+$/,
+	accountName: /^[a-zA-Z0-9\s\-_.]+$/,
 	// Path pattern for API endpoints
 	apiPath: /^\/v1\/[a-zA-Z0-9\-_/]*$/,
 	// URL pattern
@@ -430,12 +430,13 @@ export function safeJsonParse<T = unknown>(json: unknown, field = "json"): T {
 }
 
 /**
- * Validate model mappings object
+ * Validate model mappings object.
+ * Values may be a single model string or an ordered array of models to try.
  */
 export function validateModelMappings(
 	mappings: unknown,
 	field = "modelMappings",
-): Record<string, string> {
+): Record<string, string | string[]> {
 	if (!mappings) {
 		throw new ValidationError(`${field} cannot be null or undefined`, field);
 	}
@@ -446,8 +447,7 @@ export function validateModelMappings(
 
 	const obj = mappings as Record<string, unknown>;
 
-	// Validate all keys and values are strings
-	const result: Record<string, string> = {};
+	const result: Record<string, string | string[]> = {};
 	for (const [key, value] of Object.entries(obj)) {
 		if (!key || typeof key !== "string" || !key.trim()) {
 			throw new ValidationError(
@@ -457,15 +457,37 @@ export function validateModelMappings(
 			);
 		}
 
-		if (!value || typeof value !== "string" || !(value as string).trim()) {
-			throw new ValidationError(
-				`${field} value for key '${key}' must be a non-empty string`,
-				field,
-				mappings,
-			);
+		if (Array.isArray(value)) {
+			const arr = value as unknown[];
+			if (arr.length === 0) {
+				throw new ValidationError(
+					`${field} value for key '${key}' must not be an empty array`,
+					field,
+					mappings,
+				);
+			}
+			const validated: string[] = [];
+			for (const item of arr) {
+				if (!item || typeof item !== "string" || !item.trim()) {
+					throw new ValidationError(
+						`${field} array values for key '${key}' must be non-empty strings`,
+						field,
+						mappings,
+					);
+				}
+				validated.push(item.trim());
+			}
+			result[key.trim()] = validated.length === 1 ? validated[0] : validated;
+		} else {
+			if (!value || typeof value !== "string" || !(value as string).trim()) {
+				throw new ValidationError(
+					`${field} value for key '${key}' must be a non-empty string or array`,
+					field,
+					mappings,
+				);
+			}
+			result[key.trim()] = (value as string).trim();
 		}
-
-		result[key.trim()] = (value as string).trim();
 	}
 
 	return result;

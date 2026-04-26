@@ -29,6 +29,7 @@ export interface RuntimeConfig {
 		cacheSize?: number;
 		synchronous?: "OFF" | "NORMAL" | "FULL";
 		mmapSize?: number;
+		pageSize?: number;
 		retry?: {
 			attempts?: number;
 			delayMs?: number;
@@ -49,12 +50,17 @@ export interface ConfigData {
 	default_agent_model?: string;
 	data_retention_days?: number;
 	request_retention_days?: number;
+	store_payloads?: boolean;
+	usage_poll_interval_ms?: number;
+	cache_keepalive_ttl_minutes?: number;
+	system_prompt_cache_ttl_1h?: boolean;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
 	db_cache_size?: number;
 	db_synchronous?: "OFF" | "NORMAL" | "FULL";
 	db_mmap_size?: number;
+	db_page_size?: number;
 	db_retry_attempts?: number;
 	db_retry_delay_ms?: number;
 	db_retry_backoff?: number;
@@ -275,7 +281,7 @@ export class Config extends EventEmitter {
 		}
 		const fromFile = this.data.data_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 365);
-		return 7;
+		return 3; // Reduced from 7 to 3 days to reduce database size
 	}
 
 	setDataRetentionDays(days: number): void {
@@ -291,12 +297,73 @@ export class Config extends EventEmitter {
 		}
 		const fromFile = this.data.request_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
-		return 365; // default metadata retention
+		return 90; // default metadata retention (90 days for analytics and troubleshooting)
 	}
 
 	setRequestRetentionDays(days: number): void {
 		const clamped = this.clamp(days, 1, 3650);
 		this.set("request_retention_days", clamped);
+	}
+
+	getStorePayloads(): boolean {
+		const fromEnv = process.env.STORE_PAYLOADS;
+		if (fromEnv) {
+			return fromEnv !== "false" && fromEnv !== "0";
+		}
+		const fromFile = this.data.store_payloads;
+		if (typeof fromFile === "boolean") return fromFile;
+		return true; // default: store payloads
+	}
+
+	setStorePayloads(value: boolean): void {
+		this.set("store_payloads", value);
+	}
+
+	getUsagePollIntervalMs(): number {
+		const fromEnv = process.env.USAGE_POLL_INTERVAL_MS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 10000, 3600000);
+		}
+		const fromFile = this.data.usage_poll_interval_ms;
+		if (typeof fromFile === "number")
+			return this.clamp(fromFile, 10000, 3600000);
+		return 90000; // default: 90 seconds
+	}
+
+	setUsagePollIntervalMs(ms: number): void {
+		const clamped = this.clamp(ms, 10000, 3600000);
+		this.set("usage_poll_interval_ms", clamped);
+	}
+
+	getCacheKeepaliveTtlMinutes(): number {
+		const fromEnv = process.env.CACHE_KEEPALIVE_TTL_MINUTES;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 0, 60);
+		}
+		const fromFile = this.data.cache_keepalive_ttl_minutes;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 0, 60);
+		return 0; // default: disabled
+	}
+
+	setCacheKeepaliveTtlMinutes(minutes: number): void {
+		const clamped = this.clamp(minutes, 0, 60);
+		this.set("cache_keepalive_ttl_minutes", clamped);
+	}
+
+	getSystemPromptCacheTtl1h(): boolean {
+		const fromEnv = process.env.SYSTEM_PROMPT_CACHE_TTL_1H;
+		if (fromEnv) {
+			return fromEnv !== "false" && fromEnv !== "0";
+		}
+		const fromFile = this.data.system_prompt_cache_ttl_1h;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false; // default: disabled
+	}
+
+	setSystemPromptCacheTtl1h(value: boolean): void {
+		this.set("system_prompt_cache_ttl_1h", value);
 	}
 
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
@@ -307,6 +374,10 @@ export class Config extends EventEmitter {
 			default_agent_model: this.getDefaultAgentModel(),
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
+			store_payloads: this.getStorePayloads(),
+			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
+			cache_keepalive_ttl_minutes: this.getCacheKeepaliveTtlMinutes(),
+			system_prompt_cache_ttl_1h: this.getSystemPromptCacheTtl1h(),
 		};
 	}
 
@@ -424,6 +495,12 @@ export class Config extends EventEmitter {
 		}
 		if (typeof this.data.db_mmap_size === "number") {
 			defaults.database.mmapSize = this.data.db_mmap_size;
+		}
+		// Page size: default 2048 (2KB) for better memory efficiency, recommend 4096 (4KB)
+		if (typeof this.data.db_page_size === "number") {
+			defaults.database.pageSize = this.data.db_page_size;
+		} else {
+			defaults.database.pageSize = 2048;
 		}
 		if (typeof this.data.db_retry_attempts === "number") {
 			defaults.database.retry.attempts = this.data.db_retry_attempts;

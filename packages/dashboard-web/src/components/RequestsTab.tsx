@@ -21,10 +21,12 @@ import {
 	User,
 	X,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { RequestPayload, RequestSummary } from "../api";
-import { useRequests } from "../hooks/queries";
+import { API_LIMITS } from "../constants";
+import { useAccounts, useRequests } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
+import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
@@ -75,183 +77,209 @@ export function RequestsTab() {
 		isLoading: loading,
 		error,
 		refetch: loadRequests,
-	} = useRequests(200);
+	} = useRequests(API_LIMITS.requestsDetail);
 
 	// Enable real-time updates
-	useRequestStream(200);
+	useRequestStream(API_LIMITS.requestsDetail);
 
-	// Transform the data to match the expected structure
-	const data: {
-		requests: RequestPayload[];
-		summaries: Map<string, RequestSummary>;
-	} | null = requestsData
-		? {
-				requests: requestsData.requests,
-				summaries:
-					requestsData.detailsMap instanceof Map
-						? (requestsData.detailsMap as Map<string, RequestSummary>)
-						: new Map<string, RequestSummary>(
-								Array.isArray(requestsData.detailsMap)
-									? (requestsData.detailsMap as RequestSummary[]).map(
-											(s) => [s.id, s] as [string, RequestSummary],
-										)
-									: [],
-							),
+	const { data: accounts } = useAccounts();
+	const zaiAccountNames = new Set(
+		(accounts ?? []).filter((a) => a.provider === "zai").map((a) => a.name),
+	);
+	const oauthAccountNames = new Set(
+		(accounts ?? [])
+			.filter((a) => a.provider === "anthropic")
+			.map((a) => a.name),
+	);
+
+	// Transform the data to match the expected structure - memoized to avoid recalculation on SSE updates
+	const data = useMemo(() => {
+		if (!requestsData) return null;
+		return {
+			requests: requestsData.requests,
+			summaries:
+				requestsData.detailsMap instanceof Map
+					? (requestsData.detailsMap as Map<string, RequestSummary>)
+					: new Map<string, RequestSummary>(
+							Array.isArray(requestsData.detailsMap)
+								? (requestsData.detailsMap as RequestSummary[]).map(
+										(s) => [s.id, s] as [string, RequestSummary],
+									)
+								: [],
+						),
+		};
+	}, [requestsData]);
+
+	// Extract unique accounts for filter dropdown - memoized
+	const uniqueAccounts = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => r.meta.accountName || r.meta.accountId)
+					.filter(Boolean),
+			),
+		).sort();
+	}, [data]);
+
+	// Extract unique status codes for filter - memoized
+	const uniqueStatusCodes = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => r.response?.status)
+					.filter((status): status is number => status !== undefined),
+			),
+		).sort((a, b) => a - b);
+	}, [data]);
+
+	// Extract unique agents for filter - memoized
+	const uniqueAgents = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => {
+						const summary = data.summaries.get(r.id);
+						return summary?.agentUsed || r.meta.agentUsed;
+					})
+					.filter(Boolean),
+			),
+		).sort();
+	}, [data]);
+
+	// Extract unique API keys for filter - memoized
+	const uniqueApiKeys = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => {
+						const summary = data.summaries.get(r.id);
+						return summary?.apiKeyName;
+					})
+					.filter(Boolean),
+			),
+		).sort();
+	}, [data]);
+
+	// Extract unique models for filter - memoized
+	const uniqueModels = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => {
+						const summary = data.summaries.get(r.id);
+						return summary?.model;
+					})
+					.filter((model): model is string => !!model),
+			),
+		).sort();
+	}, [data]);
+
+	// Extract unique projects for filter - memoized
+	const uniqueProjects = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => {
+						const summary = data.summaries.get(r.id);
+						return summary?.project || r.meta.project;
+					})
+					.filter((project): project is string => !!project),
+			),
+		).sort();
+	}, [data]);
+
+	// Filter requests based on selected filters - memoized to avoid recalculation on every render
+	const filteredRequests = useMemo(() => {
+		if (!data) return [];
+		return data.requests.filter((request) => {
+			// Account filter
+			if (accountFilter !== "all") {
+				const requestAccount =
+					request.meta.accountName || request.meta.accountId;
+				if (requestAccount !== accountFilter) return false;
 			}
-		: null;
 
-	// Extract unique accounts for filter dropdown
-	const uniqueAccounts = data
-		? Array.from(
-				new Set(
-					data.requests
-						.map((r) => r.meta.accountName || r.meta.accountId)
-						.filter(Boolean),
-				),
-			).sort()
-		: [];
+			// Agent filter
+			if (agentFilter !== "all") {
+				const summary = data.summaries.get(request.id);
+				const requestAgent = summary?.agentUsed || request.meta.agentUsed;
+				if (requestAgent !== agentFilter) return false;
+			}
 
-	// Extract unique status codes for filter
-	const uniqueStatusCodes = data
-		? Array.from(
-				new Set(
-					data.requests
-						.map((r) => r.response?.status)
-						.filter((status): status is number => status !== undefined),
-				),
-			).sort((a, b) => a - b)
-		: [];
-
-	// Extract unique agents for filter
-	const uniqueAgents = data
-		? Array.from(
-				new Set(
-					data.requests
-						.map((r) => {
-							const summary = data.summaries.get(r.id);
-							return summary?.agentUsed || r.meta.agentUsed;
-						})
-						.filter(Boolean),
-				),
-			).sort()
-		: [];
-
-	// Extract unique models for filter
-	const uniqueModels = data
-		? Array.from(
-				new Set(
-					data.requests
-						.map((r) => {
-							const summary = data.summaries.get(r.id);
-							return summary?.model;
-						})
-						.filter((model): model is string => !!model),
-				),
-			).sort()
-		: [];
-
-	// Extract unique projects for filter
-	const uniqueProjects = data
-		? Array.from(
-				new Set(
-					data.requests
-						.map((r) => {
-							const summary = data.summaries.get(r.id);
-							return summary?.project || r.meta.project;
-						})
-						.filter((project): project is string => !!project),
-				),
-			).sort()
-		: [];
-
-	// Extract unique API keys for filter
-	const uniqueApiKeys = data
-		? Array.from(
-				new Set(
-					data.requests
-						.map((r) => {
-							const summary = data.summaries.get(r.id);
-							return summary?.apiKeyName;
-						})
-						.filter(Boolean),
-				),
-			).sort()
-		: [];
-
-	// Filter requests based on selected filters
-	const filteredRequests = data
-		? data.requests.filter((request) => {
-				// Account filter
-				if (accountFilter !== "all") {
-					const requestAccount =
-						request.meta.accountName || request.meta.accountId;
-					if (requestAccount !== accountFilter) return false;
+			// API key filter
+			if (apiKeyFilter !== "all") {
+				const summary = data.summaries.get(request.id);
+				const requestApiKey = summary?.apiKeyName;
+				if (apiKeyFilter === "no-api-key") {
+					if (requestApiKey) return false;
+				} else {
+					if (requestApiKey !== apiKeyFilter) return false;
 				}
+			}
 
-				// Agent filter
-				if (agentFilter !== "all") {
-					const summary = data.summaries.get(request.id);
-					const requestAgent = summary?.agentUsed || request.meta.agentUsed;
-					if (requestAgent !== agentFilter) return false;
+			// Status code filter
+			if (statusCodeFilters.size > 0 && request.response?.status) {
+				if (!statusCodeFilters.has(request.response.status.toString())) {
+					return false;
 				}
+			}
 
-				// API key filter
-				if (apiKeyFilter !== "all") {
-					const summary = data.summaries.get(request.id);
-					const requestApiKey = summary?.apiKeyName;
-					if (apiKeyFilter === "no-api-key") {
-						if (requestApiKey) return false;
-					} else {
-						if (requestApiKey !== apiKeyFilter) return false;
-					}
-				}
+			// Date range filter
+			const requestDate = new Date(request.meta.timestamp);
+			if (dateFrom) {
+				const fromDate = new Date(dateFrom);
+				fromDate.setHours(0, 0, 0, 0);
+				if (requestDate < fromDate) return false;
+			}
+			if (dateTo) {
+				const toDate = new Date(dateTo);
+				toDate.setHours(23, 59, 59, 999);
+				if (requestDate > toDate) return false;
+			}
 
-				// Status code filter
-				if (statusCodeFilters.size > 0 && request.response?.status) {
-					if (!statusCodeFilters.has(request.response.status.toString())) {
-						return false;
-					}
-				}
+			// With tokens filter
+			if (withTokensOnly) {
+				const summary = data.summaries.get(request.id);
+				const hasTokens =
+					(summary?.totalTokens && summary.totalTokens > 0) ||
+					(summary?.costUsd && summary.costUsd > 0);
+				if (!hasTokens) return false;
+			}
 
-				// Date range filter
-				const requestDate = new Date(request.meta.timestamp);
-				if (dateFrom) {
-					const fromDate = new Date(dateFrom);
-					fromDate.setHours(0, 0, 0, 0);
-					if (requestDate < fromDate) return false;
-				}
-				if (dateTo) {
-					const toDate = new Date(dateTo);
-					toDate.setHours(23, 59, 59, 999);
-					if (requestDate > toDate) return false;
-				}
+			// Model filter
+			if (modelFilters.size > 0) {
+				const summary = data.summaries.get(request.id);
+				const model = summary?.model;
+				if (!model || !modelFilters.has(model)) return false;
+			}
 
-				// With tokens filter
-				if (withTokensOnly) {
-					const summary = data.summaries.get(request.id);
-					const hasTokens =
-						(summary?.totalTokens && summary.totalTokens > 0) ||
-						(summary?.costUsd && summary.costUsd > 0);
-					if (!hasTokens) return false;
-				}
+			// Project filter
+			if (projectFilters.size > 0) {
+				const summary = data.summaries.get(request.id);
+				const project = summary?.project || request.meta.project;
+				if (!project || !projectFilters.has(project)) return false;
+			}
 
-				// Model filter
-				if (modelFilters.size > 0) {
-					const summary = data.summaries.get(request.id);
-					const model = summary?.model;
-					if (!model || !modelFilters.has(model)) return false;
-				}
-
-				// Project filter
-				if (projectFilters.size > 0) {
-					const summary = data.summaries.get(request.id);
-					const project = summary?.project || request.meta.project;
-					if (!project || !projectFilters.has(project)) return false;
-				}
-
-				return true;
-			})
-		: [];
+			return true;
+		});
+	}, [
+		data,
+		accountFilter,
+		agentFilter,
+		apiKeyFilter,
+		statusCodeFilters,
+		dateFrom,
+		dateTo,
+		withTokensOnly,
+		modelFilters,
+		projectFilters,
+	]);
 
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
@@ -422,7 +450,8 @@ export function RequestsTab() {
 					<div>
 						<CardTitle>Request History</CardTitle>
 						<CardDescription>
-							Detailed request and response data (last 200)
+							Detailed request and response data (last{" "}
+							{API_LIMITS.requestsDetail})
 						</CardDescription>
 					</div>
 					<div className="flex gap-2">
@@ -1055,6 +1084,14 @@ export function RequestsTab() {
 													Agent: {summary?.agentUsed || request.meta.agentUsed}
 												</Badge>
 											)}
+											{summary?.comboName && (
+												<Badge
+													variant="outline"
+													className="text-xs border-purple-500 text-purple-500"
+												>
+													Combo: {summary.comboName}
+												</Badge>
+											)}
 											{summary?.apiKeyName && (
 												<Badge variant="outline" className="text-xs">
 													<Key className="h-3 w-3 mr-1" />
@@ -1076,6 +1113,22 @@ export function RequestsTab() {
 														: "--"}
 												</Badge>
 											)}
+											{summary?.billingType === "overage" && (
+												<Badge
+													variant="outline"
+													className="text-xs border-orange-500 text-orange-500"
+												>
+													Overage
+												</Badge>
+											)}
+											{summary?.billingType === "plan" && (
+												<Badge
+													variant="outline"
+													className="text-xs border-teal-500 text-teal-500"
+												>
+													Plan
+												</Badge>
+											)}
 											{summary?.tokensPerSecond &&
 												summary.tokensPerSecond > 0 && (
 													<Badge variant="secondary" className="text-xs">
@@ -1094,6 +1147,24 @@ export function RequestsTab() {
 													Rate Limited
 												</Badge>
 											)}
+											{zaiAccountNames.has(request.meta.accountName ?? "") &&
+												isZaiPeakHour(request.meta.timestamp) && (
+													<Badge
+														variant="outline"
+														className="text-xs border-orange-500 text-orange-500"
+													>
+														Peak
+													</Badge>
+												)}
+											{oauthAccountNames.has(request.meta.accountName ?? "") &&
+												isAnthropicPeakHour(request.meta.timestamp) && (
+													<Badge
+														variant="outline"
+														className="text-xs border-orange-500 text-orange-500"
+													>
+														Peak
+													</Badge>
+												)}
 											{request.error && (
 												<span className="text-sm text-destructive">
 													Error: {request.error}

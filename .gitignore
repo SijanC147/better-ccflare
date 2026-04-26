@@ -43,3 +43,6 @@ test_*.sh
 .serena
 
 references
+.gitnexus
+.worktrees/
+docs/superpowers/

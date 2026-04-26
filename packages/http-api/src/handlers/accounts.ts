@@ -1,4 +1,7 @@
-import type { Database } from "bun:sqlite";
+import crypto from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import * as cliCommands from "@better-ccflare/cli-commands";
 import type { Config } from "@better-ccflare/config";
 import {
@@ -23,67 +26,112 @@ import {
 	fetchUsageData,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
+	parseCodexUsageHeaders,
 	type UsageData,
 	usageCache,
 } from "@better-ccflare/providers";
-import { clearAccountRefreshCache } from "@better-ccflare/proxy";
+import {
+	clearAccountRefreshCache,
+	restartUsagePollingForAccount,
+} from "@better-ccflare/proxy";
 import type { FullUsageData } from "@better-ccflare/types";
+import { requiresSessionDurationTracking } from "@better-ccflare/types";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
 
+function normalizeCodexUsageData(usage: UsageData): UsageData | null {
+	const normalized: UsageData = {
+		five_hour: { ...usage.five_hour },
+		seven_day: { ...usage.seven_day },
+	};
+	if (
+		normalized.five_hour.resets_at &&
+		new Date(normalized.five_hour.resets_at).getTime() <= Date.now()
+	) {
+		normalized.five_hour = { utilization: 0, resets_at: null };
+	}
+	if (
+		normalized.seven_day.resets_at &&
+		new Date(normalized.seven_day.resets_at).getTime() <= Date.now()
+	) {
+		normalized.seven_day = { utilization: 0, resets_at: null };
+	}
+	return normalized.five_hour.resets_at !== null ||
+		normalized.seven_day.resets_at !== null
+		? normalized
+		: null;
+}
+
+async function getCachedOrPersistedCodexUsage(
+	db: ReturnType<DatabaseOperations["getAdapter"]>,
+	accountId: string,
+	accountName: string,
+	cacheData: FullUsageData | null,
+): Promise<FullUsageData | null> {
+	if (cacheData) {
+		const normalizedCache = normalizeCodexUsageData(cacheData as UsageData);
+		if (normalizedCache) {
+			return normalizedCache as FullUsageData;
+		}
+	}
+	const rows = await db.query<{ json: string; timestamp: number | null }>(
+		`SELECT rp.json, COALESCE(rp.timestamp, r.timestamp) as timestamp
+		 FROM request_payloads rp
+		 JOIN requests r ON rp.id = r.id
+		 WHERE r.account_used = ?
+		 ORDER BY r.timestamp DESC
+		 LIMIT 20`,
+		[accountId],
+	);
+
+	for (const row of rows) {
+		if (!row.json || !row.timestamp) continue;
+
+		try {
+			const payload = JSON.parse(row.json) as {
+				response?: { headers?: Record<string, string>; status?: number };
+				meta?: { timestamp?: number };
+			};
+			const headerEntries = Object.entries(payload.response?.headers ?? {});
+			if (headerEntries.length === 0) continue;
+
+			const codexStatus = payload.response?.status;
+			const payloadTimestamp = payload.meta?.timestamp ?? row.timestamp;
+			const usage = parseCodexUsageHeaders(new Headers(headerEntries), {
+				baseTimeMs: payloadTimestamp,
+				allowRelativeResetAfter: true,
+				defaultUtilization: codexStatus === 429 ? 100 : 0,
+			});
+			if (!usage) continue;
+
+			const normalizedUsage = normalizeCodexUsageData(usage);
+			if (!normalizedUsage) continue;
+
+			usageCache.set(accountId, normalizedUsage);
+			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
+			return normalizedUsage as FullUsageData;
+		} catch (error) {
+			log.warn(
+				`Failed to recover Codex usage from stored payload for ${accountName}:`,
+				error instanceof Error ? error.message : String(error),
+			);
+		}
+	}
+
+	return null;
+}
+
 /**
  * Create an accounts list handler
  */
-export function createAccountsListHandler(db: Database) {
+export function createAccountsListHandler(dbOps: DatabaseOperations) {
 	return async (): Promise<Response> => {
+		const db = dbOps.getAdapter();
 		const now = Date.now();
 		const sessionDuration = 5 * 60 * 60 * 1000; // 5 hours
 
-		const accounts = db
-			.query(
-				`
-				SELECT
-					id,
-					name,
-					provider,
-					request_count,
-					total_requests,
-					last_used,
-					created_at,
-					expires_at,
-					rate_limited_until,
-					rate_limit_reset,
-					rate_limit_status,
-					rate_limit_remaining,
-					session_start,
-					session_request_count,
-					refresh_token,
-					access_token,
-					COALESCE(paused, 0) as paused,
-					COALESCE(priority, 0) as priority,
-					COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
-					COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
-					custom_endpoint,
-					model_mappings,
-					CASE
-						WHEN expires_at > ?1 THEN 1
-						ELSE 0
-					END as token_valid,
-					CASE
-						WHEN rate_limited_until > ?2 THEN 1
-						ELSE 0
-					END as rate_limited,
-					CASE
-						WHEN session_start IS NOT NULL AND ?3 - session_start < ?4 THEN
-							'Active: ' || session_request_count || ' reqs'
-						ELSE '-'
-					END as session_info
-				FROM accounts
-				ORDER BY priority DESC, request_count DESC
-				`,
-			)
-			.all(now, now, now, sessionDuration) as Array<{
+		const accounts = await db.query<{
 			id: string;
 			name: string;
 			provider: string | null;
@@ -107,9 +155,60 @@ export function createAccountsListHandler(db: Database) {
 			session_info: string | null;
 			auto_fallback_enabled: 0 | 1;
 			auto_refresh_enabled: 0 | 1;
+			auto_pause_on_overage_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
-		}>;
+			cross_region_mode: string | null;
+			model_fallbacks: string | null;
+			billing_type: string | null;
+		}>(
+			`
+				SELECT
+					id,
+					name,
+					provider,
+					request_count,
+					total_requests,
+					last_used,
+					created_at,
+					expires_at,
+					rate_limited_until,
+					rate_limit_reset,
+					rate_limit_status,
+					rate_limit_remaining,
+					session_start,
+					session_request_count,
+					refresh_token,
+					access_token,
+					COALESCE(paused, 0) as paused,
+					COALESCE(priority, 0) as priority,
+					COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
+					COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
+					custom_endpoint,
+					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
+
+					model_mappings,
+					cross_region_mode,
+					model_fallbacks,
+					billing_type,
+					CASE
+						WHEN expires_at > ? THEN 1
+						ELSE 0
+					END as token_valid,
+					CASE
+						WHEN rate_limited_until > ? THEN 1
+						ELSE 0
+					END as rate_limited,
+					CASE
+						WHEN session_start IS NOT NULL AND ? - session_start < ? THEN
+							'Active: ' || session_request_count || ' reqs'
+						ELSE '-'
+					END as session_info
+				FROM accounts
+				ORDER BY priority DESC, request_count DESC
+			`,
+			[now, now, now, sessionDuration],
+		);
 
 		// Fetch usage data for all Claude CLI OAuth accounts (those with refresh tokens)
 		// API key accounts don't have usage tracking available
@@ -134,7 +233,9 @@ export function createAccountsListHandler(db: Database) {
 				if (!isCacheFresh && account.access_token) {
 					// Fetch usage data if cache is stale or missing
 					try {
-						const usageData = await fetchUsageData(account.access_token);
+						const { data: usageData } = await fetchUsageData(
+							account.access_token,
+						);
 						if (usageData) {
 							// Update the cache using the public set method
 							usageCache.set(account.id, usageData);
@@ -152,164 +253,245 @@ export function createAccountsListHandler(db: Database) {
 			}),
 		);
 
-		const response: AccountResponse[] = accounts.map((account) => {
-			let rateLimitStatus = "OK";
+		// Fetch session-window token stats only for providers with session-based limits
+		const sessionStatsMap = await dbOps
+			.getStatsRepository()
+			.getSessionStats(
+				accounts
+					.filter((a) => requiresSessionDurationTracking(a.provider ?? ""))
+					.map((a) => ({
+						id: a.id,
+						session_start: a.session_start ? Number(a.session_start) : null,
+					})),
+			)
+			.catch(() => new Map());
 
-			// Use unified rate limit status if available
-			if (account.rate_limit_status) {
-				rateLimitStatus = account.rate_limit_status;
-				if (account.rate_limit_reset && account.rate_limit_reset > now) {
-					const minutesLeft = Math.ceil(
-						(account.rate_limit_reset - now) / 60000,
+		const response: AccountResponse[] = await Promise.all(
+			accounts.map(async (account) => {
+				let rateLimitStatus = "OK";
+
+				// Use unified rate limit status if available
+				if (account.rate_limit_status) {
+					rateLimitStatus = account.rate_limit_status;
+					const resetMs = Number(account.rate_limit_reset);
+					if (resetMs && resetMs > now) {
+						const minutesLeft = Math.ceil((resetMs - now) / 60000);
+						rateLimitStatus = `${account.rate_limit_status} (${minutesLeft}m)`;
+					}
+				} else if (account.rate_limited && account.rate_limited_until) {
+					// Fall back to legacy rate limit check
+					const limitedMs = Number(account.rate_limited_until);
+					if (limitedMs > now) {
+						const minutesLeft = Math.ceil((limitedMs - now) / 60000);
+						rateLimitStatus = `Rate limited (${minutesLeft}m)`;
+					}
+				}
+
+				// Get usage data from cache for providers that expose account-page quota or credit data
+				const cachedUsageData = usageCache.get(account.id);
+				let usageData: FullUsageData | null =
+					cachedUsageData as FullUsageData | null;
+				if (account.provider === "codex") {
+					usageData = await getCachedOrPersistedCodexUsage(
+						db,
+						account.id,
+						account.name,
+						usageData,
 					);
-					rateLimitStatus = `${account.rate_limit_status} (${minutesLeft}m)`;
 				}
-			} else if (
-				account.rate_limited &&
-				account.rate_limited_until &&
-				account.rate_limited_until > now
-			) {
-				// Fall back to legacy rate limit check
-				const minutesLeft = Math.ceil(
-					(account.rate_limited_until - now) / 60000,
-				);
-				rateLimitStatus = `Rate limited (${minutesLeft}m)`;
-			}
+				let usageUtilization: number | null = null;
+				let usageWindow: string | null = null;
+				let fullUsageData: FullUsageData | null = null;
 
-			// Get usage data from cache for Anthropic and NanoGPT accounts
-			const usageData = usageCache.get(account.id);
-			let usageUtilization: number | null = null;
-			let usageWindow: string | null = null;
-			let fullUsageData: FullUsageData | null = null;
+				if (
+					(account.provider === "anthropic" || account.provider === "codex") &&
+					usageData
+				) {
+					const isAnthropicStyleData =
+						"five_hour" in usageData && "seven_day" in usageData;
+					if (isAnthropicStyleData) {
+						try {
+							usageUtilization = getRepresentativeUtilization(
+								usageData as UsageData,
+							);
+							usageWindow = getRepresentativeWindow(usageData as UsageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process ${account.provider} usage data for account ${account.id}:`,
+								error instanceof Error ? error.message : String(error),
+							);
+						}
+					}
+				} else if (account.provider === "nanogpt" && usageData) {
+					// NanoGPT usage data - type guard to check it's NanoGPTUsageData
+					const isNanoGPTData =
+						"active" in usageData &&
+						"daily" in usageData &&
+						"monthly" in usageData;
+					if (isNanoGPTData) {
+						try {
+							const {
+								getRepresentativeNanoGPTUtilization,
+								getRepresentativeNanoGPTWindow,
+							} = require("@better-ccflare/providers");
+							usageUtilization = getRepresentativeNanoGPTUtilization(usageData);
+							usageWindow = getRepresentativeNanoGPTWindow(usageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process NanoGPT usage data for account ${account.name}:`,
+								error,
+							);
+						}
+					}
+				} else if (account.provider === "zai" && usageData) {
+					// Zai usage data - type guard to check it's ZaiUsageData
+					const isZaiData =
+						"time_limit" in usageData || "tokens_limit" in usageData;
+					if (isZaiData) {
+						try {
+							const {
+								getRepresentativeZaiUtilization,
+								getRepresentativeZaiWindow,
+							} = require("@better-ccflare/providers");
+							usageUtilization = getRepresentativeZaiUtilization(usageData);
+							usageWindow = getRepresentativeZaiWindow(usageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process Zai usage data for account ${account.name}:`,
+								error,
+							);
+						}
+					}
+				} else if (account.provider === "kilo" && usageData) {
+					// Kilo usage data - type guard to check it's KiloUsageData
+					const isKiloData = "remainingUsd" in usageData;
+					if (isKiloData) {
+						try {
+							const {
+								getRepresentativeKiloUtilization,
+								getRepresentativeKiloWindow,
+							} = require("@better-ccflare/providers");
+							usageUtilization = getRepresentativeKiloUtilization(usageData);
+							usageWindow = getRepresentativeKiloWindow(usageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process Kilo usage data for account ${account.name}:`,
+								error,
+							);
+						}
+					}
+				} else if (account.provider === "alibaba-coding-plan" && usageData) {
+					// Alibaba Coding Plan usage data - type guard to check it's AlibabaCodingPlanUsageData
+					const isAlibabaData =
+						"five_hour" in usageData && "weekly" in usageData;
+					if (isAlibabaData) {
+						try {
+							const {
+								getRepresentativeAlibabaCodingPlanUtilization,
+								getRepresentativeAlibabaCodingPlanWindow,
+							} = require("@better-ccflare/providers");
+							usageUtilization =
+								getRepresentativeAlibabaCodingPlanUtilization(usageData);
+							usageWindow = getRepresentativeAlibabaCodingPlanWindow(usageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process Alibaba Coding Plan usage data for account ${account.name}:`,
+								error,
+							);
+						}
+					}
+				}
 
-			if (account.provider === "anthropic" && usageData) {
-				// Anthropic usage data - type guard to check it's UsageData
-				const isAnthropicData =
-					"five_hour" in usageData && "seven_day" in usageData;
-				if (isAnthropicData) {
+				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, NanoGPT, and OpenRouter providers
+				let modelMappings: { [key: string]: string } | null = null;
+				if (account.model_mappings) {
 					try {
-						usageUtilization = getRepresentativeUtilization(
-							usageData as UsageData,
-						);
-						usageWindow = getRepresentativeWindow(usageData as UsageData);
-						fullUsageData = usageData as FullUsageData;
-					} catch (error) {
-						// Log error but don't fail the entire accounts page
-						log.warn(
-							`Failed to process usage data for account ${account.id}:`,
-							error instanceof Error ? error.message : String(error),
-						);
-						// Keep null values for usage if processing fails
+						const parsed = JSON.parse(account.model_mappings);
+						// Handle both formats: direct mappings or wrapped in modelMappings
+						modelMappings = parsed.modelMappings || parsed || null;
+					} catch {
+						// If parsing fails, ignore model mappings
+						modelMappings = null;
 					}
-				}
-			} else if (account.provider === "nanogpt" && usageData) {
-				// NanoGPT usage data - type guard to check it's NanoGPTUsageData
-				const isNanoGPTData =
-					"active" in usageData &&
-					"daily" in usageData &&
-					"monthly" in usageData;
-				if (isNanoGPTData) {
+				} else if (
+					account.provider === "openai-compatible" &&
+					account.custom_endpoint
+				) {
+					// Also try parsing from custom_endpoint for backwards compatibility
 					try {
-						const {
-							getRepresentativeNanoGPTUtilization,
-							getRepresentativeNanoGPTWindow,
-						} = require("@better-ccflare/providers");
-						usageUtilization = getRepresentativeNanoGPTUtilization(usageData);
-						usageWindow = getRepresentativeNanoGPTWindow(usageData);
-						fullUsageData = usageData as FullUsageData;
-					} catch (error) {
-						log.warn(
-							`Failed to process NanoGPT usage data for account ${account.name}:`,
-							error,
-						);
+						const parsed = JSON.parse(account.custom_endpoint);
+						if (parsed.modelMappings) {
+							modelMappings = parsed.modelMappings;
+						}
+					} catch {
+						// If parsing fails, ignore model mappings
+						modelMappings = null;
 					}
 				}
-			} else if (account.provider === "zai" && usageData) {
-				// Zai usage data - type guard to check it's ZaiUsageData
-				const isZaiData =
-					"time_limit" in usageData || "tokens_limit" in usageData;
-				if (isZaiData) {
+
+				// Parse model fallbacks for all providers
+				let modelFallbacks: { [key: string]: string } | null = null;
+				if (account.model_fallbacks) {
 					try {
-						const {
-							getRepresentativeZaiUtilization,
-							getRepresentativeZaiWindow,
-						} = require("@better-ccflare/providers");
-						usageUtilization = getRepresentativeZaiUtilization(usageData);
-						usageWindow = getRepresentativeZaiWindow(usageData);
-						fullUsageData = usageData as FullUsageData;
-					} catch (error) {
-						log.warn(
-							`Failed to process Zai usage data for account ${account.name}:`,
-							error,
-						);
+						const parsed = JSON.parse(account.model_fallbacks);
+						modelFallbacks = parsed.modelFallbacks || parsed || null;
+					} catch {
+						modelFallbacks = null;
 					}
 				}
-			}
 
-			// Parse model mappings for OpenAI-compatible, Anthropic-compatible, and NanoGPT providers
-			let modelMappings: { [key: string]: string } | null = null;
-			if (
-				(account.provider === "openai-compatible" ||
-					account.provider === "anthropic-compatible" ||
-					account.provider === "nanogpt") &&
-				account.model_mappings
-			) {
-				try {
-					const parsed = JSON.parse(account.model_mappings);
-					// Handle both formats: direct mappings or wrapped in modelMappings
-					modelMappings = parsed.modelMappings || parsed || null;
-				} catch {
-					// If parsing fails, ignore model mappings
-					modelMappings = null;
-				}
-			} else if (
-				account.provider === "openai-compatible" &&
-				account.custom_endpoint
-			) {
-				// Also try parsing from custom_endpoint for backwards compatibility
-				try {
-					const parsed = JSON.parse(account.custom_endpoint);
-					if (parsed.modelMappings) {
-						modelMappings = parsed.modelMappings;
-					}
-				} catch {
-					// If parsing fails, ignore model mappings
-					modelMappings = null;
-				}
-			}
-
-			return {
-				id: account.id,
-				name: account.name,
-				provider: account.provider || "anthropic",
-				requestCount: account.request_count,
-				totalRequests: account.total_requests,
-				lastUsed: account.last_used
-					? new Date(account.last_used).toISOString()
-					: null,
-				created: new Date(account.created_at).toISOString(),
-				paused: account.paused === 1,
-				priority: account.priority,
-				tokenStatus: account.token_valid ? "valid" : "expired",
-				tokenExpiresAt: account.expires_at
-					? new Date(account.expires_at).toISOString()
-					: null,
-				rateLimitStatus,
-				rateLimitReset: account.rate_limit_reset
-					? new Date(account.rate_limit_reset).toISOString()
-					: null,
-				rateLimitRemaining: account.rate_limit_remaining,
-				sessionInfo: account.session_info || "",
-				autoFallbackEnabled: account.auto_fallback_enabled === 1,
-				autoRefreshEnabled: account.auto_refresh_enabled === 1,
-				customEndpoint: account.custom_endpoint,
-				modelMappings,
-				usageUtilization,
-				usageWindow,
-				usageData: fullUsageData, // Full usage data for UI
-				hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
-			};
-		});
+				return {
+					id: account.id,
+					name: account.name,
+					provider: account.provider || "anthropic",
+					requestCount: Number(account.request_count) || 0,
+					totalRequests: Number(account.total_requests) || 0,
+					lastUsed: account.last_used
+						? new Date(Number(account.last_used)).toISOString()
+						: null,
+					created: new Date(Number(account.created_at)).toISOString(),
+					paused: account.paused === 1,
+					priority: Number(account.priority) || 0,
+					tokenStatus: account.token_valid ? "valid" : "expired",
+					tokenExpiresAt: account.expires_at
+						? new Date(Number(account.expires_at)).toISOString()
+						: null,
+					rateLimitStatus,
+					rateLimitReset: account.rate_limit_reset
+						? new Date(Number(account.rate_limit_reset)).toISOString()
+						: null,
+					rateLimitRemaining:
+						account.rate_limit_remaining != null
+							? Number(account.rate_limit_remaining)
+							: null,
+					rateLimitedUntil: account.rate_limited_until
+						? Number(account.rate_limited_until)
+						: null,
+					sessionInfo: account.session_info || "",
+					autoFallbackEnabled: account.auto_fallback_enabled === 1,
+					autoRefreshEnabled: account.auto_refresh_enabled === 1,
+					autoPauseOnOverageEnabled:
+						account.auto_pause_on_overage_enabled === 1,
+					customEndpoint: account.custom_endpoint,
+					modelMappings,
+					usageUtilization,
+					usageWindow,
+					usageData: fullUsageData, // Full usage data for UI
+					hasRefreshToken:
+						!!account.refresh_token &&
+						account.refresh_token !== account.access_token, // API-key providers store key in both fields
+					crossRegionMode: account.cross_region_mode,
+					modelFallbacks,
+					billingType: account.billing_type,
+					sessionStats: sessionStatsMap.get(account.id) ?? null,
+				};
+			}),
+		);
 
 		return jsonResponse(response);
 	};
@@ -331,10 +513,11 @@ export function createAccountPriorityUpdateHandler(dbOps: DatabaseOperations) {
 			const priority = validatePriority(body.priority, "priority");
 
 			// Check if account exists
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ id: string }, [string]>("SELECT id FROM accounts WHERE id = ?")
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
@@ -371,7 +554,7 @@ export function createAccountAddHandler(
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -438,7 +621,7 @@ export function createAccountAddHandler(
 				const accountId = crypto.randomUUID();
 				const now = Date.now();
 
-				dbOps.getDatabase().run(
+				await dbOps.getAdapter().run(
 					`INSERT INTO accounts (
 						id, name, provider, refresh_token, access_token,
 						created_at, request_count, total_requests, priority, custom_endpoint
@@ -501,19 +684,18 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			const result = cliCommands.removeAccount(dbOps, accountName);
+			const result = await cliCommands.removeAccount(dbOps, accountName);
 
 			if (!result.success) {
 				return errorResponse(NotFound(result.message));
 			}
 
 			// Find the account ID to clean up usage cache (check before deletion)
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ id: string }, [string]>(
-					"SELECT id FROM accounts WHERE name = ?",
-				)
-				.get(accountName);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE name = ?",
+				[accountName],
+			);
 
 			if (account) {
 				// Clear usage cache for removed account to prevent memory leaks
@@ -539,18 +721,17 @@ export function createAccountPauseHandler(dbOps: DatabaseOperations) {
 	return async (_req: Request, accountId: string): Promise<Response> => {
 		try {
 			// Get account name by ID
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ name: string }, [string]>(
-					"SELECT name FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const result = cliCommands.pauseAccount(dbOps, account.name);
+			const result = await cliCommands.pauseAccount(dbOps, account.name);
 
 			if (!result.success) {
 				return errorResponse(BadRequest(result.message));
@@ -575,18 +756,17 @@ export function createAccountResumeHandler(dbOps: DatabaseOperations) {
 	return async (_req: Request, accountId: string): Promise<Response> => {
 		try {
 			// Get account name by ID
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ name: string }, [string]>(
-					"SELECT name FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const result = cliCommands.resumeAccount(dbOps, account.name);
+			const result = await cliCommands.resumeAccount(dbOps, account.name);
 
 			if (!result.success) {
 				return errorResponse(BadRequest(result.message));
@@ -619,7 +799,7 @@ export function createAccountRenameHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -628,23 +808,21 @@ export function createAccountRenameHandler(dbOps: DatabaseOperations) {
 			}
 
 			// Check if account exists
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ name: string }, [string]>(
-					"SELECT name FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
 			// Check if new name is already taken
-			const existingAccount = db
-				.query<{ id: string }, [string, string]>(
-					"SELECT id FROM accounts WHERE name = ? AND id != ?",
-				)
-				.get(newName, accountId);
+			const existingAccount = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE name = ? AND id != ?",
+				[newName, accountId],
+			);
 
 			if (existingAccount) {
 				return errorResponse(
@@ -684,7 +862,7 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -731,16 +909,25 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 				},
 			);
 
+			// Validate model mappings
+			let modelMappingsJson: string | null = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				const validated = validateAndSanitizeModelMappings(body.modelMappings);
+				if (validated) {
+					modelMappingsJson = JSON.stringify(validated);
+				}
+			}
+
 			// Create z.ai account directly in database
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 
-			const db = dbOps.getDatabase();
-			db.run(
+			const db = dbOps.getAdapter();
+			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
-					expires_at, created_at, request_count, total_requests, priority, custom_endpoint
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				[
 					accountId,
 					name,
@@ -754,6 +941,7 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 					0,
 					priority,
 					customEndpoint || null,
+					modelMappingsJson,
 				],
 			);
 
@@ -762,29 +950,25 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 			);
 
 			// Get the created account for response
-			const account = db
-				.query<
-					{
-						id: string;
-						name: string;
-						provider: string;
-						request_count: number;
-						total_requests: number;
-						last_used: number | null;
-						created_at: number;
-						expires_at: number;
-						refresh_token: string;
-						paused: number;
-					},
-					[string]
-				>(
-					`SELECT
-						id, name, provider, request_count, total_requests,
-						last_used, created_at, expires_at, refresh_token,
-						COALESCE(paused, 0) as paused
-					FROM accounts WHERE id = ?`,
-				)
-				.get(accountId);
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(
@@ -811,8 +995,9 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 					rateLimitStatus: "OK",
 					rateLimitReset: null,
 					rateLimitRemaining: null,
+					rateLimitedUntil: null,
 					sessionInfo: "No active session",
-					hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+					hasRefreshToken: false,
 				},
 			});
 		} catch (error) {
@@ -841,7 +1026,7 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -901,8 +1086,8 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 
-			const db = dbOps.getDatabase();
-			db.run(
+			const db = dbOps.getAdapter();
+			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -929,29 +1114,25 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 			);
 
 			// Get the created account for response
-			const account = db
-				.query<
-					{
-						id: string;
-						name: string;
-						provider: string;
-						request_count: number;
-						total_requests: number;
-						last_used: number | null;
-						created_at: number;
-						expires_at: number;
-						refresh_token: string;
-						paused: number;
-					},
-					[string]
-				>(
-					`SELECT
-						id, name, provider, request_count, total_requests,
-						last_used, created_at, expires_at, refresh_token,
-						COALESCE(paused, 0) as paused
-					FROM accounts WHERE id = ?`,
-				)
-				.get(accountId);
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
 
 			if (!account) {
 				throw new Error("Failed to retrieve created account");
@@ -976,9 +1157,10 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 					rateLimitStatus: "OK",
 					rateLimitReset: null,
 					rateLimitRemaining: null,
+					rateLimitedUntil: null,
 					sessionInfo: "No active session",
 					customEndpoint: customEndpoint,
-					hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+					hasRefreshToken: false,
 				},
 			});
 		} catch (error) {
@@ -1007,7 +1189,7 @@ export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1049,8 +1231,8 @@ export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
 			// Create Vertex AI account directly in database
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
-			const db = dbOps.getDatabase();
-			db.run(
+			const db = dbOps.getAdapter();
+			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -1076,29 +1258,25 @@ export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
 			);
 
 			// Get the created account for response
-			const account = db
-				.query<
-					{
-						id: string;
-						name: string;
-						provider: string;
-						request_count: number;
-						total_requests: number;
-						last_used: number | null;
-						created_at: number;
-						expires_at: number | null;
-						refresh_token: string;
-						paused: number;
-					},
-					[string]
-				>(
-					`SELECT
-						id, name, provider, request_count, total_requests,
-						last_used, created_at, expires_at, refresh_token,
-						COALESCE(paused, 0) as paused
-					FROM accounts WHERE id = ?`,
-				)
-				.get(accountId);
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number | null;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(
@@ -1148,7 +1326,7 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1177,8 +1355,8 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 			// Create Minimax account directly in database
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
-			const db = dbOps.getDatabase();
-			db.run(
+			const db = dbOps.getAdapter();
+			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -1204,29 +1382,25 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 			);
 
 			// Get the created account for response
-			const account = db
-				.query<
-					{
-						id: string;
-						name: string;
-						provider: string;
-						request_count: number;
-						total_requests: number;
-						last_used: number | null;
-						created_at: number;
-						expires_at: number;
-						refresh_token: string;
-						paused: number;
-					},
-					[string]
-				>(
-					`SELECT
-						id, name, provider, request_count, total_requests,
-						last_used, created_at, expires_at, refresh_token,
-						COALESCE(paused, 0) as paused
-					FROM accounts WHERE id = ?`,
-				)
-				.get(accountId);
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(
@@ -1253,8 +1427,9 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 					rateLimitStatus: "OK",
 					rateLimitReset: null,
 					rateLimitRemaining: null,
+					rateLimitedUntil: null,
 					sessionInfo: "No active session",
-					hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+					hasRefreshToken: false,
 				},
 			});
 		} catch (error) {
@@ -1282,7 +1457,7 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 			if (!name) {
@@ -1347,8 +1522,8 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 			// Create NanoGPT account directly in database
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
-			const db = dbOps.getDatabase();
-			db.run(
+			const db = dbOps.getAdapter();
+			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -1373,29 +1548,25 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 				`Successfully added NanoGPT account: ${name} (Priority ${priority})`,
 			);
 			// Get the created account for response
-			const account = db
-				.query<
-					{
-						id: string;
-						name: string;
-						provider: string;
-						request_count: number;
-						total_requests: number;
-						last_used: number | null;
-						created_at: number;
-						expires_at: number;
-						refresh_token: string;
-						paused: number;
-					},
-					[string]
-				>(
-					`SELECT
-						id, name, provider, request_count, total_requests,
-						last_used, created_at, expires_at, refresh_token,
-						COALESCE(paused, 0) as paused
-					FROM accounts WHERE id = ?`,
-				)
-				.get(accountId);
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
 			if (!account) {
 				return errorResponse(
 					InternalServerError("Failed to retrieve created account"),
@@ -1420,8 +1591,9 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 					rateLimitStatus: "OK",
 					rateLimitReset: null,
 					rateLimitRemaining: null,
+					rateLimitedUntil: null,
 					sessionInfo: "No active session",
-					hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+					hasRefreshToken: false,
 				},
 			});
 		} catch (error) {
@@ -1455,7 +1627,7 @@ export function createAnthropicCompatibleAccountAddHandler(
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1514,8 +1686,8 @@ export function createAnthropicCompatibleAccountAddHandler(
 			// Create Anthropic-compatible account directly in database
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
-			const db = dbOps.getDatabase();
-			db.run(
+			const db = dbOps.getAdapter();
+			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -1542,29 +1714,25 @@ export function createAnthropicCompatibleAccountAddHandler(
 			);
 
 			// Get the created account for response
-			const account = db
-				.query<
-					{
-						id: string;
-						name: string;
-						provider: string;
-						request_count: number;
-						total_requests: number;
-						last_used: number | null;
-						created_at: number;
-						expires_at: number;
-						refresh_token: string;
-						paused: number;
-					},
-					[string]
-				>(
-					`SELECT
-						id, name, provider, request_count, total_requests,
-						last_used, created_at, expires_at, refresh_token,
-						COALESCE(paused, 0) as paused
-					FROM accounts WHERE id = ?`,
-				)
-				.get(accountId);
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(
@@ -1591,8 +1759,9 @@ export function createAnthropicCompatibleAccountAddHandler(
 					rateLimitStatus: "OK",
 					rateLimitReset: null,
 					rateLimitRemaining: null,
+					rateLimitedUntil: null,
 					sessionInfo: "No active session",
-					hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+					hasRefreshToken: false,
 				},
 			});
 		} catch (error) {
@@ -1625,21 +1794,20 @@ export function createAccountAutoFallbackHandler(dbOps: DatabaseOperations) {
 			}
 
 			// Check if account exists
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ name: string; provider: string }, [string]>(
-					"SELECT name, provider FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			// Check if account is Anthropic provider (only Anthropic accounts have rate limit windows)
-			if (account.provider !== "anthropic") {
+			// Check if account supports session-based auto-fallback
+			if (!["anthropic", "codex", "zai"].includes(account.provider)) {
 				return errorResponse(
-					BadRequest("Auto-fallback is only available for Anthropic accounts"),
+					BadRequest("Auto-fallback is only available for supported accounts"),
 				);
 			}
 
@@ -1665,6 +1833,131 @@ export function createAccountAutoFallbackHandler(dbOps: DatabaseOperations) {
 }
 
 /**
+ * Create an account auto-pause-on-overage toggle handler
+ */
+export function createAccountAutoPauseOnOverageHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate enabled parameter
+			const enabled = validateNumber(body.enabled, "enabled", {
+				required: true,
+				allowedValues: [0, 1] as const,
+			});
+
+			if (enabled === undefined) {
+				return errorResponse(BadRequest("Enabled field is required (0 or 1)"));
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Check if account is Anthropic provider (only Anthropic accounts have overage detection)
+			if (account.provider !== "anthropic") {
+				return errorResponse(
+					BadRequest(
+						"Auto-pause on overage is only available for Anthropic accounts",
+					),
+				);
+			}
+
+			// Update auto-pause-on-overage setting
+			dbOps.setAutoPauseOnOverageEnabled(accountId, enabled === 1);
+
+			const action = enabled === 1 ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Auto-pause on overage ${action} for account '${account.name}'`,
+				autoPauseOnOverageEnabled: enabled === 1,
+			});
+		} catch (error) {
+			log.error("Account auto-pause-on-overage toggle error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle auto-pause-on-overage"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account billing type handler
+ */
+export function createAccountBillingTypeHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const billingType = validateString(body.billingType, "billingType", {
+				required: true,
+				allowedValues: ["plan", "api", "auto"],
+			});
+
+			if (billingType === undefined) {
+				return errorResponse(
+					BadRequest("billingType must be 'plan', 'api', or 'auto'"),
+				);
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Only allow custom billing type for compatible providers
+			if (
+				!["anthropic-compatible", "openai-compatible"].includes(
+					account.provider,
+				)
+			) {
+				return errorResponse(
+					BadRequest(
+						"Custom billing type is only available for anthropic-compatible and openai-compatible providers",
+					),
+				);
+			}
+
+			await dbOps.setAccountBillingType(
+				accountId,
+				billingType === "auto" ? null : billingType,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: `Billing type set to '${billingType}' for account '${account.name}'`,
+				billingType,
+			});
+		} catch (error) {
+			log.error("Account billing type update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update billing type"),
+			);
+		}
+	};
+}
+
+/**
  * Create an account auto-refresh toggle handler
  */
 export function createAccountAutoRefreshHandler(dbOps: DatabaseOperations) {
@@ -1683,29 +1976,34 @@ export function createAccountAutoRefreshHandler(dbOps: DatabaseOperations) {
 			}
 
 			// Check if account exists
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ name: string; provider: string }, [string]>(
-					"SELECT name, provider FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			// Check if account is Anthropic provider (only Anthropic accounts have rate limit windows)
-			if (account.provider !== "anthropic") {
+			// Check if account provider supports auto-refresh (session-window based providers)
+			if (
+				account.provider !== "anthropic" &&
+				account.provider !== "codex" &&
+				account.provider !== "zai"
+			) {
 				return errorResponse(
-					BadRequest("Auto-refresh is only available for Anthropic accounts"),
+					BadRequest(
+						"Auto-refresh is only available for Anthropic, Codex, and Zai accounts",
+					),
 				);
 			}
 
 			// Update auto-refresh setting
-			db.run("UPDATE accounts SET auto_refresh_enabled = ? WHERE id = ?", [
-				enabled,
-				accountId,
-			]);
+			await db.run(
+				"UPDATE accounts SET auto_refresh_enabled = ? WHERE id = ?",
+				[enabled, accountId],
+			);
 
 			const action = enabled === 1 ? "enabled" : "disabled";
 
@@ -1757,11 +2055,12 @@ export function createAccountCustomEndpointUpdateHandler(
 			);
 
 			// Update account custom endpoint
-			const db = dbOps.getDatabase();
-			db.run("UPDATE accounts SET custom_endpoint = ? WHERE id = ?", [
-				customEndpoint || null,
-				accountId,
-			]);
+			await dbOps
+				.getAdapter()
+				.run("UPDATE accounts SET custom_endpoint = ? WHERE id = ?", [
+					customEndpoint || null,
+					accountId,
+				]);
 
 			log.info(`Updated custom endpoint for account ${accountId}`);
 
@@ -1791,80 +2090,78 @@ export function createAccountModelMappingsUpdateHandler(
 			const body = await req.json();
 
 			// Get account to verify it supports model mappings
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ provider: string; custom_endpoint: string | null }, [string]>(
-					"SELECT provider, custom_endpoint FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{
+				provider: string;
+				custom_endpoint: string | null;
+			}>("SELECT provider, custom_endpoint FROM accounts WHERE id = ?", [
+				accountId,
+			]);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			if (
-				account.provider !== "openai-compatible" &&
-				account.provider !== "anthropic-compatible" &&
-				account.provider !== "nanogpt"
-			) {
-				return errorResponse(
-					BadRequest(
-						"Model mappings are only available for OpenAI-compatible, Anthropic-compatible, and NanoGPT accounts",
-					),
-				);
-			}
-
 			// Handle model mappings update
-			const modelMappings: { [key: string]: string } = (body.modelMappings ||
-				{}) as { [key: string]: string };
+			const modelMappings = body.modelMappings || {};
 
-			// Validate model mappings
+			// Validate model mappings - values can be string or string[]
 			if (typeof modelMappings !== "object" || Array.isArray(modelMappings)) {
 				return errorResponse(BadRequest("Model mappings must be an object"));
 			}
 
-			// Ensure modelMappings is a record with string values
-			if (modelMappings) {
-				for (const [_key, value] of Object.entries(modelMappings)) {
-					if (typeof value !== "string") {
+			for (const [_key, value] of Object.entries(modelMappings)) {
+				if (typeof value === "string") {
+					if (!value.trim()) {
 						return errorResponse(
-							BadRequest("All model mapping values must be strings"),
+							BadRequest(
+								`Model mapping value for key '${_key}' must not be empty`,
+							),
 						);
 					}
-				}
-			}
-
-			// Get existing model mappings from the dedicated field
-			let existingModelMappings: { [key: string]: string } = {};
-			const result = db
-				.query<{ model_mappings: string | null }, [string]>(
-					"SELECT model_mappings FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
-			const existingModelMappingsStr = result?.model_mappings || null;
-
-			if (existingModelMappingsStr) {
-				try {
-					const parsed = JSON.parse(existingModelMappingsStr);
-					// Handle both formats: direct mappings or wrapped in modelMappings
-					existingModelMappings = parsed.modelMappings || parsed || {};
-				} catch {
-					// If parsing fails, ignore existing mappings
-					existingModelMappings = {};
-				}
-			}
-
-			// Merge new model mappings with existing ones
-			const mergedModelMappings = { ...existingModelMappings };
-
-			// Update or remove model mappings based on the input
-			for (const [modelType, modelValue] of Object.entries(modelMappings)) {
-				if (!modelValue || modelValue.trim() === "") {
-					// Remove the mapping if value is empty
-					delete mergedModelMappings[modelType];
+				} else if (Array.isArray(value)) {
+					if (value.length === 0) {
+						return errorResponse(
+							BadRequest(
+								`Model mapping array for key '${_key}' must not be empty`,
+							),
+						);
+					}
+					for (const item of value) {
+						if (typeof item !== "string" || !item.trim()) {
+							return errorResponse(
+								BadRequest(
+									`All model mapping array values for key '${_key}' must be non-empty strings`,
+								),
+							);
+						}
+					}
 				} else {
-					// Update the mapping
-					mergedModelMappings[modelType] = modelValue.trim();
+					return errorResponse(
+						BadRequest(
+							"Model mapping values must be strings or arrays of strings",
+						),
+					);
+				}
+			}
+
+			// Build the new model mappings as a full replacement (not a merge).
+			// This ensures that sending an empty {} correctly clears all mappings.
+			const mergedModelMappings: Record<string, string | string[]> = {};
+
+			for (const [modelType, modelValue] of Object.entries(modelMappings)) {
+				if (typeof modelValue === "string") {
+					if (modelValue.trim()) {
+						mergedModelMappings[modelType] = modelValue.trim();
+					}
+				} else if (Array.isArray(modelValue)) {
+					const trimmed = modelValue
+						.map((v) => (typeof v === "string" ? v.trim() : ""))
+						.filter(Boolean);
+					if (trimmed.length > 0) {
+						mergedModelMappings[modelType] =
+							trimmed.length === 1 ? trimmed[0] : trimmed;
+					}
 				}
 			}
 
@@ -1874,7 +2171,7 @@ export function createAccountModelMappingsUpdateHandler(
 					? JSON.stringify(mergedModelMappings)
 					: null;
 
-			db.run("UPDATE accounts SET model_mappings = ? WHERE id = ?", [
+			await db.run("UPDATE accounts SET model_mappings = ? WHERE id = ?", [
 				finalModelMappings,
 				accountId,
 			]);
@@ -1898,6 +2195,177 @@ export function createAccountModelMappingsUpdateHandler(
 }
 
 /**
+ * Create an account model fallbacks update handler.
+ * @deprecated Fallbacks are now merged into model_mappings as arrays.
+ * This handler appends fallback models to existing model_mappings arrays.
+ */
+export function createAccountModelFallbacksUpdateHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Validate fallbacks input
+			const modelFallbacks = body.modelFallbacks || {};
+			if (typeof modelFallbacks !== "object" || Array.isArray(modelFallbacks)) {
+				return errorResponse(BadRequest("Model fallbacks must be an object"));
+			}
+			for (const [_key, value] of Object.entries(modelFallbacks)) {
+				if (typeof value !== "string" || !value.trim()) {
+					return errorResponse(
+						BadRequest("All model fallback values must be non-empty strings"),
+					);
+				}
+			}
+
+			// Get existing model_mappings and merge fallbacks into them
+			let existingMappings: Record<string, string | string[]> = {};
+			const result = await db.get<{ model_mappings: string | null }>(
+				"SELECT model_mappings FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (result?.model_mappings) {
+				try {
+					const parsed = JSON.parse(result.model_mappings);
+					existingMappings = parsed.modelMappings || parsed || {};
+				} catch {
+					existingMappings = {};
+				}
+			}
+
+			// Merge: for each fallback, append to existing mapping array
+			for (const [modelType, fallbackValue] of Object.entries(modelFallbacks)) {
+				const existing = existingMappings[modelType];
+				const fallback = (fallbackValue as string).trim();
+
+				if (typeof existing === "string") {
+					// Promote single string to array with fallback appended
+					existingMappings[modelType] = [existing, fallback];
+				} else if (Array.isArray(existing)) {
+					if (!existing.includes(fallback)) {
+						existingMappings[modelType] = [...existing, fallback];
+					}
+				} else {
+					existingMappings[modelType] = fallback;
+				}
+			}
+
+			const finalMappings =
+				Object.keys(existingMappings).length > 0
+					? JSON.stringify(existingMappings)
+					: null;
+
+			await db.run(
+				"UPDATE accounts SET model_mappings = ?, model_fallbacks = NULL WHERE id = ?",
+				[finalMappings, accountId],
+			);
+
+			log.info(
+				`Merged model fallbacks into model_mappings for account ${accountId}`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: "Model fallbacks merged into model mappings",
+				modelMappings: existingMappings,
+			});
+		} catch (error) {
+			log.error("Account model fallbacks update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update model fallbacks"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account force-reset rate limit handler
+ * Clears rate limit lock fields and triggers immediate usage refresh when possible.
+ */
+export function createAccountForceResetRateLimitHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const db = dbOps.getAdapter();
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				access_token: string | null;
+			}>("SELECT id, name, provider, access_token FROM accounts WHERE id = ?", [
+				accountId,
+			]);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			const resetSuccess = dbOps.forceResetAccountRateLimit(accountId);
+			if (!resetSuccess) {
+				return errorResponse(
+					new Error(
+						`Failed to reset rate limit state for account '${account.name}'`,
+					),
+				);
+			}
+			clearAccountRefreshCache(accountId);
+
+			// Trigger immediate poll if this server has a polling token provider for the account.
+			let usagePollTriggered = await usageCache.refreshNow(accountId);
+
+			// Best-effort fallback: use raw DB token for Anthropic OAuth accounts.
+			// Only Anthropic accounts support direct usage fetch via fetchUsageData();
+			// other providers (Zai, NanoGPT) use different endpoints handled by their own fetchers.
+			// This bypasses token refresh, but is acceptable since this path only runs when
+			// no active polling exists and the token is likely fresh from recent proxy requests.
+			if (
+				!usagePollTriggered &&
+				account.provider === "anthropic" &&
+				account.access_token
+			) {
+				const { data: usageData } = await fetchUsageData(account.access_token);
+				if (usageData) {
+					usageCache.set(account.id, usageData);
+					usagePollTriggered = true;
+				}
+			}
+
+			log.info(
+				`Force-reset rate limit for account '${account.name}' (usage poll triggered: ${usagePollTriggered})`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: `Rate limit state cleared for account '${account.name}'`,
+				usagePollTriggered,
+			});
+		} catch (error) {
+			log.error("Account force-reset rate limit error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to force reset account rate limit"),
+			);
+		}
+	};
+}
+
+/**
  * Create an account reload handler
  * Clears refresh cache for an account after re-authentication
  */
@@ -1905,12 +2373,11 @@ export function createAccountReloadHandler(dbOps: DatabaseOperations) {
 	return async (_req: Request, accountId: string): Promise<Response> => {
 		try {
 			// Check if account exists
-			const db = dbOps.getDatabase();
-			const account = db
-				.query<{ name: string; provider: string }, [string]>(
-					"SELECT name, provider FROM accounts WHERE id = ?",
-				)
-				.get(accountId);
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
@@ -1941,6 +2408,777 @@ export function createAccountReloadHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to reload account tokens"),
+			);
+		}
+	};
+}
+
+/**
+ * Check if an AWS profile exists in ~/.aws/credentials
+ */
+function checkAwsProfileExists(profile: string): boolean {
+	try {
+		const credentialsPath = join(homedir(), ".aws", "credentials");
+		if (!existsSync(credentialsPath)) {
+			return false;
+		}
+		const content = readFileSync(credentialsPath, "utf-8");
+		// Match [profile] section header (handles default and named profiles)
+		const profileRegex = new RegExp(`^\\[${profile}\\]`, "m");
+		return profileRegex.test(content);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Read region from ~/.aws/config for a given profile
+ * AWS config format: [profile <name>] for named profiles, [default] for default
+ */
+function readAwsRegion(profile: string): string | null {
+	try {
+		const configPath = join(homedir(), ".aws", "config");
+		if (!existsSync(configPath)) {
+			return null;
+		}
+		const content = readFileSync(configPath, "utf-8");
+		// In ~/.aws/config, the default profile is [default], named profiles are [profile <name>]
+		const sectionHeader =
+			profile === "default" ? "\\[default\\]" : `\\[profile ${profile}\\]`;
+		const sectionRegex = new RegExp(`${sectionHeader}[\\s\\S]*?(?=\\[|$)`);
+		const sectionMatch = content.match(sectionRegex);
+		if (!sectionMatch) return null;
+		const regionMatch = sectionMatch[0].match(/^region\s*=\s*(.+)$/m);
+		return regionMatch ? regionMatch[1].trim() : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Create an AWS profiles list handler
+ * Returns all AWS profiles from ~/.aws/credentials with their regions
+ */
+export function createAwsProfilesListHandler() {
+	return async (): Promise<Response> => {
+		try {
+			const credentialsPath = join(homedir(), ".aws", "credentials");
+
+			// If credentials file doesn't exist, return empty array
+			if (!existsSync(credentialsPath)) {
+				log.debug("AWS credentials file not found");
+				return jsonResponse([]);
+			}
+
+			// Read and parse credentials file
+			const content = readFileSync(credentialsPath, "utf-8");
+			const profiles: Array<{ name: string; region: string | null }> = [];
+
+			// Match all profile sections [profile-name]
+			const profileMatches = content.matchAll(/^\[([^\]]+)\]/gm);
+
+			for (const match of profileMatches) {
+				const profileName = match[1];
+				// Try to read region from config
+				const region = readAwsRegion(profileName);
+				profiles.push({ name: profileName, region });
+			}
+
+			log.debug(`Found ${profiles.length} AWS profiles`);
+			return jsonResponse(profiles);
+		} catch (error) {
+			log.error("Failed to list AWS profiles:", error);
+			// Return empty array on error instead of failing
+			return jsonResponse([]);
+		}
+	};
+}
+
+/**
+ * Create a Bedrock account add handler
+ */
+export function createBedrockAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate account name
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			// Validate profile
+			const profile = validateString(body.profile, "profile", {
+				required: true,
+				minLength: 1,
+				transform: sanitizers.trim,
+			});
+
+			if (!profile) {
+				return errorResponse(BadRequest("AWS profile is required"));
+			}
+
+			// Validate region
+			const region = validateString(body.region, "region", {
+				required: true,
+				minLength: 1,
+				transform: sanitizers.trim,
+			});
+
+			if (!region) {
+				return errorResponse(BadRequest("Region is required"));
+			}
+
+			// Validate priority
+			const priority = validatePriority(body.priority);
+
+			// Validate cross_region_mode
+			const crossRegionMode = body.cross_region_mode ?? "geographic";
+			if (
+				crossRegionMode !== "geographic" &&
+				crossRegionMode !== "global" &&
+				crossRegionMode !== "regional"
+			) {
+				return errorResponse(
+					BadRequest(
+						"cross_region_mode must be one of: geographic, global, regional",
+					),
+				);
+			}
+
+			// Validate custom model (optional)
+			const customModel = body.customModel
+				? validateString(body.customModel, "customModel", {
+						required: false,
+						minLength: 1,
+						maxLength: 200,
+						transform: sanitizers.trim,
+					})
+				: undefined;
+
+			// Build model_mappings JSON if custom model specified
+			let modelMappings: string | null = null;
+			if (customModel) {
+				modelMappings = JSON.stringify({ custom: customModel });
+			}
+
+			// Check if AWS profile exists
+			if (!checkAwsProfileExists(profile)) {
+				return errorResponse(
+					BadRequest(
+						`AWS profile '${profile}' not found. Check ~/.aws/credentials or run: aws configure --profile ${profile}`,
+					),
+				);
+			}
+
+			// Store profile and region in custom_endpoint as "bedrock:profile:region"
+			const bedrockConfig = `bedrock:${profile}:${region}`;
+
+			// Create Bedrock account directly in database
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const oneYearFromNow = now + 365 * 24 * 60 * 60 * 1000; // 1 year expiry
+			const db = dbOps.getAdapter();
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, cross_region_mode, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"bedrock",
+					null, // No API key - uses AWS credentials
+					"", // Empty refresh token
+					null, // No access token
+					oneYearFromNow, // Set expiry to 1 year from now
+					now,
+					0,
+					0,
+					priority,
+					bedrockConfig,
+					crossRegionMode,
+					modelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added Bedrock account: ${name} (Profile: ${profile}, Region: ${region}, CrossRegionMode: ${crossRegionMode}, Priority ${priority}${customModel ? `, CustomModel: ${customModel}` : ""})`,
+			);
+
+			// Get the created account for response
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number | null;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `Bedrock account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					request_count: account.request_count,
+					total_requests: account.total_requests,
+					last_used: account.last_used,
+					created_at: new Date(account.created_at),
+					expires_at: account.expires_at ? new Date(account.expires_at) : null,
+					tokenStatus: "valid",
+					mode: "bedrock",
+					paused: account.paused === 1,
+					cross_region_mode: crossRegionMode,
+				},
+			});
+		} catch (error) {
+			log.error("Failed to add Bedrock account:", error);
+			if (error instanceof ValidationError) {
+				return errorResponse(BadRequest(error.message));
+			}
+			return errorResponse(
+				InternalServerError(
+					error instanceof Error ? error.message : "Failed to add account",
+				),
+			);
+		}
+	};
+}
+
+/**
+ * Create a Kilo Gateway account add handler
+ */
+export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate account name
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			// Validate API key
+			const apiKey = validateString(body.apiKey, "apiKey", {
+				required: true,
+				minLength: 1,
+			});
+
+			if (!apiKey) {
+				return errorResponse(BadRequest("API key is required"));
+			}
+
+			// Validate priority
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			// Validate and sanitize model mappings if provided
+			let validatedModelMappings = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				try {
+					const sanitized = validateAndSanitizeModelMappings(
+						body.modelMappings,
+					);
+					if (sanitized && Object.keys(sanitized).length > 0) {
+						validatedModelMappings = JSON.stringify(sanitized);
+					}
+				} catch (err) {
+					return errorResponse(
+						BadRequest(
+							`Invalid model mappings: ${err instanceof Error ? err.message : String(err)}`,
+						),
+					);
+				}
+			}
+
+			// Create Kilo account in database
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"kilo",
+					apiKey,
+					null,
+					null,
+					now + 365 * 24 * 60 * 60 * 1000,
+					now,
+					0,
+					0,
+					priority,
+					null,
+					validatedModelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added Kilo Gateway account: ${name} (Priority ${priority})`,
+			);
+
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `Kilo Gateway account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("Kilo Gateway account creation error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create Kilo Gateway account"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an Alibaba Coding Plan account add handler
+ */
+export function createAlibabaCodingPlanAccountAddHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			const apiKey = validateString(body.apiKey, "apiKey", {
+				required: true,
+				minLength: 1,
+			});
+
+			if (!apiKey) {
+				return errorResponse(BadRequest("API key is required"));
+			}
+
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			let validatedModelMappings = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				try {
+					const sanitized = validateAndSanitizeModelMappings(
+						body.modelMappings,
+					);
+					if (sanitized && Object.keys(sanitized).length > 0) {
+						validatedModelMappings = JSON.stringify(sanitized);
+					}
+				} catch (err) {
+					return errorResponse(
+						BadRequest(
+							`Invalid model mappings: ${err instanceof Error ? err.message : String(err)}`,
+						),
+					);
+				}
+			}
+
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"alibaba-coding-plan",
+					apiKey,
+					apiKey,
+					apiKey,
+					now + 365 * 24 * 60 * 60 * 1000,
+					now,
+					0,
+					0,
+					priority,
+					null,
+					validatedModelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added Alibaba Coding Plan account: ${name} (Priority ${priority})`,
+			);
+
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `Alibaba Coding Plan account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("Alibaba Coding Plan account creation error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create Alibaba Coding Plan account"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an OpenRouter account add handler
+ */
+export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate account name
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			// Validate API key
+			const apiKey = validateString(body.apiKey, "apiKey", {
+				required: true,
+				minLength: 1,
+			});
+
+			if (!apiKey) {
+				return errorResponse(BadRequest("API key is required"));
+			}
+
+			// Validate priority
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			// Validate and sanitize model mappings (optional)
+			let modelMappings = null;
+			if (body.modelMappings) {
+				if (typeof body.modelMappings !== "object") {
+					throw new ValidationError("Model mappings must be an object");
+				}
+				try {
+					const validatedMappings = validateAndSanitizeModelMappings(
+						body.modelMappings,
+					);
+					if (validatedMappings && Object.keys(validatedMappings).length > 0) {
+						modelMappings = JSON.stringify(validatedMappings);
+					}
+				} catch (error) {
+					if (error instanceof ValidationError) {
+						throw error;
+					}
+					throw new ValidationError("Invalid model mappings format");
+				}
+			}
+
+			// Create OpenRouter account in database
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"openrouter",
+					apiKey,
+					null,
+					null,
+					now + 365 * 24 * 60 * 60 * 1000,
+					now,
+					0,
+					0,
+					priority,
+					null,
+					modelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added OpenRouter account: ${name} (Priority ${priority})`,
+			);
+
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `OpenRouter account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("OpenRouter account creation error:", error);
+			if (error instanceof ValidationError) {
+				return errorResponse(BadRequest(error.message));
+			}
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create OpenRouter account"),
+			);
+		}
+	};
+}
+
+/**
+ * Force an immediate usage data refresh for an Anthropic OAuth account.
+ * Clears the refresh cache, restarts usage polling (which refreshes the token
+ * if expired), and returns whether polling was successfully restarted.
+ */
+export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const account = await dbOps.getAccount(accountId);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (account.provider !== "anthropic") {
+				return errorResponse(
+					BadRequest(
+						"Usage refresh is only available for Anthropic OAuth accounts",
+					),
+				);
+			}
+
+			if (!account.access_token && !account.refresh_token) {
+				return errorResponse(
+					BadRequest(
+						`Account '${account.name}' has no tokens - please re-authenticate`,
+					),
+				);
+			}
+
+			clearAccountRefreshCache(accountId);
+			const pollingRestarted = await restartUsagePollingForAccount(accountId);
+
+			log.info(
+				`Usage refresh requested for account '${account.name}' (polling restarted: ${pollingRestarted})`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: pollingRestarted
+					? `Usage polling restarted for account '${account.name}'. Fresh usage data will appear within 5-10 seconds.`
+					: `Usage cache cleared for account '${account.name}'. Note: server-side polling could not be restarted - usage data may not update until a request is proxied.`,
+				pollingRestarted,
+			});
+		} catch (error) {
+			log.error("Account refresh usage error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to refresh usage data"),
 			);
 		}
 	};

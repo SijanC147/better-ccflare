@@ -70,18 +70,18 @@ export async function interceptAndModifyRequest(
 				const sample = systemPrompt.substring(start, end);
 				log.info(`Found 'Contents of' pattern: ${sample}`);
 			} else {
-				log.info("System prompt does NOT contain 'Contents of' pattern");
+				log.debug("System prompt does NOT contain 'Contents of' pattern");
 				// Show a sample of what we do have
 				const claudeIndex = systemPrompt.indexOf("CLAUDE.md");
 				const start = Math.max(0, claudeIndex - 50);
 				const end = Math.min(systemPrompt.length, claudeIndex + 50);
 				const sample = systemPrompt.substring(start, end);
-				log.info(`Sample around CLAUDE.md: ...${sample}...`);
+				log.debug(`Sample around CLAUDE.md: ...${sample}...`);
 			}
 
 			// Count all CLAUDE.md occurrences
 			const matches = systemPrompt.match(/CLAUDE\.md/g);
-			log.info(`Total CLAUDE.md occurrences: ${matches ? matches.length : 0}`);
+			log.debug(`Total CLAUDE.md occurrences: ${matches ? matches.length : 0}`);
 		}
 
 		const extraDirs = extractAgentDirectories(systemPrompt);
@@ -125,7 +125,7 @@ export async function interceptAndModifyRequest(
 		);
 
 		// Look up model preference
-		const preference = dbOps.getAgentPreference(detectedAgent.id);
+		const preference = await dbOps.getAgentPreference(detectedAgent.id);
 		const preferredModel = preference?.model || detectedAgent.model;
 
 		// If the preferred model is the same as original, no modification needed

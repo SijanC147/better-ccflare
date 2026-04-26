@@ -16,19 +16,33 @@ import {
 } from "@better-ccflare/core";
 import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
 import type { DatabaseOperations } from "@better-ccflare/database";
-import { AsyncDbWriter, DatabaseFactory } from "@better-ccflare/database";
+import {
+	AsyncDbWriter,
+	DatabaseFactory,
+	initPayloadEncryption,
+} from "@better-ccflare/database";
 import { APIRouter, AuthService } from "@better-ccflare/http-api";
 import { SessionStrategy } from "@better-ccflare/load-balancer";
 import { Logger } from "@better-ccflare/logger";
 import { getProvider, usageCache } from "@better-ccflare/providers";
 import {
+	canUseInferenceProfileDynamic,
+	parseBedrockConfig,
+	translateModelName,
+} from "@better-ccflare/providers/bedrock";
+import {
 	AutoRefreshScheduler,
+	CacheKeepaliveScheduler,
 	getUsageWorker,
+	getUsageWorkerHealth,
 	getValidAccessToken,
 	handleProxy,
 	type ProxyContext,
+	registerPollingRestarter,
 	registerRefreshClearer,
+	sendWorkerConfigUpdate,
 	startGlobalTokenHealthChecks,
+	startUsageWorker,
 	stopGlobalTokenHealthChecks,
 	terminateUsageWorker,
 } from "@better-ccflare/proxy";
@@ -59,6 +73,11 @@ try {
 		console.warn("⚠️  Dashboard assets not found - dashboard will be disabled");
 	}
 }
+
+// Memory monitoring thresholds
+const MEMORY_MONITOR_INTERVAL_MS = 60 * 1000;
+const MEMORY_GROWTH_WARN_BYTES = 512 * 1024 * 1024;
+const MEMORY_GROWTH_ERROR_BYTES = 1024 * 1024 * 1024;
 
 // Helper function to resolve dashboard assets with fallback
 function resolveDashboardAsset(assetPath: string): string | null {
@@ -155,7 +174,11 @@ let serverInstance: ReturnType<typeof serve> | null = null;
 let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
+let stopDataCleanupJob: (() => void) | null = null;
+let stopWalCheckpointJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
+let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
+let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
 
@@ -171,7 +194,7 @@ async function runStartupMaintenance(
 	try {
 		const payloadDays = config.getDataRetentionDays();
 		const requestDays = config.getRequestRetentionDays();
-		const { removedRequests, removedPayloads } = dbOps.cleanupOldRequests(
+		const { removedRequests, removedPayloads } = await dbOps.cleanupOldRequests(
 			payloadDays * 24 * 60 * 60 * 1000,
 			requestDays * 24 * 60 * 60 * 1000,
 		);
@@ -183,7 +206,7 @@ async function runStartupMaintenance(
 	}
 	try {
 		// Clean up expired OAuth sessions
-		const removedSessions = dbOps.cleanupExpiredOAuthSessions();
+		const removedSessions = await dbOps.cleanupExpiredOAuthSessions();
 		if (removedSessions > 0) {
 			log.info(
 				`Startup cleanup removed ${removedSessions} expired OAuth sessions`,
@@ -195,7 +218,7 @@ async function runStartupMaintenance(
 	try {
 		// Clear expired rate_limited_until values
 		const now = Date.now();
-		const clearedCount = dbOps.clearExpiredRateLimits(now);
+		const clearedCount = await dbOps.clearExpiredRateLimits(now);
 		if (clearedCount > 0) {
 			log.info(`Cleared ${clearedCount} expired rate_limited_until entries`);
 		} else {
@@ -217,12 +240,39 @@ async function runStartupMaintenance(
 }
 
 /**
+ * Pre-warm Bedrock model and inference profile caches for faster first request
+ */
+async function prewarmBedrockCache(account: Account, region: string) {
+	const logger = new Logger("BedrockCachePrewarm");
+
+	try {
+		// Pre-warm model cache
+		await translateModelName("claude-opus-4-6", account);
+
+		// Pre-warm inference profile cache
+		await canUseInferenceProfileDynamic(
+			"claude-opus-4-6",
+			"geographic",
+			account,
+		);
+
+		logger.info(`Successfully pre-warmed Bedrock caches for region ${region}`);
+	} catch (error) {
+		logger.error(
+			`Failed to pre-warm Bedrock caches for region ${region}: ${(error as Error).message}`,
+		);
+	}
+}
+
+/**
  * Start usage polling for an account with automatic token refresh
  * Temporarily resumes paused accounts for token refresh, then restores original state
  */
 function startUsagePollingWithRefresh(
 	account: Account,
 	proxyContext: ProxyContext,
+	startupDelayMs: number = 0,
+	intervalMs: number = 90000,
 ) {
 	const logger = new Logger("UsagePolling");
 	const MAX_RETRY_ATTEMPTS = 10;
@@ -235,7 +285,7 @@ function startUsagePollingWithRefresh(
 			const tokenProvider = async () => {
 				// Get the current paused state from the database to avoid stale state issues
 				// This is important because the account might be paused/resumed via API during runtime
-				const currentAccount = proxyContext.dbOps.getAccount(account.id);
+				const currentAccount = await proxyContext.dbOps.getAccount(account.id);
 				const wasTemporarilyResumed = currentAccount?.paused === true;
 
 				// Update in-memory account with fresh token data from DB
@@ -274,8 +324,20 @@ function startUsagePollingWithRefresh(
 				account.id,
 				tokenProvider,
 				account.provider,
-				30000,
-			); // Poll every 30s
+				intervalMs,
+				undefined, // customEndpoint
+				(accountId) => {
+					// Usage window has rolled over — reset session tracking so the
+					// dashboard reflects the new window without waiting for the next request.
+					proxyContext.dbOps
+						.resetAccountSession(accountId, Date.now())
+						.catch((err) =>
+							logger.warn(
+								`Failed to reset session for account ${accountId} on window reset: ${err}`,
+							),
+						);
+				},
+			);
 
 			// Reset retry count on success
 			retryCount = 0;
@@ -377,12 +439,16 @@ function startUsagePollingWithRefresh(
 		}
 	};
 
-	// Start the polling
-	pollWithRefresh();
+	// Start the polling (with optional startup delay to stagger multiple accounts)
+	if (startupDelayMs > 0) {
+		setTimeout(() => pollWithRefresh(), startupDelayMs);
+	} else {
+		pollWithRefresh();
+	}
 }
 
 // Export for programmatic use
-export default function startServer(options?: {
+export default async function startServer(options?: {
 	port?: number;
 	withDashboard?: boolean;
 	sslKeyPath?: string;
@@ -460,6 +526,13 @@ export default function startServer(options?: {
 	container.registerInstance(SERVICE_KEYS.Config, new Config());
 	container.registerInstance(SERVICE_KEYS.Logger, new Logger("Server"));
 
+	// Initialize payload encryption (no-op if PAYLOAD_ENCRYPTION_KEY is unset).
+	// This must run before any database operations that read/write payloads.
+	// NOTE: this only initializes the main thread; the post-processor worker
+	// runs `initPayloadEncryption()` itself at module load — Bun workers have
+	// isolated module scopes.
+	await initPayloadEncryption();
+
 	// Initialize components
 	const config = container.resolve<Config>(SERVICE_KEYS.Config);
 	const runtime = config.getRuntime();
@@ -468,12 +541,14 @@ export default function startServer(options?: {
 		runtime.port = port;
 	}
 	DatabaseFactory.initialize(undefined, runtime);
-	const dbOps = DatabaseFactory.getInstance();
+	const dbOps = await DatabaseFactory.getInstanceAsync();
 
-	// Run integrity check if database was initialized in fast mode
-	dbOps.runIntegrityCheck();
+	// Run integrity check if database was initialized in fast mode (SQLite only)
+	if (dbOps.isSQLite) {
+		dbOps.runIntegrityCheck();
+	}
 
-	const db = dbOps.getDatabase();
+	const db = dbOps.getAdapter();
 	const log = container.resolve<Logger>(SERVICE_KEYS.Logger);
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
 
@@ -495,6 +570,8 @@ export default function startServer(options?: {
 			port,
 			tlsEnabled,
 		},
+		getAsyncWriterHealth: () => asyncWriter.getHealth(),
+		getUsageWorkerHealth: () => getUsageWorkerHealth(),
 	});
 
 	// Initialize AuthService for proxy authentication
@@ -509,9 +586,9 @@ export default function startServer(options?: {
 	// Set up periodic OAuth session cleanup (every hour)
 	const unregisterOAuthCleanup = registerCleanup({
 		id: "oauth-session-cleanup",
-		callback: () => {
+		callback: async () => {
 			try {
-				const removedSessions = dbOps.cleanupExpiredOAuthSessions();
+				const removedSessions = await dbOps.cleanupExpiredOAuthSessions();
 				if (removedSessions > 0) {
 					log.debug(`Cleaned up ${removedSessions} expired OAuth sessions`);
 				}
@@ -528,10 +605,10 @@ export default function startServer(options?: {
 	// Set up periodic rate limit cleanup (every hour)
 	const unregisterRateLimitCleanup = registerCleanup({
 		id: "rate-limit-cleanup",
-		callback: () => {
+		callback: async () => {
 			try {
 				const now = Date.now();
-				const clearedCount = dbOps.clearExpiredRateLimits(now);
+				const clearedCount = await dbOps.clearExpiredRateLimits(now);
 				if (clearedCount > 0) {
 					log.debug(
 						`Cleared ${clearedCount} expired rate_limited_until entries`,
@@ -546,6 +623,58 @@ export default function startServer(options?: {
 	});
 
 	stopRateLimitCleanupJob = unregisterRateLimitCleanup;
+
+	// Set up periodic data retention cleanup every 1 hour
+	const dataRetentionCleanup = async () => {
+		const startTime = Date.now();
+		try {
+			const payloadDays = config.getDataRetentionDays();
+			const requestDays = config.getRequestRetentionDays();
+			const { removedRequests, removedPayloads } =
+				await dbOps.cleanupOldRequests(
+					payloadDays * TIME_CONSTANTS.DAY,
+					requestDays * TIME_CONSTANTS.DAY,
+				);
+			if (removedRequests > 0 || removedPayloads > 0) {
+				log.info(
+					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads in ${Date.now() - startTime}ms`,
+				);
+				// Reclaim freed SQLite pages without a full blocking VACUUM
+				// Increased from 50000 to 200000 pages (~800 MB) for more aggressive cleanup
+				dbOps.incrementalVacuum(200000);
+			}
+		} catch (err) {
+			log.error(`Periodic data retention cleanup error: ${err}`);
+		}
+	};
+
+	// Periodic data retention cleanup every 1 hour (reduced from 6 hours for more aggressive cleanup).
+	// runStartupMaintenance() (called above) handles the initial cleanup on boot,
+	// so we don't fire dataRetentionCleanup() immediately to avoid concurrent
+	// large deletes that can spike WAL size and wedge the service.
+	const unregisterDataCleanup = registerCleanup({
+		id: "data-retention-cleanup",
+		callback: dataRetentionCleanup,
+		minutes: 60, // every 1 hour
+		description: "Periodic data retention cleanup and incremental vacuum",
+	});
+
+	stopDataCleanupJob = unregisterDataCleanup;
+
+	// Set up periodic WAL checkpoint every 5 minutes to prevent unbounded WAL growth
+	const unregisterWalCheckpoint = registerCleanup({
+		id: "wal-checkpoint",
+		callback: () => {
+			try {
+				dbOps.optimize(); // runs PRAGMA optimize + PRAGMA wal_checkpoint(PASSIVE)
+			} catch (err) {
+				log.error(`WAL checkpoint error: ${err}`);
+			}
+		},
+		minutes: 5,
+		description: "WAL checkpoint to prevent unbounded WAL file growth",
+	});
+	stopWalCheckpointJob = unregisterWalCheckpoint;
 
 	// Initialize load balancing strategy (will be created after runtime config)
 
@@ -577,15 +706,21 @@ export default function startServer(options?: {
 	const strategy = new SessionStrategy(runtimeConfig.sessionDurationMs);
 	strategy.initialize(dbOps);
 
+	// Start usage worker eagerly (before first request)
+	startUsageWorker();
+
 	// Proxy context
+	const usageWorker = getUsageWorker();
+	sendWorkerConfigUpdate(config.getStorePayloads());
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
 		runtime: runtimeConfig,
+		config,
 		provider,
 		refreshInFlight: new Map(),
 		asyncWriter,
-		usageWorker: getUsageWorker(),
+		usageWorker,
 	};
 
 	// Register this server's refresh clearing capability
@@ -596,17 +731,55 @@ export default function startServer(options?: {
 		log.info(`Cleared refresh cache for account ${accountId} on ${serverId}`);
 	});
 
+	// Register this server's usage polling restart capability
+	registerPollingRestarter(serverId, async (accountId: string) => {
+		const account = await dbOps.getAccount(accountId);
+		if (!account) {
+			log.warn(
+				`Cannot restart usage polling: account ${accountId} not found on ${serverId}`,
+			);
+			return false;
+		}
+		if (account.provider !== "anthropic") {
+			log.warn(
+				`Cannot restart usage polling: account ${account.name} is not an Anthropic OAuth account`,
+			);
+			return false;
+		}
+		if (!account.access_token && !account.refresh_token) {
+			log.warn(
+				`Cannot restart usage polling: account ${account.name} has no tokens`,
+			);
+			return false;
+		}
+		log.info(
+			`Restarting usage polling for account ${account.name} on ${serverId}`,
+		);
+		usageCache.stopPolling(accountId);
+		startUsagePollingWithRefresh(
+			account,
+			proxyContext,
+			0,
+			config.getUsagePollIntervalMs(),
+		);
+		return true;
+	});
+
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
 	autoRefreshScheduler = new AutoRefreshScheduler(db, proxyContext);
 	autoRefreshScheduler.start();
+
+	// Initialize cache keepalive scheduler
+	cacheKeepaliveScheduler = new CacheKeepaliveScheduler(proxyContext, config);
+	cacheKeepaliveScheduler.start();
 
 	// Initialize token health monitoring service
 	startGlobalTokenHealthChecks(() => dbOps.getAllAccounts());
 
 	// Hot reload strategy configuration
-	config.on("change", (changeType, fieldName) => {
-		if (fieldName === "strategy") {
-			log.info(`Strategy configuration changed: ${changeType}`);
+	config.on("change", ({ key }: { key: string }) => {
+		if (key === "lb_strategy") {
+			log.info(`Strategy configuration changed to: ${config.getStrategy()}`);
 			const newStrategyName = config.getStrategy();
 			// For now, only SessionStrategy is supported
 			if (newStrategyName === "session") {
@@ -614,6 +787,9 @@ export default function startServer(options?: {
 				strategy.initialize(dbOps);
 				proxyContext.strategy = strategy;
 			}
+		}
+		if (key === "store_payloads") {
+			sendWorkerConfigUpdate(config.getStorePayloads());
 		}
 	});
 
@@ -687,13 +863,72 @@ export default function startServer(options?: {
 						);
 					}
 
-					return handleProxy(
-						req,
-						url,
-						proxyContext,
-						authResult.apiKeyId,
-						authResult.apiKeyName,
-					);
+					// Authorization check - verify API key has permission for this endpoint
+					if (authResult.apiKey) {
+						const authzResult = await authService.authorizeEndpoint(
+							authResult.apiKey,
+							url.pathname,
+							req.method,
+						);
+
+						if (!authzResult.authorized) {
+							return new Response(
+								JSON.stringify({
+									type: "error",
+									error: {
+										type: "authorization_error",
+										message: authzResult.reason || "Access denied",
+									},
+								}),
+								{
+									status: 403,
+									headers: { "Content-Type": "application/json" },
+								},
+							);
+						}
+					}
+
+					try {
+						return await handleProxy(
+							req,
+							url,
+							proxyContext,
+							authResult.apiKeyId,
+							authResult.apiKeyName,
+						);
+					} catch (proxyError) {
+						const statusCode =
+							typeof proxyError === "object" &&
+							proxyError !== null &&
+							"statusCode" in proxyError &&
+							typeof (proxyError as { statusCode: unknown }).statusCode ===
+								"number"
+								? (proxyError as { statusCode: number }).statusCode
+								: HTTP_STATUS.INTERNAL_SERVER_ERROR;
+
+						log.error("Proxy request failed:", proxyError);
+
+						const isServiceUnavailable =
+							statusCode === HTTP_STATUS.SERVICE_UNAVAILABLE;
+
+						return new Response(
+							JSON.stringify({
+								type: "error",
+								error: {
+									type: isServiceUnavailable
+										? "service_unavailable_error"
+										: "proxy_error",
+									message: isServiceUnavailable
+										? "Service temporarily unavailable. Please try again later."
+										: "Proxy request failed",
+								},
+							}),
+							{
+								status: statusCode,
+								headers: { "Content-Type": "application/json" },
+							},
+						);
+					}
 				} catch (authError) {
 					// Log authentication errors for security monitoring
 					log.error("Authentication service error:", authError);
@@ -734,6 +969,32 @@ export default function startServer(options?: {
 		throw error;
 	}
 
+	// Memory monitoring - log RSS every 60s with warnings at growth thresholds
+	const baselineRss = process.memoryUsage.rss();
+	const memLog = new Logger("MemoryMonitor");
+	memoryMonitorInterval = setInterval(() => {
+		const mem = process.memoryUsage();
+		const rssMb = Math.round(mem.rss / 1024 / 1024);
+		const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
+		const growthBytes = mem.rss - baselineRss;
+		const growthMb = Math.round(growthBytes / 1024 / 1024);
+
+		if (growthBytes > MEMORY_GROWTH_ERROR_BYTES) {
+			memLog.error(
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>1GB growth - potential leak)`,
+			);
+		} else if (growthBytes > MEMORY_GROWTH_WARN_BYTES) {
+			memLog.warn(
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>512MB growth)`,
+			);
+		} else {
+			memLog.debug(
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB`,
+			);
+		}
+	}, MEMORY_MONITOR_INTERVAL_MS);
+	memoryMonitorInterval.unref();
+
 	// Log server startup (async)
 	getVersion().then((version) => {
 		if (!serverInstance) return;
@@ -773,7 +1034,7 @@ Available endpoints:
 	);
 
 	// Log initial account status
-	const accounts = dbOps.getAllAccounts();
+	const accounts = await dbOps.getAllAccounts();
 	const activeAccounts = accounts.filter(
 		(a) => !a.paused && (!a.expires_at || a.expires_at > Date.now()),
 	);
@@ -792,7 +1053,7 @@ Available endpoints:
 		log.info(
 			`Found ${anthropicAccounts.length} Anthropic accounts, starting usage polling...`,
 		);
-		for (const account of anthropicAccounts) {
+		for (const [index, account] of anthropicAccounts.entries()) {
 			log.debug(`Processing account: ${account.name}`, {
 				accountId: account.id,
 				hasAccessToken: !!account.access_token,
@@ -806,8 +1067,17 @@ Available endpoints:
 			if (account.access_token || account.refresh_token) {
 				// Start usage polling with token refresh capability
 				// Usage data fetching should work independently of account paused status
-				startUsagePollingWithRefresh(account, proxyContext);
-				log.info(`Started usage polling for account ${account.name}`);
+				// Stagger startup by 5s per account to avoid simultaneous 429s on boot
+				const startupDelayMs = index * 5000;
+				startUsagePollingWithRefresh(
+					account,
+					proxyContext,
+					startupDelayMs,
+					config.getUsagePollIntervalMs(),
+				);
+				log.info(
+					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
+				);
 			} else {
 				log.warn(
 					`Account ${account.name} has no access token or refresh token, skipping usage polling`,
@@ -842,7 +1112,7 @@ Available endpoints:
 					account.id,
 					apiKeyProvider,
 					account.provider,
-					90000, // Poll every 90 seconds (same as Anthropic)
+					config.getUsagePollIntervalMs(),
 					account.custom_endpoint,
 				);
 				log.info(`Started usage polling for NanoGPT account ${account.name}`);
@@ -879,7 +1149,17 @@ Available endpoints:
 					account.id,
 					apiKeyProvider,
 					account.provider,
-					90000, // Poll every 90 seconds (same as Anthropic)
+					config.getUsagePollIntervalMs(),
+					undefined, // customEndpoint
+					(accountId) => {
+						dbOps
+							.resetAccountSession(accountId, Date.now())
+							.catch((err) =>
+								log.warn(
+									`Failed to reset session for Zai account ${accountId} on window reset: ${err}`,
+								),
+							);
+					},
 				);
 				log.info(`Started usage polling for Zai account ${account.name}`);
 			} else {
@@ -890,6 +1170,64 @@ Available endpoints:
 		}
 	} else {
 		log.info(`No Zai accounts found, usage polling will not start`);
+	}
+
+	// Start usage polling for Kilo Gateway accounts
+	const kiloAccounts = accounts.filter((a) => a.provider === "kilo");
+	if (kiloAccounts.length > 0) {
+		log.info(
+			`Found ${kiloAccounts.length} Kilo Gateway accounts, starting usage polling...`,
+		);
+		for (const account of kiloAccounts) {
+			if (account.api_key) {
+				const apiKeyProvider = async () => account.api_key || "";
+				usageCache.startPolling(
+					account.id,
+					apiKeyProvider,
+					account.provider,
+					config.getUsagePollIntervalMs(),
+				);
+				log.info(
+					`Started usage polling for Kilo Gateway account ${account.name}`,
+				);
+			} else {
+				log.warn(
+					`Kilo Gateway account ${account.name} has no API key, skipping usage polling`,
+				);
+			}
+		}
+	} else {
+		log.info(`No Kilo Gateway accounts found, usage polling will not start`);
+	}
+
+	// Pre-warm Bedrock model and inference profile caches
+	const bedrockAccounts = accounts.filter((a) => a.provider === "bedrock");
+	if (bedrockAccounts.length > 0) {
+		log.info(
+			`Found ${bedrockAccounts.length} Bedrock accounts, pre-warming caches...`,
+		);
+
+		// Group accounts by region to avoid duplicate cache loads
+		const regionMap = new Map<string, Account[]>();
+		for (const account of bedrockAccounts) {
+			const config = parseBedrockConfig(account.custom_endpoint);
+			if (config) {
+				const accounts = regionMap.get(config.region) || [];
+				accounts.push(account);
+				regionMap.set(config.region, accounts);
+			}
+		}
+
+		// Pre-warm caches per region (don't block startup)
+		for (const [region, regionAccounts] of regionMap) {
+			prewarmBedrockCache(regionAccounts[0], region).catch((err) => {
+				log.warn(
+					`Failed to pre-warm Bedrock cache for region ${region}: ${err.message}`,
+				);
+			});
+		}
+	} else {
+		log.info(`No Bedrock accounts found, cache pre-warming will not start`);
 	}
 
 	// Initialize NanoGPT pricing refresh if there are NanoGPT accounts (non-blocking)
@@ -927,9 +1265,27 @@ async function handleGracefulShutdown(signal: string) {
 			stopRateLimitCleanupJob();
 			stopRateLimitCleanupJob = null;
 		}
+		if (stopDataCleanupJob) {
+			stopDataCleanupJob();
+			stopDataCleanupJob = null;
+		}
+		if (stopWalCheckpointJob) {
+			stopWalCheckpointJob();
+			stopWalCheckpointJob = null;
+		}
 		if (autoRefreshScheduler) {
 			autoRefreshScheduler.stop();
 			autoRefreshScheduler = null;
+		}
+		if (cacheKeepaliveScheduler) {
+			cacheKeepaliveScheduler.stop();
+			cacheKeepaliveScheduler = null;
+		}
+
+		// Stop memory monitoring
+		if (memoryMonitorInterval) {
+			clearInterval(memoryMonitorInterval);
+			memoryMonitorInterval = null;
 		}
 
 		// Stop token health monitoring
@@ -950,7 +1306,7 @@ async function handleGracefulShutdown(signal: string) {
 		}
 
 		usageCache.clear(); // Stop all usage polling
-		terminateUsageWorker();
+		await terminateUsageWorker();
 		await shutdown();
 		console.log("✅ Shutdown complete");
 		process.exit(0);

@@ -12,11 +12,13 @@ import { AccountsTab } from "./components/AccountsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
 import { ApiKeysTab } from "./components/ApiKeysTab";
+import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
 import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
 import { RequestsTab } from "./components/RequestsTab";
+import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { ThemeProvider } from "./contexts/theme-context";
 import "./index.css";
@@ -51,74 +53,100 @@ const LoadingSkeleton = () => (
 
 // QueryClient will be created inside App component to have access to auth state
 
-const routes = [
-	{
-		path: "/",
-		element: <OverviewTab />,
-		title: "Dashboard Overview",
-		subtitle: "Monitor your ccflare performance and usage",
-	},
-	{
-		path: "/analytics",
-		element: (
-			<Suspense fallback={<LoadingSkeleton />}>
-				<LazyAnalyticsTab />
-			</Suspense>
-		),
-		title: "Analytics",
-		subtitle: "Deep dive into your usage patterns and trends",
-	},
-	{
-		path: "/requests",
-		element: <RequestsTab />,
-		title: "Request History",
-		subtitle: "View detailed request and response data",
-	},
-	{
-		path: "/accounts",
-		element: <AccountsTab />,
-		title: "Account Management",
-		subtitle: "Manage your OAuth accounts and settings",
-	},
-	{
-		path: "/agents",
-		element: <AgentsTab />,
-		title: "Agent Management",
-		subtitle: "Discover and manage Claude Code agents",
-	},
-	{
-		path: "/api-keys",
-		element: <ApiKeysTab />,
-		title: "API Key Management",
-		subtitle: "Generate and manage API keys for authentication",
-	},
-	{
-		path: "/logs",
-		element: <LogsTab />,
-		title: "System Logs",
-		subtitle: "Real-time system logs and debugging information",
-	},
-];
-
 export function App() {
 	const location = useLocation();
+	const [showCombos, setShowCombos] = useState(false);
+
+	// Build routes array dynamically based on feature flags
+	const routes = useMemo(() => {
+		const baseRoutes = [
+			{
+				path: "/",
+				element: <OverviewTab />,
+				title: "Dashboard Overview",
+				subtitle: "Monitor your ccflare performance and usage",
+			},
+			{
+				path: "/analytics",
+				element: (
+					<Suspense fallback={<LoadingSkeleton />}>
+						<LazyAnalyticsTab />
+					</Suspense>
+				),
+				title: "Analytics",
+				subtitle: "Deep dive into your usage patterns and trends",
+			},
+			{
+				path: "/requests",
+				element: <RequestsTab />,
+				title: "Request History",
+				subtitle: "View detailed request and response data",
+			},
+			{
+				path: "/accounts",
+				element: <AccountsTab />,
+				title: "Account Management",
+				subtitle: "Manage your OAuth accounts and settings",
+			},
+			{
+				path: "/agents",
+				element: <AgentsTab />,
+				title: "Agent Management",
+				subtitle: "Discover and manage Claude Code agents",
+			},
+			{
+				path: "/api-keys",
+				element: <ApiKeysTab />,
+				title: "API Key Management",
+				subtitle: "Generate and manage API keys for authentication",
+			},
+			{
+				path: "/logs",
+				element: <LogsTab />,
+				title: "System Logs",
+				subtitle: "Real-time system logs and debugging information",
+			},
+			{
+				path: "/settings",
+				element: <SettingsTab />,
+				title: "Settings",
+				subtitle: "Configure system behavior and data retention",
+			},
+		];
+
+		// Add combos route if feature is enabled
+		if (showCombos) {
+			baseRoutes.splice(4, 0, {
+				path: "/combos",
+				element: <CombosTab />,
+				title: "Combos Management",
+				subtitle: "Define fallback chains for model families",
+			});
+		}
+
+		return baseRoutes;
+	}, [showCombos]);
+
 	const currentRoute =
 		routes.find((route) => route.path === location.pathname) || routes[0];
 	const [showAuthDialog, setShowAuthDialog] = useState(false);
 	const [isAuthenticated, setIsAuthenticated] = useState(false);
 	const [isCheckingAuth, setIsCheckingAuth] = useState(true);
 	const [authError, setAuthError] = useState<string | null>(null);
+	const [authRequired, setAuthRequired] = useState(false);
 
 	// Use refs to store state setters so they can be accessed in QueryClient callbacks
 	const showAuthDialogRef = useRef(setShowAuthDialog);
 	const isAuthenticatedRef = useRef(setIsAuthenticated);
 	const authErrorRef = useRef(setAuthError);
+	const authRequiredRef = useRef(setAuthRequired);
 
 	// Update refs when setters change
 	useEffect(() => {
 		showAuthDialogRef.current = setShowAuthDialog;
 		isAuthenticatedRef.current = setIsAuthenticated;
 		authErrorRef.current = setAuthError;
+		authRequiredRef.current = setAuthRequired;
 	}, []);
 
 	// Create QueryClient with global error handler for 401 errors
@@ -149,6 +177,7 @@ export function App() {
 							api.clearApiKey();
 							authErrorRef.current(null); // Clear any previous errors
 							isAuthenticatedRef.current(false);
+							authRequiredRef.current(true);
 							showAuthDialogRef.current(true);
 						}
 					},
@@ -161,6 +190,7 @@ export function App() {
 							api.clearApiKey();
 							authErrorRef.current(null); // Clear any previous errors
 							isAuthenticatedRef.current(false);
+							authRequiredRef.current(true);
 							showAuthDialogRef.current(true);
 						}
 					},
@@ -180,11 +210,14 @@ export function App() {
 				await api.getStats();
 				// If successful, we're authenticated (either no auth required, or valid key)
 				setIsAuthenticated(true);
+				// Auth is required only if we got here with a stored key
+				setAuthRequired(!!api.getApiKey());
 			} catch (error) {
 				// If we get a 401, auth is required
 				if (error instanceof HttpError && error.status === 401) {
 					// Clear any invalid stored key
 					api.clearApiKey();
+					setAuthRequired(true);
 					setShowAuthDialog(true);
 				}
 			} finally {
@@ -195,12 +228,32 @@ export function App() {
 		checkAuth();
 	}, []);
 
+	// Fetch feature flags
+	useEffect(() => {
+		const fetchFeatures = async () => {
+			try {
+				const features = await api.getFeatures();
+				setShowCombos(features.showCombos);
+			} catch (error) {
+				// If features endpoint fails, default to hiding combos
+				console.error("Failed to fetch features:", error);
+				setShowCombos(false);
+			}
+		};
+
+		// Only fetch features after auth check completes
+		if (!isCheckingAuth && isAuthenticated) {
+			fetchFeatures();
+		}
+	}, [isCheckingAuth, isAuthenticated]);
+
 	// Listen for 401 errors from API client
 	useEffect(() => {
 		const handleAuthRequired = () => {
 			api.clearApiKey();
 			setAuthError(null);
 			setIsAuthenticated(false);
+			setAuthRequired(true);
 			setShowAuthDialog(true);
 		};
 
@@ -221,12 +274,21 @@ export function App() {
 			setIsAuthenticated(true);
 			setShowAuthDialog(false);
 			return true;
-		} catch (_error) {
-			// Invalid API key, clear it
+		} catch (error) {
+			// Invalid API key or insufficient permissions, clear it
 			api.clearApiKey();
-			setAuthError("Invalid API key");
+			// Use the actual error message from the server if available
+			const errorMessage =
+				error instanceof Error ? error.message : "Invalid API key";
+			setAuthError(errorMessage);
 			return false;
 		}
+	};
+
+	const handleLogout = () => {
+		api.clearApiKey();
+		setIsAuthenticated(false);
+		setShowAuthDialog(true);
 	};
 
 	// Show loading state while checking authentication
@@ -251,7 +313,10 @@ export function App() {
 		<QueryClientProvider client={queryClient}>
 			<ThemeProvider>
 				<div className="min-h-screen bg-background">
-					<Navigation />
+					<Navigation
+						onLogout={authRequired ? handleLogout : undefined}
+						showCombos={showCombos}
+					/>
 
 					{/* Main Content */}
 					<main className="lg:pl-64">

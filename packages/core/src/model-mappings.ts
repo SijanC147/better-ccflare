@@ -13,14 +13,38 @@ const log = new Logger("ModelMappings");
 export const KNOWN_PATTERNS = ["opus", "haiku", "sonnet"] as const;
 
 /**
- * Default model mappings for OpenAI-compatible providers
+ * Get the model family (opus/sonnet/haiku) from a model ID
+ * Uses the same pattern matching as mapModelName()
+ * @returns Model family or null if no pattern matches
  */
-export const DEFAULT_MODEL_MAPPINGS = {
-	// Generic mappings by model family - these support wildcards
-	opus: "openai/gpt-5",
-	sonnet: "openai/gpt-5",
-	haiku: "openai/gpt-5-mini",
-};
+export function getModelFamily(
+	modelId: string,
+): "opus" | "sonnet" | "haiku" | null {
+	const normalized = modelId.toLowerCase();
+	for (const pattern of KNOWN_PATTERNS) {
+		if (normalized.includes(pattern)) {
+			return pattern;
+		}
+	}
+	return null;
+}
+
+/**
+ * Validate if a model ID is a valid Claude model
+ * Accepts any model containing opus, sonnet, or haiku (case-insensitive)
+ * @returns true if model matches a known pattern
+ */
+export function isValidClaudeModel(modelId: string): boolean {
+	return getModelFamily(modelId) !== null;
+}
+
+/**
+ * Get a user-friendly error message listing allowed model patterns
+ * @returns Error message string for API responses
+ */
+export function getAllowedModelsMessage(): string {
+	return "Model must contain one of: opus, sonnet, haiku (e.g., claude-opus-4-6, claude-sonnet-4-5-20250929)";
+}
 
 /**
  * Parse custom endpoint data from account's custom_endpoint field
@@ -52,17 +76,18 @@ export function parseCustomEndpointData(
 }
 
 /**
- * Parse model mappings from account's model_mappings field
+ * Parse model mappings from account's model_mappings field.
+ * Values may be a single string or an ordered array of model names to try.
  */
 export function parseModelMappings(
 	modelMappings: string | null,
-): Record<string, string> | null {
+): Record<string, string | string[]> | null {
 	if (!modelMappings) {
 		return null;
 	}
 
 	try {
-		return safeJsonParse<Record<string, string>>(
+		return safeJsonParse<Record<string, string | string[]>>(
 			modelMappings,
 			"model_mappings",
 		);
@@ -75,10 +100,20 @@ export function parseModelMappings(
 }
 
 /**
- * Get effective model mappings for an account
+ * Normalise a model mapping value to an array.
  */
-export function getModelMappings(account: Account): Record<string, string> {
-	const mappings: Record<string, string> = { ...DEFAULT_MODEL_MAPPINGS };
+function toArray(value: string | string[]): string[] {
+	return Array.isArray(value) ? value : [value];
+}
+
+/**
+ * Get effective model mappings for an account, merging model_fallbacks into
+ * the arrays so that model_fallbacks becomes the second+ entry for each family.
+ */
+export function getModelMappings(
+	account: Account,
+): Record<string, string | string[]> {
+	const mappings: Record<string, string | string[]> = {};
 
 	// Check for environment variable overrides (only in Node.js)
 	if (
@@ -86,7 +121,7 @@ export function getModelMappings(account: Account): Record<string, string> {
 		process.env?.OPENAI_COMPATIBLE_MODEL_MAPPINGS
 	) {
 		try {
-			const envMappings = safeJsonParse<Record<string, string>>(
+			const envMappings = safeJsonParse<Record<string, string | string[]>>(
 				process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS,
 				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
 			);
@@ -114,61 +149,114 @@ export function getModelMappings(account: Account): Record<string, string> {
 		Object.assign(mappings, customEndpointData.modelMappings);
 	}
 
+	// Merge model_fallbacks into the arrays so they become the next models to try
+	// after the primary mapping is exhausted. model_fallbacks is now deprecated as
+	// a separate concept — the array in model_mappings supersedes it.
+	if (account.model_fallbacks) {
+		const fallbacks = parseModelFallbacks(account.model_fallbacks);
+		if (fallbacks) {
+			for (const [family, fallbackModel] of Object.entries(fallbacks)) {
+				const existing = mappings[family];
+				if (existing !== undefined) {
+					const arr = toArray(existing);
+					if (!arr.includes(fallbackModel)) {
+						mappings[family] = [...arr, fallbackModel];
+					}
+				} else {
+					mappings[family] = fallbackModel;
+				}
+			}
+		}
+	}
+
 	return mappings;
 }
 
 /**
- * Map Anthropic model name to provider-specific model name
+ * Check whether an account has any model mapping configuration.
+ * Returns false if the account should just forward the model name unchanged.
+ */
+function hasAccountModelMappings(account: Account): boolean {
+	if (account.model_mappings) return true;
+	if (account.model_fallbacks) return true;
+
+	const customEndpointData = parseCustomEndpointData(account.custom_endpoint);
+	if (customEndpointData?.modelMappings) return true;
+
+	// Check env override
+	if (
+		typeof process !== "undefined" &&
+		process.env?.OPENAI_COMPATIBLE_MODEL_MAPPINGS
+	) {
+		try {
+			const envMappings = safeJsonParse<Record<string, string | string[]>>(
+				process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS,
+				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
+			);
+			if (envMappings && Object.keys(envMappings).length > 0) return true;
+		} catch {
+			// Ignore — treat parse error as no env override
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Get the ordered list of models to try for a given Anthropic model name.
+ * Returns [primaryModel, ...fallbacks] from the account's model_mappings.
+ * Returns null if the account has no model mapping configuration — the model
+ * name should be forwarded unchanged to the upstream provider.
+ */
+export function getModelList(
+	anthropicModel: string,
+	account: Account,
+): string[] | null {
+	// No custom mappings configured — don't touch the model name
+	if (!hasAccountModelMappings(account)) {
+		return null;
+	}
+
+	const mappings = getModelMappings(account);
+
+	// Exact match first
+	if (mappings[anthropicModel] !== undefined) {
+		return toArray(mappings[anthropicModel]);
+	}
+
+	// Family match
+	const family = getModelFamily(anthropicModel);
+	if (family && mappings[family] !== undefined) {
+		return toArray(mappings[family]);
+	}
+
+	// Default: sonnet family — return original model if not mapped
+	const defaultVal = mappings.sonnet;
+	if (defaultVal) return toArray(defaultVal);
+
+	// No mapping for this model — pass through unchanged
+	return [anthropicModel];
+}
+
+/**
+ * Map Anthropic model name to provider-specific model name (first in list).
  * Optimized for known model patterns with direct matching (O(1) vs O(n log n))
  */
 export function mapModelName(anthropicModel: string, account: Account): string {
-	const mappings = getModelMappings(account);
+	const list = getModelList(anthropicModel, account);
+	if (!list) return anthropicModel;
 
-	// First try exact match
-	if (mappings[anthropicModel]) {
-		if (
-			process.env.DEBUG?.includes("model") ||
-			process.env.DEBUG === "true" ||
-			process.env.NODE_ENV === "development"
-		) {
-			log.info(
-				`Exact model mapping: ${anthropicModel} -> ${mappings[anthropicModel]}`,
-			);
-		}
-		return mappings[anthropicModel];
-	}
+	const mapped = list[0];
 
-	// Direct pattern matching for known model families (O(1) constant time)
-	// Use KNOWN_PATTERNS to ensure consistent order and avoid magic strings
-	const normalizedModel = anthropicModel.toLowerCase();
-
-	for (const pattern of KNOWN_PATTERNS) {
-		if (normalizedModel.includes(pattern)) {
-			const mappedModel = mappings[pattern] || DEFAULT_MODEL_MAPPINGS[pattern];
-
-			if (
-				process.env.DEBUG?.includes("model") ||
-				process.env.DEBUG === "true" ||
-				process.env.NODE_ENV === "development"
-			) {
-				log.info(
-					`${pattern.charAt(0).toUpperCase() + pattern.slice(1)} model mapping: ${anthropicModel} -> ${mappedModel}`,
-				);
-			}
-			return mappedModel;
-		}
-	}
-
-	// Default fallback - use sonnet as the mid-tier default
-	const fallbackModel = mappings.sonnet || DEFAULT_MODEL_MAPPINGS.sonnet;
 	if (
 		process.env.DEBUG?.includes("model") ||
 		process.env.DEBUG === "true" ||
 		process.env.NODE_ENV === "development"
 	) {
-		log.info(`Fallback model mapping: ${anthropicModel} -> ${fallbackModel}`);
+		log.info(`Model mapping: ${anthropicModel} -> ${mapped}`);
 	}
-	return fallbackModel;
+
+	return mapped;
 }
 
 /**
@@ -214,11 +302,60 @@ export function createCustomEndpointData(
 }
 
 /**
- * Validate model mappings for storage
+ * Parse model fallbacks from account's model_fallbacks field.
+ * Model fallbacks map model family names (opus/sonnet/haiku) to fallback model names.
+ */
+export function parseModelFallbacks(
+	modelFallbacks: string | null,
+): Record<string, string> | null {
+	if (!modelFallbacks) {
+		return null;
+	}
+
+	try {
+		return safeJsonParse<Record<string, string>>(
+			modelFallbacks,
+			"model_fallbacks",
+		);
+	} catch (error) {
+		log.warn(
+			`Failed to parse model_fallbacks JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * Validate model fallbacks for storage.
+ * @deprecated Prefer storing fallbacks as arrays in model_mappings instead.
+ */
+export function validateAndSanitizeModelFallbacks(
+	fallbacks: unknown,
+): Record<string, string> | null {
+	if (!fallbacks) {
+		return null;
+	}
+
+	try {
+		const result = validateModelMappings(fallbacks, "modelFallbacks");
+		// model_fallbacks only ever stored single strings — cast back
+		return Object.fromEntries(
+			Object.entries(result).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]),
+		);
+	} catch (error) {
+		log.warn(
+			`Invalid model fallbacks: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * Validate model mappings for storage. Values may be a string or string[].
  */
 export function validateAndSanitizeModelMappings(
 	mappings: unknown,
-): Record<string, string> | null {
+): Record<string, string | string[]> | null {
 	if (!mappings) {
 		return null;
 	}

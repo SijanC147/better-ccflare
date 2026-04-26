@@ -2,7 +2,12 @@ import { registerUIRefresh } from "@better-ccflare/core";
 import type { FullUsageData } from "@better-ccflare/types";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
-import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
+import {
+	isAnthropicPeakHour,
+	isZaiPeakHour,
+	providerShowsCreditsBalance,
+	providerShowsWeeklyUsage,
+} from "../../utils/provider-utils";
 import { Progress } from "../ui/progress";
 
 interface RateLimitProgressProps {
@@ -31,6 +36,8 @@ function formatWindowName(window: string | null): string {
 			return "Sonnet (Weekly)";
 		case "daily":
 			return "Daily";
+		case "weekly":
+			return "Weekly";
 		case "monthly":
 			return "Monthly";
 		case "time_limit":
@@ -73,6 +80,31 @@ export function RateLimitProgress({
 	// but still render null if there's no resetIso and no usage data to show
 	if (!resetIso && !usageData) return null;
 
+	// Kilo Gateway: show credit balance in USD instead of a utilization window
+	if (providerShowsCreditsBalance(provider) && usageData) {
+		const kiloData = usageData as {
+			remainingUsd?: number;
+			totalMicrodollarsAcquired?: number;
+		};
+		if (typeof kiloData.remainingUsd === "number") {
+			const hasCredits = (kiloData.totalMicrodollarsAcquired ?? 0) > 0;
+			return (
+				<div className={cn("space-y-2", className)}>
+					<div className="flex items-center justify-between">
+						<span className="text-xs text-muted-foreground">
+							Kilo Gateway credits
+						</span>
+						<span className="text-xs font-medium text-muted-foreground">
+							{hasCredits
+								? `$${kiloData.remainingUsd.toFixed(2)} remaining`
+								: "No credits"}
+						</span>
+					</div>
+				</div>
+			);
+		}
+	}
+
 	const resetTime = resetIso ? new Date(resetIso).getTime() : Date.now();
 	const remainingMs = Math.max(0, resetTime - now);
 	const remainingMinutes = Math.ceil(remainingMs / 60000);
@@ -93,8 +125,48 @@ export function RateLimitProgress({
 	const isZaiData =
 		usageData && ("time_limit" in usageData || "tokens_limit" in usageData);
 
-	if (isZaiData && showWeekly) {
-		// Zai usage data - only show tokens_limit (5-hour token quota)
+	// Check if this is Alibaba Coding Plan usage data
+	const isAlibabaData =
+		usageData && "five_hour" in usageData && "weekly" in usageData;
+
+	// Anthropic-style quota data is shared by Anthropic and Codex; detect by shape, not provider name.
+	const hasAnthropicStyleData =
+		usageData &&
+		"five_hour" in usageData &&
+		"seven_day" in usageData &&
+		!isAlibabaData &&
+		!isZaiData &&
+		!isNanoGPTData;
+
+	if (isAlibabaData && showWeekly) {
+		const alibabaData = usageData as {
+			five_hour: { percentUsed: number; resetAt: number | null };
+			weekly: { percentUsed: number; resetAt: number | null };
+			monthly: { percentUsed: number; resetAt: number | null };
+		};
+		usages.push({
+			utilization: alibabaData.five_hour.percentUsed,
+			window: "five_hour",
+			resetTime: alibabaData.five_hour.resetAt
+				? new Date(alibabaData.five_hour.resetAt).toISOString()
+				: null,
+		});
+		usages.push({
+			utilization: alibabaData.weekly.percentUsed,
+			window: "weekly",
+			resetTime: alibabaData.weekly.resetAt
+				? new Date(alibabaData.weekly.resetAt).toISOString()
+				: null,
+		});
+		usages.push({
+			utilization: alibabaData.monthly.percentUsed,
+			window: "monthly",
+			resetTime: alibabaData.monthly.resetAt
+				? new Date(alibabaData.monthly.resetAt).toISOString()
+				: null,
+		});
+	} else if (isZaiData && showWeekly) {
+		// Zai usage data - show tokens_limit (5-hour token quota) and time_limit (peak-hour limit)
 		const zaiData = usageData as {
 			time_limit?: { percentage: number; resetAt: number } | null;
 			tokens_limit?: { percentage: number; resetAt: number } | null;
@@ -107,6 +179,17 @@ export function RateLimitProgress({
 				window: "five_hour", // Map to "5-hour" to match Claude terminology
 				resetTime: zaiData.tokens_limit.resetAt
 					? new Date(zaiData.tokens_limit.resetAt).toISOString()
+					: null,
+			});
+		}
+
+		// Time limit usage (peak-hour quota)
+		if (zaiData.time_limit) {
+			usages.push({
+				utilization: zaiData.time_limit.percentage,
+				window: "time_limit",
+				resetTime: zaiData.time_limit.resetAt
+					? new Date(zaiData.time_limit.resetAt).toISOString()
 					: null,
 			});
 		}
@@ -145,7 +228,7 @@ export function RateLimitProgress({
 				resetTime: null,
 			});
 		}
-	} else if (providerShowsWeeklyUsage(provider) && showWeekly) {
+	} else if (hasAnthropicStyleData && showWeekly) {
 		// Anthropic usage data - show 5-hour and weekly usage
 		const anthropicData = usageData as {
 			five_hour?: { utilization: number | null; resets_at: string | null };
@@ -246,8 +329,45 @@ export function RateLimitProgress({
 		});
 	}
 
+	const isZaiPeak = provider === "zai" && isZaiPeakHour(now);
+	const isAnthropicPeak = provider === "anthropic" && isAnthropicPeakHour(now);
+
 	return (
 		<div className={cn("space-y-3", className)}>
+			{provider === "zai" && (
+				<div className="flex items-center gap-2">
+					<span
+						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+							isZaiPeak
+								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+						}`}
+					>
+						<span
+							className={`h-1.5 w-1.5 rounded-full ${isZaiPeak ? "bg-orange-500" : "bg-green-500"}`}
+						/>
+						{isZaiPeak ? "Peak hours (14:00–18:00 SGT)" : "Off-peak hours"}
+					</span>
+				</div>
+			)}
+			{provider === "anthropic" && (
+				<div className="flex items-center gap-2">
+					<span
+						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+							isAnthropicPeak
+								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+						}`}
+					>
+						<span
+							className={`h-1.5 w-1.5 rounded-full ${isAnthropicPeak ? "bg-orange-500" : "bg-green-500"}`}
+						/>
+						{isAnthropicPeak
+							? "Peak hours (5–11am PT, weekdays)"
+							: "Off-peak hours"}
+					</span>
+				</div>
+			)}
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
@@ -302,7 +422,7 @@ export function RateLimitProgress({
 					<div key={usage.window || "default"} className="space-y-2">
 						<div className="flex items-center justify-between">
 							<span className="text-xs text-muted-foreground">
-								{providerShowsWeeklyUsage(provider) && usage.window
+								{usage.window
 									? `Usage (${formatWindowName(usage.window)})`
 									: "Rate limit window"}
 							</span>
@@ -322,6 +442,7 @@ export function RateLimitProgress({
 									{usage.window === "seven_day" ||
 									usage.window === "seven_day_opus" ||
 									usage.window === "seven_day_sonnet" ||
+									usage.window === "weekly" ||
 									usage.window === "monthly" ||
 									usage.window === "time_limit" ||
 									usage.window === "tokens_limit"

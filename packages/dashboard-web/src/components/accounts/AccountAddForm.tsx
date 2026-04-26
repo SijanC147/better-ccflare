@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { api } from "../../api";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -21,7 +22,13 @@ interface AccountAddFormProps {
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
-			| "vertex-ai";
+			| "vertex-ai"
+			| "bedrock"
+			| "kilo"
+			| "openrouter"
+			| "alibaba-coding-plan"
+			| "codex"
+			| "qwen";
 		priority: number;
 		customEndpoint?: string;
 	}) => Promise<{ authUrl: string; sessionId: string }>;
@@ -34,6 +41,7 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
+		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddMinimaxAccount: (params: {
 		name: string;
@@ -67,6 +75,32 @@ interface AccountAddFormProps {
 		region: string;
 		priority: number;
 	}) => Promise<void>;
+	onAddBedrockAccount: (params: {
+		name: string;
+		profile: string;
+		region: string;
+		priority: number;
+		cross_region_mode?: "geographic" | "global" | "regional";
+		customModel?: string;
+	}) => Promise<void>;
+	onAddAlibabaCodingPlanAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => Promise<void>;
+	onAddKiloAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => Promise<void>;
+	onAddOpenRouterAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => Promise<void>;
 	onCancel: () => void;
 	onSuccess: () => void;
 	onError: (error: string) => void;
@@ -81,6 +115,10 @@ export function AccountAddForm({
 	onAddNanoGPTAccount,
 	onAddOpenAIAccount,
 	onAddVertexAIAccount,
+	onAddBedrockAccount,
+	onAddAlibabaCodingPlanAccount,
+	onAddKiloAccount,
+	onAddOpenRouterAccount,
 	onCancel,
 	onSuccess,
 	onError,
@@ -98,16 +136,92 @@ export function AccountAddForm({
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
-			| "vertex-ai",
+			| "vertex-ai"
+			| "bedrock"
+			| "kilo"
+			| "openrouter"
+			| "alibaba-coding-plan"
+			| "codex"
+			| "qwen",
 		priority: 0,
 		apiKey: "",
 		customEndpoint: "",
 		projectId: "",
 		region: "global",
+		profile: "",
+		awsRegion: "",
+		crossRegionMode: "geographic" as "geographic" | "global" | "regional",
+		customBedrockModel: "",
 		opusModel: "",
 		sonnetModel: "",
 		haikuModel: "",
 	});
+
+	// Qwen device flow state
+	const [qwenStep, setQwenStep] = useState<
+		"idle" | "pending" | "complete" | "error"
+	>("idle");
+	const [qwenAuthUrl, setQwenAuthUrl] = useState("");
+	const [qwenUserCode, setQwenUserCode] = useState("");
+	const [qwenError, setQwenError] = useState("");
+	const qwenSessionIdRef = useRef<string>("");
+	const qwenPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+		null,
+	);
+
+	// Codex device flow state
+	const [codexStep, setCodexStep] = useState<
+		"idle" | "pending" | "complete" | "error"
+	>("idle");
+	const [codexVerificationUrl, setCodexVerificationUrl] = useState("");
+	const [codexUserCode, setCodexUserCode] = useState("");
+	const [codexError, setCodexError] = useState("");
+	const codexSessionIdRef = useRef<string>("");
+	const codexPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+		null,
+	);
+
+	const [awsProfiles, setAwsProfiles] = useState<
+		Array<{ name: string; region: string | null }>
+	>([]);
+	const [loadingProfiles, setLoadingProfiles] = useState(false);
+
+	// Cleanup Qwen polling on unmount
+	useEffect(() => {
+		return () => {
+			if (qwenPollIntervalRef.current !== null) {
+				clearInterval(qwenPollIntervalRef.current);
+			}
+		};
+	}, []);
+
+	// Cleanup Codex polling on unmount
+	useEffect(() => {
+		return () => {
+			if (codexPollIntervalRef.current !== null) {
+				clearInterval(codexPollIntervalRef.current);
+			}
+		};
+	}, []);
+
+	// Load AWS profiles when bedrock mode is selected
+	useEffect(() => {
+		if (newAccount.mode === "bedrock") {
+			setLoadingProfiles(true);
+			api
+				.getAwsProfiles()
+				.then((profiles) => {
+					setAwsProfiles(profiles);
+				})
+				.catch((error) => {
+					console.error("Failed to load AWS profiles:", error);
+					setAwsProfiles([]);
+				})
+				.finally(() => {
+					setLoadingProfiles(false);
+				});
+		}
+	}, [newAccount.mode]);
 
 	const validateCustomEndpoint = (endpoint: string): boolean => {
 		if (!endpoint) return true; // Empty is fine (use default)
@@ -116,6 +230,156 @@ export function AccountAddForm({
 			return true;
 		} catch {
 			return false;
+		}
+	};
+
+	const stopQwenPolling = () => {
+		if (qwenPollIntervalRef.current !== null) {
+			clearInterval(qwenPollIntervalRef.current);
+			qwenPollIntervalRef.current = null;
+		}
+	};
+
+	const stopCodexPolling = () => {
+		if (codexPollIntervalRef.current !== null) {
+			clearInterval(codexPollIntervalRef.current);
+			codexPollIntervalRef.current = null;
+		}
+	};
+
+	const handleStartQwenAuth = async () => {
+		if (!newAccount.name) {
+			onError("Account name is required");
+			return;
+		}
+		setQwenStep("pending");
+		setQwenError("");
+		try {
+			const result = await api.initQwenDeviceFlow({
+				name: newAccount.name,
+				priority: newAccount.priority,
+			});
+			qwenSessionIdRef.current = result.sessionId;
+			setQwenAuthUrl(result.authUrl);
+			setQwenUserCode(result.userCode);
+
+			// Open auth URL in new tab
+			if (typeof window !== "undefined") {
+				window.open(result.authUrl, "_blank");
+			}
+
+			// Poll for status every 3s
+			qwenPollIntervalRef.current = setInterval(async () => {
+				try {
+					const status = await api.getQwenAuthStatus(qwenSessionIdRef.current);
+					if (status.status === "complete") {
+						stopQwenPolling();
+						setQwenStep("complete");
+						setTimeout(() => {
+							setQwenStep("idle");
+							setQwenAuthUrl("");
+							setQwenUserCode("");
+							setNewAccount({
+								name: "",
+								mode: "claude-oauth",
+								priority: 0,
+								apiKey: "",
+								customEndpoint: "",
+								projectId: "",
+								region: "global",
+								profile: "",
+								awsRegion: "",
+								crossRegionMode: "geographic",
+								customBedrockModel: "",
+								opusModel: "",
+								sonnetModel: "",
+								haikuModel: "",
+							});
+							onSuccess();
+						}, 1500);
+					} else if (status.status === "error") {
+						stopQwenPolling();
+						setQwenStep("error");
+						setQwenError(status.error || "Authentication failed");
+					}
+				} catch {
+					// Network error — keep polling
+				}
+			}, 3000);
+		} catch (err) {
+			setQwenStep("error");
+			setQwenError(
+				err instanceof Error ? err.message : "Failed to start authentication",
+			);
+		}
+	};
+
+	const handleStartCodexAuth = async () => {
+		if (!newAccount.name) {
+			onError("Account name is required");
+			return;
+		}
+		setCodexStep("pending");
+		setCodexError("");
+		try {
+			const result = await api.initCodexDeviceFlow({
+				name: newAccount.name,
+				priority: newAccount.priority,
+			});
+			codexSessionIdRef.current = result.sessionId;
+			setCodexVerificationUrl(result.verificationUrl);
+			setCodexUserCode(result.userCode);
+
+			// Open auth URL in new tab
+			if (typeof window !== "undefined") {
+				window.open(result.verificationUrl, "_blank");
+			}
+
+			// Poll for status every 3s
+			codexPollIntervalRef.current = setInterval(async () => {
+				try {
+					const status = await api.getCodexAuthStatus(
+						codexSessionIdRef.current,
+					);
+					if (status.status === "complete") {
+						stopCodexPolling();
+						setCodexStep("complete");
+						setTimeout(() => {
+							setCodexStep("idle");
+							setCodexVerificationUrl("");
+							setCodexUserCode("");
+							setNewAccount({
+								name: "",
+								mode: "claude-oauth",
+								priority: 0,
+								apiKey: "",
+								customEndpoint: "",
+								projectId: "",
+								region: "global",
+								profile: "",
+								awsRegion: "",
+								crossRegionMode: "geographic",
+								customBedrockModel: "",
+								opusModel: "",
+								sonnetModel: "",
+								haikuModel: "",
+							});
+							onSuccess();
+						}, 1500);
+					} else if (status.status === "error") {
+						stopCodexPolling();
+						setCodexStep("error");
+						setCodexError(status.error || "Authentication failed");
+					}
+				} catch {
+					// Network error — keep polling
+				}
+			}, 3000);
+		} catch (err) {
+			setCodexStep("error");
+			setCodexError(
+				err instanceof Error ? err.message : "Failed to start authentication",
+			);
 		}
 	};
 
@@ -144,7 +408,11 @@ export function AccountAddForm({
 				| "zai"
 				| "minimax"
 				| "anthropic-compatible"
-				| "openai-compatible",
+				| "openai-compatible"
+				| "bedrock"
+				| "kilo"
+				| "openrouter"
+				| "alibaba-coding-plan",
 			priority: newAccount.priority,
 			...(newAccount.customEndpoint && {
 				customEndpoint: newAccount.customEndpoint.trim(),
@@ -172,6 +440,51 @@ export function AccountAddForm({
 				customEndpoint: "",
 				projectId: "",
 				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
+				opusModel: "",
+				sonnetModel: "",
+				haikuModel: "",
+			});
+			onSuccess();
+			return;
+		}
+
+		if (newAccount.mode === "bedrock") {
+			if (!newAccount.profile) {
+				onError("AWS profile is required for Bedrock accounts");
+				return;
+			}
+			if (!newAccount.awsRegion) {
+				onError(
+					"Region not found for selected profile. Configure ~/.aws/config",
+				);
+				return;
+			}
+			// For Bedrock accounts, we don't need OAuth flow
+			await onAddBedrockAccount({
+				name: newAccount.name,
+				profile: newAccount.profile,
+				region: newAccount.awsRegion,
+				priority: newAccount.priority,
+				cross_region_mode: newAccount.crossRegionMode,
+				customModel: newAccount.customBedrockModel || undefined,
+			});
+			// Reset form and signal success
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -185,12 +498,21 @@ export function AccountAddForm({
 				onError("API key is required for z.ai accounts");
 				return;
 			}
+			// Build model mappings from form fields
+			const zaiModelMappings: { [key: string]: string } = {};
+			if (newAccount.opusModel) zaiModelMappings.opus = newAccount.opusModel;
+			if (newAccount.sonnetModel)
+				zaiModelMappings.sonnet = newAccount.sonnetModel;
+			if (newAccount.haikuModel) zaiModelMappings.haiku = newAccount.haikuModel;
 			// For z.ai accounts, we don't need OAuth flow
 			await onAddZaiAccount({
 				...accountParams,
 				apiKey: newAccount.apiKey,
 				...(newAccount.customEndpoint && {
 					customEndpoint: newAccount.customEndpoint.trim(),
+				}),
+				...(Object.keys(zaiModelMappings).length > 0 && {
+					modelMappings: zaiModelMappings,
 				}),
 			});
 			// Reset form and signal success
@@ -202,6 +524,10 @@ export function AccountAddForm({
 				customEndpoint: "",
 				projectId: "",
 				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -228,11 +554,15 @@ export function AccountAddForm({
 				priority: 0,
 				apiKey: "",
 				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
-				projectId: "",
-				region: "global",
 			});
 			onSuccess();
 			return;
@@ -270,11 +600,127 @@ export function AccountAddForm({
 				priority: 0,
 				apiKey: "",
 				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
+			});
+			onSuccess();
+			return;
+		}
+
+		if (newAccount.mode === "kilo") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for Kilo Gateway accounts");
+				return;
+			}
+			const kiloModelMappings: { [key: string]: string } = {};
+			if (newAccount.opusModel) kiloModelMappings.opus = newAccount.opusModel;
+			if (newAccount.sonnetModel)
+				kiloModelMappings.sonnet = newAccount.sonnetModel;
+			if (newAccount.haikuModel)
+				kiloModelMappings.haiku = newAccount.haikuModel;
+			await onAddKiloAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+				modelMappings:
+					Object.keys(kiloModelMappings).length > 0
+						? kiloModelMappings
+						: undefined,
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
 				projectId: "",
 				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
+				opusModel: "",
+				sonnetModel: "",
+				haikuModel: "",
+			});
+			onSuccess();
+			return;
+		}
+
+		if (newAccount.mode === "alibaba-coding-plan") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for Alibaba Coding Plan accounts");
+				return;
+			}
+			const modelMappings: { [key: string]: string } = {};
+			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
+			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
+			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
+			await onAddAlibabaCodingPlanAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+				modelMappings:
+					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
+				opusModel: "",
+				sonnetModel: "",
+				haikuModel: "",
+			});
+			onSuccess();
+			return;
+		}
+
+		if (newAccount.mode === "openrouter") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for OpenRouter accounts");
+				return;
+			}
+			const modelMappings: { [key: string]: string } = {};
+			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
+			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
+			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
+			await onAddOpenRouterAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+				modelMappings:
+					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
+				opusModel: "",
+				sonnetModel: "",
+				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -307,11 +753,15 @@ export function AccountAddForm({
 				priority: 0,
 				apiKey: "",
 				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
-				projectId: "",
-				region: "global",
 			});
 			onSuccess();
 			return;
@@ -350,11 +800,15 @@ export function AccountAddForm({
 				priority: 0,
 				apiKey: "",
 				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
-				projectId: "",
-				region: "global",
 			});
 			onSuccess();
 			return;
@@ -395,16 +849,30 @@ export function AccountAddForm({
 			priority: 0,
 			apiKey: "",
 			customEndpoint: "",
+			projectId: "",
+			region: "global",
+			profile: "",
+			awsRegion: "",
+			crossRegionMode: "geographic",
+			customBedrockModel: "",
 			opusModel: "",
 			sonnetModel: "",
 			haikuModel: "",
-			projectId: "",
-			region: "global",
 		});
 		onSuccess();
 	};
 
 	const handleCancel = () => {
+		stopQwenPolling();
+		setQwenStep("idle");
+		setQwenAuthUrl("");
+		setQwenUserCode("");
+		setQwenError("");
+		stopCodexPolling();
+		setCodexStep("idle");
+		setCodexVerificationUrl("");
+		setCodexUserCode("");
+		setCodexError("");
 		setAuthStep("form");
 		setAuthCode("");
 		setSessionId("");
@@ -414,11 +882,15 @@ export function AccountAddForm({
 			priority: 0,
 			apiKey: "",
 			customEndpoint: "",
+			projectId: "",
+			region: "global",
+			profile: "",
+			awsRegion: "",
+			crossRegionMode: "geographic",
+			customBedrockModel: "",
 			opusModel: "",
 			sonnetModel: "",
 			haikuModel: "",
-			projectId: "",
-			region: "global",
 		});
 		onCancel();
 	};
@@ -455,7 +927,12 @@ export function AccountAddForm({
 									| "zai"
 									| "minimax"
 									| "anthropic-compatible"
-									| "openai-compatible",
+									| "openai-compatible"
+									| "bedrock"
+									| "kilo"
+									| "openrouter"
+									| "codex"
+									| "qwen",
 							) => setNewAccount({ ...newAccount, mode: value })}
 						>
 							<SelectTrigger id="mode">
@@ -466,9 +943,12 @@ export function AccountAddForm({
 									Claude CLI OAuth (Recommended)
 								</SelectItem>
 								<SelectItem value="console">Claude API</SelectItem>
+								<SelectItem value="codex">Codex (OpenAI OAuth)</SelectItem>
+								<SelectItem value="qwen">Qwen (Alibaba Cloud OAuth)</SelectItem>
 								<SelectItem value="vertex-ai">
 									Vertex AI (Google Cloud)
 								</SelectItem>
+								<SelectItem value="bedrock">AWS Bedrock</SelectItem>
 								<SelectItem value="zai">z.ai (API Key)</SelectItem>
 								<SelectItem value="minimax">Minimax (API Key)</SelectItem>
 								<SelectItem value="nanogpt">NanoGPT (API Key)</SelectItem>
@@ -478,9 +958,144 @@ export function AccountAddForm({
 								<SelectItem value="openai-compatible">
 									OpenAI-Compatible (API Key)
 								</SelectItem>
+								<SelectItem value="kilo">Kilo Gateway (API Key)</SelectItem>
+								<SelectItem value="openrouter">OpenRouter (API Key)</SelectItem>
+								<SelectItem value="alibaba-coding-plan">
+									Alibaba Coding Plan International (API Key)
+								</SelectItem>
 							</SelectContent>
 						</Select>
 					</div>
+					{newAccount.mode === "codex" && (
+						<div className="space-y-3">
+							{codexStep === "idle" && (
+								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
+									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+										Device Code Authentication
+									</p>
+									<p className="text-xs text-blue-800 dark:text-blue-200">
+										Click the button below to start Codex authentication. A
+										browser tab will open for you to authorize.
+									</p>
+								</div>
+							)}
+							{codexStep === "pending" && (
+								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium">
+										Waiting for authorization...
+									</p>
+									<p className="text-xs text-blue-800 dark:text-blue-200">
+										Enter this code in the browser tab:
+									</p>
+									<div className="flex items-center gap-2">
+										<code className="text-lg font-mono font-bold tracking-widest bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-100 px-3 py-1 rounded">
+											{codexUserCode}
+										</code>
+										<a
+											href={codexVerificationUrl}
+											target="_blank"
+											rel="noreferrer"
+											className="text-xs text-blue-700 dark:text-blue-300 underline"
+										>
+											Open browser
+										</a>
+									</div>
+								</div>
+							)}
+							{codexStep === "complete" && (
+								<div className="bg-green-50 dark:bg-green-950 p-3 rounded-lg">
+									<p className="text-sm text-green-900 dark:text-green-100 font-medium">
+										Authorization successful! Account added.
+									</p>
+								</div>
+							)}
+							{codexStep === "error" && (
+								<div className="bg-red-50 dark:bg-red-950 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-red-900 dark:text-red-100 font-medium">
+										Authentication failed
+									</p>
+									<p className="text-xs text-red-800 dark:text-red-200">
+										{codexError}
+									</p>
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => {
+											setCodexStep("idle");
+											setCodexError("");
+										}}
+									>
+										Try again
+									</Button>
+								</div>
+							)}
+						</div>
+					)}
+					{newAccount.mode === "qwen" && (
+						<div className="space-y-3">
+							{qwenStep === "idle" && (
+								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
+									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+										Device Code Authentication
+									</p>
+									<p className="text-xs text-blue-800 dark:text-blue-200">
+										Click the button below to start Qwen authentication. A
+										browser tab will open for you to authorize.
+									</p>
+								</div>
+							)}
+							{qwenStep === "pending" && (
+								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium">
+										Waiting for authorization...
+									</p>
+									<p className="text-xs text-blue-800 dark:text-blue-200">
+										Enter this code in the browser tab:
+									</p>
+									<div className="flex items-center gap-2">
+										<code className="text-lg font-mono font-bold tracking-widest bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-100 px-3 py-1 rounded">
+											{qwenUserCode}
+										</code>
+										<a
+											href={qwenAuthUrl}
+											target="_blank"
+											rel="noreferrer"
+											className="text-xs text-blue-700 dark:text-blue-300 underline"
+										>
+											Open browser
+										</a>
+									</div>
+								</div>
+							)}
+							{qwenStep === "complete" && (
+								<div className="bg-green-50 dark:bg-green-950 p-3 rounded-lg">
+									<p className="text-sm text-green-900 dark:text-green-100 font-medium">
+										Authorization successful! Account added.
+									</p>
+								</div>
+							)}
+							{qwenStep === "error" && (
+								<div className="bg-red-50 dark:bg-red-950 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-red-900 dark:text-red-100 font-medium">
+										Authentication failed
+									</p>
+									<p className="text-xs text-red-800 dark:text-red-200">
+										{qwenError}
+									</p>
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => {
+											setQwenStep("idle");
+											setQwenError("");
+										}}
+									>
+										Try again
+									</Button>
+								</div>
+							)}
+						</div>
+					)}
 					{newAccount.mode === "vertex-ai" && (
 						<>
 							<div className="space-y-2">
@@ -539,22 +1154,221 @@ export function AccountAddForm({
 							</div>
 						</>
 					)}
+					{newAccount.mode === "bedrock" && (
+						<>
+							{awsProfiles.length === 0 && !loadingProfiles && (
+								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
+									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+										No AWS profiles found
+									</p>
+									<p className="text-xs text-blue-800 dark:text-blue-200">
+										Run{" "}
+										<code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">
+											aws configure
+										</code>{" "}
+										to set up profiles.
+									</p>
+								</div>
+							)}
+							{awsProfiles.length > 0 && (
+								<>
+									<div className="space-y-2">
+										<Label htmlFor="awsProfile">AWS Profile</Label>
+										<Select
+											value={newAccount.profile}
+											onValueChange={(value: string) => {
+												const selectedProfile = awsProfiles.find(
+													(p) => p.name === value,
+												);
+												setNewAccount({
+													...newAccount,
+													profile: value,
+													awsRegion: selectedProfile?.region || "",
+												});
+											}}
+										>
+											<SelectTrigger id="awsProfile">
+												<SelectValue placeholder="Select AWS profile" />
+											</SelectTrigger>
+											<SelectContent>
+												{awsProfiles.map((profile) => (
+													<SelectItem key={profile.name} value={profile.name}>
+														{profile.name}
+														{profile.region && ` (${profile.region})`}
+													</SelectItem>
+												))}
+											</SelectContent>
+										</Select>
+										<p className="text-xs text-muted-foreground">
+											Your AWS profile from ~/.aws/credentials
+										</p>
+									</div>
+									<div className="space-y-2">
+										<Label htmlFor="awsRegion">Region (Auto-detected)</Label>
+										<Input
+											id="awsRegion"
+											value={newAccount.awsRegion}
+											disabled
+											placeholder="Select profile to detect region"
+										/>
+										<p className="text-xs text-muted-foreground">
+											Region from ~/.aws/config for selected profile
+										</p>
+										{newAccount.profile &&
+											!newAccount.awsRegion &&
+											!loadingProfiles && (
+												<p className="text-xs text-yellow-600 dark:text-yellow-400">
+													No default region found for this profile. Configure
+													region in ~/.aws/config
+												</p>
+											)}
+									</div>
+									<div className="space-y-2">
+										<Label htmlFor="crossRegionMode">Cross-Region Mode</Label>
+										<Select
+											value={newAccount.crossRegionMode}
+											onValueChange={(
+												value: "geographic" | "global" | "regional",
+											) =>
+												setNewAccount({ ...newAccount, crossRegionMode: value })
+											}
+										>
+											<SelectTrigger id="crossRegionMode">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value="geographic">
+													Geographic (default - routes within your region's
+													geography)
+												</SelectItem>
+												<SelectItem value="global">
+													Global (routes globally, ~10% cost savings, premium
+													models only)
+												</SelectItem>
+												<SelectItem value="regional">
+													Regional (single region, no failover)
+												</SelectItem>
+											</SelectContent>
+										</Select>
+										<p className="text-xs text-muted-foreground">
+											Controls how Bedrock routes requests for cross-region
+											inference
+										</p>
+									</div>
+									<div className="space-y-2">
+										<Label htmlFor="customBedrockModel">
+											Custom Model ID (Optional)
+										</Label>
+										<Input
+											id="customBedrockModel"
+											value={newAccount.customBedrockModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													customBedrockModel: (e.target as HTMLInputElement)
+														.value,
+												})
+											}
+											placeholder="e.g., anthropic.claude-opus-4-6-v1:0"
+										/>
+										<p className="text-xs text-muted-foreground">
+											Specify a Bedrock model ID to bypass automatic model
+											detection. Leave empty to use fuzzy matching.
+										</p>
+									</div>
+									<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
+										<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+											Authentication Required
+										</p>
+										<p className="text-xs text-blue-800 dark:text-blue-200">
+											Bedrock uses AWS credentials from the selected profile.
+											Ensure your credentials are configured.
+										</p>
+									</div>
+								</>
+							)}
+						</>
+					)}
 					{newAccount.mode === "zai" && (
-						<div className="space-y-2">
-							<Label htmlFor="apiKey">z.ai API Key</Label>
-							<Input
-								id="apiKey"
-								type="password"
-								value={newAccount.apiKey}
-								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-									setNewAccount({
-										...newAccount,
-										apiKey: (e.target as HTMLInputElement).value,
-									})
-								}
-								placeholder="Enter your z.ai API key"
-							/>
-						</div>
+						<>
+							<div className="space-y-2">
+								<Label htmlFor="apiKey">z.ai API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										setNewAccount({
+											...newAccount,
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your z.ai API key"
+								/>
+							</div>
+							<div className="space-y-2">
+								<Label className="text-sm font-medium">
+									Model Mappings (Optional)
+								</Label>
+								<p className="text-xs text-muted-foreground">
+									Map Anthropic model names to z.ai-specific models. Leave empty
+									to use Claude models directly.
+								</p>
+								<div className="space-y-2 pl-4">
+									<div>
+										<Label htmlFor="opusModel" className="text-sm">
+											Opus Model
+										</Label>
+										<Input
+											id="opusModel"
+											value={newAccount.opusModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													opusModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g. glm-4.5-flash"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="sonnetModel" className="text-sm">
+											Sonnet Model
+										</Label>
+										<Input
+											id="sonnetModel"
+											value={newAccount.sonnetModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													sonnetModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g. glm-4.5-flash"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="haikuModel" className="text-sm">
+											Haiku Model
+										</Label>
+										<Input
+											id="haikuModel"
+											value={newAccount.haikuModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													haikuModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g. glm-4.5-air"
+											className="mt-1"
+										/>
+									</div>
+								</div>
+							</div>
+						</>
 					)}
 					{newAccount.mode === "minimax" && (
 						<div className="space-y-2">
@@ -664,6 +1478,258 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="nanogpt-lite (default)"
+											className="mt-1"
+										/>
+									</div>
+								</div>
+							</div>
+						</>
+					)}
+					{newAccount.mode === "kilo" && (
+						<>
+							<div className="space-y-2">
+								<Label htmlFor="apiKey">Kilo API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										setNewAccount({
+											...newAccount,
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your Kilo API key"
+								/>
+								<p className="text-xs text-muted-foreground">
+									Endpoint: https://api.kilo.ai/api/gateway
+								</p>
+							</div>
+							<div className="space-y-2">
+								<Label className="text-sm font-medium">
+									Model Mappings (Optional)
+								</Label>
+								<p className="text-xs text-muted-foreground">
+									Map Anthropic model names to Kilo-specific models. Leave empty
+									to use defaults.
+								</p>
+								<div className="space-y-2 pl-4">
+									<div>
+										<Label htmlFor="kiloOpusModel" className="text-sm">
+											Opus Model
+										</Label>
+										<Input
+											id="kiloOpusModel"
+											value={newAccount.opusModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													opusModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., anthropic/claude-opus-4-6 (default)"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="kiloSonnetModel" className="text-sm">
+											Sonnet Model
+										</Label>
+										<Input
+											id="kiloSonnetModel"
+											value={newAccount.sonnetModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													sonnetModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., anthropic/claude-sonnet-4-6 (default)"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="kiloHaikuModel" className="text-sm">
+											Haiku Model
+										</Label>
+										<Input
+											id="kiloHaikuModel"
+											value={newAccount.haikuModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													haikuModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., anthropic/claude-haiku-4-5 (default)"
+											className="mt-1"
+										/>
+									</div>
+								</div>
+							</div>
+						</>
+					)}
+					{newAccount.mode === "openrouter" && (
+						<>
+							<div className="space-y-2">
+								<Label htmlFor="apiKey">OpenRouter API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										setNewAccount({
+											...newAccount,
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your OpenRouter API key"
+								/>
+								<p className="text-xs text-muted-foreground">
+									Endpoint: https://openrouter.ai/api/v1
+								</p>
+							</div>
+							<div className="space-y-2">
+								<Label className="text-sm font-medium">
+									Model Mappings (Optional)
+								</Label>
+								<p className="text-xs text-muted-foreground">
+									Map Anthropic model names to OpenRouter-specific models. Leave
+									empty to pass model names through unchanged.
+								</p>
+								<div className="space-y-2 pl-4">
+									<div>
+										<Label htmlFor="opusModel" className="text-sm">
+											Opus Model
+										</Label>
+										<Input
+											id="opusModel"
+											value={newAccount.opusModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													opusModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., anthropic/claude-opus-4-5"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="sonnetModel" className="text-sm">
+											Sonnet Model
+										</Label>
+										<Input
+											id="sonnetModel"
+											value={newAccount.sonnetModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													sonnetModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., anthropic/claude-sonnet-4-5"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="haikuModel" className="text-sm">
+											Haiku Model
+										</Label>
+										<Input
+											id="haikuModel"
+											value={newAccount.haikuModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													haikuModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., anthropic/claude-haiku-4-5"
+											className="mt-1"
+										/>
+									</div>
+								</div>
+							</div>
+						</>
+					)}
+					{newAccount.mode === "alibaba-coding-plan" && (
+						<>
+							<div className="space-y-2">
+								<Label htmlFor="apiKey">Alibaba Coding Plan API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										setNewAccount({
+											...newAccount,
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your Alibaba Coding Plan API key"
+								/>
+								<p className="text-xs text-muted-foreground">
+									Endpoint: https://bailian-singapore-cs.alibabacloud.com
+								</p>
+							</div>
+							<div className="space-y-2">
+								<Label className="text-sm font-medium">
+									Model Mappings (Optional)
+								</Label>
+								<p className="text-xs text-muted-foreground">
+									Map Anthropic model names to Alibaba-specific models. Leave
+									empty to use defaults.
+								</p>
+								<div className="space-y-2 pl-4">
+									<div>
+										<Label htmlFor="alibabaOpusModel" className="text-sm">
+											Opus Model
+										</Label>
+										<Input
+											id="alibabaOpusModel"
+											value={newAccount.opusModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													opusModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., qwen-max (default)"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="alibabaSonnetModel" className="text-sm">
+											Sonnet Model
+										</Label>
+										<Input
+											id="alibabaSonnetModel"
+											value={newAccount.sonnetModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													sonnetModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., qwen-plus (default)"
+											className="mt-1"
+										/>
+									</div>
+									<div>
+										<Label htmlFor="alibabaHaikuModel" className="text-sm">
+											Haiku Model
+										</Label>
+										<Input
+											id="alibabaHaikuModel"
+											value={newAccount.haikuModel}
+											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+												setNewAccount({
+													...newAccount,
+													haikuModel: (e.target as HTMLInputElement).value,
+												})
+											}
+											placeholder="e.g., qwen-turbo (default)"
 											className="mt-1"
 										/>
 									</div>
@@ -911,10 +1977,36 @@ export function AccountAddForm({
 			)}
 			{authStep === "form" ? (
 				<div className="flex gap-2">
-					<Button onClick={handleAddAccount}>Continue</Button>
-					<Button variant="outline" onClick={handleCancel}>
-						Cancel
-					</Button>
+					{newAccount.mode === "qwen" ? (
+						<>
+							{(qwenStep === "idle" || qwenStep === "error") && (
+								<Button onClick={handleStartQwenAuth}>
+									Start Qwen Authentication
+								</Button>
+							)}
+							<Button variant="outline" onClick={handleCancel}>
+								Cancel
+							</Button>
+						</>
+					) : newAccount.mode === "codex" ? (
+						<>
+							{(codexStep === "idle" || codexStep === "error") && (
+								<Button onClick={handleStartCodexAuth}>
+									Start Codex Authentication
+								</Button>
+							)}
+							<Button variant="outline" onClick={handleCancel}>
+								Cancel
+							</Button>
+						</>
+					) : (
+						<>
+							<Button onClick={handleAddAccount}>Continue</Button>
+							<Button variant="outline" onClick={handleCancel}>
+								Cancel
+							</Button>
+						</>
+					)}
 				</div>
 			) : (
 				<>

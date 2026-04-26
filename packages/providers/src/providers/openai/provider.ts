@@ -1,171 +1,18 @@
-import {
-	getEndpointUrl,
-	mapModelName,
-	validateEndpointUrl,
-} from "@better-ccflare/core";
-import { ANALYTICS_STREAM_SYMBOL } from "@better-ccflare/http-common/symbols";
+import { getEndpointUrl, validateEndpointUrl } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
+import {
+	convertAnthropicPathToOpenAI,
+	convertAnthropicRequestToOpenAI,
+	convertOpenAIResponseToAnthropic,
+	type OpenAIRequest,
+	sanitizeHeaders,
+	transformStreamingResponse,
+} from "@better-ccflare/openai-formats";
 import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 
 const log = new Logger("OpenAICompatibleProvider");
-
-// OpenAI API Request/Response Types
-interface OpenAIToolCall {
-	id: string;
-	type: "function";
-	function: {
-		name: string;
-		arguments: string;
-	};
-}
-
-interface OpenAIMessage {
-	role: "system" | "user" | "assistant" | "tool";
-	content: string | null;
-	tool_calls?: OpenAIToolCall[];
-	tool_call_id?: string;
-}
-
-interface OpenAITool {
-	type: "function";
-	function: {
-		name: string;
-		description?: string;
-		parameters?: Record<string, unknown>;
-	};
-}
-
-interface OpenAIRequest {
-	model: string;
-	messages: OpenAIMessage[];
-	max_tokens?: number;
-	temperature?: number;
-	top_p?: number;
-	stop?: string | string[];
-	stream?: boolean;
-	tools?: OpenAITool[];
-}
-
-interface AnthropicToolUse {
-	type: "tool_use";
-	id: string;
-	name: string;
-	input?: Record<string, unknown>;
-}
-
-interface AnthropicToolResult {
-	type: "tool_result";
-	tool_use_id: string;
-	content: string;
-}
-
-interface AnthropicTextContent {
-	type: "text";
-	text: string;
-}
-
-type AnthropicContentBlock =
-	| AnthropicTextContent
-	| AnthropicToolUse
-	| AnthropicToolResult;
-
-interface AnthropicMessage {
-	role: "user" | "assistant";
-	content: string | AnthropicContentBlock[];
-}
-
-interface AnthropicTool {
-	name: string;
-	description?: string;
-	input_schema?: Record<string, unknown>;
-}
-
-interface AnthropicRequest {
-	model: string;
-	max_tokens: number;
-	messages: AnthropicMessage[];
-	system?: string;
-	temperature?: number;
-	top_p?: number;
-	stop_sequences?: string[];
-	stream?: boolean;
-	tools?: AnthropicTool[];
-}
-
-interface OpenAIUsage {
-	prompt_tokens?: number;
-	completion_tokens?: number;
-	total_tokens?: number;
-	prompt_tokens_details?: Record<string, unknown>;
-}
-
-interface TransformStreamContext {
-	buffer: string;
-	hasStarted: boolean;
-	extractedModel: string;
-	hasSentStart: boolean;
-	hasSentContentBlockStart: boolean;
-	promptTokens: number;
-	completionTokens: number;
-	encounteredToolCall: boolean;
-	toolCallAccumulators: Record<number, string>;
-	maxToolCallLength: number;
-	maxToolCallIndex: number;
-}
-
-interface OpenAIStreamDelta {
-	content?: string;
-	tool_calls?: Array<{
-		index: number;
-		id?: string;
-		type?: "function";
-		function?: {
-			name?: string;
-			arguments?: string;
-		};
-	}>;
-}
-
-interface OpenAIResponse {
-	id?: string;
-	object?: string;
-	model?: string;
-	choices?: Array<{
-		message?: {
-			content?: string | null;
-			role?: string;
-			tool_calls?: OpenAIToolCall[];
-		};
-		delta?: OpenAIStreamDelta;
-		finish_reason?: string;
-	}>;
-	usage?: OpenAIUsage;
-	error?: {
-		message?: string;
-		type?: string;
-		code?: string;
-	};
-}
-
-interface AnthropicResponse {
-	type: "message" | "error";
-	id?: string;
-	role?: string;
-	content?: AnthropicContentBlock[];
-	model?: string;
-	stop_reason?: string;
-	stop_sequence?: string;
-	usage?: {
-		input_tokens: number;
-		output_tokens: number;
-	};
-	error?: {
-		type: string;
-		message: string;
-	};
-}
 
 export class OpenAICompatibleProvider extends BaseProvider {
 	name = "openai-compatible";
@@ -212,9 +59,12 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			endpoint = "https://api.openai.com";
 		}
 
+		// Store endpoint for provider-specific transformations (e.g., Alibaba caching)
+		this.currentEndpoint = endpoint;
+
 		// Convert Anthropic paths to OpenAI-compatible paths
 		// Anthropic: /v1/messages → OpenAI: /v1/chat/completions
-		let openaiPath = this.convertAnthropicPathToOpenAI(path);
+		let openaiPath = convertAnthropicPathToOpenAI(path);
 		if (endpoint.endsWith("/v1") && openaiPath.startsWith("/v1/")) {
 			openaiPath = openaiPath.replace(/^\/v1/, "");
 		}
@@ -288,12 +138,12 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			try {
 				const clone = response.clone();
 				const data = await clone.json();
-				const anthropicData = this.convertOpenAIResponseToAnthropic(data);
+				const anthropicData = convertOpenAIResponseToAnthropic(data);
 
 				return new Response(JSON.stringify(anthropicData), {
 					status: response.status,
 					statusText: response.statusText,
-					headers: this.sanitizeHeaders(response.headers),
+					headers: sanitizeHeaders(response.headers),
 				});
 			} catch (error) {
 				log.error(
@@ -306,14 +156,14 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		// For streaming responses, we need to transform the SSE stream
 		if (contentType?.includes("text/event-stream")) {
-			return this.transformStreamingResponse(response);
+			return transformStreamingResponse(response);
 		}
 
 		// For non-JSON responses, return as-is with sanitized headers
 		return new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
-			headers: this.sanitizeHeaders(response.headers),
+			headers: sanitizeHeaders(response.headers),
 		});
 	}
 
@@ -332,7 +182,16 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		try {
 			const body = await request.json();
-			const openaiBody = this.convertAnthropicRequestToOpenAI(body, account);
+			const effectiveAccount = this.beforeConvert(body, account);
+			const openaiBody = convertAnthropicRequestToOpenAI(
+				body,
+				effectiveAccount,
+			);
+			this.afterConvert(openaiBody);
+
+			// Inject enable_thinking for reasoning models on DashScope
+			this.injectDashScopeReasoning(openaiBody, body);
+
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
 			newHeaders.delete("content-length");
@@ -391,6 +250,18 @@ export class OpenAICompatibleProvider extends BaseProvider {
 				const totalTokens =
 					json.usage.total_tokens || promptTokens + completionTokens;
 
+				// Extract cache statistics from prompt_tokens_details (Qwen/DashScope)
+				const promptTokensDetails = json.usage.prompt_tokens_details as
+					| {
+							cache_creation_input_tokens?: number;
+							cached_tokens?: number;
+					  }
+					| undefined;
+
+				const cacheCreationInputTokens =
+					promptTokensDetails?.cache_creation_input_tokens || 0;
+				const cacheReadInputTokens = promptTokensDetails?.cached_tokens || 0;
+
 				// Calculate cost using OpenAI-compatible pricing
 				const costUsd = this.calculateCost(
 					json.model,
@@ -406,8 +277,8 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					costUsd,
 					inputTokens: promptTokens,
 					outputTokens: completionTokens,
-					cacheReadInputTokens: 0,
-					cacheCreationInputTokens: 0,
+					cacheReadInputTokens,
+					cacheCreationInputTokens,
 				};
 			}
 		} catch {
@@ -417,21 +288,9 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	}
 
 	/**
-	 * Safely parse JSON with error handling
-	 */
-	private safeParseJSON(jsonString: string): any {
-		try {
-			return JSON.parse(jsonString);
-		} catch (error) {
-			log.warn(`Failed to parse JSON: ${jsonString}`, error);
-			return {};
-		}
-	}
-
-	/**
 	 * Calculate cost based on model and token usage
 	 */
-	private calculateCost(
+	protected calculateCost(
 		model?: string,
 		promptTokens: number = 0,
 		completionTokens: number = 0,
@@ -480,648 +339,148 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	}
 
 	/**
-	 * Convert Anthropic API paths to OpenAI-compatible paths
+	 * Hook called after converting Anthropic request to OpenAI format.
+	 * Override to inject provider-specific fields (e.g., cache_control, vision flags).
 	 */
-	private convertAnthropicPathToOpenAI(anthropicPath: string): string {
-		// Anthropic /v1/messages → OpenAI /v1/chat/completions
-		if (anthropicPath === "/v1/messages") {
-			return "/v1/chat/completions";
+	protected afterConvert(body: OpenAIRequest): void {
+		// Inject cache_control for Alibaba/DashScope endpoints
+		if (this.shouldInjectAlibabaCaching()) {
+			this.injectAlibabaCaching(body);
 		}
-
-		// For other paths, keep them as-is for now
-		// This could be expanded based on needs
-		return anthropicPath;
 	}
 
 	/**
-	 * Helper to remove format: 'uri' from JSON schemas (some providers reject it)
+	 * Hook called before converting Anthropic request to OpenAI format.
+	 * Override to adjust the account (e.g., inject default model mappings).
+	 * Returns the account to use for model mapping.
 	 */
-	private removeUriFormat(schema: unknown): unknown {
-		if (Array.isArray(schema)) {
-			return schema.map((item) => this.removeUriFormat(item));
-		}
-
-		if (schema === null || typeof schema !== "object") {
-			return schema;
-		}
-
-		const obj = schema as Record<string, unknown>;
-
-		if (obj.type === "string" && obj.format === "uri") {
-			// biome-ignore lint/correctness/noUnusedVariables: format is intentionally extracted and not used
-			const { format, ...rest } = obj;
-			// Recursively process remaining properties
-			return this.removeUriFormat(rest);
-		}
-
-		const result: Record<string, unknown> = {};
-		for (const key of Object.keys(obj)) {
-			result[key] = this.removeUriFormat(obj[key]);
-		}
-		return result;
-	}
-
-	/**
-	 * Convert Anthropic request format to OpenAI format
-	 */
-	private convertAnthropicRequestToOpenAI(
-		anthropicData: AnthropicRequest,
+	protected beforeConvert(
+		_body: Record<string, unknown>,
 		account?: Account,
-	): OpenAIRequest {
-		// Map the model name from Anthropic to provider-specific
-		const mappedModel = account
-			? mapModelName(anthropicData.model, account)
-			: "openai/gpt-5";
-
-		const openaiRequest: OpenAIRequest = {
-			model: mappedModel,
-			messages: [],
-		};
-
-		// Map parameters
-		if (anthropicData.max_tokens !== undefined) {
-			openaiRequest.max_tokens = anthropicData.max_tokens;
+	): Account | undefined {
+		// Store model for provider-specific transformations (e.g., Alibaba caching for Qwen)
+		if (_body.model && typeof _body.model === "string") {
+			this.currentModel = _body.model;
 		}
-		if (anthropicData.temperature !== undefined) {
-			openaiRequest.temperature = anthropicData.temperature;
-		}
-		if (anthropicData.top_p !== undefined) {
-			openaiRequest.top_p = anthropicData.top_p;
-		}
-		if (anthropicData.stop_sequences !== undefined) {
-			openaiRequest.stop = anthropicData.stop_sequences;
-		}
-		if (anthropicData.stream !== undefined) {
-			openaiRequest.stream = anthropicData.stream;
-		}
+		return account;
+	}
 
-		// Convert tools
-		if (anthropicData.tools && Array.isArray(anthropicData.tools)) {
-			openaiRequest.tools = anthropicData.tools.map((tool) => ({
-				type: "function",
-				function: {
-					name: tool.name,
-					description: tool.description,
-					parameters: this.removeUriFormat(tool.input_schema) as Record<
-						string,
-						unknown
-					>,
-				},
-			}));
-		}
+	/**
+	 * Check if we should inject Alibaba-style prompt caching.
+	 * Only triggered for Qwen models on DashScope or OpenCode Go endpoints.
+	 * These endpoints support Alibaba's cacheControl format for Qwen models only.
+	 */
+	private shouldInjectAlibabaCaching(): boolean {
+		// Check if current request is for a DashScope or OpenCode Go endpoint
+		const endpoint = this.currentEndpoint?.toLowerCase() || "";
+		const isDashScopeEndpoint =
+			endpoint.includes("dashscope.aliyuncs.com") ||
+			endpoint.includes("opencode.ai/zen/go");
 
-		// Handle system message (Anthropic has it as top-level, OpenAI has it in messages array)
-		const messages: OpenAIMessage[] = [];
-		if (anthropicData.system) {
-			messages.push({
-				role: "system",
-				content: anthropicData.system,
-			});
-		}
+		if (!isDashScopeEndpoint) return false;
 
-		// Add user/assistant messages
-		if (anthropicData.messages && Array.isArray(anthropicData.messages)) {
-			for (const message of anthropicData.messages) {
-				// Handle content arrays (Anthropic supports rich content)
-				if (Array.isArray(message.content)) {
-					// Extract tool_use blocks
-					const toolUseBlocks = message.content.filter(
-						(item): item is AnthropicToolUse => item.type === "tool_use",
-					);
+		// Only apply caching for Qwen models (qwen3.5-plus, qwen3.6-plus, etc.)
+		// Other models on these endpoints use different SDKs (openai-compatible, anthropic)
+		const model = this.currentModel?.toLowerCase() || "";
+		return model.includes("qwen");
+	}
 
-					// Extract text content
-					const textParts = message.content
-						.filter(
-							(part): part is AnthropicTextContent => part.type === "text",
-						)
-						.map((part) => part.text)
-						.join("");
+	/**
+	 * Inject Alibaba-style cache_control on system and final messages.
+	 * Uses OpenAI-compatible format (snake_case) since DashScope endpoint is /compatible-mode/v1.
+	 * Mirrors opencode's applyCaching logic for prompt caching.
+	 */
+	private injectAlibabaCaching(body: OpenAIRequest): void {
+		if (!body.messages || body.messages.length === 0) return;
 
-					// Create OpenAI message with tool calls if present
-					const openaiMessage: OpenAIMessage = {
-						role: message.role,
-						content: textParts || null,
-					};
+		// Find system messages (first 2) and final messages (last 2)
+		const systemMessages = body.messages
+			.filter((msg) => msg.role === "system")
+			.slice(0, 2);
 
-					if (toolUseBlocks.length > 0) {
-						openaiMessage.tool_calls = toolUseBlocks.map((toolCall) => ({
-							id: toolCall.id,
-							type: "function",
-							function: {
-								name: toolCall.name,
-								arguments: JSON.stringify(toolCall.input || {}),
-							},
-						}));
-					}
+		const nonSystemMessages = body.messages.filter(
+			(msg) => msg.role !== "system",
+		);
+		const finalMessages = nonSystemMessages.slice(-2);
 
-					if (openaiMessage.content || openaiMessage.tool_calls) {
-						messages.push(openaiMessage);
-					}
+		// Apply caching to these messages
+		const messagesToCache = [...systemMessages, ...finalMessages];
 
-					// Handle tool_result blocks as separate 'tool' role messages
-					const toolResults = message.content.filter(
-						(item): item is AnthropicToolResult => item.type === "tool_result",
-					);
-					for (const toolResult of toolResults) {
-						messages.push({
-							role: "tool",
-							content: toolResult.content,
-							tool_call_id: toolResult.tool_use_id,
-						});
-					}
-				} else {
-					// Simple string content
-					messages.push({
-						role: message.role,
-						content: message.content,
-					});
+		for (const msg of messagesToCache) {
+			// DashScope OpenAI-compatible endpoint expects snake_case cache_control
+			if (Array.isArray(msg.content)) {
+				// Find last valid content part
+				const lastPart = msg.content[msg.content.length - 1];
+				if (
+					lastPart &&
+					typeof lastPart === "object" &&
+					lastPart.type === "text"
+				) {
+					// Inject cache_control (snake_case for OpenAI-compatible API)
+					(lastPart as any).cache_control = { type: "ephemeral" };
 				}
+			} else if (typeof msg.content === "string" && msg.content.length > 0) {
+				// Convert string content to array with cache_control
+				msg.content = [
+					{
+						type: "text",
+						text: msg.content,
+						cache_control: { type: "ephemeral" },
+					},
+				];
 			}
 		}
 
-		openaiRequest.messages = messages;
-		return openaiRequest;
-	}
-
-	/**
-	 * Convert OpenAI response format to Anthropic format
-	 */
-	private convertOpenAIResponseToAnthropic(
-		openaiData: OpenAIResponse,
-	): AnthropicResponse {
-		// Handle error responses
-		if (openaiData.error) {
-			return {
-				type: "error",
-				error: {
-					type: openaiData.error.type || "api_error",
-					message: openaiData.error.message || "An error occurred",
-				},
-			};
-		}
-
-		// Handle successful responses
-		const choice = openaiData.choices?.[0];
-		if (!choice) {
-			return {
-				type: "error",
-				error: {
-					type: "invalid_response",
-					message: "Invalid response format from OpenAI provider",
-				},
-			};
-		}
-
-		// Build content array with text and tool calls
-		const content: AnthropicContentBlock[] = [];
-
-		// Add text content if present
-		if (choice.message?.content) {
-			content.push({
-				type: "text",
-				text: choice.message.content,
-			});
-		}
-
-		// Add tool calls if present
-		const toolCalls = choice.message?.tool_calls || [];
-		for (const toolCall of toolCalls) {
-			content.push({
-				type: "tool_use",
-				id: toolCall.id,
-				name: toolCall.function.name,
-				input: this.safeParseJSON(toolCall.function.arguments || "{}"),
-			});
-		}
-
-		return {
-			id: openaiData.id || `msg_${Date.now()}`,
-			type: "message",
-			role: "assistant",
-			content,
-			model: openaiData.model,
-			stop_reason: this.mapOpenAIFinishReason(choice.finish_reason),
-			stop_sequence: undefined,
-			usage: {
-				input_tokens: openaiData.usage?.prompt_tokens || 0,
-				output_tokens: openaiData.usage?.completion_tokens || 0,
-			},
-		};
-	}
-
-	/**
-	 * Map OpenAI finish_reason to Anthropic stop_reason
-	 */
-	private mapOpenAIFinishReason(openaiReason?: string): string {
-		switch (openaiReason) {
-			case "stop":
-				return "end_turn";
-			case "length":
-				return "max_tokens";
-			case "function_call":
-			case "tool_calls":
-				return "tool_use";
-			case "content_filter":
-				return "stop_sequence";
-			default:
-				return "end_turn";
-		}
-	}
-
-	/**
-	 * Transform OpenAI Server-Sent Events (SSE) streaming response to Anthropic SSE format
-	 *
-	 * ## Transformation Flow:
-	 * 1. **Input**: OpenAI SSE chunks (`data: {...choices[0].delta...}`)
-	 * 2. **Buffering**: Accumulates incomplete lines across chunks
-	 * 3. **Parsing**: Extracts JSON from `data:` lines, ignores malformed chunks
-	 * 4. **Event Mapping**:
-	 *    - `message_start` + `ping` (first chunk)
-	 *    - `content_block_start` (text/tool_use)
-	 *    - `content_block_delta` (text deltas, tool arg accumulation)
-	 *    - `content_block_stop` + `message_stop` (`[DONE]`)
-	 * 5. **State Management**: Tracks context via TransformStreamContext
-	 * 6. **Stream Tee**: Splits into client + analytics streams for usage extraction
-	 *
-	 * ## State Machine:
-	 * ```
-	 * [START] → buffer chunks → parse lines → [JSON delta]
-	 *                                    ↓
-	 *                           text? → content_block_start(0) → text_delta
-	 *                           tool? → content_block_start(N) → input_json_delta
-	 *                                    ↓
-	 *                              [DONE] → content_block_stop → message_delta → message_stop
-	 * ```
-	 *
-	 * @param response - Original OpenAI streaming response
-	 * @returns Transformed Anthropic-compatible streaming Response
-	 */
-	private transformStreamingResponse(response: Response): Response {
-		if (!response.body) {
-			return response;
-		}
-
-		const encoder = new TextEncoder();
-		const decoder = new TextDecoder();
-
-		// Use pipeThrough to transform the stream while preserving clonability
-		const transformedBody = response.body.pipeThrough(
-			new TransformStream<Uint8Array, Uint8Array>({
-				start(_controller) {
-					// Initialize context object for streaming state
-					(this as any).context = {
-						buffer: "",
-						hasStarted: false,
-						extractedModel: "unknown",
-						hasSentStart: false,
-						hasSentContentBlockStart: false,
-						promptTokens: 0,
-						completionTokens: 0,
-						encounteredToolCall: false,
-						toolCallAccumulators: {},
-						maxToolCallLength: 1_000_000,
-						maxToolCallIndex: 100,
-					} as TransformStreamContext;
-				},
-				transform(chunk, controller) {
-					try {
-						const context = (this as any).context as TransformStreamContext;
-						if (!context) {
-							log.error("TransformStream context not initialized");
-							return;
-						}
-						// Decode the chunk and add to buffer
-						context.buffer += decoder.decode(chunk, { stream: true });
-						const lines = context.buffer.split("\n");
-						// Keep incomplete line in buffer
-						context.buffer = lines.pop() || "";
-
-						for (const line of lines) {
-							const trimmed = line.trim();
-							if (!trimmed || !trimmed.startsWith("data:")) continue;
-
-							const dataStr = trimmed.slice(5).trim();
-
-							// Handle [DONE] marker
-							if (dataStr === "[DONE]") {
-								// Send content_block_stop for tool calls or text
-								if (context.encounteredToolCall) {
-									// Stop all tool call blocks
-									for (const idx in context.toolCallAccumulators) {
-										const contentBlockStop = {
-											type: "content_block_stop",
-											index: Number.parseInt(idx, 10),
-										};
-										controller.enqueue(
-											encoder.encode(`event: content_block_stop\n`),
-										);
-										controller.enqueue(
-											encoder.encode(
-												`data: ${JSON.stringify(contentBlockStop)}\n\n`,
-											),
-										);
-									}
-									// Cleanup accumulators after processing
-									context.toolCallAccumulators = {};
-								} else if (context.hasSentContentBlockStart) {
-									const contentBlockStop = {
-										type: "content_block_stop",
-										index: 0,
-									};
-									controller.enqueue(
-										encoder.encode(`event: content_block_stop\n`),
-									);
-									controller.enqueue(
-										encoder.encode(
-											`data: ${JSON.stringify(contentBlockStop)}\n\n`,
-										),
-									);
-								}
-
-								// Send message_delta with appropriate stop_reason
-								const messageDelta = {
-									type: "message_delta",
-									delta: {
-										stop_reason: context.encounteredToolCall
-											? "tool_use"
-											: "end_turn",
-										stop_sequence: null,
-									},
-									usage: {
-										input_tokens: context.promptTokens,
-										output_tokens: context.completionTokens,
-									},
-								};
-								controller.enqueue(encoder.encode(`event: message_delta\n`));
-								controller.enqueue(
-									encoder.encode(`data: ${JSON.stringify(messageDelta)}\n\n`),
-								);
-
-								// Send message_stop
-								const messageStop = {
-									type: "message_stop",
-								};
-								controller.enqueue(encoder.encode(`event: message_stop\n`));
-								controller.enqueue(
-									encoder.encode(`data: ${JSON.stringify(messageStop)}\n\n`),
-								);
-
-								// Cleanup entire context after stream completion to prevent memory leaks
-								(this as any).context = null;
-								continue;
-							}
-
-							// Parse OpenAI chunk
-							try {
-								const data = JSON.parse(dataStr);
-
-								// Extract model from first chunk
-								if (!context.hasStarted && data.model) {
-									context.extractedModel = data.model;
-									context.hasStarted = true;
-								}
-
-								// Extract usage data if present (typically in last chunk before [DONE])
-								if (data.usage) {
-									if (data.usage.prompt_tokens) {
-										context.promptTokens = data.usage.prompt_tokens;
-									}
-									if (data.usage.completion_tokens) {
-										context.completionTokens = data.usage.completion_tokens;
-									}
-								}
-
-								// Send message_start on first chunk
-								if (!context.hasSentStart) {
-									context.hasSentStart = true;
-									const messageStart = {
-										type: "message_start",
-										message: {
-											id: `msg_${Date.now()}`,
-											type: "message",
-											role: "assistant",
-											content: [],
-											model: context.extractedModel,
-											stop_reason: null,
-											stop_sequence: null,
-											usage: {
-												input_tokens: 0,
-												output_tokens: 0,
-											},
-										},
-									};
-									controller.enqueue(encoder.encode(`event: message_start\n`));
-									controller.enqueue(
-										encoder.encode(`data: ${JSON.stringify(messageStart)}\n\n`),
-									);
-
-									// Send ping
-									const ping = { type: "ping" };
-									controller.enqueue(encoder.encode(`event: ping\n`));
-									controller.enqueue(
-										encoder.encode(`data: ${JSON.stringify(ping)}\n\n`),
-									);
-								}
-
-								const delta = data.choices?.[0]?.delta;
-
-								// Handle tool call deltas
-								if (delta?.tool_calls) {
-									for (const toolCall of delta.tool_calls) {
-										context.encounteredToolCall = true;
-										const idx = toolCall.index;
-
-										// Validate tool call index bounds
-										if (
-											typeof idx !== "number" ||
-											idx < 0 ||
-											idx >= context.maxToolCallIndex
-										) {
-											log.warn(
-												`Invalid tool call index: ${idx} (max: ${context.maxToolCallIndex})`,
-											);
-											continue;
-										}
-
-										// Send content_block_start on first tool call chunk
-										if (context.toolCallAccumulators[idx] === undefined) {
-											if (!toolCall.id || !toolCall.function?.name) {
-												log.warn(
-													`Missing tool call id or name for index: ${idx}`,
-												);
-												continue;
-											}
-											context.toolCallAccumulators[idx] = "";
-											const contentBlockStart = {
-												type: "content_block_start",
-												index: idx,
-												content_block: {
-													type: "tool_use",
-													id: toolCall.id,
-													name: toolCall.function.name,
-													input: {},
-												},
-											};
-											controller.enqueue(
-												encoder.encode(`event: content_block_start\n`),
-											);
-											controller.enqueue(
-												encoder.encode(
-													`data: ${JSON.stringify(contentBlockStart)}\n\n`,
-												),
-											);
-										}
-
-										// Accumulate and send argument deltas with validation
-										const newArgs = toolCall.function?.arguments || "";
-										if (newArgs.length > context.maxToolCallLength) {
-											log.warn(
-												`Tool call arguments exceed max length for index ${idx} (${newArgs.length}/${context.maxToolCallLength})`,
-											);
-											continue;
-										}
-										const oldArgs = context.toolCallAccumulators[idx] || "";
-
-										// Validate that new arguments start with old arguments (streaming consistency)
-										if (
-											newArgs.startsWith(oldArgs) &&
-											newArgs.length > oldArgs.length
-										) {
-											const deltaText = newArgs.substring(oldArgs.length);
-											const contentBlockDelta = {
-												type: "content_block_delta",
-												index: idx,
-												delta: {
-													type: "input_json_delta",
-													partial_json: deltaText,
-												},
-											};
-											controller.enqueue(
-												encoder.encode(`event: content_block_delta\n`),
-											);
-											controller.enqueue(
-												encoder.encode(
-													`data: ${JSON.stringify(contentBlockDelta)}\n\n`,
-												),
-											);
-											context.toolCallAccumulators[idx] = newArgs;
-										} else if (newArgs.length < oldArgs.length) {
-											// Handle case where arguments are reset (rare but possible)
-											log.debug(`Tool call arguments reset for index ${idx}`);
-											context.toolCallAccumulators[idx] = newArgs;
-										}
-									}
-								} else if (delta?.content) {
-									// Send content_block_start on first content
-									if (!context.hasSentContentBlockStart) {
-										context.hasSentContentBlockStart = true;
-										const contentBlockStart = {
-											type: "content_block_start",
-											index: 0,
-											content_block: {
-												type: "text",
-												text: "",
-											},
-										};
-										controller.enqueue(
-											encoder.encode(`event: content_block_start\n`),
-										);
-										controller.enqueue(
-											encoder.encode(
-												`data: ${JSON.stringify(contentBlockStart)}\n\n`,
-											),
-										);
-									}
-
-									// Send content delta
-									const contentBlockDelta = {
-										type: "content_block_delta",
-										index: 0,
-										delta: {
-											type: "text_delta",
-											text: delta.content,
-										},
-									};
-									controller.enqueue(
-										encoder.encode(`event: content_block_delta\n`),
-									);
-									controller.enqueue(
-										encoder.encode(
-											`data: ${JSON.stringify(contentBlockDelta)}\n\n`,
-										),
-									);
-								}
-							} catch (_parseError) {
-								// Ignore JSON parse errors for malformed chunks
-							}
-						}
-					} catch (error) {
-						log.error("Error in transform:", error);
-					}
-				},
-				flush(_controller) {
-					const context = (this as any).context as TransformStreamContext;
-					if (context && Object.keys(context.toolCallAccumulators).length > 0) {
-						log.warn(
-							"Stream terminated with unprocessed tool calls, cleaning up accumulators",
-						);
-						// Add logic to handle incomplete tool calls gracefully
-						context.toolCallAccumulators = {};
-					}
-					(this as any).context = null;
-				},
-			}),
+		log.debug(
+			`Injected cache_control for ${messagesToCache.length} messages on DashScope endpoint`,
 		);
-
-		// The issue: response.clone() on a pipeThrough'd Response returns the original
-		// untransformed body in some environments. Solution: Manually tee the stream
-		// and attach the analytics stream as a property for response-handler to use.
-
-		// Tee the transformed stream into two independent streams
-		const [clientStream, analyticsStream] = transformedBody.tee();
-
-		// Create the response that will be returned to the client
-		const clientResponse = new Response(clientStream, {
-			status: response.status,
-			statusText: response.statusText,
-			headers: this.sanitizeHeaders(response.headers),
-		});
-
-		// Attach the analytics stream as a non-enumerable Symbol property
-		// The response-handler will check for this Symbol and use it instead of calling clone()
-		Object.defineProperty(clientResponse, ANALYTICS_STREAM_SYMBOL, {
-			value: analyticsStream,
-			writable: false,
-			enumerable: false,
-			configurable: false,
-		});
-
-		return clientResponse;
 	}
 
 	/**
-	 * Sanitize headers by removing provider-specific headers
+	 * Inject enable_thinking for reasoning models on DashScope.
+	 * DashScope's OpenAI-compatible API requires this flag to return reasoning_content.
+	 * Without it, reasoning models like Qwen-Plus, Qwen3, qwq, etc. never output thinking tokens.
 	 */
-	private sanitizeHeaders(headers: Headers): Headers {
-		const sanitized = new Headers();
+	private injectDashScopeReasoning(
+		openaiBody: OpenAIRequest,
+		anthropicBody: Record<string, unknown>,
+	): void {
+		// Only apply for DashScope endpoints
+		const endpoint = this.currentEndpoint?.toLowerCase() || "";
+		if (
+			!endpoint.includes("dashscope.aliyuncs.com") &&
+			!endpoint.includes("opencode.ai/zen/go")
+		)
+			return;
 
-		for (const [key, value] of headers.entries()) {
-			// Skip provider-specific headers
-			if (
-				!key.startsWith("x-ratelimit-") &&
-				!key.startsWith("openai-") &&
-				key !== "access-control-expose-headers"
-			) {
-				sanitized.set(key, value);
-			}
+		// Check if model is a reasoning model (has thinking/reasoning capabilities)
+		const modelId = this.currentModel?.toLowerCase() || "";
+		const isReasoningModel =
+			modelId.includes("qwen") ||
+			modelId.includes("qwq") ||
+			modelId.includes("deepseek-r1") ||
+			// Also check if anthropic request indicates thinking
+			(anthropicBody as any).thinking?.type === "enabled";
+
+		// Skip if it's kimi-k2-thinking (returns reasoning_content by default)
+		if (modelId.includes("kimi-k2-thinking")) return;
+
+		// Inject enable_thinking flag
+		if (isReasoningModel) {
+			(openaiBody as any).enable_thinking = true;
+			log.debug(
+				`Injected enable_thinking for DashScope reasoning model: ${modelId}`,
+			);
 		}
-
-		// Add back important headers that should be preserved
-		sanitized.set(
-			"content-type",
-			headers.get("content-type") || "application/json",
-		);
-
-		return sanitized;
 	}
+
+	/**
+	 * Store current endpoint for provider-specific transformations
+	 */
+	private currentEndpoint?: string;
+
+	/**
+	 * Store current model for provider-specific transformations (e.g., Qwen caching)
+	 */
+	private currentModel?: string;
 }

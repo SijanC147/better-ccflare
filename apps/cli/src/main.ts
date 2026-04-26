@@ -31,9 +31,11 @@ import {
 	addAccount,
 	analyzePerformance,
 	clearRequestHistory,
+	compactDatabase,
 	deleteApiKey,
 	disableApiKey,
 	enableApiKey,
+	forceResetRateLimit,
 	formatApiKeyForDisplay,
 	formatApiKeyGenerationResult,
 	generateApiKey,
@@ -59,6 +61,7 @@ import {
 import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
 import { DatabaseFactory } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
+import { parseBedrockConfig } from "@better-ccflare/providers";
 // Import server
 import startServer from "@better-ccflare/server";
 
@@ -79,8 +82,14 @@ interface ParsedArgs {
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
+		| "bedrock"
+		| "kilo"
+		| "alibaba-coding-plan"
+		| "codex"
 		| null;
 	priority: number | null;
+	profile: string | null;
+	crossRegionMode?: "geographic" | "global" | "regional";
 	list: boolean;
 	remove: string | null;
 	pause: string | null;
@@ -91,6 +100,7 @@ interface ParsedArgs {
 	repairDb: boolean;
 	resetStats: boolean;
 	clearHistory: boolean;
+	compact: boolean;
 	getModel: boolean;
 	setModel: string | null;
 	generateApiKey: string | null;
@@ -98,7 +108,9 @@ interface ParsedArgs {
 	disableApiKey: string | null;
 	enableApiKey: string | null;
 	deleteApiKey: string | null;
+	forceResetRateLimit: string | null;
 	showConfig: boolean;
+	admin: boolean;
 }
 
 /**
@@ -344,6 +356,18 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 		description: "Request metadata retention period",
 	});
 
+	configItems.push({
+		name: "Store Payloads",
+		value: config.getStorePayloads(),
+		source: process.env.STORE_PAYLOADS
+			? "Environment (STORE_PAYLOADS)"
+			: config.get("store_payloads") !== undefined
+				? "Config file"
+				: "Default",
+		description:
+			"Store request/response bodies in DB (disable to reduce DB size)",
+	});
+
 	// Logging Configuration
 	configItems.push({
 		name: "Log Level",
@@ -413,6 +437,8 @@ function parseArgs(args: string[]): ParsedArgs {
 		addAccount: null,
 		mode: null,
 		priority: null,
+		profile: null,
+		crossRegionMode: undefined,
 		list: false,
 		remove: null,
 		pause: null,
@@ -423,6 +449,7 @@ function parseArgs(args: string[]): ParsedArgs {
 		repairDb: false,
 		resetStats: false,
 		clearHistory: false,
+		compact: false,
 		getModel: false,
 		setModel: null,
 		generateApiKey: null,
@@ -430,7 +457,9 @@ function parseArgs(args: string[]): ParsedArgs {
 		disableApiKey: null,
 		enableApiKey: null,
 		deleteApiKey: null,
+		forceResetRateLimit: null,
 		showConfig: false,
+		admin: false,
 	};
 
 	for (let i = 0; i < args.length; i++) {
@@ -501,6 +530,10 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "anthropic-compatible"
 					| "openai-compatible"
 					| "nanogpt"
+					| "bedrock"
+					| "kilo"
+					| "alibaba-coding-plan"
+					| "codex"
 					| "max";
 
 				// Handle deprecated "max" mode with warning
@@ -516,8 +549,13 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "console"
 					| "zai"
 					| "minimax"
+					| "nanogpt"
 					| "anthropic-compatible"
-					| "openai-compatible";
+					| "openai-compatible"
+					| "bedrock"
+					| "kilo"
+					| "alibaba-coding-plan"
+					| "codex";
 				const validModes: Array<
 					| "claude-oauth"
 					| "console"
@@ -526,6 +564,10 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "nanogpt"
 					| "anthropic-compatible"
 					| "openai-compatible"
+					| "bedrock"
+					| "kilo"
+					| "alibaba-coding-plan"
+					| "codex"
 				> = [
 					"claude-oauth",
 					"console",
@@ -534,6 +576,10 @@ function parseArgs(args: string[]): ParsedArgs {
 					"nanogpt",
 					"anthropic-compatible",
 					"openai-compatible",
+					"bedrock",
+					"kilo",
+					"alibaba-coding-plan",
+					"codex",
 				];
 				if (!validModes.includes(modeValue)) {
 					console.error(`❌ Invalid mode: ${modeValue}`);
@@ -564,6 +610,9 @@ function parseArgs(args: string[]): ParsedArgs {
 					console.error(
 						"  bun run cli --add-account anthropic-account --mode anthropic-compatible --priority 50",
 					);
+					console.error(
+						"  bun run cli --add-account bedrock-account --mode bedrock --profile default",
+					);
 
 					fastExit(1);
 				}
@@ -581,6 +630,35 @@ function parseArgs(args: string[]): ParsedArgs {
 					fastExit(1);
 				}
 				break;
+			case "--profile":
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --profile requires a value");
+					fastExit(1);
+				}
+				parsed.profile = args[++i];
+				break;
+			case "--cross-region-mode": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --cross-region-mode requires a value");
+					fastExit(1);
+				}
+				const crossRegionValue = args[++i];
+				if (
+					crossRegionValue !== "geographic" &&
+					crossRegionValue !== "global" &&
+					crossRegionValue !== "regional"
+				) {
+					console.error(
+						"Invalid --cross-region-mode value. Must be one of: geographic, global, regional",
+					);
+					fastExit(1);
+				}
+				parsed.crossRegionMode = crossRegionValue as
+					| "geographic"
+					| "global"
+					| "regional";
+				break;
+			}
 			case "--list":
 				parsed.list = true;
 				break;
@@ -633,6 +711,9 @@ function parseArgs(args: string[]): ParsedArgs {
 			case "--clear-history":
 				parsed.clearHistory = true;
 				break;
+			case "--compact":
+				parsed.compact = true;
+				break;
 			case "--get-model":
 				parsed.getModel = true;
 				break;
@@ -649,6 +730,9 @@ function parseArgs(args: string[]): ParsedArgs {
 					fastExit(1);
 				}
 				parsed.generateApiKey = args[++i];
+				break;
+			case "--admin":
+				parsed.admin = true;
 				break;
 			case "--list-api-keys":
 				parsed.listApiKeys = true;
@@ -680,6 +764,13 @@ function parseArgs(args: string[]): ParsedArgs {
 					fastExit(1);
 				}
 				parsed.reauthenticate = args[++i];
+				break;
+			case "--force-reset-rate-limit":
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --force-reset-rate-limit requires an account name");
+					fastExit(1);
+				}
+				parsed.forceResetRateLimit = args[++i];
 				break;
 			case "--show-config":
 				parsed.showConfig = true;
@@ -728,7 +819,7 @@ Options:
   --ssl-cert <path>    Path to SSL certificate file (enables HTTPS)
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
-    --mode <claude-oauth|console|zai|minimax|nanogpt|anthropic-compatible|openai-compatible>  Account mode (default: claude-oauth)
+    --mode <claude-oauth|console|zai|minimax|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex>  Account mode (default: claude-oauth)
       claude-oauth: Claude CLI account (OAuth)
       console: Claude API account (OAuth)
       zai: z.ai account (API key)
@@ -736,22 +827,31 @@ Options:
       nanogpt: NanoGPT provider (API key)
       anthropic-compatible: Anthropic-compatible provider (API key)
       openai-compatible: OpenAI-compatible provider (API key)
+      bedrock: AWS Bedrock account (AWS profile credentials)
+        --profile <name>  AWS profile name from ~/.aws/credentials (required)
+        --cross-region-mode <mode>   Cross-region inference mode: geographic (default), global, or regional
+      kilo: Kilo Gateway provider (API key)
+      alibaba-coding-plan: Alibaba Coding Plan International provider (API key)
+      codex: Codex (OpenAI OAuth) provider
     --priority <number>   Account priority (default: 0)
   --list               List all accounts
   --remove <name>      Remove an account
   --reauthenticate <name> Re-authenticate an account (preserves metadata)
   --pause <name>       Pause an account
   --resume <name>      Resume an account
+  --force-reset-rate-limit <name> Force-clear stale rate-limit lock for an account
   --set-priority <name> <priority>  Set account priority
   --analyze            Analyze database performance
   --repair-db          Check and repair database integrity
   --reset-stats        Reset usage statistics
   --clear-history      Clear request history
+  --compact            Compact database (WAL checkpoint + VACUUM)
   --get-model          Show current default agent model
   --set-model <model>  Set default agent model (opus-4 or sonnet-4)
 
 API Key Management:
   --generate-api-key <name>  Generate a new API key
+    --admin                  Grant admin privileges (dashboard access)
   --list-api-keys            List all API keys
   --disable-api-key <name>   Disable an API key
   --enable-api-key <name>    Enable a disabled API key
@@ -765,11 +865,14 @@ Examples:
   better-ccflare --serve                # Start server
   better-ccflare --serve --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem  # Start server with HTTPS
   better-ccflare --add-account work --mode claude-oauth --priority 0  # Add account
+  better-ccflare --add-account my-bedrock --mode bedrock --profile default  # Add Bedrock account
   better-ccflare --reauthenticate work  # Re-authenticate account (preserves metadata)
+  better-ccflare --force-reset-rate-limit work  # Force-clear stale rate-limit lock
   better-ccflare --pause work           # Pause account
   better-ccflare --analyze              # Run performance analysis
   better-ccflare --stats                # View stats
-  better-ccflare --generate-api-key "My App"  # Generate new API key
+  better-ccflare --generate-api-key "My App"  # Generate API-only key
+  better-ccflare --generate-api-key "Admin Key" --admin  # Generate admin key
   better-ccflare --list-api-keys               # List all API keys
   better-ccflare --disable-api-key "My App"    # Disable an API key
 `);
@@ -796,12 +899,13 @@ Examples:
 				"sonnet-4": CLAUDE_MODEL_IDS.SONNET_4,
 				"opus-4.1": CLAUDE_MODEL_IDS.OPUS_4_1,
 				"sonnet-4.5": CLAUDE_MODEL_IDS.SONNET_4_5,
+				"sonnet-4.6": CLAUDE_MODEL_IDS.SONNET_4_6,
 			};
 
 			const fullModel = modelMap[parsed.setModel];
 			if (!fullModel) {
 				console.error(`❌ Invalid model: ${parsed.setModel}`);
-				console.error("Valid models: opus-4, sonnet-4, opus-4.1, sonnet-4.5");
+				console.error(`Valid models: ${Object.keys(modelMap).join(", ")}`);
 				fastExit(1);
 				return;
 			}
@@ -833,7 +937,7 @@ Examples:
 	}
 
 	if (parsed.stats) {
-		const accounts = getAccountsList(dbOps);
+		const accounts = await getAccountsList(dbOps);
 		const stats = {
 			totalAccounts: accounts.length,
 			activeAccounts: accounts.filter(
@@ -876,6 +980,14 @@ Examples:
 			console.error(
 				"  --mode openai-compatible     OpenAI-compatible provider",
 			);
+			console.error("  --mode bedrock         AWS Bedrock (AWS profile)");
+			console.error("  --mode kilo            Kilo Gateway provider (API key)");
+			console.error(
+				"  --mode alibaba-coding-plan  Alibaba Coding Plan International (API key)",
+			);
+			console.error(
+				"  --mode codex               Codex (OpenAI OAuth) provider",
+			);
 			console.error("\nExample:");
 			console.error(
 				"  better-ccflare --add-account work --mode claude-oauth --priority 0",
@@ -890,7 +1002,7 @@ Examples:
 
 			// OAuth modes need interactive prompts for the auth code
 			const needsInteractiveAuth =
-				mode === "claude-oauth" || mode === "console";
+				mode === "claude-oauth" || mode === "console" || mode === "codex";
 
 			if (needsInteractiveAuth) {
 				// Use real prompt adapter for OAuth - needs user to paste auth code
@@ -901,6 +1013,45 @@ Examples:
 					name: parsed.addAccount,
 					mode,
 					priority,
+					adapter: stdPromptAdapter,
+				});
+			} else if (mode === "bedrock") {
+				// Bedrock uses AWS profiles, not API keys
+				if (!parsed.profile) {
+					console.error("❌ --profile flag is required for bedrock mode");
+					console.error(
+						"Example: bun run cli --add-account my-bedrock --mode bedrock --profile default",
+					);
+					await exitGracefully(1);
+				}
+				await addAccount(dbOps, new Config(), {
+					name: parsed.addAccount,
+					mode: "bedrock",
+					priority,
+					profile: parsed.profile || undefined,
+					crossRegionMode: parsed.crossRegionMode,
+					adapter: {
+						select: async <T extends string | number>(
+							_prompt: string,
+							_options: Array<{ label: string; value: T }>,
+						) => (_options[0]?.value as T) || ("yes" as T),
+						input: async (_prompt: string) => "",
+						confirm: async (_prompt: string) => true,
+					},
+				});
+			} else if (
+				mode === "anthropic-compatible" ||
+				mode === "openai-compatible"
+			) {
+				// These modes need interactive prompts for endpoint + API key
+				const { stdPromptAdapter } = await import(
+					"@better-ccflare/cli-commands"
+				);
+				await addAccount(dbOps, new Config(), {
+					name: parsed.addAccount,
+					mode,
+					priority,
+					profile: parsed.profile || undefined,
 					adapter: stdPromptAdapter,
 				});
 			} else {
@@ -952,12 +1103,21 @@ Examples:
 	}
 
 	if (parsed.list) {
-		const accounts = getAccountsList(dbOps);
+		const accounts = await getAccountsList(dbOps);
 		if (accounts.length === 0) {
 			console.log("No accounts configured");
 		} else {
 			console.log("\nAccounts:");
 			accounts.forEach((acc) => {
+				if (acc.mode === "bedrock" && acc.customEndpoint) {
+					const config = parseBedrockConfig(acc.customEndpoint);
+					if (config) {
+						console.log(
+							`  - ${acc.name} (bedrock, profile=${config.profile}, region=${config.region}, cross_region_mode=${acc.crossRegionMode ?? "geographic"}, priority=${acc.priority})`,
+						);
+						return;
+					}
+				}
 				console.log(
 					`  - ${acc.name} (${acc.mode} mode, priority ${acc.priority})`,
 				);
@@ -967,7 +1127,7 @@ Examples:
 	}
 
 	if (parsed.remove) {
-		const result = removeAccount(dbOps, parsed.remove);
+		const result = await removeAccount(dbOps, parsed.remove);
 		console.log(result.message);
 		if (!result.success) {
 			await exitGracefully(1);
@@ -995,22 +1155,58 @@ Examples:
 		}
 	}
 
+	if (parsed.forceResetRateLimit) {
+		try {
+			const result = await forceResetRateLimit(
+				dbOps,
+				parsed.forceResetRateLimit,
+				new Config(),
+			);
+			console.log(result.message);
+			if (!result.success) {
+				await exitGracefully(1);
+			}
+			await exitGracefully(0);
+		} catch (error: unknown) {
+			const errorMessage =
+				error instanceof Error ? error.message : String(error);
+			console.error(`❌ Failed to force reset rate limit: ${errorMessage}`);
+			await exitGracefully(1);
+		}
+	}
+
 	if (parsed.resetStats) {
-		resetAllStats(dbOps.getDatabase());
+		await resetAllStats(dbOps);
 		console.log("✅ Statistics reset successfully");
 		await exitGracefully(0);
 	}
 
 	if (parsed.clearHistory) {
-		const result = clearRequestHistory(dbOps.getDatabase());
+		const cliConfig = container.resolve<Config>(SERVICE_KEYS.Config);
+		const result = await clearRequestHistory(dbOps, cliConfig);
 		console.log(
-			`✅ Request history cleared successfully (${result.count} records removed)`,
+			`✅ Request history cleared successfully (${result.removedPayloads} payloads, ${result.removedRequests} requests removed)`,
+		);
+		await exitGracefully(0);
+	}
+
+	if (parsed.compact) {
+		const result = await compactDatabase(dbOps);
+		if (result.error) {
+			console.error(`❌ Database compact failed: ${result.error}`);
+			console.error(
+				`WAL checkpoint: busy=${result.walBusy}, log=${result.walLog}, checkpointed=${result.walCheckpointed}${result.walTruncateBusy !== undefined ? `, truncateBusy=${result.walTruncateBusy}` : ""}`,
+			);
+			await exitGracefully(1);
+		}
+		console.log(
+			`✅ Database compact completed (vacuumed=${result.vacuumed}, walBusy=${result.walBusy}, walLog=${result.walLog}, walCheckpointed=${result.walCheckpointed}${result.walTruncateBusy !== undefined ? `, walTruncateBusy=${result.walTruncateBusy}` : ""})`,
 		);
 		await exitGracefully(0);
 	}
 
 	if (parsed.pause) {
-		const result = pauseAccount(dbOps, parsed.pause);
+		const result = await pauseAccount(dbOps, parsed.pause);
 		console.log(result.message);
 		if (!result.success) {
 			await exitGracefully(1);
@@ -1019,7 +1215,7 @@ Examples:
 	}
 
 	if (parsed.resume) {
-		const result = resumeAccount(dbOps, parsed.resume);
+		const result = await resumeAccount(dbOps, parsed.resume);
 		console.log(result.message);
 		if (!result.success) {
 			await exitGracefully(1);
@@ -1035,7 +1231,7 @@ Examples:
 			await exitGracefully(1);
 		}
 
-		const result = setAccountPriority(dbOps, name, priority);
+		const result = await setAccountPriority(dbOps, name, priority);
 		console.log(result.message);
 		if (!result.success) {
 			await exitGracefully(1);
@@ -1046,7 +1242,11 @@ Examples:
 	// API Key management commands
 	if (parsed.generateApiKey) {
 		try {
-			const result = await generateApiKey(dbOps, parsed.generateApiKey);
+			// Default to admin if this is the first key, otherwise api-only
+			const defaultRole =
+				(await dbOps.countActiveApiKeys()) === 0 ? "admin" : "api-only";
+			const role = parsed.admin ? ("admin" as const) : defaultRole;
+			const result = await generateApiKey(dbOps, parsed.generateApiKey, role);
 			console.log(formatApiKeyGenerationResult(result));
 			await exitGracefully(0);
 		} catch (error: unknown) {
@@ -1058,7 +1258,7 @@ Examples:
 	}
 
 	if (parsed.listApiKeys) {
-		const apiKeys = listApiKeys(dbOps);
+		const apiKeys = await listApiKeys(dbOps);
 		if (apiKeys.length === 0) {
 			console.log("No API keys configured");
 		} else {
@@ -1068,7 +1268,7 @@ Examples:
 			});
 
 			// Show statistics
-			const stats = getApiKeyStats(dbOps);
+			const stats = await getApiKeyStats(dbOps);
 			console.log(`\nStatistics:`);
 			console.log(`  Total: ${stats.total}`);
 			console.log(`  Active: ${stats.active}`);
@@ -1117,12 +1317,12 @@ Examples:
 	}
 
 	if (parsed.analyze) {
-		analyzePerformance(dbOps.getDatabase());
+		await analyzePerformance(dbOps);
 		await exitGracefully(0);
 	}
 
 	if (parsed.repairDb) {
-		handleRepairCommand(dbOps);
+		await handleRepairCommand(dbOps);
 		await exitGracefully(0);
 	}
 

@@ -266,10 +266,48 @@ export const useRetention = () => {
 export const useSetRetention = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (partial: { payloadDays?: number; requestDays?: number }) =>
-			api.setRetention(partial),
+		mutationFn: (partial: {
+			payloadDays?: number;
+			requestDays?: number;
+			storePayloads?: boolean;
+		}) => api.setRetention(partial),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["retention"] });
+		},
+	});
+};
+
+export const useKeepaliveTtl = () => {
+	return useQuery({
+		queryKey: ["keepalive"],
+		queryFn: () => api.getCacheKeepaliveTtl(),
+	});
+};
+
+export const useSetKeepaliveTtl = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: { ttlMinutes: number }) =>
+			api.setCacheKeepaliveTtl(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["keepalive"] });
+		},
+	});
+};
+
+export const useSystemCacheTtl = () => {
+	return useQuery({
+		queryKey: ["system-cache-ttl"],
+		queryFn: () => api.getSystemCacheTtl(),
+	});
+};
+
+export const useSetSystemCacheTtl = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (enabled: boolean) => api.setSystemCacheTtl(enabled),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["system-cache-ttl"] });
 		},
 	});
 };
@@ -283,5 +321,146 @@ export const useCleanupNow = () => {
 export const useCompactDb = () => {
 	return useMutation({
 		mutationFn: () => api.compactDb(),
+	});
+};
+
+export const useCombos = () => {
+	return useQuery({
+		queryKey: queryKeys.combos(),
+		queryFn: () => api.getCombos(),
+	});
+};
+
+export const useFamilies = () => {
+	return useQuery({
+		queryKey: queryKeys.families(),
+		queryFn: () => api.getFamilies(),
+	});
+};
+
+export const useCreateCombo = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (params: {
+			name: string;
+			description?: string;
+			enabled?: boolean;
+		}) => api.createCombo(params),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+		},
+	});
+};
+
+export const useAssignFamily = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (params: {
+			family: string;
+			comboId: string | null;
+			enabled: boolean;
+		}) => api.assignFamily(params),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.families() });
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+		},
+	});
+};
+
+export const useDeleteCombo = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (id: string) => api.deleteCombo(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+		},
+	});
+};
+
+export const useUpdateCombo = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (params: {
+			id: string;
+			name?: string;
+			description?: string;
+			enabled?: boolean;
+		}) => api.updateCombo(params.id, params),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+		},
+	});
+};
+
+export const useGetCombo = (id: string | null) => {
+	return useQuery({
+		queryKey: ["combo", id],
+		queryFn: () => api.getCombo(id!),
+		enabled: !!id,
+	});
+};
+
+export const useAddComboSlot = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			comboId,
+			params,
+		}: {
+			comboId: string;
+			params: { account_id: string; model: string; enabled?: boolean };
+		}) => api.addComboSlot(comboId, params),
+		onSuccess: (_data, { comboId }) => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+			queryClient.invalidateQueries({ queryKey: ["combo", comboId] });
+		},
+	});
+};
+
+export const useUpdateComboSlot = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			comboId,
+			slotId,
+			params,
+		}: {
+			comboId: string;
+			slotId: string;
+			params: { model?: string; enabled?: boolean };
+		}) => api.updateComboSlot(comboId, slotId, params),
+		onSuccess: (_data, { comboId }) => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+			queryClient.invalidateQueries({ queryKey: ["combo", comboId] });
+		},
+	});
+};
+
+export const useRemoveComboSlot = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({ comboId, slotId }: { comboId: string; slotId: string }) =>
+			api.removeComboSlot(comboId, slotId),
+		onSuccess: (_data, { comboId }) => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+			queryClient.invalidateQueries({ queryKey: ["combo", comboId] });
+		},
+	});
+};
+
+export const useReorderComboSlots = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			comboId,
+			slotIds,
+		}: {
+			comboId: string;
+			slotIds: string[];
+		}) => api.reorderComboSlots(comboId, slotIds),
+		onSuccess: (_data, { comboId }) => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+			queryClient.invalidateQueries({ queryKey: ["combo", comboId] });
+		},
 	});
 };

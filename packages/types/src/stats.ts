@@ -37,6 +37,8 @@ export interface TimePoint {
 	requests: number;
 	tokens: number;
 	costUsd: number;
+	planCostUsd: number;
+	apiCostUsd: number;
 	successRate: number; // 0-100
 	errorRate: number; // 0-100
 	cacheHitRate: number; // 0-100
@@ -74,6 +76,8 @@ export interface AnalyticsResponse {
 		avgResponseTime: number;
 		totalTokens: number;
 		totalCostUsd: number;
+		planCostUsd: number;
+		apiCostUsd: number;
 		avgTokensPerSecond: number | null;
 	};
 	timeSeries: TimePoint[];
@@ -83,6 +87,9 @@ export interface AnalyticsResponse {
 		name: string;
 		requests: number;
 		successRate: number;
+		planCostUsd: number;
+		apiCostUsd: number;
+		totalCostUsd: number;
 	}>;
 	apiKeyPerformance: Array<{
 		id: string;
@@ -96,6 +103,7 @@ export interface AnalyticsResponse {
 		requests: number;
 		totalTokens?: number;
 	}>;
+	accountModelUsage: Array<{ account: string; model: string; count: number }>;
 	modelPerformance: ModelPerformance[];
 }
 
@@ -105,6 +113,19 @@ export interface HealthResponse {
 	accounts: number;
 	timestamp: string;
 	strategy: string;
+	runtime?: {
+		asyncWriter: {
+			healthy: boolean;
+			failureCount: number;
+			queuedJobs: number;
+		};
+		usageWorker: {
+			state: string;
+			pendingAcks: number;
+			lastError: string | null;
+			startedAt: number | null;
+		};
+	};
 }
 
 // Config types
@@ -114,6 +135,7 @@ export interface ConfigResponse {
 	sessionDurationMs: number;
 	default_agent_model: string;
 	tls_enabled: boolean;
+	system_prompt_cache_ttl_1h: boolean;
 }
 
 export interface StrategyUpdateRequest {

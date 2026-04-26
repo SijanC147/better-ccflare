@@ -2,6 +2,7 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import {
 	type ApiKeyGenerationResult,
 	type ApiKeyResponse,
+	type ApiKeyRole,
 	NodeCryptoUtils,
 	toApiKeyResponse,
 } from "@better-ccflare/types";
@@ -12,6 +13,7 @@ import {
 export async function generateApiKey(
 	dbOps: DatabaseOperations,
 	name: string,
+	role: ApiKeyRole = "api-only",
 ): Promise<ApiKeyGenerationResult> {
 	// Validate name
 	if (!name || name.trim().length === 0) {
@@ -26,8 +28,17 @@ export async function generateApiKey(
 	}
 
 	// Check if name already exists
-	if (dbOps.apiKeyNameExists(trimmedName)) {
+	if (await dbOps.apiKeyNameExists(trimmedName)) {
 		throw new Error(`API key with name '${trimmedName}' already exists`);
+	}
+
+	// Prevent creating api-only key when no other keys exist (would lock user out of dashboard)
+	if (role === "api-only" && (await dbOps.countActiveApiKeys()) === 0) {
+		throw new Error(
+			"Cannot create an API-only key as your first key. " +
+				"API-only keys cannot access the dashboard, which would lock you out. " +
+				"Please create an Admin key first using: --role admin",
+		);
 	}
 
 	// Generate API key
@@ -40,13 +51,14 @@ export async function generateApiKey(
 	const id = globalThis.crypto.randomUUID();
 	const now = Date.now();
 
-	dbOps.createApiKey({
+	await dbOps.createApiKey({
 		id,
 		name: trimmedName,
 		hashedKey,
 		prefixLast8,
 		createdAt: now,
 		isActive: true,
+		role,
 	});
 
 	return {
@@ -55,25 +67,28 @@ export async function generateApiKey(
 		apiKey,
 		prefixLast8,
 		createdAt: new Date(now).toISOString(),
+		role,
 	};
 }
 
 /**
  * List all API keys
  */
-export function listApiKeys(dbOps: DatabaseOperations): ApiKeyResponse[] {
-	const apiKeys = dbOps.getApiKeys();
+export async function listApiKeys(
+	dbOps: DatabaseOperations,
+): Promise<ApiKeyResponse[]> {
+	const apiKeys = await dbOps.getApiKeys();
 	return apiKeys.map(toApiKeyResponse);
 }
 
 /**
  * Get details about a specific API key
  */
-export function getApiKey(
+export async function getApiKey(
 	dbOps: DatabaseOperations,
 	name: string,
-): ApiKeyResponse | null {
-	const apiKey = dbOps.getApiKeyByName(name);
+): Promise<ApiKeyResponse | null> {
+	const apiKey = await dbOps.getApiKeyByName(name);
 	if (!apiKey) {
 		return null;
 	}
@@ -83,11 +98,11 @@ export function getApiKey(
 /**
  * Disable an API key (soft delete)
  */
-export function disableApiKey(
+export async function disableApiKey(
 	dbOps: DatabaseOperations,
 	name: string,
-): boolean {
-	const apiKey = dbOps.getApiKeyByName(name);
+): Promise<boolean> {
+	const apiKey = await dbOps.getApiKeyByName(name);
 	if (!apiKey) {
 		throw new Error(`API key '${name}' not found`);
 	}
@@ -96,7 +111,33 @@ export function disableApiKey(
 		throw new Error(`API key '${name}' is already disabled`);
 	}
 
-	const success = dbOps.disableApiKey(apiKey.id);
+	// Prevent disabling the last active admin key if other keys exist
+	if (apiKey.role === "admin") {
+		const allKeys = await dbOps.getApiKeys();
+		const activeAdminKeys = allKeys.filter(
+			(k) => k.isActive && k.role === "admin",
+		);
+
+		// If this is the only admin key but there are other non-admin keys
+		if (activeAdminKeys.length === 1) {
+			const otherActiveKeys = allKeys.filter(
+				(k) => k.isActive && k.id !== apiKey.id,
+			);
+
+			if (otherActiveKeys.length > 0) {
+				// There are other keys, so this admin key is needed for dashboard access
+				throw new Error(
+					"Cannot disable the last active admin key. " +
+						"This would lock you out of the dashboard. " +
+						"Create another admin key first, or disable an API-only key instead.",
+				);
+			}
+			// If this is the only key (last key overall), we allow disabling
+			// which will effectively disable authentication and unlock the dashboard
+		}
+	}
+
+	const success = await dbOps.disableApiKey(apiKey.id);
 	if (!success) {
 		throw new Error(`Failed to disable API key '${name}'`);
 	}
@@ -107,8 +148,11 @@ export function disableApiKey(
 /**
  * Enable a previously disabled API key
  */
-export function enableApiKey(dbOps: DatabaseOperations, name: string): boolean {
-	const apiKey = dbOps.getApiKeyByName(name);
+export async function enableApiKey(
+	dbOps: DatabaseOperations,
+	name: string,
+): Promise<boolean> {
+	const apiKey = await dbOps.getApiKeyByName(name);
 	if (!apiKey) {
 		throw new Error(`API key '${name}' not found`);
 	}
@@ -117,7 +161,7 @@ export function enableApiKey(dbOps: DatabaseOperations, name: string): boolean {
 		throw new Error(`API key '${name}' is already active`);
 	}
 
-	const success = dbOps.enableApiKey(apiKey.id);
+	const success = await dbOps.enableApiKey(apiKey.id);
 	if (!success) {
 		throw new Error(`Failed to enable API key '${name}'`);
 	}
@@ -128,13 +172,42 @@ export function enableApiKey(dbOps: DatabaseOperations, name: string): boolean {
 /**
  * Delete an API key permanently
  */
-export function deleteApiKey(dbOps: DatabaseOperations, name: string): boolean {
-	const apiKey = dbOps.getApiKeyByName(name);
+export async function deleteApiKey(
+	dbOps: DatabaseOperations,
+	name: string,
+): Promise<boolean> {
+	const apiKey = await dbOps.getApiKeyByName(name);
 	if (!apiKey) {
 		throw new Error(`API key '${name}' not found`);
 	}
 
-	const success = dbOps.deleteApiKey(apiKey.id);
+	// Prevent deleting the last active admin key if other keys exist
+	if (apiKey.isActive && apiKey.role === "admin") {
+		const allKeys = await dbOps.getApiKeys();
+		const activeAdminKeys = allKeys.filter(
+			(k) => k.isActive && k.role === "admin",
+		);
+
+		// If this is the only admin key but there are other non-admin keys
+		if (activeAdminKeys.length === 1) {
+			const otherActiveKeys = allKeys.filter(
+				(k) => k.isActive && k.id !== apiKey.id,
+			);
+
+			if (otherActiveKeys.length > 0) {
+				// There are other keys, so this admin key is needed for dashboard access
+				throw new Error(
+					"Cannot delete the last active admin key. " +
+						"This would lock you out of the dashboard. " +
+						"Create another admin key first, or delete an API-only key instead.",
+				);
+			}
+			// If this is the only key (last key overall), we allow deletion
+			// which will disable authentication and unlock the dashboard
+		}
+	}
+
+	const success = await dbOps.deleteApiKey(apiKey.id);
 	if (!success) {
 		throw new Error(`Failed to delete API key '${name}'`);
 	}
@@ -143,15 +216,78 @@ export function deleteApiKey(dbOps: DatabaseOperations, name: string): boolean {
 }
 
 /**
+ * Update an API key's role
+ */
+export async function updateApiKeyRole(
+	dbOps: DatabaseOperations,
+	id: string,
+	role: ApiKeyRole,
+	currentApiKeyId?: string,
+): Promise<boolean> {
+	const apiKey = await dbOps.getApiKey(id);
+	if (!apiKey) {
+		throw new Error("API key not found");
+	}
+
+	// Prevent modifying the currently authenticated key
+	if (currentApiKeyId && apiKey.id === currentApiKeyId) {
+		throw new Error(
+			"Cannot modify the role of the currently authenticated API key to prevent lockouts",
+		);
+	}
+
+	// Prevent changing the first API key from admin (it should always remain admin)
+	// Get all keys ordered by creation date
+	const allKeys = await dbOps.getApiKeys();
+	const firstKey = allKeys.sort((a, b) => a.createdAt - b.createdAt)[0];
+
+	if (firstKey && apiKey.id === firstKey.id && role === "api-only") {
+		throw new Error(
+			"Cannot change the first API key to api-only. The first key must remain an admin key to prevent lockouts.",
+		);
+	}
+
+	// Prevent changing the last active admin key to api-only if other keys exist
+	if (apiKey.role === "admin" && role === "api-only") {
+		const activeAdminKeys = allKeys.filter(
+			(k) => k.isActive && k.role === "admin",
+		);
+
+		// If this is the only admin key but there are other non-admin keys
+		if (activeAdminKeys.length === 1) {
+			const otherActiveKeys = allKeys.filter(
+				(k) => k.isActive && k.id !== apiKey.id,
+			);
+
+			if (otherActiveKeys.length > 0) {
+				// There are other keys, so this admin key is needed for dashboard access
+				throw new Error(
+					"Cannot change the last active admin key to api-only. " +
+						"This would lock you out of the dashboard. " +
+						"Create another admin key first, or change an API-only key to admin instead.",
+				);
+			}
+		}
+	}
+
+	const success = await dbOps.updateApiKeyRole(apiKey.id, role);
+	if (!success) {
+		throw new Error("Failed to update API key role");
+	}
+
+	return true;
+}
+
+/**
  * Get API key statistics
  */
-export function getApiKeyStats(dbOps: DatabaseOperations): {
+export async function getApiKeyStats(dbOps: DatabaseOperations): Promise<{
 	total: number;
 	active: number;
 	inactive: number;
-} {
-	const total = dbOps.countAllApiKeys();
-	const active = dbOps.countActiveApiKeys();
+}> {
+	const total = await dbOps.countAllApiKeys();
+	const active = await dbOps.countActiveApiKeys();
 	const inactive = total - active;
 
 	return {
@@ -166,12 +302,14 @@ export function getApiKeyStats(dbOps: DatabaseOperations): {
  */
 export function formatApiKeyForDisplay(apiKey: ApiKeyResponse): string {
 	const status = apiKey.isActive ? "Active" : "Disabled";
+	const role = apiKey.role === "admin" ? "Admin" : "API-only";
 	const lastUsed = apiKey.lastUsed
 		? new Date(apiKey.lastUsed).toLocaleDateString()
 		: "Never";
 
 	return `  ${apiKey.name} (${apiKey.prefixLast8})
     Status: ${status}
+    Role: ${role}
     Created: ${new Date(apiKey.createdAt).toLocaleDateString()}
     Last Used: ${lastUsed}
     Usage Count: ${apiKey.usageCount}`;
@@ -183,10 +321,12 @@ export function formatApiKeyForDisplay(apiKey: ApiKeyResponse): string {
 export function formatApiKeyGenerationResult(
 	result: ApiKeyGenerationResult,
 ): string {
-	return `✅ API Key Generated Successfully!
+	const role = result.role === "admin" ? "Admin" : "API-only";
+	return `API Key Generated Successfully!
 
 Name: ${result.name}
-Key: ${result.apiKey}  ⚠️  Save this key now - it won't be shown again
+Role: ${role}
+Key: ${result.apiKey}  Save this key now - it won't be shown again
 Prefix: ${result.prefixLast8}
 Created: ${new Date(result.createdAt).toLocaleString()}
 

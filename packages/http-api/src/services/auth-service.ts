@@ -1,11 +1,16 @@
 import type { DatabaseOperations } from "@better-ccflare/database";
-import { type ApiKey, NodeCryptoUtils } from "@better-ccflare/types";
+import {
+	type ApiKey,
+	type ApiKeyRole,
+	NodeCryptoUtils,
+} from "@better-ccflare/types";
 
 export interface AuthenticationResult {
 	isAuthenticated: boolean;
 	apiKey?: ApiKey;
 	apiKeyId?: string;
 	apiKeyName?: string;
+	role?: ApiKeyRole;
 	error?: string;
 }
 
@@ -21,8 +26,8 @@ export class AuthService {
 	/**
 	 * Check if API authentication is enabled (has at least one active API key)
 	 */
-	isAuthenticationEnabled(): boolean {
-		return this.dbOps.countActiveApiKeys() > 0;
+	async isAuthenticationEnabled(): Promise<boolean> {
+		return (await this.dbOps.countActiveApiKeys()) > 0;
 	}
 
 	/**
@@ -37,7 +42,7 @@ export class AuthService {
 		}
 
 		// If no API keys are configured, authentication is disabled
-		if (!this.isAuthenticationEnabled()) {
+		if (!(await this.isAuthenticationEnabled())) {
 			return {
 				isAuthenticated: true,
 				error: undefined,
@@ -45,7 +50,7 @@ export class AuthService {
 		}
 
 		// Get all active API keys
-		const activeApiKeys = this.dbOps.getActiveApiKeys();
+		const activeApiKeys = await this.dbOps.getActiveApiKeys();
 
 		// Check each API key
 		for (const keyRecord of activeApiKeys) {
@@ -62,6 +67,7 @@ export class AuthService {
 					apiKey: keyRecord,
 					apiKeyId: keyRecord.id,
 					apiKeyName: keyRecord.name,
+					role: keyRecord.role,
 				};
 			}
 		}
@@ -70,6 +76,41 @@ export class AuthService {
 			isAuthenticated: false,
 			error: "Invalid API key",
 		};
+	}
+
+	/**
+	 * Authorize endpoint access based on API key role
+	 */
+	async authorizeEndpoint(
+		apiKey: ApiKey,
+		path: string,
+		_method: string,
+	): Promise<{ authorized: boolean; reason?: string }> {
+		// Admin keys have full access
+		if (apiKey.role === "admin") {
+			return { authorized: true };
+		}
+
+		// Debug endpoints are admin-only (heap snapshots contain secrets)
+		if (path.startsWith("/api/debug/")) {
+			return {
+				authorized: false,
+				reason: "Unauthorized: Debug endpoints require an admin API key",
+			};
+		}
+
+		// API-only keys: Only allow /v1/* and /messages/* (proxy endpoints)
+		const isProxyEndpoint =
+			path.startsWith("/v1/") || path.startsWith("/messages/");
+
+		if (!isProxyEndpoint) {
+			return {
+				authorized: false,
+				reason: "Unauthorized: This API key does not have dashboard access",
+			};
+		}
+
+		return { authorized: true };
 	}
 
 	/**
@@ -95,9 +136,10 @@ export class AuthService {
 	}
 
 	/**
-	 * Check if a path should be exempt from authentication
+	 * Check if a path is statically exempt from authentication
+	 * (does not require async DB check)
 	 */
-	isPathExempt(path: string, method: string): boolean {
+	isStaticPathExempt(path: string): boolean {
 		// Health endpoint is always exempt
 		if (path === "/health") {
 			return true;
@@ -108,12 +150,35 @@ export class AuthService {
 			return true;
 		}
 
+		// All other paths are dashboard routes (client-side routing) or static assets
+		// These should be exempt to allow serving the dashboard HTML and assets
+		// This matches the server logic that serves index.html for non-API routes
+		if (
+			!path.startsWith("/api") &&
+			!path.startsWith("/v1") &&
+			!path.startsWith("/messages")
+		) {
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Check if a path should be exempt from authentication
+	 */
+	async isPathExempt(path: string, method: string): Promise<boolean> {
+		// Static exemptions first (no DB hit)
+		if (this.isStaticPathExempt(path)) {
+			return true;
+		}
+
 		// API key management: Only allow initial key creation without auth if no keys exist
 		// All other operations require authentication
 		if (path.startsWith("/api/api-keys")) {
 			// Only allow POST (key creation) without auth if no keys exist
 			if (path === "/api/api-keys" && method === "POST") {
-				return !this.isAuthenticationEnabled(); // Only exempt if no keys exist
+				return !(await this.isAuthenticationEnabled()); // Only exempt if no keys exist
 			}
 			// All other API key operations require authentication
 			return false;
@@ -129,10 +194,7 @@ export class AuthService {
 			return false;
 		}
 
-		// All other paths are dashboard routes (client-side routing) or static assets
-		// These should be exempt to allow serving the dashboard HTML and assets
-		// This matches the server logic that serves index.html for non-API routes
-		return true;
+		return false;
 	}
 
 	/**
@@ -144,14 +206,14 @@ export class AuthService {
 		method: string,
 	): Promise<AuthenticationResult> {
 		// If path is exempt, allow without authentication
-		if (this.isPathExempt(path, method)) {
+		if (await this.isPathExempt(path, method)) {
 			return {
 				isAuthenticated: true,
 			};
 		}
 
 		// If authentication is not enabled (no API keys), allow
-		if (!this.isAuthenticationEnabled()) {
+		if (!(await this.isAuthenticationEnabled())) {
 			return {
 				isAuthenticated: true,
 			};

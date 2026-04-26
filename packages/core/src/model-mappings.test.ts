@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mapModelName, parseModelMappings } from "@better-ccflare/core";
+import {
+	getAllowedModelsMessage,
+	getModelFamily,
+	isValidClaudeModel,
+	mapModelName,
+	parseModelMappings,
+} from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
 
 describe("Model Mapping", () => {
@@ -113,7 +119,7 @@ describe("Model Mapping", () => {
 		expect(futureSonnet).toBe("z-ai/glm-4.5-air:free"); // still matches "sonnet"
 	});
 
-	test("mapModelName handles missing model_mappings gracefully", () => {
+	test("mapModelName passes through original model when no mappings configured", () => {
 		const mockAccount: Account = {
 			id: "test",
 			name: "test-account",
@@ -130,14 +136,14 @@ describe("Model Mapping", () => {
 			custom_endpoint: null,
 		};
 
-		// Should use default fallback mappings
+		// Should return the original model name unchanged
 		const result1 = mapModelName("claude-sonnet-4-5-20250929", mockAccount);
 		const result2 = mapModelName("claude-haiku-4-5-20251001", mockAccount);
 		const result3 = mapModelName("claude-opus-4-1-20250805", mockAccount);
 
-		expect(result1).toBe("openai/gpt-5"); // Default sonnet fallback
-		expect(result2).toBe("openai/gpt-5-mini"); // Default haiku fallback
-		expect(result3).toBe("openai/gpt-5"); // Default opus fallback
+		expect(result1).toBe("claude-sonnet-4-5-20250929");
+		expect(result2).toBe("claude-haiku-4-5-20251001");
+		expect(result3).toBe("claude-opus-4-1-20250805");
 	});
 
 	test("mapModelName handles case insensitive pattern matching correctly", () => {
@@ -173,5 +179,49 @@ describe("Model Mapping", () => {
 		expect(sonnetResult).toBe("lowercase-gpt-4");
 		expect(haikuResult).toBe("lowercase-gpt-3.5");
 		expect(opusResult).toBe("lowercase-gpt-4-turbo");
+	});
+});
+
+describe("Model Validation Utilities", () => {
+	test("getModelFamily detects opus models", () => {
+		expect(getModelFamily("claude-opus-4-6")).toBe("opus");
+		expect(getModelFamily("claude-opus-4-20250514")).toBe("opus");
+		expect(getModelFamily("CLAUDE-OPUS-5-0")).toBe("opus"); // case insensitive
+	});
+
+	test("getModelFamily detects sonnet models", () => {
+		expect(getModelFamily("claude-sonnet-4-5-20250929")).toBe("sonnet");
+		expect(getModelFamily("claude-sonnet-5-0")).toBe("sonnet");
+	});
+
+	test("getModelFamily detects haiku models", () => {
+		expect(getModelFamily("claude-haiku-4-5-20251001")).toBe("haiku");
+		expect(getModelFamily("claude-haiku-5-0")).toBe("haiku");
+	});
+
+	test("getModelFamily returns null for invalid models", () => {
+		expect(getModelFamily("gpt-4")).toBeNull();
+		expect(getModelFamily("invalid-model")).toBeNull();
+		expect(getModelFamily("")).toBeNull();
+	});
+
+	test("isValidClaudeModel accepts valid patterns", () => {
+		expect(isValidClaudeModel("claude-opus-4-6")).toBe(true);
+		expect(isValidClaudeModel("claude-sonnet-4-5-20250929")).toBe(true);
+		expect(isValidClaudeModel("claude-haiku-4-5-20251001")).toBe(true);
+		expect(isValidClaudeModel("claude-opus-5-0-future")).toBe(true); // future models
+	});
+
+	test("isValidClaudeModel rejects invalid patterns", () => {
+		expect(isValidClaudeModel("gpt-4")).toBe(false);
+		expect(isValidClaudeModel("invalid-model")).toBe(false);
+		expect(isValidClaudeModel("")).toBe(false);
+	});
+
+	test("getAllowedModelsMessage returns user-friendly error", () => {
+		const message = getAllowedModelsMessage();
+		expect(message).toContain("opus");
+		expect(message).toContain("sonnet");
+		expect(message).toContain("haiku");
 	});
 });

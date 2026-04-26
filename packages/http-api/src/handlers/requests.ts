@@ -1,9 +1,11 @@
-import type { Database } from "bun:sqlite";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type {
+	BunSqlAdapter,
+	DatabaseOperations,
+} from "@better-ccflare/database";
 import { jsonResponse } from "@better-ccflare/http-common";
 import type { RequestResponse } from "../types";
 
-const MAX_BODY_PREVIEW_BYTES = 32 * 1024; // 32KB preview to keep responses lightweight
+const MAX_BODY_PREVIEW_BYTES = 256 * 1024; // 256KB - match response body cap to preserve full conversation history
 const MAX_REQUEST_DETAILS_LIMIT = 50;
 
 function truncateBase64(body: unknown): {
@@ -31,19 +33,9 @@ function truncateBase64(body: unknown): {
 /**
  * Create a requests summary handler (existing functionality)
  */
-export function createRequestsSummaryHandler(db: Database) {
-	return (limit: number = 50): Response => {
-		const requests = db
-			.query(
-				`
-				SELECT r.*, a.name as account_name
-				FROM requests r
-				LEFT JOIN accounts a ON r.account_used = a.id
-				ORDER BY r.timestamp DESC
-				LIMIT ?1
-			`,
-			)
-			.all(limit) as Array<{
+export function createRequestsSummaryHandler(db: BunSqlAdapter) {
+	return async (limit: number = 50): Promise<Response> => {
+		const requests = await db.query<{
 			id: string;
 			timestamp: number;
 			method: string;
@@ -51,7 +43,7 @@ export function createRequestsSummaryHandler(db: Database) {
 			account_used: string | null;
 			account_name: string | null;
 			status_code: number | null;
-			success: 0 | 1;
+			success: unknown;
 			error_message: string | null;
 			response_time_ms: number | null;
 			failover_attempts: number;
@@ -69,16 +61,27 @@ export function createRequestsSummaryHandler(db: Database) {
 			project: string | null;
 			api_key_id: string | null;
 			api_key_name: string | null;
-		}>;
+			billing_type: string | null;
+			combo_name: string | null;
+		}>(
+			`
+			SELECT r.*, a.name as account_name
+			FROM requests r
+			LEFT JOIN accounts a ON r.account_used = a.id
+			ORDER BY r.timestamp DESC
+			LIMIT ?
+		`,
+			[limit],
+		);
 
 		const response: RequestResponse[] = requests.map((request) => ({
 			id: request.id,
-			timestamp: new Date(request.timestamp).toISOString(),
+			timestamp: new Date(Number(request.timestamp)).toISOString(),
 			method: request.method,
 			path: request.path,
 			accountUsed: request.account_name || request.account_used,
 			statusCode: request.status_code,
-			success: request.success === 1,
+			success: !!request.success,
 			errorMessage: request.error_message,
 			responseTimeMs: request.response_time_ms,
 			failoverAttempts: request.failover_attempts,
@@ -97,6 +100,8 @@ export function createRequestsSummaryHandler(db: Database) {
 			project: request.project,
 			apiKeyId: request.api_key_id || undefined,
 			apiKeyName: request.api_key_name || undefined,
+			billingType: request.billing_type || undefined,
+			comboName: request.combo_name || undefined,
 		}));
 
 		return jsonResponse(response);
@@ -107,12 +112,12 @@ export function createRequestsSummaryHandler(db: Database) {
  * Create a detailed requests handler with full payload data
  */
 export function createRequestsDetailHandler(dbOps: DatabaseOperations) {
-	return (limit = 100): Response => {
+	return async (limit = 100): Promise<Response> => {
 		const safeLimit = Math.min(
 			Math.max(Number.isFinite(limit) ? limit : 1, 1),
 			MAX_REQUEST_DETAILS_LIMIT,
 		);
-		const rows = dbOps.listRequestPayloadsWithAccountNames(safeLimit);
+		const rows = await dbOps.listRequestPayloadsWithAccountNames(safeLimit);
 		const parsed = rows.map((r) => {
 			try {
 				const data = JSON.parse(r.json) as Record<string, unknown>;
@@ -170,8 +175,8 @@ export function createRequestsDetailHandler(dbOps: DatabaseOperations) {
  * This endpoint supports the performance optimization that eliminates JSON parsing bottleneck
  */
 export function createRequestPayloadHandler(dbOps: DatabaseOperations) {
-	return (requestId: string): Response => {
-		const payload = dbOps.getRequestPayload(requestId);
+	return async (requestId: string): Promise<Response> => {
+		const payload = await dbOps.getRequestPayload(requestId);
 
 		if (!payload) {
 			return new Response(JSON.stringify({ error: "Request not found" }), {

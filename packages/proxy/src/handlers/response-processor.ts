@@ -1,6 +1,10 @@
 import { logError, RateLimitError } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
-import type { Provider } from "@better-ccflare/providers";
+import {
+	type Provider,
+	parseCodexUsageHeaders,
+	usageCache,
+} from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "./proxy-types";
 
@@ -56,12 +60,12 @@ export function updateAccountMetadata(
 	// Update basic usage (with optional bypass)
 	if (bypassSession) {
 		// Increment request count without updating session tracking
-		ctx.asyncWriter.enqueue(() => {
+		ctx.asyncWriter.enqueue(async () => {
 			// Manually increment request count and total requests without touching session
-			const db = ctx.dbOps.getDatabase();
+			const db = ctx.dbOps.getAdapter();
 			const now = Date.now();
-			db.run(
-				`UPDATE accounts 
+			await db.run(
+				`UPDATE accounts
 				 SET last_used = ?, request_count = request_count + 1, total_requests = total_requests + 1
 				 WHERE id = ?`,
 				[now, account.id],
@@ -70,7 +74,6 @@ export function updateAccountMetadata(
 	} else {
 		ctx.asyncWriter.enqueue(() => ctx.dbOps.updateAccountUsage(account.id));
 	}
-
 	// Extract and update rate limit info for every response
 	const rateLimitInfo = ctx.provider.parseRateLimit(response);
 	// Only update rate limit metadata when we have actual rate limit headers
@@ -87,21 +90,21 @@ export function updateAccountMetadata(
 	} else {
 		// If there's no rate limit status header (meaning request was successful),
 		// clear the rate_limited_until field if it has expired
-		ctx.asyncWriter.enqueue(() => {
-			const db = ctx.dbOps.getDatabase();
-			const result = db
-				.query<{ rate_limited_until: number | null }, [string]>(
-					"SELECT rate_limited_until FROM accounts WHERE id = ?",
-				)
-				.get(account.id);
+		ctx.asyncWriter.enqueue(async () => {
+			const db = ctx.dbOps.getAdapter();
+			const result = await db.get<{ rate_limited_until: number | null }>(
+				"SELECT rate_limited_until FROM accounts WHERE id = ?",
+				[account.id],
+			);
 
 			if (
 				result?.rate_limited_until &&
 				result.rate_limited_until < Date.now()
 			) {
-				db.run("UPDATE accounts SET rate_limited_until = NULL WHERE id = ?", [
-					account.id,
-				]);
+				await db.run(
+					"UPDATE accounts SET rate_limited_until = NULL WHERE id = ?",
+					[account.id],
+				);
 				log.debug(
 					`Cleared expired rate_limited_until for account ${account.name} on successful response`,
 				);
@@ -109,21 +112,120 @@ export function updateAccountMetadata(
 		});
 	}
 
-	// Extract usage info if supported
-	if (ctx.provider.extractUsageInfo && requestId) {
-		const extractUsageInfo = ctx.provider.extractUsageInfo.bind(ctx.provider);
-		(async () => {
-			const usageInfo = await extractUsageInfo(response.clone() as Response);
-			if (usageInfo) {
-				log.debug(
-					`Extracted usage info for account ${account.name}: ${JSON.stringify(usageInfo)}`,
-				);
-				// Store usage info in database
+	if (account.provider === "codex") {
+		const codexUsage = parseCodexUsageHeaders(response.headers, {
+			defaultUtilization: response.status === 429 ? 100 : 0,
+		});
+		if (codexUsage) {
+			const prevUsage = usageCache.get(account.id);
+			const prevResetAt = (
+				prevUsage as { five_hour?: { resets_at: string | null } } | null
+			)?.five_hour?.resets_at;
+			const newResetAt = codexUsage.five_hour?.resets_at;
+			const windowRolledOver =
+				prevResetAt != null &&
+				newResetAt != null &&
+				newResetAt !== prevResetAt &&
+				new Date(newResetAt).getTime() > new Date(prevResetAt).getTime();
+
+			usageCache.set(account.id, codexUsage);
+			log.debug(
+				`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour.utilization}%, 7d=${codexUsage.seven_day.utilization}%`,
+			);
+
+			// Update rate_limit_reset from usage headers so auto-refresh can track windows
+			const resetTimes = [
+				codexUsage.five_hour?.resets_at,
+				codexUsage.seven_day?.resets_at,
+			]
+				.filter((t): t is string => t != null)
+				.map((t) => new Date(t).getTime());
+			if (resetTimes.length > 0) {
+				const earliestReset = Math.min(...resetTimes);
 				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps.updateRequestUsage(requestId, usageInfo),
+					ctx.dbOps
+						.getAdapter()
+						.run("UPDATE accounts SET rate_limit_reset = ? WHERE id = ?", [
+							earliestReset,
+							account.id,
+						]),
 				);
 			}
-		})();
+
+			if (windowRolledOver) {
+				log.info(
+					`Codex window rolled over for ${account.name}: ${prevResetAt} → ${newResetAt}, resetting session`,
+				);
+				ctx.dbOps
+					.resetAccountSession(account.id, Date.now())
+					.catch((err) =>
+						log.warn(
+							`Failed to reset Codex session for ${account.name} on window reset: ${err}`,
+						),
+					);
+			}
+		}
+	}
+
+	// Extract usage info if supported
+	if (requestId) {
+		// For streaming responses, prefer parseUsage (handles SSE final events)
+		// For non-streaming, use extractUsageInfo (handles JSON responses)
+		const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
+
+		if (isStream && ctx.provider.parseUsage) {
+			const parseUsage = ctx.provider.parseUsage.bind(ctx.provider);
+			(async () => {
+				try {
+					const usageInfo = await parseUsage(response.clone() as Response);
+					if (usageInfo) {
+						log.debug(
+							`Extracted streaming usage for account ${account.name}: ${JSON.stringify(usageInfo)}`,
+						);
+						// Store usage info in database
+						try {
+							await ctx.asyncWriter.enqueue(() =>
+								ctx.dbOps.updateRequestUsage(requestId, usageInfo),
+							);
+						} catch (error) {
+							log.warn(`Failed to save usage for request ${requestId}:`, error);
+						}
+					}
+				} catch (error) {
+					log.warn(
+						`Failed to extract streaming usage for account ${account.name}:`,
+						error,
+					);
+				}
+			})();
+		} else if (ctx.provider.extractUsageInfo) {
+			const extractUsageInfo = ctx.provider.extractUsageInfo.bind(ctx.provider);
+			(async () => {
+				try {
+					const usageInfo = await extractUsageInfo(
+						response.clone() as Response,
+					);
+					if (usageInfo) {
+						log.debug(
+							`Extracted usage info for account ${account.name}: ${JSON.stringify(usageInfo)}`,
+						);
+						// Store usage info in database
+						try {
+							await ctx.asyncWriter.enqueue(() =>
+								ctx.dbOps.updateRequestUsage(requestId, usageInfo),
+							);
+						} catch (error) {
+							log.warn(`Failed to save usage for request ${requestId}:`, error);
+						}
+					}
+				} catch (error) {
+					log.warn(
+						`Failed to extract usage info for account ${account.name}:`,
+						error,
+					);
+				}
+			})();
+		}
 	}
 }
 
@@ -142,7 +244,6 @@ export async function processProxyResponse(
 	requestId?: string,
 	requestMeta?: { headers?: Headers },
 ): Promise<boolean> {
-	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 	let rateLimitInfo = ctx.provider.parseRateLimit(response);
 
 	// For Zai provider, if we got a 429 without resetTime, try parsing the body
@@ -172,7 +273,23 @@ export async function processProxyResponse(
 	}
 
 	// Handle rate limit
-	if (!isStream && rateLimitInfo.isRateLimited) {
+	//
+	// We deliberately do NOT exclude streaming responses here. A rate-limited
+	// account is rate-limited regardless of whether the response that revealed
+	// it was a stream — and the failover decision (returning true to signal
+	// the next-account loop) is safe at this point because no response bytes
+	// have been written to the client yet. The proxy hasn't entered the
+	// `forwardToClient` path; it's still inspecting the upstream response.
+	//
+	// In practice the most common pre-stream 429 has
+	// `content-type: application/json` because Anthropic only opens an SSE
+	// stream when the request is accepted, but the historic `!isStream` guard
+	// here was a footgun: providers that emit `text/event-stream` 429s, or
+	// future provider transforms that preserve the requested content-type on
+	// errors, would silently bypass marking and failover. The mid-stream case
+	// (status 200 with an SSE `event: error` frame partway through the body)
+	// is handled separately by the streaming forwarder — see issue #114.
+	if (rateLimitInfo.isRateLimited) {
 		if (rateLimitInfo.resetTime) {
 			handleRateLimitResponse(account, rateLimitInfo, ctx);
 		} else {
@@ -185,7 +302,7 @@ export async function processProxyResponse(
 					account.id,
 					Date.now() + 5 * 60 * 60 * 1000,
 				),
-			); // Default to 5 hours for Zai
+			); // Default to 5 hours — applies to any provider without reset headers
 		}
 		// Also update metadata for rate-limited responses
 		const bypassSession =
@@ -202,23 +319,23 @@ export async function processProxyResponse(
 	// Clear rate_limited_until if the account was previously rate-limited but is now successful
 	if (!rateLimitInfo.isRateLimited) {
 		// Check if the account had a rate_limited_until value and clear it
-		ctx.asyncWriter.enqueue(() => {
-			const db = ctx.dbOps.getDatabase();
+		ctx.asyncWriter.enqueue(async () => {
+			const db = ctx.dbOps.getAdapter();
 			// Only clear rate_limited_until if it's in the past or null (meaning it was rate-limited before)
-			const result = db
-				.query<{ rate_limited_until: number | null }, [string]>(
-					"SELECT rate_limited_until FROM accounts WHERE id = ?",
-				)
-				.get(account.id);
+			const result = await db.get<{ rate_limited_until: number | null }>(
+				"SELECT rate_limited_until FROM accounts WHERE id = ?",
+				[account.id],
+			);
 
 			if (result?.rate_limited_until) {
 				const now = Date.now();
 				// If the rate limit was in the past (already expired) or if we're just clearing it after success
 				// We clear it regardless if it's expired to ensure the account is no longer marked as rate-limited
 				if (result.rate_limited_until <= now) {
-					db.run("UPDATE accounts SET rate_limited_until = NULL WHERE id = ?", [
-						account.id,
-					]);
+					await db.run(
+						"UPDATE accounts SET rate_limited_until = NULL WHERE id = ?",
+						[account.id],
+					);
 					log.debug(
 						`Cleared expired rate_limited_until for account ${account.name}`,
 					);

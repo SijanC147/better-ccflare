@@ -1,8 +1,7 @@
 import {
 	BUFFER_SIZES,
 	estimateCostUSD,
-	KNOWN_PATTERNS,
-	parseModelMappings,
+	mapModelName,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import { sanitizeProxyHeaders } from "@better-ccflare/http-common";
@@ -171,51 +170,18 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 
 		// Use the shared utility for model mapping
 		return transformRequestBodyModel(request, account, (model, acc) => {
-			// Provider-specific mapping logic
-			let mappedModel = model;
-
-			// First try account-specific mappings
-			if (acc?.model_mappings) {
-				mappedModel = this.mapAccountModel(model, acc);
+			if (acc) {
+				// Use core mapModelName which handles arrays, fallbacks, env overrides, and defaults
+				return mapModelName(model, acc);
 			}
+
 			// Fall back to static config mappings for backward compatibility
-			else if (this.config.modelMappings?.[model]) {
-				mappedModel = this.config.modelMappings[model];
+			if (this.config.modelMappings?.[model]) {
+				return this.config.modelMappings[model];
 			}
 
-			return mappedModel;
+			return model;
 		});
-	}
-
-	/**
-	 * Helper method to map models using account-specific mappings
-	 */
-	private mapAccountModel(originalModel: string, account: Account): string {
-		if (!account.model_mappings) {
-			return originalModel;
-		}
-
-		const accountMappings = parseModelMappings(account.model_mappings);
-
-		if (!accountMappings) {
-			return originalModel;
-		}
-
-		// First try exact match
-		if (accountMappings[originalModel]) {
-			return accountMappings[originalModel];
-		}
-
-		// Try pattern matching for known model families (more efficient)
-		const modelLower = originalModel.toLowerCase();
-
-		for (const pattern of KNOWN_PATTERNS) {
-			if (modelLower.includes(pattern) && accountMappings[pattern]) {
-				return accountMappings[pattern];
-			}
-		}
-
-		return originalModel;
 	}
 
 	parseRateLimit(response: Response): RateLimitInfo {
@@ -444,12 +410,18 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 					if (!line) continue;
 
 					// Parse SSE event
-					if (line.startsWith("event: message_start")) {
+					if (
+						line.startsWith("event: message_start") ||
+						line.startsWith("event:message_start")
+					) {
 						// Look for the next data line, skipping empty lines
 						let dataLine = null;
 						for (let j = i + 1; j < lines.length; j++) {
 							const nextLine = lines[j].trim();
-							if (nextLine.startsWith("data: ")) {
+							if (
+								nextLine.startsWith("data: ") ||
+								nextLine.startsWith("data:")
+							) {
 								dataLine = nextLine;
 								break;
 							} else if (nextLine && !nextLine.startsWith("event: ")) {
@@ -460,7 +432,10 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 
 						if (dataLine) {
 							try {
-								const jsonStr = dataLine.slice(6);
+								// Handle both "data: {...}" and "data:{...}" formats
+								const jsonStr = dataLine.startsWith("data: ")
+									? dataLine.slice(6)
+									: dataLine.slice(5);
 								const data = JSON.parse(jsonStr) as {
 									message?: {
 										model?: string;
@@ -488,12 +463,18 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 								// Ignore parse errors
 							}
 						}
-					} else if (line.startsWith("event: message_delta")) {
+					} else if (
+						line.startsWith("event: message_delta") ||
+						line.startsWith("event:message_delta")
+					) {
 						// Look for the next data line, skipping empty lines
 						let dataLine = null;
 						for (let j = i + 1; j < lines.length; j++) {
 							const nextLine = lines[j].trim();
-							if (nextLine.startsWith("data: ")) {
+							if (
+								nextLine.startsWith("data: ") ||
+								nextLine.startsWith("data:")
+							) {
 								dataLine = nextLine;
 								break;
 							} else if (nextLine && !nextLine.startsWith("event: ")) {
@@ -504,7 +485,10 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 
 						if (dataLine) {
 							try {
-								const jsonStr = dataLine.slice(6);
+								// Handle both "data: {...}" and "data:{...}" formats
+								const jsonStr = dataLine.startsWith("data: ")
+									? dataLine.slice(6)
+									: dataLine.slice(5);
 								const data = JSON.parse(jsonStr) as {
 									usage?: {
 										input_tokens?: number;

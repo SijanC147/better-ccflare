@@ -1,6 +1,11 @@
+import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Config } from "@better-ccflare/config";
 import type { ModelMapping } from "@better-ccflare/core";
 import {
+	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
 	validateApiKey,
 	validateEndpointUrl,
@@ -9,9 +14,14 @@ import {
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { createOAuthFlow } from "@better-ccflare/oauth-flow";
 import {
+	generatePKCE,
 	getOAuthProvider,
 	type TokenRefreshResult as TokenResult,
 } from "@better-ccflare/providers";
+import {
+	initiateDeviceFlow as initiateQwenDeviceFlow,
+	pollForToken as pollQwenForToken,
+} from "@better-ccflare/providers/qwen";
 import type { AccountListItem } from "@better-ccflare/types";
 import {
 	type PromptAdapter,
@@ -31,10 +41,20 @@ export interface AddAccountOptionsWithAdapter {
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
-		| "vertex-ai";
+		| "vertex-ai"
+		| "bedrock"
+		| "kilo"
+		| "openrouter"
+		| "alibaba-coding-plan"
+		| "codex"
+		| "qwen";
 	priority?: number;
 	customEndpoint?: string;
-	modelMappings?: { [key: string]: string };
+	modelMappings?: { [key: string]: string | string[] };
+	/** @deprecated Use comma-separated values in modelMappings instead */
+	modelFallbacks?: { [key: string]: string };
+	profile?: string;
+	crossRegionMode?: "geographic" | "global" | "regional";
 	adapter?: PromptAdapter;
 }
 
@@ -51,7 +71,13 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
-		| "vertex-ai";
+		| "vertex-ai"
+		| "bedrock"
+		| "kilo"
+		| "openrouter"
+		| "alibaba-coding-plan"
+		| "codex"
+		| "qwen";
 }
 
 /**
@@ -71,7 +97,7 @@ async function createConsoleAccountWithApiKey(
 	const validatedApiKey = validateApiKey(apiKey, "Claude API key");
 	const validatedPriority = validatePriority(priority, "priority");
 
-	dbOps.getDatabase().run(
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
 			expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -107,7 +133,7 @@ async function createMinimaxAccount(
 	const validatedApiKey = validateApiKey(apiKey, "Minimax API key");
 	const validatedPriority = validatePriority(priority, "priority");
 
-	dbOps.getDatabase().run(
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
 			expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -133,7 +159,8 @@ export async function createNanoGPTAccount(
 	apiKey: string,
 	priority: number,
 	customEndpoint?: string,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -151,25 +178,182 @@ export async function createNanoGPTAccount(
 		const validatedMappings = validateAndSanitizeModelMappings(modelMappings);
 		validatedModelMappings = JSON.stringify(validatedMappings);
 	}
-	dbOps.getDatabase().run(
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
 			"nanogpt",
 			validatedApiKey,
-			validatedApiKey, // Use API key as refresh token for consistency with HTTP API
-			validatedApiKey, // Use API key as access token
-			now + 365 * 24 * 60 * 60 * 1000, // 1 year from now
+			null,
+			null,
+			null,
 			now,
 			0,
 			0,
 			validatedPriority,
 			validatedEndpoint,
 			validatedModelMappings,
+			validatedModelFallbacks,
+		],
+	);
+}
+
+/**
+ * Create a Kilo Gateway account in the database
+ */
+async function createKiloAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	apiKey: string,
+	priority: number,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedApiKey = validateApiKey(apiKey, "Kilo API key");
+	const validatedPriority = validatePriority(priority, "priority");
+	let validatedModelMappings = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validated = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validated);
+	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"kilo",
+			validatedApiKey,
+			null,
+			null,
+			now + 365 * 24 * 60 * 60 * 1000,
+			now,
+			0,
+			0,
+			validatedPriority,
+			null,
+			validatedModelMappings,
+			validatedModelFallbacks,
+		],
+	);
+}
+
+/**
+ * Create an Alibaba Coding Plan account in the database
+ */
+async function createAlibabaCodingPlanAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	apiKey: string,
+	priority: number,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedApiKey = validateApiKey(apiKey, "Alibaba Coding Plan API key");
+	const validatedPriority = validatePriority(priority, "priority");
+	let validatedModelMappings = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validated = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validated);
+	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"alibaba-coding-plan",
+			validatedApiKey,
+			null,
+			null,
+			null,
+			now,
+			0,
+			0,
+			validatedPriority,
+			null,
+			validatedModelMappings,
+			validatedModelFallbacks,
+		],
+	);
+}
+
+/**
+ * Create an OpenRouter account in the database
+ */
+async function createOpenRouterAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	apiKey: string,
+	priority: number,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedApiKey = validateApiKey(apiKey, "OpenRouter API key");
+	const validatedPriority = validatePriority(priority, "priority");
+	let validatedModelMappings = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validatedMappings = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validatedMappings);
+	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"openrouter",
+			validatedApiKey,
+			null,
+			null,
+			now + 365 * 24 * 60 * 60 * 1000,
+			now,
+			0,
+			0,
+			validatedPriority,
+			null,
+			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -183,7 +367,8 @@ async function createAnthropicCompatibleAccount(
 	apiKey: string,
 	priority: number,
 	customEndpoint?: string,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -208,11 +393,18 @@ async function createAnthropicCompatibleAccount(
 		validatedModelMappings = JSON.stringify(validatedMappings);
 	}
 
-	dbOps.getDatabase().run(
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -222,6 +414,7 @@ async function createAnthropicCompatibleAccount(
 			validatedPriority,
 			validatedEndpoint,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -234,6 +427,8 @@ async function createZaiAccount(
 	name: string,
 	apiKey: string,
 	priority: number,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -241,12 +436,23 @@ async function createZaiAccount(
 	// Validate inputs
 	const validatedApiKey = validateApiKey(apiKey, "z.ai API key");
 	const validatedPriority = validatePriority(priority, "priority");
+	let validatedModelMappings = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validated = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validated);
+	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
 
-	dbOps.getDatabase().run(
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint
-		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -257,11 +463,90 @@ async function createZaiAccount(
 			0,
 			validatedPriority,
 			null,
+			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 
 	console.log(`\nAccount '${name}' added successfully!`);
 	console.log("Type: z.ai (API key)");
+}
+
+/**
+ * Check if an AWS profile exists in ~/.aws/credentials
+ */
+function checkAwsProfileExists(profile: string): boolean {
+	try {
+		const credentialsPath = join(homedir(), ".aws", "credentials");
+		const content = readFileSync(credentialsPath, "utf-8");
+		// Match [profile] section header (handles default and named profiles)
+		const profileRegex = new RegExp(`^\\[${profile}\\]`, "m");
+		return profileRegex.test(content);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Read region from ~/.aws/config for a given profile
+ * AWS config format: [profile <name>] for named profiles, [default] for default
+ */
+function readAwsRegion(profile: string): string | null {
+	try {
+		const configPath = join(homedir(), ".aws", "config");
+		const content = readFileSync(configPath, "utf-8");
+		// In ~/.aws/config, the default profile is [default], named profiles are [profile <name>]
+		const sectionHeader =
+			profile === "default" ? "\\[default\\]" : `\\[profile ${profile}\\]`;
+		const sectionRegex = new RegExp(`${sectionHeader}[\\s\\S]*?(?=\\[|$)`);
+		const sectionMatch = content.match(sectionRegex);
+		if (!sectionMatch) return null;
+		const regionMatch = sectionMatch[0].match(/^region\s*=\s*(.+)$/m);
+		return regionMatch ? regionMatch[1].trim() : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Create a Bedrock account in the database
+ */
+async function createBedrockAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	profile: string,
+	region: string,
+	priority: number,
+	crossRegionMode?: "geographic" | "global" | "regional",
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedPriority = validatePriority(priority, "priority");
+
+	// Store as "bedrock:profile:region" format
+	const customEndpoint = `bedrock:${profile}:${region}`;
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, cross_region_mode
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"bedrock",
+			null, // No API key - uses AWS profiles
+			null, // No refresh token
+			null, // No access token
+			null,
+			now,
+			0,
+			0,
+			validatedPriority,
+			customEndpoint,
+			crossRegionMode || "geographic",
+		],
+	);
 }
 
 /**
@@ -292,7 +577,7 @@ async function createVertexAIAccount(
 		region: region.trim(),
 	});
 
-	dbOps.getDatabase().run(
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
 			expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -302,7 +587,7 @@ async function createVertexAIAccount(
 			name,
 			"vertex-ai",
 			null, // No API key - uses Google Cloud credentials
-			"", // Empty refresh token
+			null, // No refresh token
 			null, // Access token will be fetched on first use
 			null, // Expiry will be set on first token refresh
 			now,
@@ -327,17 +612,38 @@ async function createVertexAIAccount(
 }
 
 /**
- * Prompt user for model mappings
+ * Parse a comma-separated model string into a string or string[].
+ * Trims whitespace around each value and filters empty entries.
+ */
+function parseModelInput(value: string): string | string[] | null {
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	const parts = trimmed
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	return parts.length === 1 ? parts[0] : parts;
+}
+
+/**
+ * Prompt user for model mappings. Supports comma-separated models for cycling.
  */
 async function promptModelMappings(
 	adapter: PromptAdapter,
 	existingMappings?: ModelMapping,
+	providerDefaults?: { opus: string; sonnet: string; haiku: string },
 ): Promise<ModelMapping | null> {
+	const defaults = providerDefaults ?? {
+		opus: "openai/gpt-5",
+		sonnet: "openai/gpt-5",
+		haiku: "openai/gpt-5-mini",
+	};
+
 	const wantsCustomMappings = await adapter.select(
 		"\nDo you want to configure custom model mappings?",
 		[
 			{
-				label: "No, use defaults (opus/sonnet→gpt-5, haiku→gpt-5-mini)",
+				label: `No, use defaults (opus/sonnet→${defaults.opus}, haiku→${defaults.haiku})`,
 				value: "no",
 			},
 			{ label: "Yes, configure custom mappings", value: "yes" },
@@ -349,31 +655,30 @@ async function promptModelMappings(
 	}
 
 	console.log(
-		"\nEnter model mappings (press Enter with empty value to finish):",
+		"\nEnter model mappings (comma-separated for multiple models to cycle through):",
 	);
 	const mappings: ModelMapping = {};
 
 	// Get opus mapping
-	const opusModel = await adapter.input("Opus model (default: openai/gpt-5): ");
-	if (opusModel.trim()) {
-		mappings.opus = opusModel.trim();
-	}
+	const opusModel = await adapter.input(
+		`Opus model (default: ${defaults.opus}): `,
+	);
+	const opus = parseModelInput(opusModel);
+	if (opus) mappings.opus = opus;
 
 	// Get sonnet mapping
 	const sonnetModel = await adapter.input(
-		"Sonnet model (default: openai/gpt-5): ",
+		`Sonnet model (default: ${defaults.sonnet}): `,
 	);
-	if (sonnetModel.trim()) {
-		mappings.sonnet = sonnetModel.trim();
-	}
+	const sonnet = parseModelInput(sonnetModel);
+	if (sonnet) mappings.sonnet = sonnet;
 
 	// Get haiku mapping
 	const haikuModel = await adapter.input(
-		"Haiku model (default: openai/gpt-5-mini): ",
+		`Haiku model (default: ${defaults.haiku}): `,
 	);
-	if (haikuModel.trim()) {
-		mappings.haiku = haikuModel.trim();
-	}
+	const haiku = parseModelInput(haikuModel);
+	if (haiku) mappings.haiku = haiku;
 
 	return Object.keys(mappings).length > 0 ? mappings : null;
 }
@@ -388,6 +693,7 @@ async function createOpenAIAccount(
 	endpoint: string,
 	priority: number,
 	modelMappings: ModelMapping | null,
+	modelFallbacks?: ModelMapping | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -406,11 +712,18 @@ async function createOpenAIAccount(
 		? JSON.stringify(validatedModelMappings)
 		: null;
 
-	dbOps.getDatabase().run(
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
+	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -422,6 +735,7 @@ async function createOpenAIAccount(
 			validatedPriority,
 			validatedEndpoint,
 			modelMappingsJson,
+			validatedModelFallbacks,
 		],
 	);
 
@@ -439,6 +753,261 @@ async function createOpenAIAccount(
 			console.log(`  ${key} → ${value}`);
 		}
 	}
+}
+
+/**
+ * Create a Codex account via OpenAI OAuth with PKCE, using a local callback server on port 1455
+ */
+async function createCodexOAuthAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	priority: number,
+	customEndpoint?: string,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
+): Promise<void> {
+	// Get the CodexOAuthProvider
+	const oauthProvider = getOAuthProvider("codex");
+	if (!oauthProvider) {
+		throw new Error(
+			"Codex OAuth provider not found. This is a bug — please report it.",
+		);
+	}
+
+	const pkce = await generatePKCE();
+	const config = oauthProvider.getOAuthConfig();
+	const authUrl = oauthProvider.generateAuthUrl(config, pkce);
+
+	console.log("\nCodex uses OpenAI OAuth for authentication.");
+	console.log(
+		"A local server will be started on port 1455 to receive the callback.",
+	);
+	console.log("\nOpening browser to authenticate...");
+	console.log(`URL: ${authUrl}`);
+
+	const { openBrowser } = await import("../utils/browser");
+	const browserOpened = await openBrowser(authUrl);
+	if (!browserOpened) {
+		console.log(
+			"\nFailed to open browser automatically. Please manually open the URL above.",
+		);
+	}
+
+	// Start local HTTP server on port 1455 to capture the OAuth callback
+	const callbackPromise = new Promise<{ code: string; state: string }>(
+		(resolve, reject) => {
+			const timeout = setTimeout(
+				() => {
+					server.close();
+					reject(new Error("OAuth callback timed out after 5 minutes."));
+				},
+				5 * 60 * 1000,
+			);
+
+			const server = createServer((req, _res) => {
+				if (!req.url?.startsWith("/auth/callback")) return;
+
+				const url = new URL(req.url, "http://localhost:1455");
+				const code = url.searchParams.get("code");
+				const state = url.searchParams.get("state");
+
+				_res.writeHead(200, { "Content-Type": "text/html" });
+				_res.end(
+					"<html><body><h2>Authentication successful!</h2><p>You can close this tab and return to the terminal.</p></body></html>",
+				);
+
+				clearTimeout(timeout);
+				server.close();
+
+				if (!code) {
+					reject(new Error("No authorization code received in callback."));
+					return;
+				}
+				resolve({ code, state: state || "" });
+			});
+
+			server.listen(1455, "127.0.0.1", () => {
+				console.log(
+					"\nWaiting for OAuth callback on http://localhost:1455/auth/callback ...",
+				);
+			});
+
+			server.on("error", (err) => {
+				clearTimeout(timeout);
+				reject(
+					new Error(
+						`Failed to start local callback server: ${err.message}. Is port 1455 already in use?`,
+					),
+				);
+			});
+		},
+	);
+
+	const { code } = await callbackPromise;
+
+	console.log("\nExchanging code for tokens...");
+	const tokens = await oauthProvider.exchangeCode(code, pkce.verifier, config);
+
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedPriority = validatePriority(priority, "priority");
+
+	let validatedEndpoint: string | null = null;
+	if (customEndpoint) {
+		validatedEndpoint = validateEndpointUrl(customEndpoint, "custom endpoint");
+	}
+
+	let validatedModelMappings: string | null = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validated = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validated);
+	}
+
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks,
+			refresh_token_issued_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"codex",
+			null,
+			tokens.refreshToken,
+			tokens.accessToken,
+			tokens.expiresAt,
+			now,
+			validatedPriority,
+			validatedEndpoint,
+			validatedModelMappings,
+			validatedModelFallbacks,
+			now,
+		],
+	);
+
+	console.log(`\nAccount '${name}' added successfully!`);
+	console.log("Type: Codex (OpenAI OAuth)");
+}
+
+async function createQwenOAuthAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	priority: number,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
+): Promise<void> {
+	console.log("\nQwen uses OAuth device code authentication.");
+	console.log("You will be given a URL and a code to enter in your browser.\n");
+
+	console.log("Initiating device flow...");
+	const deviceFlow = await initiateQwenDeviceFlow();
+
+	console.log(`\n  Verification URL: ${deviceFlow.verificationUri}`);
+	console.log(`  User code:        ${deviceFlow.userCode}`);
+	if (deviceFlow.verificationUriComplete) {
+		console.log(`\n  Quick link: ${deviceFlow.verificationUriComplete}`);
+	}
+
+	console.log(
+		"\nOpen the URL above in your browser and enter the user code to authorize.",
+	);
+
+	const browserOpened = await openBrowser(
+		deviceFlow.verificationUriComplete || deviceFlow.verificationUri,
+	);
+	if (!browserOpened) {
+		console.log(
+			"\nFailed to open browser automatically. Please manually open the URL above.",
+		);
+	}
+
+	console.log("\nWaiting for authorization...");
+
+	const tokens = await pollQwenForToken(
+		deviceFlow.deviceCode,
+		deviceFlow.pkce,
+		deviceFlow.interval,
+		60,
+		(attempt: number) => {
+			if (attempt % 6 === 0) {
+				process.stdout.write(".");
+			}
+		},
+	);
+	console.log("\n"); // newline after progress dots
+
+	console.log("Authorization successful! Saving account...");
+
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedPriority = validatePriority(priority, "priority");
+
+	let validatedModelMappings: string | null = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validated = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validated);
+	}
+
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
+	// Store resource_url as custom_endpoint
+	const resourceUrl = tokens.resource_url
+		? normalizeQwenBaseUrl(tokens.resource_url)
+		: null;
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority,
+			custom_endpoint, model_mappings, model_fallbacks,
+			refresh_token_issued_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"qwen",
+			null,
+			tokens.refresh_token,
+			tokens.access_token,
+			now + tokens.expires_in * 1000,
+			now,
+			validatedPriority,
+			resourceUrl,
+			validatedModelMappings,
+			validatedModelFallbacks,
+			now,
+		],
+	);
+
+	console.log(`\nAccount '${name}' added successfully!`);
+	console.log("Type: Qwen (OAuth device code)");
+}
+
+/**
+ * Normalize Qwen resource_url to ensure it has https:// prefix and /v1 suffix.
+ * Verified against qwen-code: packages/core/src/qwen/qwenContentGenerator.ts
+ */
+function normalizeQwenBaseUrl(url: string): string {
+	let normalized = url.trim();
+	if (!normalized.startsWith("http")) {
+		normalized = `https://${normalized}`;
+	}
+	if (!normalized.endsWith("/v1")) {
+		normalized = `${normalized}/v1`;
+	}
+	return normalized;
 }
 
 /**
@@ -467,9 +1036,18 @@ export async function addAccount(
 		(await adapter.select("What type of account would you like to add?", [
 			{ label: "Claude CLI OAuth account", value: "claude-oauth" },
 			{ label: "Claude API account", value: "console" },
+			{ label: "Codex (OpenAI OAuth)", value: "codex" },
+			{ label: "Qwen (Alibaba Cloud OAuth)", value: "qwen" },
 			{ label: "Vertex AI (Google Cloud)", value: "vertex-ai" },
+			{ label: "AWS Bedrock (AWS profile credentials)", value: "bedrock" },
 			{ label: "z.ai account (API key)", value: "zai" },
 			{ label: "Minimax account (API key)", value: "minimax" },
+			{ label: "Kilo Gateway (API key)", value: "kilo" },
+			{ label: "OpenRouter (API key)", value: "openrouter" },
+			{
+				label: "Alibaba Coding Plan International (API key)",
+				value: "alibaba-coding-plan",
+			},
 			{
 				label: "Anthropic-compatible provider (API key)",
 				value: "anthropic-compatible",
@@ -480,7 +1058,43 @@ export async function addAccount(
 			},
 		]));
 
-	if (mode === "vertex-ai") {
+	if (mode === "bedrock") {
+		// Handle Bedrock accounts with AWS profile credentials
+		const profile = options.profile;
+
+		if (!profile) {
+			throw new Error("--profile flag is required for bedrock mode");
+		}
+
+		// Validate profile exists
+		if (!checkAwsProfileExists(profile)) {
+			throw new Error(
+				`Profile "${profile}" not found. Check ~/.aws/credentials or run: aws configure --profile ${profile}`,
+			);
+		}
+
+		// Read region from ~/.aws/config
+		const region = readAwsRegion(profile);
+		if (!region) {
+			throw new Error(
+				`No region configured for profile "${profile}". Set region in ~/.aws/config or run: aws configure --profile ${profile}`,
+			);
+		}
+
+		// Get priority
+		const priority = providedPriority || 0;
+
+		// Create account
+		await createBedrockAccount(
+			dbOps,
+			name,
+			profile,
+			region,
+			priority,
+			options.crossRegionMode,
+		);
+		// DO NOT print success message - main.ts handles this
+	} else if (mode === "vertex-ai") {
 		// Handle Vertex AI accounts with Google Cloud credentials
 		console.log("\nVertex AI uses Google Cloud authentication.");
 		console.log("Make sure you have authenticated using:");
@@ -532,7 +1146,19 @@ export async function addAccount(
 		// Handle z.ai accounts with API keys
 		const apiKey = await adapter.input("\nEnter your z.ai API key: ");
 
-		await createZaiAccount(dbOps, name, apiKey, providedPriority || 0);
+		// Get model mappings
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createZaiAccount(
+			dbOps,
+			name,
+			apiKey,
+			providedPriority || 0,
+			finalModelMappings,
+		);
 	} else if (mode === "console") {
 		// Handle Console accounts - offer choice between OAuth and direct API key
 		const consoleMethod = await adapter.select(
@@ -652,6 +1278,7 @@ export async function addAccount(
 			adapter,
 			modelMappings,
 		);
+
 		await createNanoGPTAccount(
 			dbOps,
 			name,
@@ -664,6 +1291,146 @@ export async function addAccount(
 		);
 		console.log(`\nAccount '${name}' added successfully!`);
 		console.log("Type: NanoGPT (API key)");
+	} else if (mode === "kilo") {
+		// Handle Kilo Gateway accounts with API keys
+		const apiKey = await adapter.input("\nEnter your Kilo API key: ");
+		// Get priority
+		const priority =
+			providedPriority ??
+			(await adapter.input(
+				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+			));
+		// Get model mappings
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createKiloAccount(
+			dbOps,
+			name,
+			apiKey,
+			typeof priority === "string"
+				? parseInt(priority, 10) || 0
+				: priority || 0,
+			finalModelMappings,
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: Kilo Gateway (API key)");
+		console.log("Endpoint: https://api.kilo.ai/api/gateway");
+	} else if (mode === "openrouter") {
+		// Handle OpenRouter accounts with API keys
+		const apiKey = await adapter.input("\nEnter your OpenRouter API key: ");
+		// Get priority
+		const priority =
+			providedPriority ??
+			(await adapter.input(
+				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+			));
+		// Get model mappings
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createOpenRouterAccount(
+			dbOps,
+			name,
+			apiKey,
+			typeof priority === "string"
+				? parseInt(priority, 10) || 0
+				: priority || 0,
+			finalModelMappings,
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: OpenRouter (API key)");
+		console.log("Endpoint: https://openrouter.ai/api/v1");
+	} else if (mode === "alibaba-coding-plan") {
+		// Handle Alibaba Coding Plan accounts with API keys
+		const apiKey = await adapter.input(
+			"\nEnter your Alibaba Coding Plan API key: ",
+		);
+		// Get priority
+		const priority =
+			providedPriority ??
+			(await adapter.input(
+				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+			));
+		// Get model mappings
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createAlibabaCodingPlanAccount(
+			dbOps,
+			name,
+			apiKey,
+			typeof priority === "string"
+				? parseInt(priority, 10) || 0
+				: priority || 0,
+			finalModelMappings,
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: Alibaba Coding Plan International (API key)");
+		console.log("Endpoint: https://coding-intl.dashscope.aliyuncs.com");
+	} else if (mode === "codex") {
+		// Handle Codex accounts via OpenAI OAuth (port-1455 callback server)
+		const priority =
+			providedPriority ??
+			Number(
+				(await adapter.input(
+					"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+				)) || 0,
+			);
+
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+			{
+				opus: "gpt-5.3-codex",
+				sonnet: "gpt-5.3-codex",
+				haiku: "gpt-5.4-mini",
+			},
+		);
+
+		await createCodexOAuthAccount(
+			dbOps,
+			name,
+			typeof priority === "number"
+				? priority
+				: parseInt(String(priority), 10) || 0,
+			customEndpoint,
+			finalModelMappings,
+		);
+	} else if (mode === "qwen") {
+		// Handle Qwen accounts via OAuth device code flow
+		const priority =
+			providedPriority ??
+			Number(
+				(await adapter.input(
+					"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+				)) || 0,
+			);
+
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+			{
+				opus: "coder-model",
+				sonnet: "coder-model",
+				haiku: "coder-model",
+			},
+		);
+
+		await createQwenOAuthAccount(
+			dbOps,
+			name,
+			typeof priority === "number"
+				? priority
+				: parseInt(String(priority), 10) || 0,
+			finalModelMappings,
+		);
 	} else if (mode === "anthropic-compatible") {
 		// Handle Anthropic-compatible accounts with API keys
 		const apiKey = await adapter.input(
@@ -765,8 +1532,10 @@ export async function addAccount(
 /**
  * Get list of all accounts with formatted information
  */
-export function getAccountsList(dbOps: DatabaseOperations): AccountListItem[] {
-	const accounts = dbOps.getAllAccounts();
+export async function getAccountsList(
+	dbOps: DatabaseOperations,
+): Promise<AccountListItem[]> {
+	const accounts = await dbOps.getAllAccounts();
 	const now = Date.now();
 
 	return accounts.map((account) => {
@@ -804,7 +1573,10 @@ export function getAccountsList(dbOps: DatabaseOperations): AccountListItem[] {
 				if (
 					account.provider === "zai" ||
 					account.provider === "minimax" ||
-					account.provider === "anthropic-compatible"
+					account.provider === "anthropic-compatible" ||
+					account.provider === "bedrock" ||
+					account.provider === "openrouter" ||
+					account.provider === "codex"
 				) {
 					return account.provider;
 				}
@@ -814,6 +1586,8 @@ export function getAccountsList(dbOps: DatabaseOperations): AccountListItem[] {
 			priority: account.priority || 0,
 			autoFallbackEnabled: account.auto_fallback_enabled,
 			autoRefreshEnabled: account.auto_refresh_enabled,
+			customEndpoint: account.custom_endpoint || null,
+			crossRegionMode: account.cross_region_mode || null,
 		};
 	});
 }
@@ -821,14 +1595,17 @@ export function getAccountsList(dbOps: DatabaseOperations): AccountListItem[] {
 /**
  * Remove an account by name
  */
-export function removeAccount(
+export async function removeAccount(
 	dbOps: DatabaseOperations,
 	name: string,
-): { success: boolean; message: string } {
-	const db = dbOps.getDatabase();
-	const result = db.run("DELETE FROM accounts WHERE name = ?", [name]);
+): Promise<{ success: boolean; message: string }> {
+	const adapter = dbOps.getAdapter();
+	const changes = await adapter.runWithChanges(
+		"DELETE FROM accounts WHERE name = ?",
+		[name],
+	);
 
-	if (result.changes === 0) {
+	if (changes === 0) {
 		return {
 			success: false,
 			message: `Account '${name}' not found`,
@@ -850,7 +1627,7 @@ export async function removeAccountWithConfirmation(
 	force?: boolean,
 ): Promise<{ success: boolean; message: string }> {
 	// Check if account exists first
-	const accounts = dbOps.getAllAccounts();
+	const accounts = await dbOps.getAllAccounts();
 	const exists = accounts.some((a) => a.name === name);
 
 	if (!exists) {
@@ -877,19 +1654,18 @@ export async function removeAccountWithConfirmation(
 /**
  * Toggle account pause state (shared logic for pause/resume)
  */
-function toggleAccountPause(
+async function toggleAccountPause(
 	dbOps: DatabaseOperations,
 	name: string,
 	shouldPause: boolean,
-): { success: boolean; message: string } {
-	const db = dbOps.getDatabase();
+): Promise<{ success: boolean; message: string }> {
+	const adapter = dbOps.getAdapter();
 
 	// Get account ID by name
-	const account = db
-		.query<{ id: string; paused: 0 | 1 }, [string]>(
-			"SELECT id, COALESCE(paused, 0) as paused FROM accounts WHERE name = ?",
-		)
-		.get(name);
+	const account = await adapter.get<{ id: string; paused: number }>(
+		"SELECT id, COALESCE(paused, 0) as paused FROM accounts WHERE name = ?",
+		[name],
+	);
 
 	if (!account) {
 		return {
@@ -899,7 +1675,6 @@ function toggleAccountPause(
 	}
 
 	const isPaused = account.paused === 1;
-	const _action = shouldPause ? "pause" : "resume";
 	const actionPast = shouldPause ? "paused" : "resumed";
 
 	if (isPaused === shouldPause) {
@@ -910,9 +1685,9 @@ function toggleAccountPause(
 	}
 
 	if (shouldPause) {
-		dbOps.pauseAccount(account.id);
+		await dbOps.pauseAccount(account.id);
 	} else {
-		dbOps.resumeAccount(account.id);
+		await dbOps.resumeAccount(account.id);
 	}
 
 	return {
@@ -924,37 +1699,38 @@ function toggleAccountPause(
 /**
  * Pause an account by name
  */
-export function pauseAccount(
+export async function pauseAccount(
 	dbOps: DatabaseOperations,
 	name: string,
-): { success: boolean; message: string } {
+): Promise<{ success: boolean; message: string }> {
 	return toggleAccountPause(dbOps, name, true);
 }
 
 /**
  * Resume a paused account by name
  */
-export function resumeAccount(
+export async function resumeAccount(
 	dbOps: DatabaseOperations,
 	name: string,
-): { success: boolean; message: string } {
+): Promise<{ success: boolean; message: string }> {
 	return toggleAccountPause(dbOps, name, false);
 }
 
 /**
  * Set the priority of an account by name
  */
-export function setAccountPriority(
+export async function setAccountPriority(
 	dbOps: DatabaseOperations,
 	name: string,
 	priority: number,
-): { success: boolean; message: string } {
-	const db = dbOps.getDatabase();
+): Promise<{ success: boolean; message: string }> {
+	const adapter = dbOps.getAdapter();
 
 	// Get account ID by name
-	const account = db
-		.query<{ id: string }, [string]>("SELECT id FROM accounts WHERE name = ?")
-		.get(name);
+	const account = await adapter.get<{ id: string }>(
+		"SELECT id FROM accounts WHERE name = ?",
+		[name],
+	);
 
 	if (!account) {
 		return {
@@ -967,7 +1743,7 @@ export function setAccountPriority(
 	const validatedPriority = validatePriority(priority, "priority");
 
 	// Update the account priority
-	db.run("UPDATE accounts SET priority = ? WHERE id = ?", [
+	await adapter.run("UPDATE accounts SET priority = ? WHERE id = ?", [
 		validatedPriority,
 		account.id,
 	]);
@@ -975,6 +1751,227 @@ export function setAccountPriority(
 	return {
 		success: true,
 		message: `Account '${name}' priority set to ${validatedPriority}`,
+	};
+}
+
+/**
+ * Force reset account rate-limit state by account name.
+ * Clears persisted lock fields and then best-effort notifies running local servers
+ * to trigger immediate usage polling.
+ */
+export async function forceResetRateLimit(
+	dbOps: DatabaseOperations,
+	name: string,
+	config: Config,
+): Promise<{ success: boolean; message: string }> {
+	const adapter = dbOps.getAdapter();
+	const account = await adapter.get<{ id: string; name: string }>(
+		"SELECT id, name FROM accounts WHERE name = ?",
+		[name],
+	);
+
+	if (!account) {
+		return {
+			success: false,
+			message: `Account '${name}' not found`,
+		};
+	}
+
+	const updated = dbOps.forceResetAccountRateLimit(account.id);
+	if (!updated) {
+		return {
+			success: false,
+			message: `Failed to reset rate limit for account '${name}'`,
+		};
+	}
+
+	const usagePollTriggered = await notifyServersToForceResetRateLimit(
+		account.id,
+		dbOps,
+		config,
+	);
+
+	return {
+		success: true,
+		message: usagePollTriggered
+			? `Rate limit state for account '${account.name}' was reset and immediate usage polling was triggered.`
+			: `Rate limit state for account '${account.name}' was reset. No running local server accepted the usage poll trigger.`,
+	};
+}
+
+async function notifyServersToForceResetRateLimit(
+	accountId: string,
+	dbOps: DatabaseOperations,
+	config: Config,
+): Promise<boolean> {
+	const configuredPort = config.getRuntime().port || 8080;
+	const defaultPort = 8080;
+	const testPort = 8081;
+	const ports = [...new Set([configuredPort, defaultPort, testPort])];
+	let usagePollTriggered = false;
+
+	// If API authentication is enabled, skip best-effort local notifications.
+	const activeApiKeys = await dbOps.getActiveApiKeys();
+	const requiresAuth = activeApiKeys.length > 0;
+	if (requiresAuth) {
+		console.warn(
+			"⚠️  API authentication is enabled — skipping server notification.\n" +
+				"   The rate limit state was cleared in the database but no usage poll was triggered.",
+		);
+		return false;
+	}
+
+	for (const port of ports) {
+		try {
+			const response = await fetch(
+				`http://localhost:${port}/api/accounts/${accountId}/force-reset-rate-limit`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+
+			if (response.ok) {
+				const data = (await response.json()) as {
+					usagePollTriggered?: boolean;
+				};
+				if (data.usagePollTriggered) {
+					usagePollTriggered = true;
+					break;
+				}
+			}
+		} catch {
+			// Best-effort only: ignore unreachable local ports.
+		}
+	}
+
+	return usagePollTriggered;
+}
+
+/**
+ * Re-authenticate a Qwen account via device code flow (preserves all metadata)
+ */
+async function reauthenticateQwenAccount(
+	dbOps: DatabaseOperations,
+	account: {
+		id: string;
+		provider: string;
+		priority: number;
+		custom_endpoint: string | null;
+		api_key: string | null;
+	},
+	name: string,
+): Promise<{ success: boolean; message: string }> {
+	const db = dbOps.getAdapter();
+
+	console.log(`\nRe-authenticating Qwen account '${name}'...`);
+	console.log(
+		"This will preserve all your account metadata (usage stats, priority, etc.)",
+	);
+	console.log("\nQwen uses OAuth device code authentication.");
+	console.log("You will be given a URL and a code to enter in your browser.\n");
+
+	console.log("Initiating device flow...");
+	const deviceFlow = await initiateQwenDeviceFlow();
+
+	console.log(`\n  Verification URL: ${deviceFlow.verificationUri}`);
+	console.log(`  User code:        ${deviceFlow.userCode}`);
+	if (deviceFlow.verificationUriComplete) {
+		console.log(`\n  Quick link: ${deviceFlow.verificationUriComplete}`);
+	}
+
+	console.log(
+		"\nOpen the URL above in your browser and enter the user code to authorize.",
+	);
+
+	const browserOpened = await openBrowser(
+		deviceFlow.verificationUriComplete || deviceFlow.verificationUri,
+	);
+	if (!browserOpened) {
+		console.log(
+			"\nFailed to open browser automatically. Please manually open the URL above.",
+		);
+	}
+
+	console.log("\nWaiting for authorization...");
+
+	let tokens: Awaited<ReturnType<typeof pollQwenForToken>>;
+	try {
+		tokens = await pollQwenForToken(
+			deviceFlow.deviceCode,
+			deviceFlow.pkce,
+			deviceFlow.interval,
+			60,
+			(attempt: number) => {
+				if (attempt % 6 === 0) {
+					process.stdout.write(".");
+				}
+			},
+		);
+	} catch (error) {
+		return {
+			success: false,
+			message: `Qwen authorization failed: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	console.log("\n");
+
+	const resourceUrl = tokens.resource_url
+		? normalizeQwenBaseUrl(tokens.resource_url)
+		: account.custom_endpoint;
+
+	try {
+		await db.run(
+			`UPDATE accounts SET
+				refresh_token = ?,
+				access_token = ?,
+				expires_at = ?,
+				custom_endpoint = ?
+			WHERE id = ?`,
+			[
+				tokens.refresh_token,
+				tokens.access_token,
+				Date.now() + tokens.expires_in * 1000,
+				resourceUrl,
+				account.id,
+			],
+		);
+	} catch (dbError) {
+		return {
+			success: false,
+			message: `Database error while updating tokens: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
+		};
+	}
+
+	console.log(`\nAccount '${name}' re-authenticated successfully!`);
+	console.log(
+		"All account metadata (usage stats, priority, settings) has been preserved.",
+	);
+	console.log("OAuth tokens have been updated.");
+
+	// Notify running servers to reload tokens (best-effort)
+	console.log("\nNotifying running servers to reload tokens...");
+	for (const port of [8080, 8081]) {
+		try {
+			const response = await fetch(
+				`http://localhost:${port}/api/accounts/${account.id}/reload`,
+				{ method: "POST", headers: { "Content-Type": "application/json" } },
+			);
+			if (response.ok) {
+				console.log(`✓ Token reload successful on port ${port}`);
+			} else {
+				console.log(
+					`✗ Server not responding on port ${port} (${response.status})`,
+				);
+			}
+		} catch {
+			console.log(`✗ No server running on port ${port}`);
+		}
+	}
+
+	return {
+		success: true,
+		message: `Account '${name}' re-authenticated successfully. All metadata preserved.`,
 	};
 }
 
@@ -987,23 +1984,19 @@ export async function reauthenticateAccount(
 	config: Config,
 	name: string,
 ): Promise<{ success: boolean; message: string }> {
-	const db = dbOps.getDatabase();
+	const db = dbOps.getAdapter();
 
 	// Get account by name
-	const account = db
-		.query<
-			{
-				id: string;
-				provider: string;
-				priority: number;
-				custom_endpoint: string | null;
-				api_key: string | null;
-			},
-			[string]
-		>(
-			"SELECT id, provider, priority, custom_endpoint, api_key FROM accounts WHERE name = ?",
-		)
-		.get(name);
+	const account = await db.get<{
+		id: string;
+		provider: string;
+		priority: number;
+		custom_endpoint: string | null;
+		api_key: string | null;
+	}>(
+		"SELECT id, provider, priority, custom_endpoint, api_key FROM accounts WHERE name = ?",
+		[name],
+	);
 
 	if (!account) {
 		return {
@@ -1012,12 +2005,17 @@ export async function reauthenticateAccount(
 		};
 	}
 
-	// Check if account supports OAuth (only anthropic provider)
-	if (account.provider !== "anthropic") {
+	// Check if account supports OAuth re-authentication
+	if (account.provider !== "anthropic" && account.provider !== "qwen") {
 		return {
 			success: false,
-			message: `Account '${name}' (${account.provider}) does not support OAuth re-authentication. Only Anthropic accounts can be re-authenticated.`,
+			message: `Account '${name}' (${account.provider}) does not support OAuth re-authentication. Only Anthropic and Qwen accounts can be re-authenticated.`,
 		};
+	}
+
+	// Handle Qwen re-authentication via device code flow
+	if (account.provider === "qwen") {
+		return reauthenticateQwenAccount(dbOps, account, name);
 	}
 
 	// Create OAuth flow instance
@@ -1124,7 +2122,7 @@ export async function reauthenticateAccount(
 			// Update existing account with new API key (preserving all other metadata)
 			// Use transaction for atomic update
 			try {
-				db.run(
+				await db.run(
 					`UPDATE accounts SET
 						api_key = ?,
 						refresh_token = ?,
@@ -1154,7 +2152,7 @@ export async function reauthenticateAccount(
 	console.log("Updating OAuth tokens...");
 
 	try {
-		db.run(
+		await db.run(
 			`UPDATE accounts SET
 				refresh_token = ?,
 				access_token = ?,
@@ -1206,7 +2204,7 @@ export async function reauthenticateAccount(
 		const testPort = 8081;
 
 		// Check if API authentication is enabled
-		const activeApiKeys = dbOps.getActiveApiKeys();
+		const activeApiKeys = await dbOps.getActiveApiKeys();
 		const requiresAuth = activeApiKeys.length > 0;
 
 		if (requiresAuth) {

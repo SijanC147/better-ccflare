@@ -10,6 +10,12 @@ export const PROVIDER_NAMES = {
 	OPENAI_COMPATIBLE: "openai-compatible",
 	NANOGPT: "nanogpt",
 	VERTEX_AI: "vertex-ai",
+	BEDROCK: "bedrock",
+	KILO: "kilo",
+	OPENROUTER: "openrouter",
+	ALIBABA_CODING_PLAN: "alibaba-coding-plan",
+	CODEX: "codex",
+	QWEN: "qwen",
 } as const;
 
 export type ProviderName = (typeof PROVIDER_NAMES)[keyof typeof PROVIDER_NAMES];
@@ -52,7 +58,7 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		defaultEndpoint: "https://api.anthropic.com",
 	},
 	[PROVIDER_NAMES.ZAI]: {
-		requiresSessionTracking: false, // Zai is typically pay-as-you-go
+		requiresSessionTracking: true, // Zai has 5-hour session windows
 		supportsUsageTracking: true, // Zai supports usage tracking via monitoring API
 		supportsOAuth: false, // Zai uses API key authentication
 		defaultEndpoint: "https://api.z.ai/api/anthropic",
@@ -86,6 +92,43 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		supportsUsageTracking: false, // Vertex AI doesn't have a usage tracking API
 		supportsOAuth: false, // Vertex AI uses Google Cloud authentication (not Anthropic OAuth)
 		defaultEndpoint: "https://aiplatform.googleapis.com",
+	},
+	[PROVIDER_NAMES.BEDROCK]: {
+		requiresSessionTracking: false, // Pay-as-you-go, no 5-hour windows
+		supportsUsageTracking: false, // Usage extracted per-request, not via polling API
+		supportsOAuth: false, // AWS credentials, not OAuth
+		defaultEndpoint: "bedrock://aws", // Placeholder (SDK-based, not HTTP)
+	},
+	[PROVIDER_NAMES.KILO]: {
+		requiresSessionTracking: false, // Kilo is credit-based, no session windows
+		supportsUsageTracking: true, // Kilo supports credit balance via /api/user
+		supportsOAuth: false, // Kilo uses API key authentication
+		defaultEndpoint: "https://api.kilo.ai/api/gateway",
+	},
+	[PROVIDER_NAMES.OPENROUTER]: {
+		requiresSessionTracking: false, // OpenRouter is pay-as-you-go
+		supportsUsageTracking: false, // Credits endpoint requires a separate management key
+		supportsOAuth: false, // OpenRouter uses API key authentication
+		defaultEndpoint: "https://openrouter.ai/api/v1",
+	},
+	[PROVIDER_NAMES.ALIBABA_CODING_PLAN]: {
+		requiresSessionTracking: false, // Alibaba Coding Plan uses quota windows, not session stickiness
+		supportsUsageTracking: false, // Usage endpoint requires session cookies, not API key
+		supportsOAuth: false, // Uses API key authentication
+		defaultEndpoint:
+			"https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
+	},
+	[PROVIDER_NAMES.CODEX]: {
+		requiresSessionTracking: true, // Codex has 5h/7d usage windows like Anthropic OAuth
+		supportsUsageTracking: false, // Usage tracked via response headers, not a polling API
+		supportsOAuth: true, // Codex uses OpenAI OAuth with PKCE
+		defaultEndpoint: "https://chatgpt.com/backend-api/codex/responses",
+	},
+	[PROVIDER_NAMES.QWEN]: {
+		requiresSessionTracking: false, // Qwen OAuth is quota-based, no session stickiness
+		supportsUsageTracking: true, // Usage tracked via response body (OpenAI-compatible)
+		supportsOAuth: true, // Qwen uses OAuth 2.0 device code flow
+		defaultEndpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 	},
 } as const satisfies Record<ProviderName, ProviderConfig>;
 

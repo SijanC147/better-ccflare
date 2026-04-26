@@ -1,5 +1,18 @@
+import { CLAUDE_CLI_VERSION } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import { supportsUsageTracking } from "@better-ccflare/types";
+import {
+	type AlibabaCodingPlanUsageData,
+	fetchAlibabaCodingPlanUsageData,
+	getRepresentativeAlibabaCodingPlanUtilization,
+	getRepresentativeAlibabaCodingPlanWindow,
+} from "./alibaba-coding-plan-usage-fetcher";
+import {
+	fetchKiloUsageData,
+	getRepresentativeKiloUtilization,
+	getRepresentativeKiloWindow,
+	type KiloUsageData,
+} from "./kilo-usage-fetcher";
 import {
 	fetchNanoGPTUsageData,
 	type NanoGPTUsageData,
@@ -35,27 +48,96 @@ export interface UsageData {
 }
 
 // Union type for all provider usage data
-export type AnyUsageData = UsageData | NanoGPTUsageData | ZaiUsageData;
+export type AnyUsageData =
+	| UsageData
+	| NanoGPTUsageData
+	| ZaiUsageData
+	| KiloUsageData
+	| AlibabaCodingPlanUsageData;
+
+/**
+ * Extract the primary window reset timestamp (ms) from usage data.
+ * Returns null if the provider doesn't expose a reset time or it isn't available.
+ */
+export function extractWindowResetTime(
+	data: AnyUsageData,
+	provider: string,
+): number | null {
+	if (provider === "zai") {
+		const zai = data as ZaiUsageData;
+		return zai.tokens_limit?.resetAt ?? null;
+	}
+	if (provider === "anthropic") {
+		const anthropic = data as UsageData;
+		const resetsAt = anthropic.five_hour?.resets_at;
+		if (!resetsAt) return null;
+		const ms = new Date(resetsAt).getTime();
+		return Number.isFinite(ms) ? ms : null;
+	}
+	if (provider === "codex") {
+		const codex = data as UsageData;
+		const resetsAt = codex.five_hour?.resets_at;
+		if (!resetsAt) return null;
+		const ms = new Date(resetsAt).getTime();
+		return Number.isFinite(ms) ? ms : null;
+	}
+	return null;
+}
 
 /**
  * Fetch usage data from Anthropic's OAuth usage endpoint
  */
+export interface UsageFetchResult {
+	data: UsageData | null;
+	retryAfterMs: number | null; // Set when server returns retry-after on 429
+}
+
 export async function fetchUsageData(
 	accessToken: string,
-): Promise<UsageData | null> {
+): Promise<UsageFetchResult> {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), 5000);
 	try {
 		const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
 			method: "GET",
 			headers: {
 				Authorization: `Bearer ${accessToken}`,
 				"anthropic-beta": "oauth-2025-04-20",
+				"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
 				Accept: "application/json",
+				"Content-Type": "application/json",
 			},
+			signal: controller.signal,
 		});
 
 		if (!response.ok) {
 			const errorMessage = response.statusText;
 			const responseHeaders = Object.fromEntries(response.headers.entries());
+
+			// Extract retry-after on 429 so callers can schedule smarter backoff
+			let retryAfterMs: number | null = null;
+			if (response.status === 429) {
+				const retryAfter = response.headers.get("retry-after");
+				if (retryAfter) {
+					const seconds = Number(retryAfter);
+					if (Number.isFinite(seconds) && seconds > 0) {
+						retryAfterMs = Math.round(seconds * 1000);
+						log.warn(`Usage endpoint rate-limited, retry-after: ${seconds}s`);
+					} else {
+						const retryDateMs = new Date(retryAfter).getTime();
+						if (Number.isFinite(retryDateMs)) {
+							const deltaMs = retryDateMs - Date.now();
+							if (deltaMs > 0) {
+								retryAfterMs = deltaMs;
+								log.warn(
+									`Usage endpoint rate-limited, retry-after date: ${retryAfter}`,
+								);
+							}
+						}
+					}
+				}
+			}
+
 			try {
 				const errorBody = await response.text();
 				log.error(
@@ -81,11 +163,11 @@ export async function fetchUsageData(
 					},
 				);
 			}
-			return null;
+			return { data: null, retryAfterMs };
 		}
 
 		const data = (await response.json()) as UsageData;
-		return data;
+		return { data, retryAfterMs: null };
 	} catch (error) {
 		// Ensure we have a proper error object for logging
 		const errorMessage =
@@ -96,7 +178,9 @@ export async function fetchUsageData(
 					: String(error);
 
 		log.error("Error fetching usage data:", errorMessage || "Unknown error");
-		return null;
+		return { data: null, retryAfterMs: null };
+	} finally {
+		clearTimeout(timeoutId);
 	}
 }
 
@@ -191,10 +275,77 @@ export type AccessTokenProvider = () => Promise<string>;
  */
 class UsageCache {
 	private cache = new Map<string, { data: AnyUsageData; timestamp: number }>();
-	private polling = new Map<string, NodeJS.Timeout>();
+	private pollTimeouts = new Map<string, NodeJS.Timeout>();
+	private failureCounts = new Map<string, number>();
 	private tokenProviders = new Map<string, AccessTokenProvider>();
 	private providerTypes = new Map<string, string>(); // Track provider type for each account
 	private customEndpoints = new Map<string, string | null>(); // Track custom endpoints
+	private windowResetCallbacks = new Map<string, (accountId: string) => void>();
+
+	/**
+	 * Schedule the next poll with exponential backoff on failures.
+	 * If retryAfterMs is provided (from a 429 retry-after header), it takes
+	 * precedence over the calculated backoff delay.
+	 */
+	private scheduleNextPoll(
+		accountId: string,
+		tokenProvider: AccessTokenProvider,
+		baseIntervalMs: number,
+		provider?: string,
+		customEndpoint?: string | null,
+		retryAfterMs?: number | null,
+	) {
+		const failures = this.failureCounts.get(accountId) ?? 0;
+		// Add ±20% random jitter to the base interval so accounts spread out
+		// and don't lock into sync with each other over time.
+		const jitter = (Math.random() - 0.5) * 0.4 * baseIntervalMs;
+		// Use server-provided retry-after if available, otherwise exponential backoff capped at 30 minutes
+		const delay =
+			retryAfterMs != null
+				? retryAfterMs
+				: failures === 0
+					? baseIntervalMs + jitter
+					: Math.min(baseIntervalMs * 2 ** failures, 30 * 60 * 1000);
+
+		if (failures > 0) {
+			log.info(
+				`Usage poll backoff for account ${accountId}: retry in ${Math.round(delay / 1000)}s (${failures} consecutive failure(s))${retryAfterMs != null ? " [server retry-after]" : ""}`,
+			);
+		}
+
+		const timeoutId = setTimeout(async () => {
+			this.pollTimeouts.delete(accountId);
+			// Bail if polling was stopped
+			if (!this.tokenProviders.has(accountId)) return;
+
+			const { success, retryAfterMs: nextRetryAfterMs } =
+				await this.fetchAndCache(
+					accountId,
+					tokenProvider,
+					provider,
+					customEndpoint,
+				);
+			if (success) {
+				this.failureCounts.delete(accountId); // reset streak on success
+			} else {
+				const count = (this.failureCounts.get(accountId) ?? 0) + 1;
+				this.failureCounts.set(accountId, count);
+			}
+			// Schedule the next poll if still active
+			if (this.tokenProviders.has(accountId)) {
+				this.scheduleNextPoll(
+					accountId,
+					tokenProvider,
+					baseIntervalMs,
+					provider,
+					customEndpoint,
+					nextRetryAfterMs,
+				);
+			}
+		}, delay);
+
+		this.pollTimeouts.set(accountId, timeoutId);
+	}
 
 	/**
 	 * Start polling for an account's usage data
@@ -205,6 +356,7 @@ class UsageCache {
 		provider?: string,
 		intervalMs?: number,
 		customEndpoint?: string | null,
+		onWindowReset?: (accountId: string) => void,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -215,13 +367,16 @@ class UsageCache {
 		}
 
 		// Stop existing polling if any to prevent leaks
-		const existing = this.polling.get(accountId);
+		const existing = this.pollTimeouts.get(accountId);
 		if (existing) {
-			clearInterval(existing);
+			clearTimeout(existing);
 			log.warn(
-				`Clearing existing polling interval for account ${accountId} before starting new one`,
+				`Clearing existing polling timeout for account ${accountId} before starting new one`,
 			);
 		}
+
+		// Reset failure count for fresh start
+		this.failureCounts.delete(accountId);
 
 		// Store the token provider (either a static token or a function)
 		const tokenProvider: AccessTokenProvider =
@@ -230,40 +385,80 @@ class UsageCache {
 				: accessTokenOrProvider;
 		this.tokenProviders.set(accountId, tokenProvider);
 
-		// Store provider type and custom endpoint for this account
+		// Store provider type, custom endpoint, and window-reset callback for this account
 		if (provider) {
 			this.providerTypes.set(accountId, provider);
 		}
 		if (customEndpoint !== undefined) {
 			this.customEndpoints.set(accountId, customEndpoint);
 		}
+		if (onWindowReset) {
+			this.windowResetCallbacks.set(accountId, onWindowReset);
+		} else {
+			this.windowResetCallbacks.delete(accountId);
+		}
+
+		// Default to 90s if not provided
+		const baseIntervalMs = intervalMs ?? 90000;
 
 		// Immediate fetch
-		this.fetchAndCache(accountId, tokenProvider, provider, customEndpoint);
-
-		// Default to 90 seconds ± 5 seconds with randomization if not provided
-		const pollingInterval = intervalMs ?? 90000 + Math.random() * 10000;
-
-		// Start interval
-		const interval = setInterval(() => {
-			this.fetchAndCache(accountId, tokenProvider, provider, customEndpoint);
-		}, pollingInterval);
-
-		this.polling.set(accountId, interval);
-		log.debug(
-			`Started usage polling for account ${accountId} (provider: ${provider}) with interval ${Math.round(pollingInterval / 1000)}s`,
+		this.fetchAndCache(accountId, tokenProvider, provider, customEndpoint).then(
+			({ success, retryAfterMs }) => {
+				if (!success) {
+					this.failureCounts.set(accountId, 1);
+				}
+				if (this.tokenProviders.has(accountId)) {
+					this.scheduleNextPoll(
+						accountId,
+						tokenProvider,
+						baseIntervalMs,
+						provider,
+						customEndpoint,
+						retryAfterMs,
+					);
+				}
+			},
 		);
+
+		log.debug(
+			`Started usage polling for account ${accountId} (provider: ${provider}) with base interval ${Math.round(baseIntervalMs / 1000)}s`,
+		);
+	}
+
+	/**
+	 * Trigger an immediate usage fetch for an account that already has polling configured.
+	 * Returns false when no polling/token provider is configured or when the fetch fails.
+	 */
+	async refreshNow(accountId: string): Promise<boolean> {
+		const tokenProvider = this.tokenProviders.get(accountId);
+		if (!tokenProvider) {
+			return false;
+		}
+
+		const provider = this.providerTypes.get(accountId);
+		const customEndpoint = this.customEndpoints.get(accountId);
+		const { success } = await this.fetchAndCache(
+			accountId,
+			tokenProvider,
+			provider,
+			customEndpoint,
+		);
+		return success;
 	}
 
 	/**
 	 * Stop polling for an account
 	 */
 	stopPolling(accountId: string) {
-		const interval = this.polling.get(accountId);
-		if (interval) {
-			clearInterval(interval);
-			this.polling.delete(accountId);
+		const timeout = this.pollTimeouts.get(accountId);
+		if (timeout) {
+			clearTimeout(timeout);
+			this.pollTimeouts.delete(accountId);
+		}
+		if (this.tokenProviders.has(accountId)) {
 			this.tokenProviders.delete(accountId);
+			this.failureCounts.delete(accountId);
+			this.windowResetCallbacks.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
 			this.cache.delete(accountId);
 			log.info(
@@ -273,14 +468,16 @@ class UsageCache {
 	}
 
 	/**
-	 * Fetch and cache usage data
+	 * Fetch and cache usage data.
+	 * Returns { success, retryAfterMs } where retryAfterMs is set when the
+	 * server returns a retry-after header on a 429 response.
 	 */
 	private async fetchAndCache(
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
 		provider?: string,
 		customEndpoint?: string | null,
-	) {
+	): Promise<{ success: boolean; retryAfterMs: number | null }> {
 		try {
 			// Get a fresh access token or API key on each fetch
 			let token: string;
@@ -298,7 +495,7 @@ class UsageCache {
 				log.warn(
 					`Token provider failed for account ${accountId}: ${tokenErrorMessage || "Unknown error"}`,
 				);
-				return;
+				return { success: false, retryAfterMs: null };
 			}
 
 			// Validate token before proceeding
@@ -306,7 +503,7 @@ class UsageCache {
 				log.warn(
 					`No valid token available for account ${accountId}, skipping usage fetch`,
 				);
-				return;
+				return { success: false, retryAfterMs: null };
 			}
 
 			// Fetch data based on provider type
@@ -332,6 +529,7 @@ class UsageCache {
 					log.debug(
 						`Successfully fetched NanoGPT usage data for account ${accountId}: ${utilization}% (${window} window)`,
 					);
+					return { success: true, retryAfterMs: null };
 				}
 			} else if (provider === "zai") {
 				// Fetch Zai usage data
@@ -343,6 +541,9 @@ class UsageCache {
 						getRepresentativeZaiWindow,
 					} = await import("./zai-usage-fetcher");
 
+					const callback = this.windowResetCallbacks.get(accountId);
+					if (callback)
+						this.notifyWindowReset(accountId, data, "zai", callback);
 					this.cache.set(accountId, { data, timestamp: Date.now() });
 					const utilization = getRepresentativeZaiUtilization(
 						data as ZaiUsageData,
@@ -351,19 +552,67 @@ class UsageCache {
 					log.debug(
 						`Successfully fetched Zai usage data for account ${accountId}: ${utilization}% (${window} window)`,
 					);
+					return { success: true, retryAfterMs: null };
+				}
+			} else if (provider === "kilo") {
+				// Fetch Kilo usage data
+				data = await fetchKiloUsageData(token);
+				if (data) {
+					this.cache.set(accountId, { data, timestamp: Date.now() });
+					const utilization = getRepresentativeKiloUtilization(
+						data as KiloUsageData,
+					);
+					const window = getRepresentativeKiloWindow(data as KiloUsageData);
+					log.debug(
+						`Successfully fetched Kilo usage data for account ${accountId}: $${(data as KiloUsageData).remainingUsd.toFixed(2)} remaining (${utilization?.toFixed(1)}% used, ${window})`,
+					);
+					return { success: true, retryAfterMs: null };
+				}
+			} else if (provider === "alibaba-coding-plan") {
+				// Fetch Alibaba Coding Plan usage data
+				data = await fetchAlibabaCodingPlanUsageData(token);
+				if (data) {
+					this.cache.set(accountId, { data, timestamp: Date.now() });
+					const utilization = getRepresentativeAlibabaCodingPlanUtilization(
+						data as AlibabaCodingPlanUsageData,
+					);
+					const window = getRepresentativeAlibabaCodingPlanWindow(
+						data as AlibabaCodingPlanUsageData,
+					);
+					log.debug(
+						`Successfully fetched Alibaba Coding Plan usage data for account ${accountId}: ${utilization?.toFixed(1)}% used (${window} window)`,
+					);
+					return { success: true, retryAfterMs: null };
 				}
 			} else {
 				// Default to Anthropic usage data
-				data = await fetchUsageData(token);
-				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
-					const utilization = getRepresentativeUtilization(data as UsageData);
-					const window = getRepresentativeWindow(data as UsageData);
+				const result = await fetchUsageData(token);
+				if (result.data) {
+					const callback = this.windowResetCallbacks.get(accountId);
+					if (callback)
+						this.notifyWindowReset(
+							accountId,
+							result.data,
+							"anthropic",
+							callback,
+						);
+					this.cache.set(accountId, {
+						data: result.data,
+						timestamp: Date.now(),
+					});
+					const utilization = getRepresentativeUtilization(
+						result.data as UsageData,
+					);
+					const window = getRepresentativeWindow(result.data as UsageData);
 					log.debug(
 						`Successfully fetched usage data for account ${accountId}: ${utilization}% (${window} window)`,
 					);
+					return { success: true, retryAfterMs: null };
 				}
+				return { success: false, retryAfterMs: result.retryAfterMs };
 			}
+
+			return { success: false, retryAfterMs: null };
 		} catch (error) {
 			// Ensure we have a proper error object for logging
 			const errorMessage =
@@ -377,6 +626,7 @@ class UsageCache {
 				`Error fetching usage data for account ${accountId}:`,
 				errorMessage || "Unknown error",
 			);
+			return { success: false, retryAfterMs: null };
 		}
 	}
 
@@ -434,6 +684,37 @@ class UsageCache {
 	}
 
 	/**
+	 * Check if the usage window has reset by comparing the new data's reset time
+	 * against the previously cached data, and fire the callback if it has advanced.
+	 * Should be called after successfully fetching new data, before updating the cache.
+	 * No-ops on the first poll (no previous data) to avoid spurious resets.
+	 */
+	notifyWindowReset(
+		accountId: string,
+		newData: AnyUsageData,
+		provider: string,
+		callback: (accountId: string) => void,
+	): void {
+		const previous = this.cache.get(accountId);
+		if (!previous) return; // first poll — no baseline to compare against
+
+		const prevResetAt = extractWindowResetTime(previous.data, provider);
+		const newResetAt = extractWindowResetTime(newData, provider);
+
+		if (
+			prevResetAt !== null &&
+			newResetAt !== null &&
+			newResetAt > prevResetAt
+		) {
+			log.info(
+				`Usage window reset detected for account ${accountId} (${provider}): ` +
+					`${new Date(prevResetAt).toISOString()} → ${new Date(newResetAt).toISOString()}`,
+			);
+			callback(accountId);
+		}
+	}
+
+	/**
 	 * Get cached data age in milliseconds
 	 */
 	getAge(accountId: string): number | null {
@@ -463,7 +744,7 @@ class UsageCache {
 	 * Clear all cached data and stop all polling
 	 */
 	clear() {
-		for (const accountId of this.polling.keys()) {
+		for (const accountId of this.tokenProviders.keys()) {
 			this.stopPolling(accountId);
 		}
 		this.cache.clear();

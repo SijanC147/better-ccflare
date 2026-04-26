@@ -6,14 +6,16 @@ import {
 	GitBranch,
 	Key,
 	LayoutDashboard,
+	LogOut,
 	Menu,
 	RefreshCw,
+	Settings,
 	Shield,
 	Users,
 	X,
 	Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
@@ -35,17 +37,27 @@ interface NavItem {
 	badge?: string;
 }
 
-const navItems: NavItem[] = [
+const _navItems: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
+	// { label: "Combos", icon: Zap, path: "/combos" },
 	{ label: "Agents", icon: Bot, path: "/agents" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
+	{ label: "Settings", icon: Settings, path: "/settings" },
 ];
 
-export function Navigation() {
+interface NavigationProps {
+	onLogout?: () => void;
+	showCombos?: boolean;
+}
+
+export function Navigation({
+	onLogout,
+	showCombos = false,
+}: NavigationProps = {}) {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 	const [updateStatus, setUpdateStatus] = useState<
 		"idle" | "checking" | "available" | "current" | "error"
@@ -53,6 +65,31 @@ export function Navigation() {
 	const [latestVersion, setLatestVersion] = useState<string>("");
 	const location = useLocation();
 	const isMountedRef = useRef(true);
+
+	// Build nav items dynamically based on feature flags
+	const navItems: NavItem[] = useMemo(() => {
+		const baseItems: NavItem[] = [
+			{ label: "Overview", icon: LayoutDashboard, path: "/" },
+			{ label: "Analytics", icon: BarChart3, path: "/analytics" },
+			{ label: "Requests", icon: Activity, path: "/requests" },
+			{ label: "Accounts", icon: Users, path: "/accounts" },
+		];
+
+		// Add combos item if feature is enabled
+		if (showCombos) {
+			baseItems.push({ label: "Combos", icon: Zap, path: "/combos" });
+		}
+
+		// Add remaining items
+		baseItems.push(
+			{ label: "Agents", icon: Bot, path: "/agents" },
+			{ label: "API Keys", icon: Key, path: "/api-keys" },
+			{ label: "Logs", icon: FileText, path: "/logs" },
+			{ label: "Settings", icon: Settings, path: "/settings" },
+		);
+
+		return baseItems;
+	}, [showCombos]);
 
 	// Cleanup on unmount to prevent memory leaks
 	useEffect(() => {
@@ -367,6 +404,19 @@ export function Navigation() {
 								</Link>
 							);
 						})}
+						{onLogout && (
+							<Button
+								variant="ghost"
+								className="w-full justify-start gap-3 transition-all text-muted-foreground hover:text-destructive"
+								onClick={() => {
+									setIsMobileMenuOpen(false);
+									onLogout();
+								}}
+							>
+								<LogOut className="h-4 w-4" />
+								Log Out
+							</Button>
+						)}
 					</nav>
 
 					<Separator />

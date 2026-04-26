@@ -14,6 +14,7 @@ import {
 	CardTitle,
 } from "../ui/card";
 import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 
 export function DataRetentionCard() {
 	const { data, isLoading } = useRetention();
@@ -21,10 +22,10 @@ export function DataRetentionCard() {
 	const cleanupNow = useCleanupNow();
 	const compactDb = useCompactDb();
 	const [payloadDays, setPayloadDays] = useState<number>(
-		data?.payloadDays ?? 7,
+		data?.payloadDays ?? 3,
 	);
 	const [requestDays, setRequestDays] = useState<number>(
-		data?.requestDays ?? 365,
+		data?.requestDays ?? 90,
 	);
 
 	useEffect(() => {
@@ -72,19 +73,6 @@ export function DataRetentionCard() {
 					</Button>
 				</div>
 
-				<div className="flex items-center gap-2">
-					{[7, 14, 30, 90].map((d) => (
-						<Button
-							key={d}
-							variant="outline"
-							size="sm"
-							onClick={() => setPayloadDays(d)}
-						>
-							{d}d
-						</Button>
-					))}
-				</div>
-
 				<div className="flex items-center gap-2 pt-2">
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium w-28">Requests</span>
@@ -109,35 +97,78 @@ export function DataRetentionCard() {
 					</Button>
 				</div>
 
-				<div className="pt-2">
+				<div className="flex items-center justify-between pt-2 pb-1">
+					<div>
+						<p className="text-sm font-medium">Store message payloads</p>
+						<p className="text-xs text-muted-foreground">
+							Stores full request/response bodies (conversation text, images) in
+							the database. Disable to reduce database size and lower memory
+							pressure — token counts, costs, and analytics are always saved
+							regardless.
+						</p>
+						<p className="text-xs text-amber-500 mt-0.5">
+							Warning: storing payloads can significantly grow the database size
+							over time.
+						</p>
+					</div>
+					<Switch
+						checked={data?.storePayloads ?? true}
+						disabled={isLoading || setRetention.isPending}
+						onCheckedChange={(checked) =>
+							setRetention.mutate({ storePayloads: checked })
+						}
+					/>
+				</div>
+
+				<div className="pt-1 flex items-center gap-2">
 					<Button
 						variant="secondary"
 						size="sm"
 						onClick={() => cleanupNow.mutate()}
 						disabled={cleanupNow.isPending}
 					>
-						Clean up now
+						{cleanupNow.isPending ? "Cleaning up…" : "Clean up now"}
 					</Button>
 					<Button
 						variant="outline"
 						size="sm"
-						className="ml-2"
 						onClick={() => compactDb.mutate()}
 						disabled={compactDb.isPending}
 					>
-						Compact database
+						{compactDb.isPending ? "Compacting…" : "Compact database"}
 					</Button>
 				</div>
 
-				{cleanupNow.data && (
-					<p className="text-xs text-muted-foreground">
-						Removed {cleanupNow.data.removedRequests} requests and{" "}
-						{cleanupNow.data.removedPayloads} payloads older than{" "}
-						{new Date(cleanupNow.data.cutoffIso).toLocaleString()}.
+				{cleanupNow.isError && (
+					<p className="text-xs text-destructive">
+						Operation timed out — for large databases this may take several
+						minutes. Check server logs.
 					</p>
 				)}
 
-				{compactDb.isSuccess && (
+				{cleanupNow.data && (
+					<p className="text-xs text-muted-foreground">
+						Removed {cleanupNow.data.removedPayloads} payloads (older than{" "}
+						{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString()}) and{" "}
+						{cleanupNow.data.removedRequests} requests (older than{" "}
+						{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}).
+					</p>
+				)}
+
+				{compactDb.isError && (
+					<p className="text-xs text-destructive">
+						Operation timed out — for large databases this may take several
+						minutes. Check server logs.
+					</p>
+				)}
+
+				{compactDb.isSuccess && !compactDb.data?.ok && (
+					<p className="text-xs text-destructive">
+						{compactDb.data?.error ?? "Compaction failed — check server logs."}
+					</p>
+				)}
+
+				{compactDb.isSuccess && compactDb.data?.ok && (
 					<p className="text-xs text-muted-foreground">
 						Database compacted. File size should reduce on disk.
 					</p>

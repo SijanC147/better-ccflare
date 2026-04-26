@@ -1,9 +1,14 @@
-import { BUFFER_SIZES, validateEndpointUrl } from "@better-ccflare/core";
+import {
+	BUFFER_SIZES,
+	mapModelName,
+	validateEndpointUrl,
+} from "@better-ccflare/core";
 import { sanitizeProxyHeaders } from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { transformRequestBodyModel } from "../../utils/model-mapping";
 
 // Hard rate limit statuses that should block account usage
 const HARD_LIMIT_STATUSES = new Set([
@@ -86,16 +91,13 @@ export class AnthropicProvider extends BaseProvider {
 
 		log.debug("Request body:", requestBody);
 
-		const response = await fetch(
-			"https://console.anthropic.com/v1/oauth/token",
-			{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify(requestBody),
+		const response = await fetch("https://platform.claude.com/v1/oauth/token", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
 			},
-		);
+			body: JSON.stringify(requestBody),
+		});
 
 		log.debug(`Response status: ${response.status} ${response.statusText}`, {
 			headers: Object.fromEntries(response.headers.entries()),
@@ -159,6 +161,11 @@ export class AnthropicProvider extends BaseProvider {
 			refresh_token?: string;
 		};
 
+		log.debug(`token response for ${account.name}:`, {
+			expiresIn: json.expires_in,
+			hasRefreshToken: !!json.refresh_token,
+			responseKeys: Object.keys(json),
+		});
 		// Ensure we always return a refresh token
 		const refreshToken = json.refresh_token || account.refresh_token;
 
@@ -177,6 +184,18 @@ export class AnthropicProvider extends BaseProvider {
 			expiresAt: Date.now() + json.expires_in * 1000,
 			refreshToken: refreshToken,
 		};
+	}
+
+	async transformRequestBody(
+		request: Request,
+		account?: Account,
+	): Promise<Request> {
+		return transformRequestBodyModel(request, account, (model, acc) => {
+			if (acc) {
+				return mapModelName(model, acc);
+			}
+			return model;
+		});
 	}
 
 	buildUrl(path: string, query: string, account?: Account): string {
@@ -240,10 +259,6 @@ export class AnthropicProvider extends BaseProvider {
 		// Remove host header
 		newHeaders.delete("host");
 
-		// Remove compression headers to avoid decompression issues
-		newHeaders.delete("accept-encoding");
-		newHeaders.delete("content-encoding");
-
 		return newHeaders;
 	}
 
@@ -291,18 +306,142 @@ export class AnthropicProvider extends BaseProvider {
 		};
 	}
 
+	/**
+	 * Transform Anthropic SSE stream to add OpenAI-compatible finish_reason.
+	 * Anthropic uses stop_reason on message_delta events; OpenAI clients expect
+	 * finish_reason. This maps between them without breaking native Anthropic clients
+	 * since both fields are present in the transformed output.
+	 */
+	private async transformStreamToOpenAIFormat(
+		response: Response,
+		requestHeaders?: Headers,
+	): Promise<Response> {
+		// Native Anthropic SDK clients always send anthropic-version; skip transform for them
+		if (requestHeaders?.has("anthropic-version")) {
+			return response;
+		}
+
+		const contentType = response.headers.get("content-type");
+
+		// Only transform streaming responses
+		if (!contentType?.includes("text/event-stream")) {
+			return response;
+		}
+
+		const reader = response.body?.getReader();
+		if (!reader) return response;
+
+		const encoder = new TextEncoder();
+		const decoder = new TextDecoder();
+
+		// stopReasonMap defined once outside the loop for performance
+		const stopReasonMap: Record<string, string> = {
+			end_turn: "stop",
+			max_tokens: "length",
+			stop_sequence: "stop",
+			tool_use: "tool_calls",
+		};
+
+		const stream = new ReadableStream({
+			async start(controller) {
+				// lineBuffer carries incomplete lines across chunk boundaries
+				let lineBuffer = "";
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) {
+							// Flush any remaining buffered content
+							if (lineBuffer) {
+								controller.enqueue(encoder.encode(lineBuffer));
+							}
+							break;
+						}
+
+						// Accumulate decoded bytes into lineBuffer, split on newlines
+						lineBuffer += decoder.decode(value, { stream: true });
+						const lines = lineBuffer.split("\n");
+						// Last element may be an incomplete line — keep it in the buffer
+						lineBuffer = lines.pop() ?? "";
+
+						for (const line of lines) {
+							// Pass through non-data lines (empty lines, event:, id:, comment:)
+							// SSE allows both "data:" and "data: " prefixes
+							if (!line.startsWith("data:")) {
+								controller.enqueue(encoder.encode(`${line}\n`));
+								continue;
+							}
+
+							const data = line.replace(/^data:\s?/, "");
+
+							// Pass through [DONE] marker
+							if (data === "[DONE]") {
+								controller.enqueue(encoder.encode(`${line}\n`));
+								continue;
+							}
+
+							try {
+								const event = JSON.parse(data);
+
+								// Map Anthropic stop_reason -> OpenAI finish_reason on message_delta
+								if (
+									event.type === "message_delta" &&
+									event.delta?.stop_reason
+								) {
+									event.finish_reason =
+										stopReasonMap[event.delta.stop_reason] ?? "stop";
+								}
+
+								controller.enqueue(
+									encoder.encode(`data: ${JSON.stringify(event)}\n`),
+								);
+							} catch {
+								// Non-JSON data line — pass through unchanged
+								controller.enqueue(encoder.encode(`${line}\n`));
+							}
+						}
+					}
+				} catch (error) {
+					controller.error(error);
+				} finally {
+					// Guard close() — stream may already be errored
+					try {
+						controller.close();
+					} catch {
+						// ignore: stream is already in errored state
+					}
+				}
+			},
+			cancel(reason) {
+				reader.cancel(reason);
+			},
+		});
+
+		return new Response(stream, {
+			headers: response.headers,
+			status: response.status,
+			statusText: response.statusText,
+		});
+	}
+
 	async processResponse(
 		response: Response,
 		_account: Account | null,
+		requestHeaders?: Headers,
 	): Promise<Response> {
 		// Sanitize headers by removing hop-by-hop headers
 		const headers = sanitizeProxyHeaders(response.headers);
 
-		return new Response(response.body, {
+		const sanitizedResponse = new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
 			headers,
 		});
+
+		// Add OpenAI-compatible finish_reason alongside Anthropic's stop_reason
+		return this.transformStreamToOpenAIFormat(
+			sanitizedResponse,
+			requestHeaders,
+		);
 	}
 
 	async extractTierInfo(response: Response): Promise<number | null> {

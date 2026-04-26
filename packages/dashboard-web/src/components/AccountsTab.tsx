@@ -9,7 +9,10 @@ import {
 	AccountList,
 	AccountModelMappingsDialog,
 	AccountPriorityDialog,
+	AnthropicReauthDialog,
+	CodexReauthDialog,
 	DeleteConfirmationDialog,
+	QwenReauthDialog,
 	RenameAccountDialog,
 } from "./accounts";
 import { Button } from "./ui/button";
@@ -69,6 +72,27 @@ export function AccountsTab() {
 		isOpen: false,
 		account: null,
 	});
+	const [qwenReauthDialog, setQwenReauthDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
+	const [anthropicReauthDialog, setAnthropicReauthDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
+	const [codexReauthDialog, setCodexReauthDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
 	const [actionError, setActionError] = useState<string | null>(null);
 
 	const handleAddAccount = async (params: {
@@ -81,7 +105,13 @@ export function AccountsTab() {
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
-			| "vertex-ai";
+			| "vertex-ai"
+			| "bedrock"
+			| "kilo"
+			| "openrouter"
+			| "alibaba-coding-plan"
+			| "codex"
+			| "qwen";
 		priority: number;
 		customEndpoint?: string;
 	}) => {
@@ -112,6 +142,25 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAddBedrockAccount = async (params: {
+		name: string;
+		profile: string;
+		region: string;
+		priority: number;
+		cross_region_mode?: "geographic" | "global" | "regional";
+		customModel?: string;
+	}) => {
+		try {
+			await api.addBedrockAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
 	const handleCompleteAccount = async (params: {
 		sessionId: string;
 		code: string;
@@ -132,6 +181,7 @@ export function AccountsTab() {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
+		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addZaiAccount(params);
@@ -187,6 +237,57 @@ export function AccountsTab() {
 	}) => {
 		try {
 			await api.addNanoGPTAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddAlibabaCodingPlanAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addAlibabaCodingPlanAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddKiloAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addKiloAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddOpenRouterAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addOpenRouterAccount(params);
 			await loadAccounts();
 			setAdding(false);
 			setActionError(null);
@@ -271,6 +372,28 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleForceResetRateLimit = async (account: Account) => {
+		try {
+			await api.forceResetRateLimit(account.id);
+			await loadAccounts();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
+	const handleRefreshUsage = async (account: Account) => {
+		try {
+			await api.refreshUsage(account.id);
+			// Wait briefly then reload so fresh usage data has time to arrive
+			await new Promise((resolve) => setTimeout(resolve, 5000));
+			await loadAccounts();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handlePriorityChange = (account: Account) => {
 		setPriorityDialog({ isOpen: true, account });
 	};
@@ -309,12 +432,48 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleBillingTypeToggle = async (account: Account) => {
+		try {
+			await api.updateAccountBillingType(
+				account.id,
+				account.billingType === "plan" ? "api" : "plan",
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
+	const handleAutoPauseOnOverageToggle = async (account: Account) => {
+		try {
+			await api.updateAccountAutoPauseOnOverage(
+				account.id,
+				!account.autoPauseOnOverageEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleCustomEndpointChange = (account: Account) => {
 		setCustomEndpointDialog({ isOpen: true, account });
 	};
 
 	const handleModelMappingsChange = (account: Account) => {
 		setModelMappingsDialog({ isOpen: true, account });
+	};
+
+	const handleReauth = (account: Account) => {
+		setQwenReauthDialog({ isOpen: true, account });
+	};
+
+	const handleAnthropicReauth = (account: Account) => {
+		setAnthropicReauthDialog({ isOpen: true, account });
+	};
+
+	const handleCodexReauth = (account: Account) => {
+		setCodexReauthDialog({ isOpen: true, account });
 	};
 
 	const handleUpdateCustomEndpoint = async (
@@ -332,7 +491,7 @@ export function AccountsTab() {
 
 	const handleUpdateModelMappings = async (
 		accountId: string,
-		modelMappings: { [key: string]: string },
+		modelMappings: { [key: string]: string | string[] },
 	) => {
 		try {
 			await api.updateAccountModelMappings(accountId, modelMappings);
@@ -389,9 +548,13 @@ export function AccountsTab() {
 							onAddAccount={handleAddAccount}
 							onCompleteAccount={handleCompleteAccount}
 							onAddVertexAIAccount={handleAddVertexAIAccount}
+							onAddBedrockAccount={handleAddBedrockAccount}
 							onAddZaiAccount={handleAddZaiAccount}
 							onAddMinimaxAccount={handleAddMinimaxAccount}
 							onAddNanoGPTAccount={handleAddNanoGPTAccount}
+							onAddAlibabaCodingPlanAccount={handleAddAlibabaCodingPlanAccount}
+							onAddKiloAccount={handleAddKiloAccount}
+							onAddOpenRouterAccount={handleAddOpenRouterAccount}
 							onAddAnthropicCompatibleAccount={
 								handleAddAnthropicCompatibleAccount
 							}
@@ -410,13 +573,20 @@ export function AccountsTab() {
 					<AccountList
 						accounts={accounts}
 						onPauseToggle={handlePauseToggle}
+						onForceResetRateLimit={handleForceResetRateLimit}
+						onRefreshUsage={handleRefreshUsage}
 						onRemove={handleRemoveAccount}
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
+						onBillingTypeToggle={handleBillingTypeToggle}
+						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}
+						onReauth={handleReauth}
+						onAnthropicReauth={handleAnthropicReauth}
+						onCodexReauth={handleCodexReauth}
 					/>
 				</CardContent>
 			</Card>
@@ -493,6 +663,35 @@ export function AccountsTab() {
 					onUpdateModelMappings={handleUpdateModelMappings}
 				/>
 			)}
+			<QwenReauthDialog
+				isOpen={qwenReauthDialog.isOpen}
+				account={qwenReauthDialog.account}
+				onClose={() => setQwenReauthDialog({ isOpen: false, account: null })}
+				onSuccess={() => {
+					loadAccounts();
+					setQwenReauthDialog({ isOpen: false, account: null });
+				}}
+			/>
+			<AnthropicReauthDialog
+				isOpen={anthropicReauthDialog.isOpen}
+				account={anthropicReauthDialog.account}
+				onClose={() =>
+					setAnthropicReauthDialog({ isOpen: false, account: null })
+				}
+				onSuccess={() => {
+					loadAccounts();
+					setAnthropicReauthDialog({ isOpen: false, account: null });
+				}}
+			/>
+			<CodexReauthDialog
+				isOpen={codexReauthDialog.isOpen}
+				account={codexReauthDialog.account}
+				onClose={() => setCodexReauthDialog({ isOpen: false, account: null })}
+				onSuccess={() => {
+					loadAccounts();
+					setCodexReauthDialog({ isOpen: false, account: null });
+				}}
+			/>
 		</div>
 	);
 }

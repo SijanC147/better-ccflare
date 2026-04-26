@@ -1,4 +1,4 @@
-import { KNOWN_PATTERNS, parseModelMappings } from "@better-ccflare/core";
+import { getModelFamily, parseModelMappings } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
 
@@ -60,25 +60,23 @@ export function getModelName(
 		return anthropicModel;
 	}
 
+	const toFirst = (v: string | string[]) => (Array.isArray(v) ? v[0] : v);
+
 	// First try exact match
 	if (accountMappings[anthropicModel]) {
-		const mappedModel = accountMappings[anthropicModel];
+		const mappedModel = toFirst(accountMappings[anthropicModel]);
 		log.debug(`Exact model mapping: ${anthropicModel} -> ${mappedModel}`);
 		return mappedModel;
 	}
 
-	// Try pattern matching for known model families (more efficient)
-	// Use case-insensitive matching with direct pattern checks
-	const modelLower = anthropicModel.toLowerCase();
-
-	for (const pattern of KNOWN_PATTERNS) {
-		if (modelLower.includes(pattern) && accountMappings[pattern]) {
-			const mappedModel = accountMappings[pattern];
-			log.debug(
-				`Pattern model mapping: ${anthropicModel} (${pattern}) -> ${mappedModel}`,
-			);
-			return mappedModel;
-		}
+	// Use shared pattern detection
+	const family = getModelFamily(anthropicModel);
+	if (family && accountMappings[family]) {
+		const mappedModel = toFirst(accountMappings[family]);
+		log.debug(
+			`Pattern model mapping: ${anthropicModel} (${family}) -> ${mappedModel}`,
+		);
+		return mappedModel;
 	}
 
 	// No mapping found, return original

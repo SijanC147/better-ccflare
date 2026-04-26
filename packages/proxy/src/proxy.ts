@@ -4,9 +4,12 @@ import {
 	trackClientVersion,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
+import type { Account } from "@better-ccflare/types";
+import { cacheBodyStore } from "./cache-body-store";
 import {
 	createRequestMetadata,
 	ERROR_MESSAGES,
+	getComboSlotInfo,
 	interceptAndModifyRequest,
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
@@ -14,11 +17,10 @@ import {
 	proxyUnauthenticated,
 	proxyWithAccount,
 	selectAccountsForRequest,
-	TIMING,
 	validateProviderPath,
 } from "./handlers";
-import { EMBEDDED_WORKER_CODE } from "./inline-worker";
-import type { ControlMessage, OutgoingWorkerMessage } from "./worker-messages";
+import { UsageWorkerController } from "./usage-worker-controller";
+import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
 
 export type { ProxyContext } from "./handlers";
 
@@ -26,124 +28,53 @@ const log = new Logger("Proxy");
 
 // ===== WORKER MANAGEMENT =====
 
-// Create usage worker instance
-let usageWorkerInstance: Worker | null = null;
-let shutdownTimerId: Timer | null = null;
+let pendingStorePayloads: boolean | null = null;
 
-/**
- * Gets or creates the usage worker instance
- * @returns The usage worker instance
- */
-export function getUsageWorker(): Worker {
-	if (!usageWorkerInstance) {
-		try {
-			// Check if we have embedded worker code (production build)
-			if (EMBEDDED_WORKER_CODE) {
-				// Decode the base64-encoded worker code
-				const workerCode = Buffer.from(EMBEDDED_WORKER_CODE, "base64").toString(
-					"utf8",
-				);
-				// Create a blob URL from the worker code
-				const blob = new Blob([workerCode], { type: "text/javascript" });
-				const workerUrl = URL.createObjectURL(blob);
-				log.info("Post-processor worker starting from embedded code");
-				usageWorkerInstance = new Worker(workerUrl, { smol: true });
-				log.info("Post-processor worker started");
-			} else {
-				// Development: use TypeScript file
-				const workerPath = new URL(
-					"./post-processor.worker.ts",
-					import.meta.url,
-				).href;
-				log.info(`Post-processor worker starting from: ${workerPath}`);
-				usageWorkerInstance = new Worker(workerPath, { smol: true });
-				log.info("Post-processor worker started");
-			}
-
-			// Bun extends Worker with unref method
-			if (
-				"unref" in usageWorkerInstance &&
-				typeof usageWorkerInstance.unref === "function"
-			) {
-				usageWorkerInstance.unref(); // Don't keep process alive
-			}
-
-			// Listen for summary messages from worker
-			usageWorkerInstance.onmessage = (ev) => {
-				const data = ev.data as OutgoingWorkerMessage;
-				if (data.type === "summary") {
-					requestEvents.emit("event", {
-						type: "summary",
-						payload: data.summary,
-					});
-				} else if (data.type === "payload") {
-					requestEvents.emit("event", {
-						type: "payload",
-						payload: data.payload,
-					});
-				}
+const usageWorkerController = new UsageWorkerController(
+	(msg: SummaryMessage) => {
+		cacheBodyStore.onSummary(
+			msg.summary.id,
+			msg.summary.cacheCreationInputTokens,
+		);
+		requestEvents.emit("event", { type: "summary", payload: msg.summary });
+	},
+	() => {
+		// Apply deferred config update once worker is ready
+		if (pendingStorePayloads !== null) {
+			const msg: ConfigUpdateMessage = {
+				type: "config-update",
+				storePayloads: pendingStorePayloads,
 			};
-
-			// Handle worker errors
-			usageWorkerInstance.onerror = (error: ErrorEvent) => {
-				log.error("Worker error occurred in usage tracking system", {
-					message: error.message,
-					filename: error.filename,
-					lineno: error.lineno,
-					colno: error.colno,
-					stack:
-						error.error?.stack ||
-						(error as ErrorEvent & { stack?: string }).stack,
-					error: error.error,
-					timestamp: new Date().toISOString(),
-					workerType: "usage-worker",
-					impact: "Usage statistics collection temporarily unavailable",
-				});
-				// Reset worker instance on error to allow recreation
-				usageWorkerInstance = null;
-			};
-		} catch (error) {
-			log.error("Failed to create worker:", error);
-			throw error;
+			usageWorkerController.postMessage(msg);
+			pendingStorePayloads = null;
 		}
-	}
-	return usageWorkerInstance;
+	},
+);
+
+export function getUsageWorker(): UsageWorkerController {
+	return usageWorkerController;
 }
 
-/**
- * Gracefully terminates the usage worker
- */
-export function terminateUsageWorker(): void {
-	if (usageWorkerInstance) {
-		// Clear any existing shutdown timer to prevent duplicate timeouts
-		if (shutdownTimerId) {
-			clearTimeout(shutdownTimerId);
-			shutdownTimerId = null;
-		}
+export function startUsageWorker(): void {
+	usageWorkerController.start();
+}
 
-		// Send shutdown message to allow worker to flush
-		const shutdownMsg: ControlMessage = { type: "shutdown" };
-		try {
-			usageWorkerInstance.postMessage(shutdownMsg);
-		} catch (_error) {
-			// Worker already terminated, just clean up
-			usageWorkerInstance = null;
-			return;
-		}
-
-		// Give worker time to flush before terminating
-		shutdownTimerId = setTimeout(() => {
-			if (usageWorkerInstance) {
-				try {
-					usageWorkerInstance.terminate();
-				} catch (_error) {
-					// Ignore errors during termination
-				}
-				usageWorkerInstance = null;
-			}
-			shutdownTimerId = null;
-		}, TIMING.WORKER_SHUTDOWN_DELAY);
+export function sendWorkerConfigUpdate(storePayloads: boolean): void {
+	if (!usageWorkerController.isReady()) {
+		// Defer until worker is ready
+		pendingStorePayloads = storePayloads;
+		return;
 	}
+	const msg: ConfigUpdateMessage = { type: "config-update", storePayloads };
+	usageWorkerController.postMessage(msg);
+}
+
+export function terminateUsageWorker(): Promise<void> {
+	return usageWorkerController.terminate();
+}
+
+export function getUsageWorkerHealth() {
+	return usageWorkerController.getHealth();
 }
 
 // ===== MAIN HANDLER =====
@@ -194,21 +125,41 @@ export async function handleProxy(
 	validateProviderPath(ctx.provider, url.pathname);
 
 	// 3. Prepare request body
-	const { buffer: requestBodyBuffer } = await prepareRequestBody(req);
+	let { buffer: requestBodyBuffer } = await prepareRequestBody(req);
+
+	// 3b. Optionally inject 1h TTL into system prompt cache_control blocks
+	if (ctx.config.getSystemPromptCacheTtl1h() && requestBodyBuffer) {
+		const injected = injectSystemCacheTtl(requestBodyBuffer);
+		if (injected) requestBodyBuffer = injected;
+	}
+
+	// Extract model from request body for family detection (used by combo routing)
+	// and reuse parsed body for /v1/messages validation (consolidate parses)
+	let requestModel: string | null = null;
+	let parsedBody: Record<string, unknown> | null = null;
+	if (requestBodyBuffer) {
+		try {
+			const bodyText = new TextDecoder().decode(requestBodyBuffer);
+			parsedBody = JSON.parse(bodyText);
+			requestModel =
+				((parsedBody as Record<string, unknown>).model as string) ?? null;
+		} catch {
+			// If body can't be parsed, model stays null — combo routing won't activate
+		}
+	}
 
 	// 3a. Validate request body for /v1/messages endpoint
 	if (url.pathname === "/v1/messages" && requestBodyBuffer) {
-		try {
-			const bodyText = new TextDecoder().decode(requestBodyBuffer);
-			const bodyJson = JSON.parse(bodyText);
-
+		if (parsedBody) {
 			// Reject requests without messages field (e.g., Claude Code internal events)
-			if (!bodyJson.messages || !Array.isArray(bodyJson.messages)) {
+			if (!parsedBody.messages || !Array.isArray(parsedBody.messages)) {
 				log.warn(
 					`Rejected invalid request to /v1/messages without messages field`,
 					{
-						event_type: bodyJson.event_type,
-						event_name: bodyJson.event_data?.event_name,
+						event_type: parsedBody.event_type,
+						event_name: (
+							parsedBody.event_data as Record<string, unknown> | undefined
+						)?.event_name,
 					},
 				);
 				return new Response(
@@ -226,9 +177,9 @@ export async function handleProxy(
 					},
 				);
 			}
-		} catch (error) {
+		} else {
 			// If we can't parse the body, let it through and let the provider handle it
-			log.debug("Could not parse request body for validation", error);
+			log.debug("Could not parse request body for validation");
 		}
 	}
 
@@ -254,7 +205,11 @@ export async function handleProxy(
 	requestMeta.agentUsed = agentUsed;
 
 	// 6. Select accounts
-	const accounts = selectAccountsForRequest(requestMeta, ctx);
+	const accounts = await selectAccountsForRequest(
+		requestMeta,
+		ctx,
+		requestModel ?? undefined,
+	);
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
@@ -283,8 +238,28 @@ export async function handleProxy(
 	}
 
 	// 9. Try each account
+	const comboInfo = getComboSlotInfo(requestMeta);
+	let response: Response | null = null;
+
 	for (let i = 0; i < accounts.length; i++) {
-		const response = await proxyWithAccount(
+		// For combo routing: enrich metadata with slot index and look up model override
+		let modelOverride: string | null = null;
+		if (comboInfo?.slots[i]) {
+			const slot = comboInfo.slots[i];
+			if (slot.accountId !== accounts[i].id) {
+				log.error(
+					`Combo slot/account desync: slot ${i} expects account ${slot.accountId} but got ${accounts[i].id}`,
+				);
+			} else {
+				modelOverride = slot.modelOverride;
+			}
+			requestMeta.comboSlotIndex = i;
+			log.info(
+				`Attempting combo slot ${i}/${accounts.length - 1} on account ${accounts[i].name} with model "${modelOverride}"`,
+			);
+		}
+
+		response = await proxyWithAccount(
 			req,
 			url,
 			accounts[i],
@@ -293,6 +268,7 @@ export async function handleProxy(
 			finalCreateBodyStream,
 			i,
 			ctx,
+			modelOverride,
 			apiKeyId,
 			apiKeyName,
 		);
@@ -300,10 +276,58 @@ export async function handleProxy(
 		if (response) {
 			return response;
 		}
+
+		// Log combo slot failure
+		if (comboInfo) {
+			log.info(
+				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
+			);
+		}
 	}
 
-	// 10. All accounts failed - check if OAuth token issues are the cause
-	const oauthAccounts = accounts.filter((acc) => acc.refresh_token);
+	// 10. Combo fallback: if combo routing was active and all slots failed,
+	//     fall back to normal SessionStrategy routing (REQ-14)
+	let fallbackAccounts: Account[] | null = null;
+	if (comboInfo?.comboName) {
+		log.warn(
+			`All combo slots failed for combo "${comboInfo.comboName}", falling back to SessionStrategy routing`,
+		);
+		// Clear combo info and retry with normal routing
+		requestMeta.comboName = null;
+		requestMeta.comboSlotIndex = null;
+		fallbackAccounts = await selectAccountsForRequest(requestMeta, ctx);
+
+		if (fallbackAccounts.length > 0) {
+			log.info(
+				`Fallback: trying ${fallbackAccounts.length} SessionStrategy accounts`,
+			);
+			for (let i = 0; i < fallbackAccounts.length; i++) {
+				response = await proxyWithAccount(
+					req,
+					url,
+					fallbackAccounts[i],
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					i,
+					ctx,
+					undefined, // No model override for fallback path
+					apiKeyId,
+					apiKeyName,
+				);
+
+				if (response) {
+					return response;
+				}
+			}
+		}
+	}
+
+	// 11. All accounts failed - check if OAuth token issues are the cause
+	const allAttemptedAccounts = comboInfo
+		? [...accounts, ...(fallbackAccounts ?? [])]
+		: accounts;
+	const oauthAccounts = allAttemptedAccounts.filter((acc) => acc.refresh_token);
 	const needsReauth = oauthAccounts.filter((acc) =>
 		isRefreshTokenLikelyExpired(acc),
 	);
@@ -323,7 +347,32 @@ export async function handleProxy(
 	}
 
 	throw new ServiceUnavailableError(
-		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${accounts.length} attempted)`,
+		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`,
 		ctx.provider.name,
 	);
+}
+
+/**
+ * Injects `ttl: "1h"` into system-level cache_control blocks that are missing a TTL.
+ * Returns a new ArrayBuffer with the modified body, or null if no changes were made.
+ */
+export function injectSystemCacheTtl(buf: ArrayBuffer): ArrayBuffer | null {
+	try {
+		const body = JSON.parse(new TextDecoder().decode(buf));
+		if (!Array.isArray(body.system)) return null;
+		let changed = false;
+		for (const block of body.system) {
+			if (
+				block.cache_control?.type === "ephemeral" &&
+				!block.cache_control.ttl
+			) {
+				block.cache_control.ttl = "1h";
+				changed = true;
+			}
+		}
+		if (!changed) return null;
+		return new TextEncoder().encode(JSON.stringify(body)).buffer;
+	} catch {
+		return null;
+	}
 }

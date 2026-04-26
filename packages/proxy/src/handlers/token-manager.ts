@@ -164,7 +164,7 @@ export async function refreshAccessTokenSafe(
 
 			try {
 				// Reload account from database
-				const dbAccount = ctx.dbOps.getAccount(account.id);
+				const dbAccount = await ctx.dbOps.getAccount(account.id);
 				if (dbAccount) {
 					// Check if DB has a valid token that we don't have in memory
 					const accessTokenFromDb = dbAccount.access_token;
@@ -258,7 +258,13 @@ export async function refreshAccessTokenSafe(
 				// Clear any previous failure record on successful refresh
 				refreshFailures.delete(account.id);
 
+				const expiresInSec = Math.round((result.expiresAt - Date.now()) / 1000);
 				log.info(`Successfully refreshed token for account: ${account.name}`);
+				log.debug(`refresh for ${account.name}:`, {
+					expiresInSec,
+					newRefreshToken: result.refreshToken !== account.refresh_token,
+					provider: account.provider,
+				});
 				return result.accessToken;
 			})
 			.catch((error) => {
@@ -296,6 +302,48 @@ export async function refreshAccessTokenSafe(
 
 // Global registry for account refresh clearing functions
 const refreshClearers: Map<string, (accountId: string) => void> = new Map();
+
+// Global registry for usage polling restart functions
+const pollingRestarters: Map<string, (accountId: string) => Promise<boolean>> =
+	new Map();
+
+/**
+ * Register a function to restart usage polling for a specific account.
+ * Used by the server to expose its polling restart capability to HTTP handlers.
+ */
+export function registerPollingRestarter(
+	serverId: string,
+	restarter: (accountId: string) => Promise<boolean>,
+): void {
+	pollingRestarters.set(serverId, restarter);
+}
+
+/**
+ * Restart usage polling for an account across all registered servers.
+ * Returns true if at least one server successfully restarted polling.
+ */
+export async function restartUsagePollingForAccount(
+	accountId: string,
+): Promise<boolean> {
+	let anySuccess = false;
+	for (const [serverId, restarter] of pollingRestarters) {
+		try {
+			const ok = await restarter(accountId);
+			if (ok) {
+				anySuccess = true;
+				log.info(
+					`Restarted usage polling for account ${accountId} on server ${serverId}`,
+				);
+			}
+		} catch (error) {
+			log.error(
+				`Failed to restart usage polling for account ${accountId} on server ${serverId}:`,
+				error,
+			);
+		}
+	}
+	return anySuccess;
+}
 
 /**
  * Register a function to clear refresh cache for a specific account
@@ -356,7 +404,6 @@ export async function getValidAccessToken(
 	ctx: ProxyContext,
 ): Promise<string> {
 	// For API key providers, return the API key directly without OAuth token refresh logic
-	// Prioritize api_key field, but maintain fallback to refresh_token for backward compatibility
 	if (
 		account.provider === "openai-compatible" ||
 		account.provider === "zai" ||
@@ -366,10 +413,6 @@ export async function getValidAccessToken(
 	) {
 		if (account.api_key) {
 			return account.api_key;
-		}
-		// Fallback to refresh_token for backward compatibility with existing accounts
-		if (account.refresh_token) {
-			return account.refresh_token;
 		}
 		throw new Error(`No API key available for account ${account.name}`);
 	}

@@ -3,8 +3,11 @@
  * Handles both streaming and non-streaming responses
  */
 
+// ===== MAIN THREAD → WORKER =====
+
 export interface StartMessage {
 	type: "start";
+	messageId: string; // envelope ID for ack tracking
 	requestId: string;
 	accountId: string | null;
 	method: string;
@@ -23,11 +26,23 @@ export interface StartMessage {
 	// Provider info for rate limit parsing
 	providerName: string;
 
+	// Account billing type override (null = use provider heuristic)
+	accountBillingType: string | null;
+
+	// Account auto-pause-on-overage flag (1 = enabled, 0 = disabled, null = not set)
+	accountAutoPauseOnOverageEnabled: number | null;
+
+	// Account name for logging
+	accountName: string | null;
+
 	// Agent info
 	agentUsed: string | null;
 
 	// Project info (from X-CCFlare-Project header)
 	project: string | null;
+
+	// Combo info
+	comboName: string | null;
 
 	// API key info
 	apiKeyId: string | null;
@@ -56,30 +71,43 @@ export interface ControlMessage {
 	type: "shutdown";
 }
 
+export interface ConfigUpdateMessage {
+	type: "config-update";
+	storePayloads: boolean;
+}
+
 export type WorkerMessage =
 	| StartMessage
 	| ChunkMessage
 	| EndMessage
 	| ControlMessage
-	| SummaryMessage
-	| PayloadMessage;
+	| ConfigUpdateMessage;
 
-// Response from worker (if needed in future)
-export interface WorkerResponse {
-	type: "ack" | "error";
-	requestId?: string;
-	message?: string;
+// ===== WORKER → MAIN THREAD =====
+
+/** Worker is initialized and ready to accept messages */
+export interface ReadyMessage {
+	type: "ready";
 }
 
-// Worker to main thread messages
+/** Worker acknowledges a StartMessage envelope */
+export interface AckMessage {
+	type: "ack";
+	messageId: string;
+}
+
+/** Worker has flushed all pending work and is safe to terminate */
+export interface ShutdownCompleteMessage {
+	type: "shutdown-complete";
+}
+
 export interface SummaryMessage {
 	type: "summary";
 	summary: import("@better-ccflare/types").RequestResponse;
 }
 
-export interface PayloadMessage {
-	type: "payload";
-	payload: import("@better-ccflare/types").RequestPayload;
-}
-
-export type OutgoingWorkerMessage = SummaryMessage | PayloadMessage;
+export type OutgoingWorkerMessage =
+	| ReadyMessage
+	| AckMessage
+	| ShutdownCompleteMessage
+	| SummaryMessage;

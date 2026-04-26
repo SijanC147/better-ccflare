@@ -67,7 +67,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 	/**
 	 * Determines if an account has an active session based on provider requirements
-	 * For Anthropic providers: checks if session is within the 5-hour window
+	 * For Anthropic providers: checks if session is within the 5-hour window AND
+	 * the account is not currently rate-limited
 	 * For other providers: always returns false (no session stickiness for pay-as-you-go)
 	 * @param account The account to check
 	 * @param now Current timestamp
@@ -77,6 +78,18 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// Non-Anthropic providers (API-key-based, etc.) should not have persistent sessions
 		// since they're pay-as-you-go and don't benefit from session stickiness
 		if (!requiresSessionDurationTracking(account.provider)) {
+			return false;
+		}
+
+		// An account that is currently rate-limited has no usable session, even
+		// if its session_start is still inside the 5h Anthropic session window.
+		// Treating it as active would re-pin requests to a known-throttled
+		// upstream for the entire rate-limit window. Note we do NOT clear
+		// session_start here — when the rate-limit window elapses the session
+		// is conceptually still valid (5h Anthropic prompt-cache windows are
+		// independent of rate-limit windows), so we'll resume the cached
+		// session naturally on the next request after recovery. See issue #115.
+		if (account.rate_limited_until && account.rate_limited_until > now) {
 			return false;
 		}
 
@@ -122,13 +135,25 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				`Auto-fallback triggered to account ${chosenFallback.name} (priority: ${chosenFallback.priority}, auto-fallback enabled)`,
 			);
 
-			// If the chosen fallback account was paused, unpause it since we're reactivating it
+			// If the chosen fallback account was paused, only auto-unpause if it was paused due to
+			// overage, or `rate_limit_window` (reserved/future pause reason) — never auto-unpause
+			// manual or failure_threshold pauses.
 			if (chosenFallback.paused && this.store?.resumeAccount) {
-				this.log.info(
-					`Unpausing account ${chosenFallback.name} due to auto-fallback reactivation`,
-				);
-				this.store.resumeAccount(chosenFallback.id);
-				chosenFallback.paused = false;
+				const canAutoUnpause =
+					!chosenFallback.pause_reason ||
+					chosenFallback.pause_reason === "overage" ||
+					chosenFallback.pause_reason === "rate_limit_window";
+				if (canAutoUnpause) {
+					this.log.info(
+						`Unpausing account ${chosenFallback.name} due to auto-fallback reactivation`,
+					);
+					this.store.resumeAccount(chosenFallback.id);
+					chosenFallback.paused = false;
+				} else {
+					this.log.info(
+						`Skipping auto-unpause of account ${chosenFallback.name} — paused with reason '${chosenFallback.pause_reason}' which requires manual intervention`,
+					);
+				}
 			}
 
 			// Return fallback account first, then others sorted by priority
@@ -165,20 +190,38 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			);
 		}
 
-		// If we have an active account and it's available, use it exclusively
+		// If we have an active account and it's available, use it — unless a higher-priority
+		// non-session account is available (priority is more important than stickiness).
 		if (activeAccount && getCachedAvailability(activeAccount)) {
-			// Reset session if expired (shouldn't happen but just in case)
-			if (!bypassSession) {
-				this.resetSessionIfExpired(activeAccount);
+			// Check if any available account has strictly higher priority than the active session account
+			const higherPriorityAccount = accounts
+				.filter(
+					(a) =>
+						a.id !== activeAccount.id &&
+						getCachedAvailability(a) &&
+						a.priority < activeAccount.priority,
+				)
+				.sort((a, b) => a.priority - b.priority)[0];
+
+			if (higherPriorityAccount) {
+				this.log.info(
+					`Skipping session on account ${activeAccount.name} (priority: ${activeAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
+				);
+				// Fall through to normal priority-based selection below by nulling activeAccount
+			} else {
+				// Reset session if expired (shouldn't happen but just in case)
+				if (!bypassSession) {
+					this.resetSessionIfExpired(activeAccount);
+				}
+				this.log.info(
+					`Continuing session for account ${activeAccount.name} (${activeAccount.session_request_count} requests in session)`,
+				);
+				// Return active account first, then others as fallback (sorted by priority)
+				const others = accounts
+					.filter((a) => a.id !== activeAccount.id && getCachedAvailability(a))
+					.sort((a, b) => a.priority - b.priority);
+				return [activeAccount, ...others];
 			}
-			this.log.info(
-				`Continuing session for account ${activeAccount.name} (${activeAccount.session_request_count} requests in session)`,
-			);
-			// Return active account first, then others as fallback (sorted by priority)
-			const others = accounts
-				.filter((a) => a.id !== activeAccount.id && getCachedAvailability(a))
-				.sort((a, b) => a.priority - b.priority);
-			return [activeAccount, ...others];
 		}
 
 		// No active session or active account is rate limited
@@ -218,10 +261,12 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			// This allows paused accounts with auto-fallback to be considered for reactivation
 
 			// Check if the API usage window has reset for auto-fallback
-			// Usage windows: Anthropic accounts with proactive rate limit headers (usage-based accounts)
-			// No usage windows: Other account types or Anthropic console keys without usage windows
-			const anthropicWindowReset =
-				account.provider === PROVIDER_NAMES.ANTHROPIC && // Only for Anthropic accounts with usage windows
+			const supportsWindowReset =
+				account.provider === PROVIDER_NAMES.ANTHROPIC ||
+				account.provider === PROVIDER_NAMES.CODEX ||
+				account.provider === PROVIDER_NAMES.ZAI;
+			const providerWindowReset =
+				supportsWindowReset &&
 				account.rate_limit_reset &&
 				account.rate_limit_reset < now - 1000; // 1 second buffer for clock skew protection
 
@@ -229,7 +274,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			const notRateLimited =
 				!account.rate_limited_until || account.rate_limited_until <= now;
 
-			return anthropicWindowReset && notRateLimited;
+			return providerWindowReset && notRateLimited;
 		});
 
 		if (resetAccounts.length === 0) return [];

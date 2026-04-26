@@ -52,6 +52,9 @@ export function getInstance(fastMode?: boolean): DatabaseOperations {
 					...(runtimeConfig.database.mmapSize !== undefined && {
 						mmapSize: runtimeConfig.database.mmapSize,
 					}),
+					...(runtimeConfig.database.pageSize !== undefined && {
+						pageSize: runtimeConfig.database.pageSize,
+					}),
 				}
 			: undefined;
 
@@ -73,10 +76,24 @@ export function getInstance(fastMode?: boolean): DatabaseOperations {
 	return instance;
 }
 
+/**
+ * Get or create the database instance, running async initialization for PostgreSQL.
+ * Use this in server startup code where async is available.
+ */
+export async function getInstanceAsync(
+	fastMode?: boolean,
+): Promise<DatabaseOperations> {
+	const db = getInstance(fastMode);
+	// Initialize PostgreSQL schema/migrations if needed
+	await db.initializeAsync();
+	return db;
+}
+
 export function closeAll(): void {
 	if (instance) {
 		unregisterDisposable(instance);
-		instance.close();
+		// Fire-and-forget close (sync-compatible)
+		void instance.close();
 		instance = null;
 	}
 }
@@ -88,6 +105,7 @@ export function reset(): void {
 export const DatabaseFactory = {
 	initialize,
 	getInstance,
+	getInstanceAsync,
 	closeAll,
 	reset,
 };

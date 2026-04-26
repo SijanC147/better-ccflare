@@ -56,19 +56,15 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const claudeUrl = oauthProvider.generateAuthUrl(claudeConfig, pkce);
 			const consoleUrl = oauthProvider.generateAuthUrl(consoleConfig, pkce);
 
-			expect(claudeUrl).toContain("claude.ai/login");
-			expect(claudeUrl).toContain("selectAccount=true");
+			expect(claudeUrl).toContain("claude.ai/oauth/authorize");
 			expect(consoleUrl).toContain("console.anthropic.com/oauth/authorize");
 
-			// Both should have PKCE challenge (in different locations due to flow differences)
-			// For claude mode, challenge is in the returnTo parameter (URL-encoded)
-			const encodedChallenge = encodeURIComponent(pkce.challenge);
-			expect(claudeUrl).toContain(encodedChallenge);
+			// Both should have PKCE challenge directly in the URL
+			expect(claudeUrl).toContain(`code_challenge=${pkce.challenge}`);
 			expect(consoleUrl).toContain(`code_challenge=${pkce.challenge}`);
 
 			// Both should use S256 method
-			const encodedMethod = encodeURIComponent("S256");
-			expect(claudeUrl).toContain(encodedMethod); // S256 encoded in URL
+			expect(claudeUrl).toContain("code_challenge_method=S256");
 			expect(consoleUrl).toContain("code_challenge_method=S256");
 		});
 	});
@@ -80,14 +76,8 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			const authUrl = oauthProvider.generateAuthUrl(config, pkce);
 
-			// State should be present in the URL (nested in returnTo parameter for Claude OAuth)
-			// The state parameter exists in the returnTo URL-encoded parameter
-			const returnToMatch = authUrl.match(/returnTo=([^&]*)/);
-			expect(returnToMatch).toBeDefined();
-			if (returnToMatch) {
-				const decodedReturnTo = decodeURIComponent(returnToMatch[1]);
-				expect(decodedReturnTo).toContain("state=");
-			}
+			// State should be present directly in the URL
+			expect(authUrl).toContain("state=");
 			expect(authUrl).not.toContain(pkce.verifier);
 			expect(authUrl).not.toContain("verifier=");
 		});
@@ -100,22 +90,9 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const authUrl1 = oauthProvider.generateAuthUrl(config, pkce1);
 			const authUrl2 = oauthProvider.generateAuthUrl(config, pkce2);
 
-			// Extract state from potentially nested URL structure (returnTo parameter)
-			let state1, state2;
-
-			// For Claude OAuth mode, state is in the returnTo parameter which is URL-encoded
-			const returnToMatch1 = authUrl1.match(/returnTo=([^&]*)/);
-			const returnToMatch2 = authUrl2.match(/returnTo=(.*)&?/);
-
-			if (returnToMatch1) {
-				const decodedReturnTo1 = decodeURIComponent(returnToMatch1[1]);
-				state1 = decodedReturnTo1.match(/state=([^&]*)/)?.[1];
-			}
-
-			if (returnToMatch2) {
-				const decodedReturnTo2 = decodeURIComponent(returnToMatch2[1]);
-				state2 = decodedReturnTo2.match(/state=([^&]*)/)?.[1];
-			}
+			// Extract state directly from the URL
+			const state1 = new URL(authUrl1).searchParams.get("state");
+			const state2 = new URL(authUrl2).searchParams.get("state");
 
 			// States should be different
 			expect(state1).toBeDefined();
@@ -186,18 +163,18 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			// Both should have same token URL
 			expect(claudeConfig.tokenUrl).toBe(
-				"https://console.anthropic.com/v1/oauth/token",
+				"https://platform.claude.com/v1/oauth/token",
 			);
 			expect(consoleConfig.tokenUrl).toBe(
-				"https://console.anthropic.com/v1/oauth/token",
+				"https://platform.claude.com/v1/oauth/token",
 			);
 
 			// Both should have same redirect URI
 			expect(claudeConfig.redirectUri).toBe(
-				"https://console.anthropic.com/oauth/code/callback",
+				"https://platform.claude.com/oauth/code/callback",
 			);
 			expect(consoleConfig.redirectUri).toBe(
-				"https://console.anthropic.com/oauth/code/callback",
+				"https://platform.claude.com/oauth/code/callback",
 			);
 
 			// Both should require client ID
@@ -256,63 +233,10 @@ describe("CLI Command Integration", () => {
 	});
 });
 
+// Note: PKCE Generation tests live in packages/providers/src/oauth/__tests__/pkce.test.ts
+// to avoid mock.module contamination from complete-reauth.test.ts.
+
 describe("4. PKCE and State Security Tests", () => {
-	describe("PKCE Generation", () => {
-		it("should generate valid PKCE verifier and challenge", async () => {
-			const pkce = await generatePKCE();
-
-			// Verify structure
-			expect(pkce).toHaveProperty("verifier");
-			expect(pkce).toHaveProperty("challenge");
-			expect(typeof pkce.verifier).toBe("string");
-			expect(typeof pkce.challenge).toBe("string");
-
-			// Verify verifier length (should be 43 chars for 32 random bytes with base64url)
-			expect(pkce.verifier.length).toBe(43);
-
-			// Verify verifier contains only valid base64url characters
-			expect(pkce.verifier).toMatch(/^[a-zA-Z0-9_-]+$/);
-
-			// Verify challenge is also valid base64url
-			expect(pkce.challenge).toMatch(/^[a-zA-Z0-9_-]+$/);
-
-			// Verify challenge is different from verifier (SHA-256 hash)
-			expect(pkce.challenge).not.toBe(pkce.verifier);
-
-			// Verify challenge length (43 chars for SHA-256 hash)
-			expect(pkce.challenge.length).toBe(43);
-		});
-
-		it("should generate unique PKCE pairs each time", async () => {
-			const pkce1 = await generatePKCE();
-			const pkce2 = await generatePKCE();
-
-			// Each generation should produce unique values
-			expect(pkce1.verifier).not.toBe(pkce2.verifier);
-			expect(pkce1.challenge).not.toBe(pkce2.challenge);
-		});
-
-		it("should validate PKCE challenge calculation", async () => {
-			const pkce = await generatePKCE();
-
-			// Manual verification that challenge is SHA-256 hash of verifier
-			const encoder = new TextEncoder();
-			const data = encoder.encode(pkce.verifier);
-			const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-
-			// Convert hash to base64url (same as PKCE implementation)
-			const hashArray = new Uint8Array(hashBuffer);
-			const base64 = btoa(String.fromCharCode(...hashArray));
-			const expectedChallenge = base64
-				.replace(/\+/g, "-")
-				.replace(/\//g, "_")
-				.replace(/=/g, "");
-
-			// Challenge should match expected value
-			expect(pkce.challenge).toBe(expectedChallenge);
-		});
-	});
-
 	describe("State Generation and Validation", () => {
 		it("should generate cryptographically secure random state", () => {
 			const generateState = (): string => {

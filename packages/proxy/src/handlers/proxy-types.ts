@@ -1,19 +1,21 @@
-import type { RuntimeConfig } from "@better-ccflare/config";
+import type { Config, RuntimeConfig } from "@better-ccflare/config";
 import type {
 	AsyncDbWriter,
 	DatabaseOperations,
 } from "@better-ccflare/database";
 import type { Provider } from "@better-ccflare/providers";
 import type { LoadBalancingStrategy } from "@better-ccflare/types";
+import type { UsageWorkerController } from "../usage-worker-controller";
 
 export interface ProxyContext {
 	strategy: LoadBalancingStrategy;
 	dbOps: DatabaseOperations;
 	runtime: RuntimeConfig;
+	config: Config;
 	provider: Provider;
 	refreshInFlight: Map<string, Promise<string>>;
 	asyncWriter: AsyncDbWriter;
-	usageWorker: Worker;
+	usageWorker: UsageWorkerController;
 }
 
 /** Error messages used throughout the proxy module */

@@ -1,18 +1,40 @@
-import type { Database } from "bun:sqlite";
+import type { Config } from "@better-ccflare/config";
+import type { DatabaseOperations } from "@better-ccflare/database";
 
 /**
  * Reset all account statistics
  */
-export function resetAllStats(db: Database): void {
-	db.run(
+export async function resetAllStats(dbOps: DatabaseOperations): Promise<void> {
+	const adapter = dbOps.getAdapter();
+	await adapter.run(
 		"UPDATE accounts SET request_count = 0, session_start = NULL, session_request_count = 0",
 	);
 }
 
 /**
- * Clear all request history
+ * Clear request history using the configured retention windows.
+ * Pass 1: delete payloads older than payloadDays.
+ * Pass 2: delete request metadata older than requestDays.
  */
-export function clearRequestHistory(db: Database): { count: number } {
-	const result = db.run("DELETE FROM requests");
-	return { count: result.changes };
+export async function clearRequestHistory(
+	dbOps: DatabaseOperations,
+	config: Config,
+): Promise<{ removedRequests: number; removedPayloads: number }> {
+	const payloadMs = config.getDataRetentionDays() * 24 * 60 * 60 * 1000;
+	const requestMs = config.getRequestRetentionDays() * 24 * 60 * 60 * 1000;
+	return dbOps.cleanupOldRequests(payloadMs, requestMs);
+}
+
+/**
+ * Compact SQLite database (checkpoint + vacuum + WAL truncate)
+ */
+export async function compactDatabase(dbOps: DatabaseOperations): Promise<{
+	walBusy: number;
+	walLog: number;
+	walCheckpointed: number;
+	vacuumed: boolean;
+	walTruncateBusy?: number;
+	error?: string;
+}> {
+	return dbOps.compact();
 }

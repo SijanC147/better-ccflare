@@ -26,6 +26,8 @@ const mockUsageCache = {
 		mockUsageCache.cache.delete(accountId);
 	},
 
+	refreshNow: async (_accountId: string) => true,
+
 	clear: () => {
 		mockUsageCache.cache.clear();
 		mockUsageCache.polling.clear();
@@ -65,6 +67,7 @@ const mockDbOps = {
 	updateAccountPriority: () => {},
 	renameAccount: () => {},
 	setAutoFallbackEnabled: () => {},
+	forceResetAccountRateLimit: () => true,
 };
 
 // Mock Database instance
@@ -344,6 +347,115 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 			// Verify response indicates error for non-Anthropic account
 			expect(response.ok).toBe(false);
 		});
+
+		it("should include rateLimitedUntil in account list response", async () => {
+			const accountsHandler = createMockAccountsListHandler(
+				CACHE_FRESHNESS_THRESHOLD_MS,
+			);
+			const futureTimestamp = Date.now() + 86400000; // 24 hours from now
+
+			mockQuery.all = () => [
+				{
+					id: "locked-account-id",
+					name: "Locked Account",
+					provider: "anthropic",
+					access_token: "sk-ant-test",
+					refresh_token: "refresh-token",
+					request_count: 0,
+					total_requests: 0,
+					last_used: null,
+					created_at: Date.now() - 86400000,
+					expires_at: Date.now() + 86400000,
+					rate_limited_until: futureTimestamp,
+					rate_limit_reset: null,
+					rate_limit_status: "allowed_warning",
+					rate_limit_remaining: null,
+					session_start: null,
+					session_request_count: 0,
+					paused: 0,
+					priority: 0,
+					auto_fallback_enabled: 0,
+					auto_refresh_enabled: 0,
+					custom_endpoint: null,
+					model_mappings: null,
+					token_valid: 1,
+					rate_limited: 0,
+					session_info: null,
+				},
+			];
+
+			const response = await accountsHandler();
+			const payload = (await response.json()) as Array<{
+				rateLimitedUntil: number | null;
+			}>;
+
+			expect(response.ok).toBe(true);
+			expect(payload[0].rateLimitedUntil).toBe(futureTimestamp);
+		});
+
+		it("should return 404 when account is not found", async () => {
+			const forceResetHandler = createMockAccountForceResetRateLimitHandler();
+			mockQuery.get = () => undefined;
+
+			const response = await forceResetHandler({} as Request, "nonexistent-id");
+			expect(response.status).toBe(404);
+		});
+
+		it("should force reset rate-limit state and trigger immediate usage polling", async () => {
+			const forceResetHandler = createMockAccountForceResetRateLimitHandler();
+
+			mockQuery.get = () => ({
+				id: "test-account-id",
+				name: "test-account-name",
+				provider: "anthropic",
+				access_token: "test-token",
+			});
+
+			const refreshNowSpy = spyOn(mockUsageCache, "refreshNow");
+			const forceResetSpy = spyOn(mockDbOps, "forceResetAccountRateLimit");
+
+			const response = await forceResetHandler(
+				{} as Request,
+				"test-account-id",
+			);
+			const payload = (await response.json()) as {
+				success: boolean;
+				usagePollTriggered: boolean;
+			};
+
+			expect(forceResetSpy).toHaveBeenCalledWith("test-account-id");
+			expect(refreshNowSpy).toHaveBeenCalledWith("test-account-id");
+			expect(response.ok).toBe(true);
+			expect(payload.success).toBe(true);
+			expect(payload.usagePollTriggered).toBe(true);
+		});
+
+		it("should return usagePollTriggered false when usage poll fails", async () => {
+			const forceResetHandler = createMockAccountForceResetRateLimitHandler();
+			mockQuery.get = () => ({
+				id: "test-id",
+				name: "test",
+				provider: "anthropic",
+				access_token: "tok",
+			});
+
+			const refreshNowSpy = spyOn(
+				mockUsageCache,
+				"refreshNow",
+			).mockImplementation(async () => false);
+			const forceResetSpy = spyOn(mockDbOps, "forceResetAccountRateLimit");
+
+			const response = await forceResetHandler({} as Request, "test-id");
+			const payload = (await response.json()) as {
+				success: boolean;
+				usagePollTriggered: boolean;
+			};
+
+			expect(forceResetSpy).toHaveBeenCalledWith("test-id");
+			expect(refreshNowSpy).toHaveBeenCalledWith("test-id");
+			expect(response.ok).toBe(true);
+			expect(payload.usagePollTriggered).toBe(false);
+		});
 	});
 });
 
@@ -415,7 +527,10 @@ function createMockAccountsListHandler(CACHE_FRESHNESS_THRESHOLD_MS: number) {
 				usageUtilization,
 				usageWindow,
 				usageData,
-				hasRefreshToken: !!account.refresh_token,
+				hasRefreshToken:
+					!!account.refresh_token &&
+					account.refresh_token !== account.access_token,
+				rateLimitedUntil: account.rate_limited_until || null,
 			};
 		});
 
@@ -483,6 +598,29 @@ function createMockAccountReloadHandler() {
 			return mockJsonResponse({
 				success: true,
 				message: `Token reload triggered for account '${account.name}'`,
+			});
+		} catch (error) {
+			return mockErrorResponse(error);
+		}
+	};
+}
+
+function createMockAccountForceResetRateLimitHandler() {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const account = mockQuery.get(accountId);
+			if (!account) {
+				return mockErrorResponse({ status: 404, message: "Account not found" });
+			}
+
+			mockDbOps.forceResetAccountRateLimit(accountId);
+			mockClearAccountRefreshCache(accountId);
+			const usagePollTriggered = await mockUsageCache.refreshNow(accountId);
+
+			return mockJsonResponse({
+				success: true,
+				message: `Rate limit state cleared for account '${account.name}'`,
+				usagePollTriggered,
 			});
 		} catch (error) {
 			return mockErrorResponse(error);

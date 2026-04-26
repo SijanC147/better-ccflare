@@ -164,20 +164,37 @@ jobs:
             # Get commits since previous tag
             COMMITS=$(git log --pretty=format:"%h %s" $PREV_TAG..HEAD)
 
+            # Drop commits that only touch CLAUDE.md files
+            FILTERED_COMMITS=""
+            while IFS= read -r commit; do
+              [ -z "$commit" ] && continue
+              HASH=$(echo "$commit" | cut -d' ' -f1)
+              FILES=$(git show --name-only --pretty="" "$HASH")
+              NON_CLAUDE_FILES=$(echo "$FILES" | grep -vE '(^|/)CLAUDE\.md$' || true)
+
+              if [ -n "$NON_CLAUDE_FILES" ]; then
+                FILTERED_COMMITS="$FILTERED_COMMITS$commit"$'\n'
+              fi
+            done <<< "$COMMITS"
+            COMMITS=$(echo "$FILTERED_COMMITS" | sed '/^$/d')
+
             if [ -n "$COMMITS" ]; then
               CHANGELOG="$CHANGELOG
 
           ## What's Changed
 
           "
-              # Categorize commits and remove duplicates (especially CLAUDE_CLI_VERSION updates)
-              FEATURES=$(echo "$COMMITS" | grep -E "feat|add|new" | grep -v "chore: update CLAUDE_CLI_VERSION" | sort -u | head -5)
-              FIXES=$(echo "$COMMITS" | grep -E "fix|bug|resolve" | grep -v "chore: update CLAUDE_CLI_VERSION" | sort -u | head -5)
-              SECURITY=$(echo "$COMMITS" | grep -E "security|vulnerabilit|redact|ReDoS" | grep -v "chore: update CLAUDE_CLI_VERSION" | sort -u | head -5)
-              IMPROVEMENTS=$(echo "$COMMITS" | grep -E "improve|enhance|update|refactor" | grep -v "chore: update CLAUDE_CLI_VERSION" | sort -u | head -5)
+              # Categorize commits by prefix only (after hash), remove duplicates and noise
+              # Dated sub-commits like feat(04-03): or feat(02-01): are filtered out
+              VERSION_SKIP='grep -v "chore: update CLAUDE_CLI_VERSION" | grep -v "chore: update CLI versions" | grep -v "chore: update CODEX_VERSION"'
+              DATED_SKIP='grep -vE "[a-f0-9]+ [a-z]+\([0-9]{2}-[0-9]{2}\):" | grep -vE "\([0-9]{2}\): (WR|CR)-[0-9]+"'
+              FEATURES=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (feat|add|new)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
+              FIXES=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (fix|bug|resolve)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
+              SECURITY=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (security|vulnerabilit|redact|ReDoS)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
+              IMPROVEMENTS=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (improve|enhance|update|refactor)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
 
               # Also filter out duplicate chore messages specifically
-              CHORE_UNIQUE=$(echo "$COMMITS" | grep -E "chore" | grep -v "chore: update CLAUDE_CLI_VERSION" | sort -u | head -3)
+              CHORE_UNIQUE=$(echo "$COMMITS" | grep -E "chore" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u | head -3)
 
               if [ -n "$FEATURES" ]; then
                 CHANGELOG="$CHANGELOG

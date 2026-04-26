@@ -42,6 +42,7 @@ export function createConfigHandlers(
 					(settings.default_agent_model as string) || DEFAULT_AGENT_MODEL,
 				// Include actual TLS status
 				tls_enabled: runtime?.tlsEnabled || false,
+				system_prompt_cache_ttl_1h: config.getSystemPromptCacheTtl1h(),
 			};
 			return jsonResponse(response);
 		},
@@ -118,6 +119,7 @@ export function createConfigHandlers(
 			return jsonResponse({
 				payloadDays: config.getDataRetentionDays(),
 				requestDays: config.getRequestRetentionDays(),
+				storePayloads: config.getStorePayloads(),
 			});
 		},
 
@@ -151,9 +153,51 @@ export function createConfigHandlers(
 				config.setRequestRetentionDays(requestDays);
 				updated = true;
 			}
+			if (body.storePayloads !== undefined) {
+				if (typeof body.storePayloads !== "boolean") {
+					return errorResponse(
+						BadRequest("Invalid 'storePayloads': must be boolean"),
+					);
+				}
+				config.setStorePayloads(body.storePayloads);
+				updated = true;
+			}
 			if (!updated) {
 				return errorResponse(BadRequest("No retention fields provided"));
 			}
+			return new Response(null, { status: 204 });
+		},
+
+		getCacheKeepaliveTtl: (): Response => {
+			return jsonResponse({ ttlMinutes: config.getCacheKeepaliveTtlMinutes() });
+		},
+
+		setCacheKeepaliveTtl: async (req: Request): Promise<Response> => {
+			const body = await req.json();
+			const ttlMinutes = validateNumber(body.ttlMinutes, "ttlMinutes", {
+				min: 0,
+				max: 60,
+				integer: true,
+			});
+			if (typeof ttlMinutes !== "number") {
+				return errorResponse(BadRequest("Invalid 'ttlMinutes': must be 0-60"));
+			}
+			config.setCacheKeepaliveTtlMinutes(ttlMinutes);
+			return new Response(null, { status: 204 });
+		},
+
+		getCacheTtl: (): Response => {
+			return jsonResponse({
+				system_prompt_cache_ttl_1h: config.getSystemPromptCacheTtl1h(),
+			});
+		},
+
+		setCacheTtl: async (req: Request): Promise<Response> => {
+			const body = await req.json();
+			if (typeof body.enabled !== "boolean") {
+				return errorResponse(BadRequest("Invalid 'enabled': must be boolean"));
+			}
+			config.setSystemPromptCacheTtl1h(body.enabled);
 			return new Response(null, { status: 204 });
 		},
 	};

@@ -1,7 +1,8 @@
-import { logError, ProviderError } from "@better-ccflare/core";
+import { getModelList, logError, ProviderError } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import { getProvider } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { cacheBodyStore } from "../cache-body-store";
 import { forwardToClient } from "../response-handler";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
@@ -9,6 +10,28 @@ import { handleProxyError, processProxyResponse } from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
 
 const log = new Logger("ProxyOperations");
+
+/**
+ * Bedrock provider currently returns a synthetic Request containing the
+ * provider response payload (instead of a real URL to fetch).
+ * Detect and unwrap that request so we don't try to fetch a fake host.
+ */
+function isSyntheticProviderResponse(request: Request): boolean {
+	return (
+		request.headers.get("x-bedrock-response") === "true" &&
+		request.url.startsWith("https://bedrock.aws/response")
+	);
+}
+
+function materializeSyntheticResponse(request: Request): Response {
+	const headers = new Headers(request.headers);
+	headers.delete("x-bedrock-response");
+
+	return new Response(request.body, {
+		status: 200,
+		headers,
+	});
+}
 
 /**
  * Filters thinking blocks from request body
@@ -31,15 +54,6 @@ function filterThinkingBlocks(
 		}
 
 		let hasChanges = false;
-
-		// Find the index of the last assistant message
-		let _lastAssistantIndex = -1;
-		for (let i = body.messages.length - 1; i >= 0; i--) {
-			if (body.messages[i].role === "assistant") {
-				_lastAssistantIndex = i;
-				break;
-			}
-		}
 
 		// Filter out thinking blocks from message content and track which messages were modified
 		const processedMessages = body.messages.map(
@@ -124,7 +138,6 @@ function filterThinkingBlocks(
 			const warningMessage =
 				"Disabled thinking mode due to incompatible thinking blocks from previous provider. Conversation context preserved.";
 			log.info(warningMessage);
-			console.log(`[better-ccflare] ${warningMessage}`);
 
 			const filteredBody = {
 				...body,
@@ -186,6 +199,66 @@ async function isInvalidThinkingSignatureError(
 }
 
 /**
+ * Checks if a response error indicates the requested model is unavailable.
+ * Covers Anthropic (not_found_error), OpenAI-compat (model_not_found),
+ * generic messages, and Bedrock (ResourceNotFoundException).
+ */
+async function isModelUnavailableError(response: Response): Promise<boolean> {
+	if (
+		response.status !== 404 &&
+		response.status !== 400 &&
+		response.status !== 429
+	)
+		return false;
+
+	// 429s always trigger slot failover regardless of content-type.
+	// Providers like Qwen return 429 without application/json bodies, and
+	// the content-type guard below would otherwise short-circuit before reaching
+	// this check, causing the 429 to be forwarded to the client instead of
+	// failing over to the next combo slot.
+	if (response.status === 429) {
+		return true;
+	}
+
+	try {
+		const clone = response.clone();
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+
+		const json = await clone.json();
+
+		// Anthropic native format
+		if (json.error?.type === "not_found_error") return true;
+
+		// OpenAI-compat format
+		if (json.error?.code === "model_not_found") return true;
+
+		// Generic: message contains "model not found" or "does not exist"
+		if (
+			json.error?.message &&
+			typeof json.error.message === "string" &&
+			(json.error.message.toLowerCase().includes("model not found") ||
+				json.error.message.toLowerCase().includes("does not exist"))
+		) {
+			return true;
+		}
+
+		// Bedrock: ResourceNotFoundException
+		if (
+			json.error?.message &&
+			typeof json.error.message === "string" &&
+			json.error.message.includes("ResourceNotFoundException")
+		) {
+			return true;
+		}
+	} catch {
+		// Ignore parse errors
+	}
+
+	return false;
+}
+
+/**
  * Handles proxy request without authentication
  * @param req - The incoming request
  * @param url - The parsed URL
@@ -238,6 +311,7 @@ export async function proxyUnauthenticated(
 				failoverAttempts: 0,
 				agentUsed: requestMeta.agentUsed,
 				project: requestMeta.project,
+				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
 			},
@@ -277,6 +351,7 @@ export async function proxyWithAccount(
 	_createBodyStream: () => ReadableStream<Uint8Array> | undefined,
 	failoverAttempts: number,
 	ctx: ProxyContext,
+	modelOverride?: string | null,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 ): Promise<Response | null> {
@@ -291,6 +366,51 @@ export async function proxyWithAccount(
 			);
 		}
 
+		// Apply model override from combo slot (per D-04, REQ-12)
+		let effectiveBodyBuffer = requestBodyBuffer;
+		if (modelOverride && requestBodyBuffer) {
+			try {
+				const bodyText = new TextDecoder().decode(requestBodyBuffer);
+				const body = JSON.parse(bodyText);
+				body.model = modelOverride;
+				effectiveBodyBuffer = new TextEncoder().encode(
+					JSON.stringify(body),
+				).buffer;
+
+				if (
+					process.env.DEBUG?.includes("proxy") ||
+					process.env.DEBUG === "true" ||
+					process.env.NODE_ENV === "development"
+				) {
+					log.info(
+						`Combo model override: applying model "${modelOverride}" for account ${account.name}`,
+					);
+				}
+			} catch {
+				log.warn(
+					"Failed to patch request body with model override, using original body",
+				);
+				effectiveBodyBuffer = requestBodyBuffer;
+			}
+		}
+
+		// Stage the original request body + headers for cache keepalive replay.
+		// Uses the pre-transform body (effectiveBodyBuffer may have a model override
+		// patched in, so use the original requestBodyBuffer for a faithful replay).
+		// Headers are stored because Anthropic's prepareHeaders() copies incoming
+		// client headers (anthropic-version, anthropic-beta, x-stainless-*, etc.)
+		// and augments them — providers that build headers from scratch ignore them.
+		// Skip staging for internal keepalive replays to prevent infinite loop.
+		if (!req.headers.get("x-better-ccflare-keepalive")) {
+			cacheBodyStore.stageRequest(
+				requestMeta.id,
+				account.id,
+				requestBodyBuffer,
+				req.headers,
+				url.pathname,
+			);
+		}
+
 		// Get the provider for this account
 		const provider = getProvider(account.provider) || ctx.provider;
 
@@ -302,7 +422,7 @@ export async function proxyWithAccount(
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
 		if (provider.prepareRequest) {
-			provider.prepareRequest(req, requestBodyBuffer, account);
+			provider.prepareRequest(req, effectiveBodyBuffer, account);
 		}
 
 		// Prepare request using account-specific provider
@@ -317,8 +437,8 @@ export async function proxyWithAccount(
 			method: req.method,
 			headers,
 		};
-		if (requestBodyBuffer) {
-			requestInit.body = new Uint8Array(requestBodyBuffer);
+		if (effectiveBodyBuffer) {
+			requestInit.body = new Uint8Array(effectiveBodyBuffer);
 			requestInit.duplex = "half";
 		}
 
@@ -328,8 +448,10 @@ export async function proxyWithAccount(
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
 
-		// Make the request
-		let rawResponse = await makeProxyRequest(transformedRequest);
+		// Make the request (or unwrap a synthetic provider response)
+		let rawResponse = isSyntheticProviderResponse(transformedRequest)
+			? materializeSyntheticResponse(transformedRequest)
+			: await makeProxyRequest(transformedRequest);
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
 		const isClaudeProvider =
@@ -343,9 +465,9 @@ export async function proxyWithAccount(
 			);
 
 			// Filter thinking blocks from the request body
-			const filteredBodyBuffer = filterThinkingBlocks(requestBodyBuffer);
+			const filteredBodyBuffer = filterThinkingBlocks(effectiveBodyBuffer);
 
-			if (filteredBodyBuffer && filteredBodyBuffer !== requestBodyBuffer) {
+			if (filteredBodyBuffer && filteredBodyBuffer !== effectiveBodyBuffer) {
 				// Retry the request with filtered body
 				const retryRequestInit: RequestInit & { duplex?: "half" } = {
 					method: req.method,
@@ -360,8 +482,10 @@ export async function proxyWithAccount(
 					? await provider.transformRequestBody(retryProviderRequest, account)
 					: retryProviderRequest;
 
-				// Make the retry request
-				rawResponse = await makeProxyRequest(retryTransformedRequest);
+				// Make the retry request (or unwrap a synthetic provider response)
+				rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
+					? materializeSyntheticResponse(retryTransformedRequest)
+					: await makeProxyRequest(retryTransformedRequest);
 			} else {
 				log.warn(
 					"Failed to filter thinking blocks or no changes made, proceeding with original error response",
@@ -369,8 +493,155 @@ export async function proxyWithAccount(
 			}
 		}
 
+		// On model unavailable / rate-limited: cycle through the model list for
+		// this account. getModelList returns [primary, ...fallbacks] merged from
+		// model_mappings arrays and legacy model_fallbacks. We already tried index 0
+		// (the primary), so start at index 1.
+		if (await isModelUnavailableError(rawResponse)) {
+			// Log 429 response headers for debugging upstream rate-limit info
+			if (rawResponse.status === 429) {
+				const rlHeaders: Record<string, string> = {};
+				rawResponse.headers.forEach((v, k) => {
+					const lk = k.toLowerCase();
+					if (
+						lk.includes("rate") ||
+						lk.includes("retry") ||
+						lk.includes("limit") ||
+						lk.includes("reset") ||
+						lk.includes("x-") ||
+						lk.includes("quota")
+					) {
+						rlHeaders[k] = v;
+					}
+				});
+				log.debug(
+					`Account ${account.name} received 429 — headers: ${JSON.stringify(rlHeaders)}`,
+				);
+			}
+			let requestedModel: string | null = null;
+			if (effectiveBodyBuffer) {
+				try {
+					const bodyText = new TextDecoder().decode(effectiveBodyBuffer);
+					requestedModel = JSON.parse(bodyText).model ?? null;
+				} catch {
+					// ignore
+				}
+			}
+
+			if (requestedModel) {
+				const modelList = getModelList(requestedModel, account);
+				if (!modelList || modelList.length <= 1) {
+					// No fallback models configured — fail over to the next account.
+					// 429s should never be forwarded to the client when other
+					// accounts are available; only genuine model-not-found
+					// errors (404/400) warrant returning the upstream response.
+					if (rawResponse.status === 429) {
+						log.warn(
+							`Account ${account.name} rate-limited (429), no model fallbacks — failing over to next account`,
+						);
+						return null;
+					}
+					return rawResponse;
+				}
+
+				for (let i = 1; i < modelList.length; i++) {
+					const nextModel = modelList[i];
+					log.info(
+						`Model '${modelList[i - 1]}' unavailable/rate-limited on account ${account.name}, ` +
+							`retrying with: ${nextModel} (${i}/${modelList.length - 1})`,
+					);
+
+					// Patch the original request body with the next model name, then let
+					// transformRequestBody handle format conversion (e.g. Anthropic→OpenAI).
+					// After that, re-patch the model name because transformRequestBody calls
+					// mapModelName internally which remaps non-Claude names back to the primary
+					// model (no family match → sonnet fallback). We always want nextModel to
+					// reach the upstream provider verbatim.
+					let patchedBody: ArrayBuffer | null = null;
+					try {
+						const bodyText = new TextDecoder().decode(effectiveBodyBuffer!);
+						const body = JSON.parse(bodyText);
+						body.model = nextModel;
+						patchedBody = new TextEncoder().encode(JSON.stringify(body)).buffer;
+					} catch {
+						log.warn("Failed to patch request body for model retry");
+						break;
+					}
+
+					const retryRequestInit: RequestInit & { duplex?: "half" } = {
+						method: req.method,
+						headers,
+						body: new Uint8Array(patchedBody),
+						duplex: "half",
+					};
+
+					const retryProviderRequest = new Request(targetUrl, retryRequestInit);
+					let retryTransformedRequest = provider.transformRequestBody
+						? await provider.transformRequestBody(retryProviderRequest, account)
+						: retryProviderRequest;
+
+					// Re-patch model after transformRequestBody — the provider's conversion
+					// (e.g. convertAnthropicRequestToOpenAI) calls mapModelName which can
+					// remap nextModel back to the primary model if it has no Claude family
+					// pattern. Force nextModel into the final request body.
+					try {
+						const transformedText = await retryTransformedRequest
+							.clone()
+							.text();
+						const transformedBody = JSON.parse(transformedText);
+						if (transformedBody.model !== nextModel) {
+							transformedBody.model = nextModel;
+							const repatchedHeaders = new Headers(
+								retryTransformedRequest.headers,
+							);
+							retryTransformedRequest = new Request(
+								retryTransformedRequest.url,
+								{
+									method: retryTransformedRequest.method,
+									headers: repatchedHeaders,
+									body: JSON.stringify(transformedBody),
+								},
+							);
+						}
+					} catch {
+						// If re-patching fails, proceed with the transformed request as-is
+					}
+
+					rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
+						? materializeSyntheticResponse(retryTransformedRequest)
+						: await makeProxyRequest(retryTransformedRequest);
+
+					if (!(await isModelUnavailableError(rawResponse.clone()))) {
+						break; // Success — stop cycling
+					}
+				}
+			}
+
+			// If still unavailable/rate-limited after exhausting the model list,
+			// failover to the next account. OpenAI-compatible providers never set
+			// isRateLimited:true in parseRateLimit, so we must handle it here.
+			if (await isModelUnavailableError(rawResponse)) {
+				log.warn(
+					`All models exhausted on account ${account.name}, failing over to next account`,
+				);
+				return null;
+			}
+		}
+
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
-		const response = await provider.processResponse(rawResponse, account);
+		const response = await provider.processResponse(
+			rawResponse,
+			account,
+			req.headers,
+		);
+
+		// Failover to next account on upstream 401 — credentials are invalid/expired
+		if (response.status === 401) {
+			log.warn(
+				`Authentication failed (401) for account ${account.name}, failing over to next account`,
+			);
+			return null;
+		}
 
 		// Check for rate limit using account-specific provider
 		const isRateLimited = await processProxyResponse(
@@ -395,13 +666,14 @@ export async function proxyWithAccount(
 				path: url.pathname,
 				account,
 				requestHeaders: req.headers,
-				requestBody: requestBodyBuffer,
+				requestBody: effectiveBodyBuffer,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts,
 				agentUsed: requestMeta.agentUsed,
 				project: requestMeta.project,
+				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
 			},

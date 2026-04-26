@@ -5,11 +5,17 @@ const logger = new Logger("async-db-writer");
 
 type DbJob = () => void | Promise<void>;
 
+export interface AsyncWriterHealth {
+	healthy: boolean;
+	failureCount: number;
+	queuedJobs: number;
+}
+
 export class AsyncDbWriter implements Disposable {
 	private queue: DbJob[] = [];
 	private running = false;
 	private intervalId: Timer | null = null;
-	private readonly MAX_QUEUE_SIZE = 10000; // Prevent unbounded growth
+	private readonly MAX_QUEUE_SIZE = 1000; // Prevent unbounded growth
 	private droppedJobs = 0;
 
 	constructor() {
@@ -61,6 +67,14 @@ export class AsyncDbWriter implements Disposable {
 		} finally {
 			this.running = false;
 		}
+	}
+
+	getHealth(): AsyncWriterHealth {
+		return {
+			healthy: this.droppedJobs === 0,
+			failureCount: this.droppedJobs,
+			queuedJobs: this.queue.length,
+		};
 	}
 
 	async dispose(): Promise<void> {

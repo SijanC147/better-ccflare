@@ -21,11 +21,12 @@ export {
 export * from "./lifecycle";
 
 // Export types for model mappings - defined inline in model-mappings.ts
-export type ModelMapping = { [anthropicModel: string]: string };
+export type ModelMapping = { [anthropicModel: string]: string | string[] };
 export type ModelMappingData = {
 	endpoint?: string;
 	modelMappings?: ModelMapping;
 };
+export type ModelFallback = { [modelFamily: string]: string };
 export {
 	type IntervalConfig,
 	intervalManager,
@@ -35,13 +36,18 @@ export {
 } from "./interval-manager";
 export {
 	createCustomEndpointData,
-	DEFAULT_MODEL_MAPPINGS,
+	getAllowedModelsMessage,
 	getEndpointUrl,
+	getModelFamily,
+	getModelList,
 	getModelMappings,
+	isValidClaudeModel,
 	KNOWN_PATTERNS,
 	mapModelName,
 	parseCustomEndpointData,
+	parseModelFallbacks,
 	parseModelMappings,
+	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
 } from "./model-mappings";
 export {
@@ -52,6 +58,9 @@ export {
 	getModelDisplayName,
 	getModelShortName,
 	isValidModelId,
+	LATEST_HAIKU_MODEL,
+	LATEST_OPUS_MODEL,
+	LATEST_SONNET_MODEL,
 	MODEL_DISPLAY_NAMES,
 	MODEL_SHORT_NAMES,
 } from "./models";
