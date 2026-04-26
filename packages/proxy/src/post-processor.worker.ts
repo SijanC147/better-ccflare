@@ -503,8 +503,11 @@ async function handleStart(msg: StartMessage): Promise<void> {
 	} else {
 		// Providers with subscription plans default to "plan" billing;
 		// all others (anthropic-compatible, openai-compatible, etc.) are API
+		// NOTE: "anthropic" provider (Claude OAuth) is intentionally excluded from this fallback.
+		// It has explicit header-based detection above (overage-in-use, overage-status).
+		// Without those headers, we have no way to determine if it's plan vs API billing,
+		// so we don't make assumptions. Only definitively plan-only providers are included.
 		const planProviders = new Set([
-			"anthropic",
 			"zai",
 			"alibaba-coding-plan",
 			"qwen",
