@@ -65,7 +65,7 @@ function getAccountBadgeColor(accountName?: string): {
 	// Simple hash function for deterministic color generation
 	let hash = 0;
 	for (let i = 0; i < accountName.length; i++) {
-		hash = ((hash << 5) - hash) + accountName.charCodeAt(i);
+		hash = (hash << 5) - hash + accountName.charCodeAt(i);
 		hash = hash & hash; // Convert to 32bit integer
 	}
 
@@ -133,7 +133,7 @@ function getModelColor(model: string): { border: string; text: string } {
 	let hash = 0;
 	for (let i = 0; i < model.length; i++) {
 		hash = (hash << 5) - hash + model.charCodeAt(i);
-		hash = hash & hash; // Convert to 32-bit integer
+		hash = hash & hash;
 	}
 
 	const colorPalette = [
@@ -1280,6 +1280,21 @@ export function RequestsTab() {
 												request.meta.retry > 0 && (
 													<span>Retry {request.meta.retry}</span>
 												)}
+											{(request.meta.accountName || request.meta.accountId) &&
+												(() => {
+													const color = getAccountBadgeColor(
+														request.meta.accountName,
+													);
+													return (
+														<Badge
+															variant="outline"
+															className={`text-xs ${color.borderClass} ${color.textClass}`}
+														>
+															{request.meta.accountName ||
+																`${request.meta.accountId?.slice(0, 8)}...`}
+														</Badge>
+													);
+												})()}
 											<span>ID: {request.id.slice(0, 8)}...</span>
 										</div>
 									</button>
