@@ -398,8 +398,13 @@ jobs:
             service do
               run opt_bin/"better-ccflare"
               keep_alive successful_exit: false, crashed: true
-              log_path var/"log/better-ccflare.log"
-              error_log_path var/"log/better-ccflare.log"
+              # Co-locate launchd stdout/stderr capture with the app's internal
+              # LogFileWriter output so all logs land in one durable directory
+              # (#{var}/log/better-ccflare/) instead of being split between
+              # Homebrew's var dir and macOS's volatile /var/folders tmp dir.
+              environment_variables BETTER_CCFLARE_LOG_DIR: var/"log/better-ccflare"
+              log_path var/"log/better-ccflare/launchd.log"
+              error_log_path var/"log/better-ccflare/launchd.log"
             end
 
             def caveats
@@ -412,8 +417,9 @@ jobs:
                 Run in foreground:
                   better-ccflare
 
-                Service logs:
-                  #{var}/log/better-ccflare.log
+                Service logs (durable, co-located):
+                  #{var}/log/better-ccflare/launchd.log  (stdout/stderr capture)
+                  #{var}/log/better-ccflare/app.log      (internal app log)
 
                 Database (default):
                   ~/.config/better-ccflare/better-ccflare.db
