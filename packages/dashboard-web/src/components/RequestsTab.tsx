@@ -85,6 +85,74 @@ function getAccountBadgeColor(accountName?: string): {
 }
 
 
+
+// Deterministic color mapping for model badges
+function getModelColor(model: string): { border: string; text: string } {
+	if (!model) {
+		return {
+			border: "border-gray-400",
+			text: "text-gray-600 dark:text-gray-300",
+		};
+	}
+
+	const modelLower = model.toLowerCase();
+
+	// Special cases for known providers
+	if (modelLower.includes("claude-sonnet")) {
+		return {
+			border: "border-blue-500",
+			text: "text-blue-600 dark:text-blue-400",
+		};
+	}
+	if (modelLower.includes("claude-haiku")) {
+		return {
+			border: "border-green-500",
+			text: "text-green-600 dark:text-green-400",
+		};
+	}
+	if (modelLower.includes("claude-opus")) {
+		return {
+			border: "border-purple-500",
+			text: "text-purple-600 dark:text-purple-400",
+		};
+	}
+	if (modelLower.includes("z-ai") || modelLower.includes("zai")) {
+		return {
+			border: "border-orange-500",
+			text: "text-orange-600 dark:text-orange-400",
+		};
+	}
+	if (modelLower.includes("gpt") || modelLower.includes("openai")) {
+		return {
+			border: "border-emerald-500",
+			text: "text-emerald-600 dark:text-emerald-400",
+		};
+	}
+
+	// Hash-based fallback for unknown models
+	let hash = 0;
+	for (let i = 0; i < model.length; i++) {
+		hash = (hash << 5) - hash + model.charCodeAt(i);
+		hash = hash & hash; // Convert to 32-bit integer
+	}
+
+	const colorPalette = [
+		{ border: "border-red-500", text: "text-red-600 dark:text-red-400" },
+		{ border: "border-pink-500", text: "text-pink-600 dark:text-pink-400" },
+		{ border: "border-rose-500", text: "text-rose-600 dark:text-rose-400" },
+		{ border: "border-indigo-500", text: "text-indigo-600 dark:text-indigo-400" },
+		{ border: "border-violet-500", text: "text-violet-600 dark:text-violet-400" },
+		{ border: "border-cyan-500", text: "text-cyan-600 dark:text-cyan-400" },
+		{ border: "border-sky-500", text: "text-sky-600 dark:text-sky-400" },
+		{ border: "border-amber-500", text: "text-amber-600 dark:text-amber-400" },
+		{ border: "border-lime-500", text: "text-lime-600 dark:text-lime-400" },
+		{ border: "border-teal-500", text: "text-teal-600 dark:text-teal-400" },
+	];
+
+	const colorIndex = Math.abs(hash) % colorPalette.length;
+	return colorPalette[colorIndex];
+}
+
 export function RequestsTab() {
 	const [expandedRequests, setExpandedRequests] = useState<Set<string>>(
 		new Set(),
@@ -1106,7 +1174,12 @@ export function RequestsTab() {
 												</span>
 											)}
 											{summary?.model && (
-												<Badge variant="secondary" className="text-xs">
+												<Badge
+													variant="outline"
+													className={`text-xs ${
+														getModelColor(summary.model).border
+													} ${getModelColor(summary.model).text}`}
+												>
 													{summary.model}
 												</Badge>
 											)}
