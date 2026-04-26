@@ -418,7 +418,12 @@ jobs:
                 Database (default):
                   ~/.config/better-ccflare/better-ccflare.db
 
-                Override DB path with environment variable:
+                Environment variables:
+                  Place a .env file at ~/.config/better-ccflare/.env
+                  to set persistent env vars (auto-loaded on every start,
+                  including `brew services start`).
+
+                Override DB path:
                   BETTER_CCFLARE_DB_PATH=/custom/path.db
 
                 Default server: http://localhost:8080

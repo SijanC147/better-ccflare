@@ -6,6 +6,7 @@ import { config } from "dotenv";
 // 1. Current directory (when binary is in project root)
 // 2. Project root (when running from source with bun run)
 // 3. Executable directory (when binary is deployed elsewhere)
+// 4. XDG config: ~/.config/better-ccflare/.env (used by Homebrew service)
 const possibleEnvPaths = [
 	".env", // Current directory
 	"../../.env", // Project root from apps/cli/src
@@ -17,6 +18,17 @@ if (process.argv[1]) {
 		require("node:path").resolve(process.argv[1]),
 	);
 	possibleEnvPaths.push(require("node:path").join(execPath, ".env"));
+}
+
+// XDG config dir — used by `brew services start better-ccflare` and any
+// installation where the user wants persistent env vars across restarts.
+{
+	const homeDir = require("node:os").homedir();
+	if (homeDir) {
+		possibleEnvPaths.push(
+			require("node:path").join(homeDir, ".config", "better-ccflare", ".env"),
+		);
+	}
 }
 
 // Try each possible .env location
