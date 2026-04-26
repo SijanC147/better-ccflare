@@ -395,12 +395,33 @@ jobs:
               bin.install "better-ccflare"
             end
 
+            service do
+              run opt_bin/"better-ccflare"
+              keep_alive successful_exit: false, crashed: true
+              log_path var/"log/better-ccflare.log"
+              error_log_path var/"log/better-ccflare.log"
+            end
+
             def caveats
               <<~EOS
                 better-ccflare has been installed!
 
-                To start the proxy server:
+                Run as a background service (managed by launchd):
+                  brew services start better-ccflare
+
+                Run in foreground:
                   better-ccflare
+
+                Service logs:
+                  #{var}/log/better-ccflare.log
+
+                Database (default):
+                  ~/.config/better-ccflare/better-ccflare.db
+
+                Override DB path with environment variable:
+                  BETTER_CCFLARE_DB_PATH=/custom/path.db
+
+                Default server: http://localhost:8080
 
                 For more information, visit:
                   https://github.com/SijanC147/better-ccflare
