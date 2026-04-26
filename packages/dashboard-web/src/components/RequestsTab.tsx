@@ -1079,6 +1079,12 @@ export function RequestsTab() {
 													{summary.model}
 												</Badge>
 											)}
+											{(summary?.project || request.meta.project) && (
+												<Badge variant="outline" className="text-xs border-violet-500 text-violet-600 dark:text-violet-400">
+													<FolderOpen className="h-3 w-3 mr-1" />
+													{summary?.project || request.meta.project}
+												</Badge>
+											)}
 											{(summary?.agentUsed || request.meta.agentUsed) && (
 												<Badge variant="secondary" className="text-xs">
 													Agent: {summary?.agentUsed || request.meta.agentUsed}
