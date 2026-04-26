@@ -8,6 +8,8 @@ import {
 	LayoutDashboard,
 	LogOut,
 	Menu,
+	PanelLeftClose,
+	PanelLeftOpen,
 	RefreshCw,
 	Settings,
 	Shield,
@@ -52,11 +54,15 @@ const _navItems: NavItem[] = [
 interface NavigationProps {
 	onLogout?: () => void;
 	showCombos?: boolean;
+	isCollapsed?: boolean;
+	onToggleCollapse?: () => void;
 }
 
 export function Navigation({
 	onLogout,
 	showCombos = false,
+	isCollapsed = false,
+	onToggleCollapse,
 }: NavigationProps = {}) {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 	const [updateStatus, setUpdateStatus] = useState<
@@ -350,26 +356,45 @@ export function Navigation({
 			{/* Sidebar */}
 			<aside
 				className={cn(
-					"fixed left-0 top-0 z-40 h-screen w-64 bg-card border-r transition-transform duration-300 lg:translate-x-0",
+					"fixed left-0 top-0 z-40 h-screen bg-card border-r transition-all duration-300 lg:translate-x-0",
+					isCollapsed ? "w-16" : "w-64",
 					isMobileMenuOpen
 						? "translate-x-0"
 						: "-translate-x-full lg:translate-x-0",
 				)}
 			>
-				<div className="flex h-full flex-col">
+				<div className="flex h-full flex-col relative">
 					{/* Logo */}
 					<div className="p-6 pb-4">
 						<div className="flex items-center gap-3">
 							<div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
 								<Shield className="h-6 w-6 text-primary" />
 							</div>
-							<div>
-								<h1 className="font-semibold text-lg">better-ccflare</h1>
-								<p className="text-xs text-muted-foreground">
-									Powerful proxy for Claude Code
-								</p>
-							</div>
+							{!isCollapsed && (
+								<div>
+									<h1 className="font-semibold text-lg">better-ccflare</h1>
+									<p className="text-xs text-muted-foreground">
+										Powerful proxy for Claude Code
+									</p>
+								</div>
+							)}
 						</div>
+					</div>
+
+					{/* Collapse Toggle Button */}
+					<div className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 z-50">
+						<button
+							type="button"
+							onClick={onToggleCollapse}
+							className="h-6 w-6 rounded-full bg-background border shadow-sm flex items-center justify-center hover:bg-muted transition-colors"
+							aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+						>
+							{isCollapsed ? (
+								<PanelLeftOpen className="h-4 w-4" />
+							) : (
+								<PanelLeftClose className="h-4 w-4" />
+							)}
+						</button>
 					</div>
 
 					<Separator />
@@ -388,17 +413,23 @@ export function Navigation({
 									<Button
 										variant={isActive ? "secondary" : "ghost"}
 										className={cn(
-											"w-full justify-start gap-3 transition-all",
+											"w-full transition-all",
+											isCollapsed ? "justify-center" : "justify-start gap-3",
 											isActive &&
 												"bg-primary/10 text-primary hover:bg-primary/20",
 										)}
+										title={isCollapsed ? item.label : undefined}
 									>
 										<Icon className="h-4 w-4" />
-										{item.label}
-										{item.badge && (
-											<span className="ml-auto rounded-full bg-primary/20 px-2 py-0.5 text-xs font-medium">
-												{item.badge}
-											</span>
+										{!isCollapsed && (
+											<>
+												{item.label}
+												{item.badge && (
+													<span className="ml-auto rounded-full bg-primary/20 px-2 py-0.5 text-xs font-medium">
+														{item.badge}
+													</span>
+												)}
+											</>
 										)}
 									</Button>
 								</Link>
@@ -407,14 +438,18 @@ export function Navigation({
 						{onLogout && (
 							<Button
 								variant="ghost"
-								className="w-full justify-start gap-3 transition-all text-muted-foreground hover:text-destructive"
+								className={cn(
+									"w-full transition-all text-muted-foreground hover:text-destructive",
+									isCollapsed ? "justify-center" : "justify-start gap-3",
+								)}
 								onClick={() => {
 									setIsMobileMenuOpen(false);
 									onLogout();
 								}}
+								title={isCollapsed ? "Log Out" : undefined}
 							>
 								<LogOut className="h-4 w-4" />
-								Log Out
+								{!isCollapsed && "Log Out"}
 							</Button>
 						)}
 					</nav>
@@ -422,90 +457,99 @@ export function Navigation({
 					<Separator />
 
 					{/* Footer */}
-					<div className="p-4 space-y-4">
-						<div className="rounded-lg bg-muted/50 p-3">
-							<div className="flex items-center gap-2 text-sm">
-								<Zap className="h-4 w-4 text-primary" />
-								<span className="font-medium">Status</span>
-							</div>
-							<p className="mt-1 text-xs text-muted-foreground">
-								All systems operational
-							</p>
-						</div>
-
-						{/* Update Check */}
-						<div
-							className={cn(
-								"rounded-lg bg-muted/50 p-3",
-								updateStatus === "checking" && "opacity-50",
-							)}
-						>
-							<button
-								type="button"
-								onClick={checkForUpdates}
-								disabled={updateStatus === "checking"}
-								className="w-full transition-colors hover:bg-muted/50 -m-3 p-3 rounded-lg"
-							>
+					{!isCollapsed && (
+						<div className="p-4 space-y-4">
+							<div className="rounded-lg bg-muted/50 p-3">
 								<div className="flex items-center gap-2 text-sm">
-									<RefreshCw
-										className={cn(
-											"h-4 w-4",
-											updateStatus === "checking" && "animate-spin",
-											updateStatus === "available" && "text-green-500",
-											updateStatus === "current" && "text-primary",
-											updateStatus === "error" && "text-red-500",
-										)}
-									/>
-									<span className="font-medium">
-										{updateStatus === "idle" && "Check for Updates"}
-										{updateStatus === "checking" && "Checking..."}
-										{updateStatus === "available" && "Update Available"}
-										{updateStatus === "current" && "Up to Date"}
-										{updateStatus === "error" && "Check Failed"}
-									</span>
+									<Zap className="h-4 w-4 text-primary" />
+									<span className="font-medium">Status</span>
 								</div>
-							</button>
-							{updateStatus === "available" && (
-								<div className="mt-2 space-y-1">
-									<p className="text-xs text-muted-foreground text-left">
-										{version.replace(/^v/, "")} → {latestVersion}
-									</p>
-									<div className="flex items-center gap-1">
-										<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
-											{updateCommand}
-										</code>
-										<CopyButton
-											value={updateCommand}
-											size="sm"
-											variant="ghost"
-											className="h-6 w-6 p-0"
-											title="Copy update command"
-										/>
-									</div>
-									<p className="text-xs text-muted-foreground text-left">
-										{isDockerInstallation
-											? "Detected: Docker 🐳"
-											: isBinaryInstallation
-												? "Detected: Binary Installation 📦"
-												: `Detected: ${detectedPackageManager} 📦`}
-									</p>
-								</div>
-							)}
-							{updateStatus === "current" && (
-								<p className="mt-1 text-xs text-muted-foreground text-left">
-									Version {version.replace(/^v/, "")}
+								<p className="mt-1 text-xs text-muted-foreground">
+									All systems operational
 								</p>
-							)}
-						</div>
-
-						<div className="hidden lg:flex items-center justify-between">
-							<div className="flex items-center gap-2 text-xs text-muted-foreground">
-								<GitBranch className="h-3 w-3" />
-								<span>{version}</span>
 							</div>
+
+							{/* Update Check */}
+							<div
+								className={cn(
+									"rounded-lg bg-muted/50 p-3",
+									updateStatus === "checking" && "opacity-50",
+								)}
+							>
+								<button
+									type="button"
+									onClick={checkForUpdates}
+									disabled={updateStatus === "checking"}
+									className="w-full transition-colors hover:bg-muted/50 -m-3 p-3 rounded-lg"
+								>
+									<div className="flex items-center gap-2 text-sm">
+										<RefreshCw
+											className={cn(
+												"h-4 w-4",
+												updateStatus === "checking" && "animate-spin",
+												updateStatus === "available" && "text-green-500",
+												updateStatus === "current" && "text-primary",
+												updateStatus === "error" && "text-red-500",
+											)}
+										/>
+										<span className="font-medium">
+											{updateStatus === "idle" && "Check for Updates"}
+											{updateStatus === "checking" && "Checking..."}
+											{updateStatus === "available" && "Update Available"}
+											{updateStatus === "current" && "Up to Date"}
+											{updateStatus === "error" && "Check Failed"}
+										</span>
+									</div>
+								</button>
+								{updateStatus === "available" && (
+									<div className="mt-2 space-y-1">
+										<p className="text-xs text-muted-foreground text-left">
+											{version.replace(/^v/, "")} → {latestVersion}
+										</p>
+										<div className="flex items-center gap-1">
+											<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
+												{updateCommand}
+											</code>
+											<CopyButton
+												value={updateCommand}
+												size="sm"
+												variant="ghost"
+												className="h-6 w-6 p-0"
+												title="Copy update command"
+											/>
+										</div>
+										<p className="text-xs text-muted-foreground text-left">
+											{isDockerInstallation
+												? "Detected: Docker 🐳"
+												: isBinaryInstallation
+													? "Detected: Binary Installation 📦"
+													: `Detected: ${detectedPackageManager} 📦`}
+										</p>
+									</div>
+								)}
+								{updateStatus === "current" && (
+									<p className="mt-1 text-xs text-muted-foreground text-left">
+										Version {version.replace(/^v/, "")}
+									</p>
+								)}
+							</div>
+
+							<div className="hidden lg:flex items-center justify-between">
+								<div className="flex items-center gap-2 text-xs text-muted-foreground">
+									<GitBranch className="h-3 w-3" />
+									<span>{version}</span>
+								</div>
+								<ThemeToggle />
+							</div>
+						</div>
+					)}
+
+					{/* Collapsed Footer - Theme Toggle Only */}
+					{isCollapsed && (
+						<div className="p-4 flex justify-center">
 							<ThemeToggle />
 						</div>
-					</div>
+					)}
 				</div>
 			</aside>
 		</>
