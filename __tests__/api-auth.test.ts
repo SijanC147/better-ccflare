@@ -182,10 +182,15 @@ describe("API Authentication", () => {
 			expect(extractedKey).toBe("btr-bearer-key-456");
 		});
 
-		test("should exempt dashboard paths from authentication", async () => {
-			expect(await authService.isPathExempt("/", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(true);
+		test("should exempt only /health at the auth layer", async () => {
 			expect(await authService.isPathExempt("/health", "GET")).toBe(true);
+			// The dashboard SPA + static assets are served by the server
+			// before authentication is consulted, so the auth layer must NOT
+			// blanket-exempt arbitrary non-API paths (Codex P1, 2nd pass) —
+			// otherwise a disabled/unavailable dashboard turns every such
+			// path into an unauthenticated proxy request.
+			expect(await authService.isPathExempt("/", "GET")).toBe(false);
+			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(false);
 		});
 
 		test("should NOT blanket-exempt token-mutating OAuth endpoints (Codex P1)", async () => {
@@ -211,19 +216,37 @@ describe("API Authentication", () => {
 			).toBe(false);
 		});
 
-		test("should exempt static assets from authentication", async () => {
-			expect(await authService.isPathExempt("/chunk-abc123.js", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/chunk-abc123.css", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/favicon-abc123.svg", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/chunk-abc123.js.map", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/static/logo.png", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/assets/font.woff2", "GET")).toBe(true);
+		test("should NOT exempt static-asset-looking paths at the auth layer", async () => {
+			// Static assets are served by the server from the dashboard
+			// manifest before auth runs; if such a path reaches the auth
+			// layer the dashboard is disabled/unavailable and the request is
+			// really a proxy request that must be authenticated.
+			expect(await authService.isPathExempt("/chunk-abc123.js", "GET")).toBe(
+				false,
+			);
+			expect(await authService.isPathExempt("/chunk-abc123.css", "GET")).toBe(
+				false,
+			);
+			expect(
+				await authService.isPathExempt("/favicon-abc123.svg", "GET"),
+			).toBe(false);
+			expect(await authService.isPathExempt("/static/logo.png", "GET")).toBe(
+				false,
+			);
+			expect(await authService.isPathExempt("/assets/font.woff2", "GET")).toBe(
+				false,
+			);
 		});
 
-		test("should require authentication for API paths", async () => {
+		test("should require authentication for API and arbitrary proxy paths", async () => {
 			expect(await authService.isPathExempt("/api/stats", "GET")).toBe(false);
 			expect(await authService.isPathExempt("/v1/messages", "POST")).toBe(false);
 			expect(await authService.isPathExempt("/api/accounts", "GET")).toBe(false);
+			// Arbitrary proxy path must not be exempt (Codex P1, 2nd pass).
+			expect(await authService.isPathExempt("/foo", "POST")).toBe(false);
+			expect(await authService.isPathExempt("/anything/else", "GET")).toBe(
+				false,
+			);
 		});
 	});
 

@@ -135,17 +135,17 @@ export class AuthService {
 		// allowed any unauthenticated caller to overwrite stored account
 		// tokens when dashboard auth was configured (Codex P1).
 
-		// All other paths are dashboard routes (client-side routing) or static assets
-		// These should be exempt to allow serving the dashboard HTML and assets
-		// This matches the server logic that serves index.html for non-API routes
-		if (
-			!path.startsWith("/api") &&
-			!path.startsWith("/v1") &&
-			!path.startsWith("/messages")
-		) {
-			return true;
-		}
-
+		// IMPORTANT: do NOT blanket-exempt "any non-/api, non-/v1 path".
+		// The dashboard SPA and its static assets are served by the server
+		// (apps/server/src/server.ts) *before* authentication is consulted —
+		// they never reach this code path. Every request that actually
+		// reaches authenticateRequest() is a proxy request (or an API/v1
+		// route). A broad "not an API path => exempt" rule therefore let
+		// arbitrary proxy paths (e.g. POST /foo) through without an API key
+		// when the dashboard was disabled/unavailable, since upstream
+		// providers accept arbitrary paths (Codex P1). Only /health is
+		// statically exempt; OAuth read-only status polling is gated in
+		// isPathExempt().
 		return false;
 	}
 

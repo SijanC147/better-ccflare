@@ -142,9 +142,20 @@ describe("OAuth path authentication gating (Codex P1)", () => {
 			expect(auth.isStaticPathExempt("/health")).toBe(true);
 		});
 
-		test("dashboard/static routes stay exempt", () => {
-			expect(auth.isStaticPathExempt("/dashboard")).toBe(true);
-			expect(auth.isStaticPathExempt("/assets/app.js")).toBe(true);
+		// Codex P1 (second pass): dashboard SPA + static assets are served by
+		// the server BEFORE authentication is consulted, so they must NOT be
+		// blanket-exempt at the auth layer. A broad "non-/api path => exempt"
+		// rule let arbitrary proxy paths through without a key when the
+		// dashboard was disabled/unavailable.
+		test.each([
+			"/dashboard",
+			"/assets/app.js",
+			"/chunk-abc123.js",
+			"/static/logo.png",
+			"/foo",
+			"/",
+		])("%s is NOT statically exempt (served pre-auth or proxied)", (path) => {
+			expect(auth.isStaticPathExempt(path)).toBe(false);
 		});
 
 		test.each([
