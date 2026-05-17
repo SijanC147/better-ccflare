@@ -23,7 +23,6 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { RequestPayload, RequestSummary } from "../api";
-import { API_LIMITS } from "../constants";
 import { useAccounts, useRequests } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
@@ -54,6 +53,38 @@ import {
 	SelectValue,
 } from "./ui/select";
 import { Switch } from "./ui/switch";
+
+// Available limit options for the request list selector
+const LIMIT_OPTIONS = [50, 100, 250, 500, 1000] as const;
+type LimitOption = (typeof LIMIT_OPTIONS)[number];
+
+const LS_LIMIT_KEY = "bcf:requests:limit";
+
+function readStoredLimit(): LimitOption {
+	try {
+		const stored = localStorage.getItem(LS_LIMIT_KEY);
+		if (stored) {
+			const parsed = Number(stored);
+			if ((LIMIT_OPTIONS as readonly number[]).includes(parsed)) {
+				return parsed as LimitOption;
+			}
+		}
+	} catch {
+		// ignore
+	}
+	return 50;
+}
+
+/** Calculate cache-hit percentage, returning "0%" when totals are zero (no NaN). */
+function calcCacheHitPct(summary: RequestSummary | undefined): string {
+	if (!summary) return "0%";
+	const read = summary.cacheReadInputTokens ?? 0;
+	const creation = summary.cacheCreationInputTokens ?? 0;
+	const input = summary.inputTokens ?? summary.promptTokens ?? 0;
+	const total = read + creation + input;
+	if (total === 0) return "0%";
+	return `${Math.round((read / total) * 100)}%`;
+}
 
 // Helper function to generate deterministic color for account names
 function getAccountBadgeColor(accountName?: string): {
@@ -181,16 +212,27 @@ export function RequestsTab() {
 	const [groupByProject, setGroupByProject] = useState(() => {
 		return localStorage.getItem("ccflare-group-by-project") === "true";
 	});
+	const [limit, setLimit] = useState<LimitOption>(readStoredLimit);
+
+	const handleLimitChange = (value: string) => {
+		const parsed = Number(value) as LimitOption;
+		setLimit(parsed);
+		try {
+			localStorage.setItem(LS_LIMIT_KEY, String(parsed));
+		} catch {
+			// ignore
+		}
+	};
 
 	const {
 		data: requestsData,
 		isLoading: loading,
 		error,
 		refetch: loadRequests,
-	} = useRequests(API_LIMITS.requestsDetail);
+	} = useRequests(limit);
 
-	// Enable real-time updates
-	useRequestStream(API_LIMITS.requestsDetail);
+	// Enable real-time updates — pass limit so the stream prunes to the same cap
+	useRequestStream(limit);
 
 	const { data: accounts } = useAccounts();
 	const zaiAccountNames = new Set(
@@ -402,7 +444,7 @@ export function RequestsTab() {
 			if (!groups.has(project)) {
 				groups.set(project, []);
 			}
-			groups.get(project)!.push(request);
+			groups.get(project)?.push(request);
 		}
 
 		// Sort groups: named projects alphabetically, then "No Project" last
@@ -707,6 +749,15 @@ export function RequestsTab() {
 								{formatTokensPerSecond(summary.tokensPerSecond)}
 							</Badge>
 						)}
+						{summary && (
+							<Badge
+								variant="outline"
+								className="text-xs border-sky-500 text-sky-600 dark:text-sky-400"
+								title="Cache hit %: cache_read / (cache_read + cache_creation + input)"
+							>
+								{calcCacheHitPct(summary)} cache
+							</Badge>
+						)}
 						{(request.meta.accountName || request.meta.accountId) && (
 							<span className="text-sm text-muted-foreground">
 								via{" "}
@@ -858,11 +909,27 @@ export function RequestsTab() {
 					<div>
 						<CardTitle>Request History</CardTitle>
 						<CardDescription>
-							Detailed request and response data (last{" "}
-							{API_LIMITS.requestsDetail})
+							Detailed request and response data (last {limit})
 						</CardDescription>
 					</div>
 					<div className="flex gap-2 items-center">
+						<div className="flex items-center gap-2">
+							<Label htmlFor="limit-select" className="text-sm font-medium">
+								Show
+							</Label>
+							<Select value={String(limit)} onValueChange={handleLimitChange}>
+								<SelectTrigger id="limit-select" className="h-8 w-24">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{LIMIT_OPTIONS.map((opt) => (
+										<SelectItem key={opt} value={String(opt)}>
+											{opt}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</div>
 						<div className="flex items-center gap-2">
 							<Label
 								htmlFor="24h-format"
