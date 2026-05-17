@@ -587,11 +587,19 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					cross_region_mode TEXT DEFAULT 'geographic',
 					model_fallbacks TEXT,
 					auto_pause_on_overage_enabled INTEGER DEFAULT 0,
-					pause_reason TEXT
+					pause_reason TEXT,
+					billing_type TEXT DEFAULT NULL,
+					refresh_token_issued_at INTEGER,
+					peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
+					rate_limited_reason TEXT,
+					rate_limited_at INTEGER
 				)
 			`).run();
 
-			// Copy data — convert empty-string sentinels back to NULL for API-key providers
+			// Copy data — convert empty-string sentinels back to NULL for API-key providers.
+			// Include every column the prior ALTERs added (billing_type, refresh_token_issued_at,
+			// peak_hours_pause_enabled, rate_limited_reason, rate_limited_at); otherwise the
+			// rebuild drops them and downstream selects fail with missing-column errors.
 			db.prepare(`
 				INSERT INTO accounts_new SELECT
 					id, name, provider, api_key,
@@ -603,7 +611,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					paused, rate_limit_reset, rate_limit_status, rate_limit_remaining,
 					auto_fallback_enabled, custom_endpoint, auto_refresh_enabled,
 					model_mappings, cross_region_mode, model_fallbacks,
-					auto_pause_on_overage_enabled, pause_reason
+					auto_pause_on_overage_enabled, pause_reason,
+					billing_type, refresh_token_issued_at, peak_hours_pause_enabled,
+					rate_limited_reason, rate_limited_at
 				FROM accounts
 			`).run();
 
@@ -754,12 +764,6 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		if (!requestsColumnNames.includes("api_key_name")) {
 			db.prepare("ALTER TABLE requests ADD COLUMN api_key_name TEXT").run();
 			log.info("Added api_key_name column to requests table");
-		}
-
-		// Add project column if it doesn't exist
-		if (!requestsColumnNames.includes("project")) {
-			db.prepare("ALTER TABLE requests ADD COLUMN project TEXT").run();
-			log.info("Added project column to requests table");
 		}
 
 		// Add billing_type column if it doesn't exist
