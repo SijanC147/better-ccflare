@@ -43,8 +43,9 @@ const platforms: Platform[] = [
 async function buildWorker() {
 	console.log("🔨 Building worker...");
 
-	// Get version from package.json
-	const packageJson = await Bun.file("./package.json").json();
+	// Get version from ROOT package.json (not apps/cli/package.json)
+	// This ensures the version matches the git tag used for releases
+	const packageJson = await Bun.file(join(projectRoot, "package.json")).json();
 	const version = packageJson.version;
 
 	// Encode tiktoken WASM FIRST (before building worker, since worker imports it)
@@ -150,8 +151,9 @@ async function buildWorker() {
 async function buildPlatform(platform: Platform) {
 	console.log(`🏗️  Building for ${platform.description}...`);
 
-	// Get version from package.json
-	const packageJson = await Bun.file("./package.json").json();
+	// Get version from ROOT package.json (not apps/cli/package.json)
+	// This ensures the version matches the git tag used for releases
+	const packageJson = await Bun.file(join(projectRoot, "package.json")).json();
 	const version = packageJson.version;
 
 	const buildCmd = [

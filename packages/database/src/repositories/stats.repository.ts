@@ -231,6 +231,22 @@ export class StatsRepository {
 	}
 
 	/**
+	 * Get distinct projects from requests
+	 */
+	async getDistinctProjects(limit = 50): Promise<string[]> {
+		const projects = await this.adapter.query<{ project: string }>(
+			`SELECT DISTINCT project
+			FROM requests
+			WHERE project IS NOT NULL AND project != ''
+			ORDER BY project
+			LIMIT ?`,
+			[limit],
+		);
+
+		return projects.map((p) => p.project);
+	}
+
+	/**
 	 * Get top models by usage
 	 */
 	async getTopModels(

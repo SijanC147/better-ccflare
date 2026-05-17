@@ -11,12 +11,16 @@ import { ERROR_MESSAGES } from "./proxy-types";
  * @returns Request metadata object
  */
 export function createRequestMetadata(req: Request, url: URL): RequestMeta {
+	// Extract X-CCFlare-Project header for project-level analytics
+	const project = req.headers.get("X-CCFlare-Project") || null;
+
 	return {
 		id: crypto.randomUUID(),
 		method: req.method,
 		path: url.pathname,
 		timestamp: Date.now(),
 		headers: req.headers,
+		project,
 	};
 }
 

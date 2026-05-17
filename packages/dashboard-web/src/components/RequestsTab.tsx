@@ -10,11 +10,14 @@ import {
 	ChevronDown,
 	ChevronRight,
 	Clock,
+	Coins,
 	Eye,
 	Filter,
+	FolderOpen,
 	Hash,
 	Key,
 	RefreshCw,
+	Sparkles,
 	User,
 	X,
 } from "lucide-react";
@@ -50,6 +53,110 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "./ui/select";
+import { Switch } from "./ui/switch";
+
+// Helper function to generate deterministic color for account names
+function getAccountBadgeColor(accountName?: string): {
+	borderClass: string;
+	textClass: string;
+} {
+	if (!accountName)
+		return { borderClass: "border-gray-400", textClass: "text-gray-600" };
+
+	// Simple hash function for deterministic color generation
+	let hash = 0;
+	for (let i = 0; i < accountName.length; i++) {
+		hash = (hash << 5) - hash + accountName.charCodeAt(i);
+		hash = hash & hash; // Convert to 32bit integer
+	}
+
+	const colors = [
+		{ borderClass: "border-blue-500", textClass: "text-blue-600" },
+		{ borderClass: "border-purple-500", textClass: "text-purple-600" },
+		{ borderClass: "border-pink-500", textClass: "text-pink-600" },
+		{ borderClass: "border-green-500", textClass: "text-green-600" },
+		{ borderClass: "border-yellow-600", textClass: "text-yellow-700" },
+		{ borderClass: "border-red-500", textClass: "text-red-600" },
+		{ borderClass: "border-indigo-500", textClass: "text-indigo-600" },
+		{ borderClass: "border-cyan-500", textClass: "text-cyan-600" },
+	];
+
+	const index = Math.abs(hash) % colors.length;
+	return colors[index];
+}
+
+// Deterministic color mapping for model badges
+function getModelColor(model: string): { border: string; text: string } {
+	if (!model) {
+		return {
+			border: "border-gray-400",
+			text: "text-gray-600 dark:text-gray-300",
+		};
+	}
+
+	const modelLower = model.toLowerCase();
+
+	// Special cases for known providers
+	if (modelLower.includes("claude-sonnet")) {
+		return {
+			border: "border-blue-500",
+			text: "text-blue-600 dark:text-blue-400",
+		};
+	}
+	if (modelLower.includes("claude-haiku")) {
+		return {
+			border: "border-green-500",
+			text: "text-green-600 dark:text-green-400",
+		};
+	}
+	if (modelLower.includes("claude-opus")) {
+		return {
+			border: "border-purple-500",
+			text: "text-purple-600 dark:text-purple-400",
+		};
+	}
+	if (modelLower.includes("z-ai") || modelLower.includes("zai")) {
+		return {
+			border: "border-orange-500",
+			text: "text-orange-600 dark:text-orange-400",
+		};
+	}
+	if (modelLower.includes("gpt") || modelLower.includes("openai")) {
+		return {
+			border: "border-emerald-500",
+			text: "text-emerald-600 dark:text-emerald-400",
+		};
+	}
+
+	// Hash-based fallback for unknown models
+	let hash = 0;
+	for (let i = 0; i < model.length; i++) {
+		hash = (hash << 5) - hash + model.charCodeAt(i);
+		hash = hash & hash;
+	}
+
+	const colorPalette = [
+		{ border: "border-red-500", text: "text-red-600 dark:text-red-400" },
+		{ border: "border-pink-500", text: "text-pink-600 dark:text-pink-400" },
+		{ border: "border-rose-500", text: "text-rose-600 dark:text-rose-400" },
+		{
+			border: "border-indigo-500",
+			text: "text-indigo-600 dark:text-indigo-400",
+		},
+		{
+			border: "border-violet-500",
+			text: "text-violet-600 dark:text-violet-400",
+		},
+		{ border: "border-cyan-500", text: "text-cyan-600 dark:text-cyan-400" },
+		{ border: "border-sky-500", text: "text-sky-600 dark:text-sky-400" },
+		{ border: "border-amber-500", text: "text-amber-600 dark:text-amber-400" },
+		{ border: "border-lime-500", text: "text-lime-600 dark:text-lime-400" },
+		{ border: "border-teal-500", text: "text-teal-600 dark:text-teal-400" },
+	];
+
+	const colorIndex = Math.abs(hash) % colorPalette.length;
+	return colorPalette[colorIndex];
+}
 
 export function RequestsTab() {
 	const [expandedRequests, setExpandedRequests] = useState<Set<string>>(
@@ -65,6 +172,15 @@ export function RequestsTab() {
 	const [statusCodeFilters, setStatusCodeFilters] = useState<Set<string>>(
 		new Set(),
 	);
+	const [withTokensOnly, setWithTokensOnly] = useState(false);
+	const [modelFilters, setModelFilters] = useState<Set<string>>(new Set());
+	const [projectFilters, setProjectFilters] = useState<Set<string>>(new Set());
+	const [use24HourFormat, setUse24HourFormat] = useState(() => {
+		return localStorage.getItem("ccflare-24h-time") === "true";
+	});
+	const [groupByProject, setGroupByProject] = useState(() => {
+		return localStorage.getItem("ccflare-group-by-project") === "true";
+	});
 
 	const {
 		data: requestsData,
@@ -158,6 +274,36 @@ export function RequestsTab() {
 		).sort();
 	}, [data]);
 
+	// Extract unique models for filter - memoized
+	const uniqueModels = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => {
+						const summary = data.summaries.get(r.id);
+						return summary?.model;
+					})
+					.filter((model): model is string => !!model),
+			),
+		).sort();
+	}, [data]);
+
+	// Extract unique projects for filter - memoized
+	const uniqueProjects = useMemo(() => {
+		if (!data) return [];
+		return Array.from(
+			new Set(
+				data.requests
+					.map((r) => {
+						const summary = data.summaries.get(r.id);
+						return summary?.project || r.meta.project;
+					})
+					.filter((project): project is string => !!project),
+			),
+		).sort();
+	}, [data]);
+
 	// Filter requests based on selected filters - memoized to avoid recalculation on every render
 	const filteredRequests = useMemo(() => {
 		if (!data) return [];
@@ -207,6 +353,29 @@ export function RequestsTab() {
 				if (requestDate > toDate) return false;
 			}
 
+			// With tokens filter
+			if (withTokensOnly) {
+				const summary = data.summaries.get(request.id);
+				const hasTokens =
+					(summary?.totalTokens && summary.totalTokens > 0) ||
+					(summary?.costUsd && summary.costUsd > 0);
+				if (!hasTokens) return false;
+			}
+
+			// Model filter
+			if (modelFilters.size > 0) {
+				const summary = data.summaries.get(request.id);
+				const model = summary?.model;
+				if (!model || !modelFilters.has(model)) return false;
+			}
+
+			// Project filter
+			if (projectFilters.size > 0) {
+				const summary = data.summaries.get(request.id);
+				const project = summary?.project || request.meta.project;
+				if (!project || !projectFilters.has(project)) return false;
+			}
+
 			return true;
 		});
 	}, [
@@ -217,7 +386,37 @@ export function RequestsTab() {
 		statusCodeFilters,
 		dateFrom,
 		dateTo,
+		withTokensOnly,
+		modelFilters,
+		projectFilters,
 	]);
+
+	// Group requests by project when toggle is enabled - memoized
+	const groupedRequests = useMemo(() => {
+		if (!groupByProject) return null;
+
+		const groups = new Map<string | null, typeof filteredRequests>();
+		for (const request of filteredRequests) {
+			const summary = data?.summaries.get(request.id);
+			const project = summary?.project || request.meta.project || null;
+			if (!groups.has(project)) {
+				groups.set(project, []);
+			}
+			groups.get(project)!.push(request);
+		}
+
+		// Sort groups: named projects alphabetically, then "No Project" last
+		const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
+			const aIsNull = a[0] === null || a[0] === "";
+			const bIsNull = b[0] === null || b[0] === "";
+			if (aIsNull && bIsNull) return 0;
+			if (aIsNull) return 1; // null/empty goes last
+			if (bIsNull) return -1;
+			return (a[0] || "").localeCompare(b[0] || "");
+		});
+
+		return sortedGroups;
+	}, [groupByProject, filteredRequests, data?.summaries]);
 
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
@@ -276,6 +475,56 @@ export function RequestsTab() {
 		});
 	};
 
+	const toggleModel = (model: string) => {
+		setModelFilters((prev) => {
+			const next = new Set(prev);
+			if (next.has(model)) {
+				next.delete(model);
+			} else {
+				next.add(model);
+			}
+			return next;
+		});
+	};
+
+	const toggleProject = (project: string) => {
+		setProjectFilters((prev) => {
+			const next = new Set(prev);
+			if (next.has(project)) {
+				next.delete(project);
+			} else {
+				next.add(project);
+			}
+			return next;
+		});
+	};
+
+	const handleToggle24HourFormat = (checked: boolean) => {
+		setUse24HourFormat(checked);
+		localStorage.setItem("ccflare-24h-time", checked ? "true" : "false");
+	};
+
+	const handleToggleGroupByProject = (checked: boolean) => {
+		setGroupByProject(checked);
+		localStorage.setItem(
+			"ccflare-group-by-project",
+			checked ? "true" : "false",
+		);
+	};
+
+	const formatTime = (timestamp: number | string): string => {
+		const date = new Date(timestamp);
+		if (use24HourFormat) {
+			return date.toLocaleTimeString("en-GB", {
+				hour: "2-digit",
+				minute: "2-digit",
+				second: "2-digit",
+				hour12: false,
+			});
+		}
+		return date.toLocaleTimeString();
+	};
+
 	const getStatusCodeColor = (code: number) => {
 		if (code >= 200 && code < 300) return "text-green-600";
 		if (code >= 400 && code < 500) return "text-yellow-600";
@@ -290,6 +539,9 @@ export function RequestsTab() {
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
+		setWithTokensOnly(false);
+		setModelFilters(new Set());
+		setProjectFilters(new Set());
 	};
 
 	const hasActiveFilters =
@@ -298,7 +550,10 @@ export function RequestsTab() {
 		apiKeyFilter !== "all" ||
 		dateFrom ||
 		dateTo ||
-		statusCodeFilters.size > 0;
+		statusCodeFilters.size > 0 ||
+		withTokensOnly ||
+		modelFilters.size > 0 ||
+		projectFilters.size > 0;
 
 	const decodeBase64 = (str: string | null): string => {
 		if (!str) return "No data";
@@ -319,6 +574,251 @@ export function RequestsTab() {
 	 * any base64-encoded bodies already decoded for easier debugging.
 	 */
 	// copyRequest helper removed – handled inline by CopyButton
+
+	// Helper component to render a single request row
+	const RequestRow = ({
+		request,
+		isExpanded,
+		onToggleExpand,
+	}: {
+		request: RequestPayload;
+		isExpanded: boolean;
+		onToggleExpand: () => void;
+	}) => {
+		const isError = request.error || !request.meta.success;
+		const statusCode = request.response?.status;
+		const summary = data?.summaries.get(request.id);
+
+		return (
+			<div
+				key={request.id}
+				className={`border rounded-lg p-3 transition-all duration-300 ${
+					isError ? "border-destructive/50" : "border-border"
+				} ${request.meta.pending ? "animate-pulse opacity-70" : "opacity-100"}`}
+			>
+				<button
+					type="button"
+					className="flex items-center justify-between cursor-pointer w-full text-left"
+					onClick={onToggleExpand}
+				>
+					<div className="flex items-center gap-2 flex-wrap">
+						{isExpanded ? (
+							<ChevronDown className="h-4 w-4" />
+						) : (
+							<ChevronRight className="h-4 w-4" />
+						)}
+						<span className="text-sm font-mono">
+							{formatTime(request.meta.timestamp)}
+						</span>
+						{(request.meta.method || summary?.method) && (
+							<span className="text-sm font-medium">
+								{request.meta.method || summary?.method}
+							</span>
+						)}
+						{(request.meta.path || summary?.path) && (
+							<span className="text-sm text-muted-foreground font-mono">
+								{request.meta.path || summary?.path}
+							</span>
+						)}
+						{statusCode && (
+							<span
+								className={`text-sm font-medium ${
+									statusCode >= 200 && statusCode < 300
+										? "text-green-600"
+										: statusCode >= 400 && statusCode < 500
+											? "text-yellow-600"
+											: "text-red-600"
+								}`}
+							>
+								{statusCode}
+							</span>
+						)}
+						{summary?.model && (
+							<Badge
+								variant="outline"
+								className={`text-xs ${
+									getModelColor(summary.model).border
+								} ${getModelColor(summary.model).text}`}
+							>
+								{summary.model}
+							</Badge>
+						)}
+						{(summary?.project || request.meta.project) && (
+							<Badge
+								variant="outline"
+								className="text-xs border-violet-500 text-violet-600 dark:text-violet-400"
+							>
+								<FolderOpen className="h-3 w-3 mr-1" />
+								{summary?.project || request.meta.project}
+							</Badge>
+						)}
+						{(summary?.agentUsed || request.meta.agentUsed) && (
+							<Badge variant="secondary" className="text-xs">
+								Agent: {summary?.agentUsed || request.meta.agentUsed}
+							</Badge>
+						)}
+						{summary?.comboName && (
+							<Badge
+								variant="outline"
+								className="text-xs border-purple-500 text-purple-500"
+							>
+								Combo: {summary.comboName}
+							</Badge>
+						)}
+						{summary?.apiKeyName && (
+							<Badge variant="outline" className="text-xs">
+								<Key className="h-3 w-3 mr-1" />
+								{summary.apiKeyName}
+							</Badge>
+						)}
+						{(summary?.totalTokens || request.meta.pending) && (
+							<Badge variant="outline" className="text-xs">
+								{summary?.totalTokens
+									? formatTokens(summary.totalTokens)
+									: "--"}{" "}
+								tokens
+							</Badge>
+						)}
+						{(summary?.costUsd || request.meta.pending) && (
+							<Badge variant="default" className="text-xs">
+								{summary?.costUsd && summary.costUsd > 0
+									? formatCost(summary.costUsd)
+									: "--"}
+							</Badge>
+						)}
+						{summary?.billingType === "overage" && (
+							<Badge
+								variant="outline"
+								className="text-xs border-orange-500 text-orange-500"
+							>
+								Overage
+							</Badge>
+						)}
+						{summary?.billingType === "plan" && (
+							<Badge
+								variant="outline"
+								className="text-xs border-teal-500 text-teal-500"
+							>
+								Plan
+							</Badge>
+						)}
+						{summary?.tokensPerSecond && summary.tokensPerSecond > 0 && (
+							<Badge variant="secondary" className="text-xs">
+								{formatTokensPerSecond(summary.tokensPerSecond)}
+							</Badge>
+						)}
+						{(request.meta.accountName || request.meta.accountId) && (
+							<span className="text-sm text-muted-foreground">
+								via{" "}
+								{request.meta.accountName ||
+									`${request.meta.accountId?.slice(0, 8)}...`}
+							</span>
+						)}
+						{request.meta.rateLimited && (
+							<Badge variant="warning" className="text-xs">
+								Rate Limited
+							</Badge>
+						)}
+						{zaiAccountNames.has(request.meta.accountName ?? "") &&
+							isZaiPeakHour(request.meta.timestamp) && (
+								<Badge
+									variant="outline"
+									className="text-xs border-orange-500 text-orange-500"
+								>
+									Peak
+								</Badge>
+							)}
+						{oauthAccountNames.has(request.meta.accountName ?? "") &&
+							isAnthropicPeakHour(request.meta.timestamp) && (
+								<Badge
+									variant="outline"
+									className="text-xs border-orange-500 text-orange-500"
+								>
+									Peak
+								</Badge>
+							)}
+						{(summary?.responseTimeMs || request.meta.pending) && (
+							<span>
+								{summary?.responseTimeMs
+									? formatDuration(summary.responseTimeMs)
+									: "--"}
+							</span>
+						)}
+						{request.meta.retry !== undefined && request.meta.retry > 0 && (
+							<span>Retry {request.meta.retry}</span>
+						)}
+						{(request.meta.accountName || request.meta.accountId) &&
+							(() => {
+								const color = getAccountBadgeColor(request.meta.accountName);
+								return (
+									<Badge
+										variant="outline"
+										className={`text-xs ${color.borderClass} ${color.textClass}`}
+									>
+										{request.meta.accountName ||
+											`${request.meta.accountId?.slice(0, 8)}...`}
+									</Badge>
+								);
+							})()}
+						<span>ID: {request.id.slice(0, 8)}...</span>
+					</div>
+				</button>
+
+				{/* Action buttons */}
+				<div className="flex justify-end gap-2 mt-2">
+					<Button
+						variant="ghost"
+						size="icon"
+						onClick={() => setModalRequest(request)}
+						title="View Details"
+					>
+						<Eye className="h-4 w-4" />
+					</Button>
+					<CopyButton
+						variant="ghost"
+						size="icon"
+						title="Copy as JSON"
+						getValue={() => {
+							const decoded: RequestPayload & { decoded?: true } = {
+								...request,
+								request: {
+									...request.request,
+									body: request.request.body
+										? decodeBase64(request.request.body)
+										: null,
+								},
+								response: request.response
+									? {
+											...request.response,
+											body: request.response.body
+												? decodeBase64(request.response.body)
+												: null,
+										}
+									: null,
+								decoded: true,
+							};
+							return JSON.stringify(decoded, null, 2);
+						}}
+					/>
+				</div>
+
+				{isExpanded && (
+					<div className="mt-3 space-y-3">
+						<TokenUsageDisplay summary={summary} />
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={() => setModalRequest(request)}
+							className="w-full"
+						>
+							<Eye className="h-4 w-4 mr-2" />
+							View More Details
+						</Button>
+					</div>
+				)}
+			</div>
+		);
+	};
 
 	if (loading) {
 		return (
@@ -362,7 +862,33 @@ export function RequestsTab() {
 							{API_LIMITS.requestsDetail})
 						</CardDescription>
 					</div>
-					<div className="flex gap-2">
+					<div className="flex gap-2 items-center">
+						<div className="flex items-center gap-2">
+							<Label
+								htmlFor="24h-format"
+								className="text-sm font-medium cursor-pointer"
+							>
+								24h
+							</Label>
+							<Switch
+								id="24h-format"
+								checked={use24HourFormat}
+								onCheckedChange={handleToggle24HourFormat}
+							/>
+						</div>
+						<div className="flex items-center gap-2">
+							<Label
+								htmlFor="group-by-project"
+								className="text-sm font-medium cursor-pointer"
+							>
+								Group by Project
+							</Label>
+							<Switch
+								id="group-by-project"
+								checked={groupByProject}
+								onCheckedChange={handleToggleGroupByProject}
+							/>
+						</div>
 						<Button
 							onClick={() => setShowFilters(!showFilters)}
 							variant={showFilters ? "default" : "outline"}
@@ -452,6 +978,49 @@ export function RequestsTab() {
 											setDateFrom("");
 											setDateTo("");
 										}}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
+							{withTokensOnly && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<Coins className="h-3 w-3" />
+									With tokens
+									<button
+										type="button"
+										onClick={() => setWithTokensOnly(false)}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
+							{modelFilters.size > 0 && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<Sparkles className="h-3 w-3" />
+									{Array.from(modelFilters).length === 1
+										? Array.from(modelFilters)[0]
+										: `${modelFilters.size} models`}
+									<button
+										type="button"
+										onClick={() => setModelFilters(new Set())}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
+							{projectFilters.size > 0 && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<FolderOpen className="h-3 w-3" />
+									{Array.from(projectFilters).length === 1
+										? Array.from(projectFilters)[0]
+										: `${projectFilters.size} projects`}
+									<button
+										type="button"
+										onClick={() => setProjectFilters(new Set())}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -561,7 +1130,7 @@ export function RequestsTab() {
 							<div className="h-px bg-border" />
 
 							{/* Resource Filters */}
-							<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+							<div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
 								{/* Account Filter */}
 								<div>
 									<Label className="text-xs flex items-center gap-1 mb-2">
@@ -695,6 +1264,187 @@ export function RequestsTab() {
 										</DropdownMenuContent>
 									</DropdownMenu>
 								</div>
+
+								{/* Model Filter */}
+								<div>
+									<Label className="text-xs flex items-center gap-1 mb-2">
+										<Sparkles className="h-3 w-3" />
+										Model
+									</Label>
+									<DropdownMenu>
+										<DropdownMenuTrigger asChild>
+											<Button
+												variant="outline"
+												className="h-9 w-full justify-between font-normal"
+											>
+												{modelFilters.size > 0
+													? `${modelFilters.size} selected`
+													: "All models"}
+												<ChevronDown className="h-4 w-4 opacity-50" />
+											</Button>
+										</DropdownMenuTrigger>
+										<DropdownMenuContent className="w-56 max-h-64 overflow-y-auto">
+											<div className="p-2">
+												<div className="text-xs font-medium text-muted-foreground mb-2">
+													Select models
+												</div>
+												{uniqueModels.map((model) => (
+													<button
+														key={model}
+														type="button"
+														className="flex items-center gap-2 p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
+														onClick={() => toggleModel(model)}
+													>
+														<div
+															className={`w-4 h-4 border rounded-sm flex items-center justify-center ${
+																modelFilters.has(model)
+																	? "bg-primary border-primary"
+																	: "border-input"
+															}`}
+														>
+															{modelFilters.has(model) && (
+																<svg
+																	className="w-3 h-3 text-primary-foreground"
+																	fill="none"
+																	viewBox="0 0 24 24"
+																	stroke="currentColor"
+																	aria-label="Selected"
+																>
+																	<title>Selected</title>
+																	<path
+																		strokeLinecap="round"
+																		strokeLinejoin="round"
+																		strokeWidth={3}
+																		d="M5 13l4 4L19 7"
+																	/>
+																</svg>
+															)}
+														</div>
+														<span className="text-sm font-medium truncate">
+															{model}
+														</span>
+													</button>
+												))}
+											</div>
+										</DropdownMenuContent>
+									</DropdownMenu>
+								</div>
+
+								{/* Project Filter */}
+								<div>
+									<Label className="text-xs flex items-center gap-1 mb-2">
+										<FolderOpen className="h-3 w-3" />
+										Project
+									</Label>
+									<DropdownMenu>
+										<DropdownMenuTrigger asChild>
+											<Button
+												variant="outline"
+												className="h-9 w-full justify-between font-normal"
+											>
+												{projectFilters.size > 0
+													? `${projectFilters.size} selected`
+													: "All projects"}
+												<ChevronDown className="h-4 w-4 opacity-50" />
+											</Button>
+										</DropdownMenuTrigger>
+										<DropdownMenuContent className="w-56 max-h-64 overflow-y-auto">
+											<div className="p-2">
+												<div className="text-xs font-medium text-muted-foreground mb-2">
+													Select projects
+												</div>
+												{uniqueProjects.length === 0 ? (
+													<div className="text-xs text-muted-foreground p-2">
+														No projects found. Set X-CCFlare-Project header in
+														your requests.
+													</div>
+												) : (
+													uniqueProjects.map((project) => (
+														<button
+															key={project}
+															type="button"
+															className="flex items-center gap-2 p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
+															onClick={() => toggleProject(project)}
+														>
+															<div
+																className={`w-4 h-4 border rounded-sm flex items-center justify-center ${
+																	projectFilters.has(project)
+																		? "bg-primary border-primary"
+																		: "border-input"
+																}`}
+															>
+																{projectFilters.has(project) && (
+																	<svg
+																		className="w-3 h-3 text-primary-foreground"
+																		fill="none"
+																		viewBox="0 0 24 24"
+																		stroke="currentColor"
+																		aria-label="Selected"
+																	>
+																		<title>Selected</title>
+																		<path
+																			strokeLinecap="round"
+																			strokeLinejoin="round"
+																			strokeWidth={3}
+																			d="M5 13l4 4L19 7"
+																		/>
+																	</svg>
+																)}
+															</div>
+															<span className="text-sm font-medium truncate">
+																{project}
+															</span>
+														</button>
+													))
+												)}
+											</div>
+										</DropdownMenuContent>
+									</DropdownMenu>
+								</div>
+							</div>
+
+							<div className="h-px bg-border" />
+
+							{/* Token Usage Filter */}
+							<div>
+								<h4 className="text-sm font-medium mb-3 flex items-center gap-2">
+									<Coins className="h-4 w-4" />
+									Token Usage
+								</h4>
+								<button
+									type="button"
+									className="flex items-center gap-2 p-2 hover:bg-accent rounded cursor-pointer"
+									onClick={() => setWithTokensOnly(!withTokensOnly)}
+								>
+									<div
+										className={`w-4 h-4 border rounded-sm flex items-center justify-center ${
+											withTokensOnly
+												? "bg-primary border-primary"
+												: "border-input"
+										}`}
+									>
+										{withTokensOnly && (
+											<svg
+												className="w-3 h-3 text-primary-foreground"
+												fill="none"
+												viewBox="0 0 24 24"
+												stroke="currentColor"
+												aria-label="Selected"
+											>
+												<title>Selected</title>
+												<path
+													strokeLinecap="round"
+													strokeLinejoin="round"
+													strokeWidth={3}
+													d="M5 13l4 4L19 7"
+												/>
+											</svg>
+										)}
+									</div>
+									<span className="text-sm">
+										Show only requests with token usage
+									</span>
+								</button>
 							</div>
 						</div>
 					</div>
@@ -706,226 +1456,46 @@ export function RequestsTab() {
 					<p className="text-muted-foreground">
 						No requests match the selected filters
 					</p>
+				) : groupByProject && groupedRequests ? (
+					<div className="space-y-4">
+						{groupedRequests.map(([project, requests]) => (
+							<Card key={project || "no-project"} className="border">
+								<CardHeader className="pb-3">
+									<div className="flex items-center justify-between">
+										<div className="flex items-center gap-2">
+											<FolderOpen className="h-4 w-4 text-violet-600" />
+											<CardTitle className="text-base">
+												{project || "No Project"}
+											</CardTitle>
+											<Badge variant="secondary" className="ml-2 text-xs">
+												{requests.length}
+											</Badge>
+										</div>
+									</div>
+								</CardHeader>
+								<CardContent className="space-y-2 max-h-[400px] overflow-y-auto">
+									{requests.map((request) => (
+										<RequestRow
+											key={request.id}
+											request={request}
+											isExpanded={expandedRequests.has(request.id)}
+											onToggleExpand={() => toggleExpanded(request.id)}
+										/>
+									))}
+								</CardContent>
+							</Card>
+						))}
+					</div>
 				) : (
 					<div className="space-y-2">
-						{filteredRequests.map((request) => {
-							const isExpanded = expandedRequests.has(request.id);
-							const isError = request.error || !request.meta.success;
-							const statusCode = request.response?.status;
-							const summary = data?.summaries.get(request.id);
-
-							return (
-								<div
-									key={request.id}
-									className={`border rounded-lg p-3 transition-all duration-300 ${
-										isError ? "border-destructive/50" : "border-border"
-									} ${request.meta.pending ? "animate-pulse opacity-70" : "opacity-100"}`}
-								>
-									<button
-										type="button"
-										className="flex items-center justify-between cursor-pointer w-full text-left"
-										onClick={() => toggleExpanded(request.id)}
-									>
-										<div className="flex items-center gap-2 flex-wrap">
-											{isExpanded ? (
-												<ChevronDown className="h-4 w-4" />
-											) : (
-												<ChevronRight className="h-4 w-4" />
-											)}
-											<span className="text-sm font-mono">
-												{new Date(request.meta.timestamp).toLocaleTimeString()}
-											</span>
-											{(request.meta.method || summary?.method) && (
-												<span className="text-sm font-medium">
-													{request.meta.method || summary?.method}
-												</span>
-											)}
-											{(request.meta.path || summary?.path) && (
-												<span className="text-sm text-muted-foreground font-mono">
-													{request.meta.path || summary?.path}
-												</span>
-											)}
-											{statusCode && (
-												<span
-													className={`text-sm font-medium ${
-														statusCode >= 200 && statusCode < 300
-															? "text-green-600"
-															: statusCode >= 400 && statusCode < 500
-																? "text-yellow-600"
-																: "text-red-600"
-													}`}
-												>
-													{statusCode}
-												</span>
-											)}
-											{summary?.model && (
-												<Badge variant="secondary" className="text-xs">
-													{summary.model}
-												</Badge>
-											)}
-											{(summary?.agentUsed || request.meta.agentUsed) && (
-												<Badge variant="secondary" className="text-xs">
-													Agent: {summary?.agentUsed || request.meta.agentUsed}
-												</Badge>
-											)}
-											{summary?.comboName && (
-												<Badge
-													variant="outline"
-													className="text-xs border-purple-500 text-purple-500"
-												>
-													Combo: {summary.comboName}
-												</Badge>
-											)}
-											{summary?.apiKeyName && (
-												<Badge variant="outline" className="text-xs">
-													<Key className="h-3 w-3 mr-1" />
-													{summary.apiKeyName}
-												</Badge>
-											)}
-											{(summary?.totalTokens || request.meta.pending) && (
-												<Badge variant="outline" className="text-xs">
-													{summary?.totalTokens
-														? formatTokens(summary.totalTokens)
-														: "--"}{" "}
-													tokens
-												</Badge>
-											)}
-											{(summary?.costUsd || request.meta.pending) && (
-												<Badge variant="default" className="text-xs">
-													{summary?.costUsd && summary.costUsd > 0
-														? formatCost(summary.costUsd)
-														: "--"}
-												</Badge>
-											)}
-											{summary?.billingType === "overage" && (
-												<Badge
-													variant="outline"
-													className="text-xs border-orange-500 text-orange-500"
-												>
-													Overage
-												</Badge>
-											)}
-											{summary?.billingType === "plan" && (
-												<Badge
-													variant="outline"
-													className="text-xs border-teal-500 text-teal-500"
-												>
-													Plan
-												</Badge>
-											)}
-											{summary?.tokensPerSecond &&
-												summary.tokensPerSecond > 0 && (
-													<Badge variant="secondary" className="text-xs">
-														{formatTokensPerSecond(summary.tokensPerSecond)}
-													</Badge>
-												)}
-											{(request.meta.accountName || request.meta.accountId) && (
-												<span className="text-sm text-muted-foreground">
-													via{" "}
-													{request.meta.accountName ||
-														`${request.meta.accountId?.slice(0, 8)}...`}
-												</span>
-											)}
-											{request.meta.rateLimited && (
-												<Badge variant="warning" className="text-xs">
-													Rate Limited
-												</Badge>
-											)}
-											{zaiAccountNames.has(request.meta.accountName ?? "") &&
-												isZaiPeakHour(request.meta.timestamp) && (
-													<Badge
-														variant="outline"
-														className="text-xs border-orange-500 text-orange-500"
-													>
-														Peak
-													</Badge>
-												)}
-											{oauthAccountNames.has(request.meta.accountName ?? "") &&
-												isAnthropicPeakHour(request.meta.timestamp) && (
-													<Badge
-														variant="outline"
-														className="text-xs border-orange-500 text-orange-500"
-													>
-														Peak
-													</Badge>
-												)}
-											{request.error && (
-												<span className="text-sm text-destructive">
-													Error: {request.error}
-												</span>
-											)}
-										</div>
-										<div className="text-sm text-muted-foreground flex items-center gap-2">
-											{(summary?.responseTimeMs || request.meta.pending) && (
-												<span>
-													{summary?.responseTimeMs
-														? formatDuration(summary.responseTimeMs)
-														: "--"}
-												</span>
-											)}
-											{request.meta.retry !== undefined &&
-												request.meta.retry > 0 && (
-													<span>Retry {request.meta.retry}</span>
-												)}
-											<span>ID: {request.id.slice(0, 8)}...</span>
-										</div>
-									</button>
-
-									{/* Action buttons */}
-									<div className="flex justify-end gap-2 mt-2">
-										<Button
-											variant="ghost"
-											size="icon"
-											onClick={() => setModalRequest(request)}
-											title="View Details"
-										>
-											<Eye className="h-4 w-4" />
-										</Button>
-										<CopyButton
-											variant="ghost"
-											size="icon"
-											title="Copy as JSON"
-											getValue={() => {
-												const decoded: RequestPayload & { decoded?: true } = {
-													...request,
-													request: {
-														...request.request,
-														body: request.request.body
-															? decodeBase64(request.request.body)
-															: null,
-													},
-													response: request.response
-														? {
-																...request.response,
-																body: request.response.body
-																	? decodeBase64(request.response.body)
-																	: null,
-															}
-														: null,
-													decoded: true,
-												};
-												return JSON.stringify(decoded, null, 2);
-											}}
-										/>
-									</div>
-
-									{isExpanded && (
-										<div className="mt-3 space-y-3">
-											<TokenUsageDisplay summary={summary} />
-											<Button
-												variant="outline"
-												size="sm"
-												onClick={() => setModalRequest(request)}
-												className="w-full"
-											>
-												<Eye className="h-4 w-4 mr-2" />
-												View More Details
-											</Button>
-										</div>
-									)}
-								</div>
-							);
-						})}
+						{filteredRequests.map((request) => (
+							<RequestRow
+								key={request.id}
+								request={request}
+								isExpanded={expandedRequests.has(request.id)}
+								onToggleExpand={() => toggleExpanded(request.id)}
+							/>
+						))}
 					</div>
 				)}
 			</CardContent>

@@ -106,24 +106,29 @@ jobs:
 
           \`\`\`bash
           # Linux x86_64
-          wget https://github.com/tombii/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-linux-amd64
+          wget https://github.com/SijanC147/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-linux-amd64
           chmod +x better-ccflare-linux-amd64
           ./better-ccflare-linux-amd64
 
           # macOS Apple Silicon (ARM64)
-          curl -L -o better-ccflare-macos-arm64 https://github.com/tombii/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-macos-arm64
+          curl -L -o better-ccflare-macos-arm64 https://github.com/SijanC147/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-macos-arm64
           chmod +x better-ccflare-macos-arm64
           xattr -d com.apple.quarantine better-ccflare-macos-arm64  # Required for unsigned binaries
           ./better-ccflare-macos-arm64
           \`\`\`
 
-          **macOS Users:** The \`xattr\` command is required to bypass Gatekeeper for unsigned binaries. If you prefer not to run unsigned binaries, [install from source](https://github.com/tombii/better-ccflare#install-from-source) instead.
-
-          Or install via npm: \`npm install -g better-ccflare@${{ github.ref_name }}\`
+          **macOS Users:** The \`xattr\` command is required to bypass Gatekeeper for unsigned binaries. If you prefer not to run unsigned binaries, [install from source](https://github.com/SijanC147/better-ccflare#install-from-source) instead.
 
           ---"
           else
             CHANGELOG="## 🎉 Stable Release ${{ github.ref_name }}
+
+          ### 🍺 Install via Homebrew (macOS)
+
+          \`\`\`bash
+          brew tap seanbugeja/hextap
+          brew install better-ccflare
+          \`\`\`
 
           ## Multi-Architecture Binaries
 
@@ -139,20 +144,18 @@ jobs:
 
           \`\`\`bash
           # Linux x86_64
-          wget https://github.com/tombii/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-linux-amd64
+          wget https://github.com/SijanC147/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-linux-amd64
           chmod +x better-ccflare-linux-amd64
           ./better-ccflare-linux-amd64
 
           # macOS Apple Silicon (ARM64)
-          curl -L -o better-ccflare-macos-arm64 https://github.com/tombii/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-macos-arm64
+          curl -L -o better-ccflare-macos-arm64 https://github.com/SijanC147/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-macos-arm64
           chmod +x better-ccflare-macos-arm64
           xattr -d com.apple.quarantine better-ccflare-macos-arm64  # Required for unsigned binaries
           ./better-ccflare-macos-arm64
           \`\`\`
 
-          **macOS Users:** The \`xattr\` command is required to bypass Gatekeeper for unsigned binaries. If you prefer not to run unsigned binaries, [install from source](https://github.com/tombii/better-ccflare#install-from-source) instead.
-
-          Or install via npm: \`npm install -g better-ccflare@${{ github.ref_name }}\`
+          **macOS Users:** The \`xattr\` command is required to bypass Gatekeeper for unsigned binaries. For easier installation, use Homebrew (see above) instead.
 
           ---"
           fi
@@ -243,7 +246,7 @@ jobs:
                     HASH=$(echo "$commit" | cut -d' ' -f1)
                     MSG=$(echo "$commit" | cut -d' ' -f2-)
                     CHANGELOG="$CHANGELOG
-          - $MSG ([\`$HASH\`](https://github.com/tombii/better-ccflare/commit/$HASH))"
+          - $MSG ([\`$HASH\`](https://github.com/SijanC147/better-ccflare/commit/$HASH))"
                   fi
                 done <<< "$FEATURES"
               fi
@@ -258,7 +261,7 @@ jobs:
                     HASH=$(echo "$commit" | cut -d' ' -f1)
                     MSG=$(echo "$commit" | cut -d' ' -f2-)
                     CHANGELOG="$CHANGELOG
-          - $MSG ([\`$HASH\`](https://github.com/tombii/better-ccflare/commit/$HASH))"
+          - $MSG ([\`$HASH\`](https://github.com/SijanC147/better-ccflare/commit/$HASH))"
                   fi
                 done <<< "$FIXES"
               fi
@@ -273,7 +276,7 @@ jobs:
                     HASH=$(echo "$commit" | cut -d' ' -f1)
                     MSG=$(echo "$commit" | cut -d' ' -f2-)
                     CHANGELOG="$CHANGELOG
-          - $MSG ([\`$HASH\`](https://github.com/tombii/better-ccflare/commit/$HASH))"
+          - $MSG ([\`$HASH\`](https://github.com/SijanC147/better-ccflare/commit/$HASH))"
                   fi
                 done <<< "$SECURITY"
               fi
@@ -288,7 +291,7 @@ jobs:
                     HASH=$(echo "$commit" | cut -d' ' -f1)
                     MSG=$(echo "$commit" | cut -d' ' -f2-)
                     CHANGELOG="$CHANGELOG
-          - $MSG ([\`$HASH\`](https://github.com/tombii/better-ccflare/commit/$HASH))"
+          - $MSG ([\`$HASH\`](https://github.com/SijanC147/better-ccflare/commit/$HASH))"
                   fi
                 done <<< "$IMPROVEMENTS"
               fi
@@ -297,7 +300,7 @@ jobs:
               CHANGELOG="$CHANGELOG
 
           ## Full Changelog
-          📋 [Compare with previous version](https://github.com/tombii/better-ccflare/compare/$PREV_TAG..${{ github.ref_name }})"
+          📋 [Compare with previous version](https://github.com/SijanC147/better-ccflare/compare/$PREV_TAG..${{ github.ref_name }})"
             fi
           fi
 
@@ -327,6 +330,28 @@ jobs:
               --notes-file /tmp/release-notes.md
           fi
 
+      - name: Create macOS tarballs for Homebrew
+        run: |
+          cd apps/cli/dist
+
+          # Create tarball for macOS ARM64 (Apple Silicon)
+          mkdir -p homebrew-arm64
+          cp better-ccflare-macos-arm64 homebrew-arm64/better-ccflare
+          chmod +x homebrew-arm64/better-ccflare
+          tar -czvf better-ccflare-macos-arm64.tar.gz -C homebrew-arm64 better-ccflare
+
+          # Create tarball for macOS x86_64 (Intel)
+          mkdir -p homebrew-x86_64
+          cp better-ccflare-macos-x86_64 homebrew-x86_64/better-ccflare
+          chmod +x homebrew-x86_64/better-ccflare
+          tar -czvf better-ccflare-macos-x86_64.tar.gz -C homebrew-x86_64 better-ccflare
+
+          # Cleanup temp directories
+          rm -rf homebrew-arm64 homebrew-x86_64
+
+          echo "Created Homebrew tarballs:"
+          ls -lh *.tar.gz
+
       - name: Upload Release Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -336,5 +361,189 @@ jobs:
             ./apps/cli/dist/better-ccflare-linux-arm64 \
             ./apps/cli/dist/better-ccflare-macos-x86_64 \
             ./apps/cli/dist/better-ccflare-macos-arm64 \
+            ./apps/cli/dist/better-ccflare-macos-arm64.tar.gz \
+            ./apps/cli/dist/better-ccflare-macos-x86_64.tar.gz \
             ./apps/cli/dist/better-ccflare-windows-x64.exe \
             --clobber
+
+  # Publish Homebrew formula after release is complete
+  homebrew:
+    name: Publish Homebrew Formula
+    needs: build
+    if: ${{ !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') && !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'pre') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          GH_PAT: op://CICD/GH_PAT/credential
+          GITEA_TOKEN: op://CICD/Gitea/access_token
+
+      - name: Prepare version
+        id: version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Download tarballs and calculate SHA256
+        id: sha
+        run: |
+          # Download ARM64 tarball
+          curl -fsSL -o arm64.tar.gz \
+            "https://github.com/SijanC147/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-macos-arm64.tar.gz"
+          SHA_ARM64=$(sha256sum arm64.tar.gz | awk '{print $1}')
+          echo "sha256_arm64=$SHA_ARM64" >> $GITHUB_OUTPUT
+          echo "ARM64 SHA256: $SHA_ARM64"
+
+          # Download x86_64 tarball
+          curl -fsSL -o x86_64.tar.gz \
+            "https://github.com/SijanC147/better-ccflare/releases/download/${{ github.ref_name }}/better-ccflare-macos-x86_64.tar.gz"
+          SHA_X86_64=$(sha256sum x86_64.tar.gz | awk '{print $1}')
+          echo "sha256_x86_64=$SHA_X86_64" >> $GITHUB_OUTPUT
+          echo "x86_64 SHA256: $SHA_X86_64"
+
+      - name: Generate multi-arch Homebrew formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ github.ref_name }}
+          SHA_ARM64: ${{ steps.sha.outputs.sha256_arm64 }}
+          SHA_X86_64: ${{ steps.sha.outputs.sha256_x86_64 }}
+        run: |
+          cat > /tmp/better-ccflare.rb << 'EOF'
+          class BetterCcflare < Formula
+            desc "Claude API proxy with intelligent load balancing across multiple accounts"
+            homepage "https://github.com/SijanC147/better-ccflare"
+            license "MIT"
+            version "VERSION_PLACEHOLDER"
+
+            on_arm do
+              url "https://github.com/SijanC147/better-ccflare/releases/download/TAG_PLACEHOLDER/better-ccflare-macos-arm64.tar.gz"
+              sha256 "SHA_ARM64_PLACEHOLDER"
+            end
+
+            on_intel do
+              url "https://github.com/SijanC147/better-ccflare/releases/download/TAG_PLACEHOLDER/better-ccflare-macos-x86_64.tar.gz"
+              sha256 "SHA_X86_64_PLACEHOLDER"
+            end
+
+            def install
+              bin.install "better-ccflare"
+            end
+
+            service do
+              run opt_bin/"better-ccflare"
+              keep_alive successful_exit: false, crashed: true
+              # Co-locate launchd stdout/stderr capture with the app's internal
+              # LogFileWriter output so all logs land in one durable directory
+              # (#{var}/log/better-ccflare/) instead of being split between
+              # Homebrew's var dir and macOS's volatile /var/folders tmp dir.
+              environment_variables BETTER_CCFLARE_LOG_DIR: var/"log/better-ccflare"
+              log_path var/"log/better-ccflare/launchd.log"
+              error_log_path var/"log/better-ccflare/launchd.log"
+            end
+
+            def caveats
+              <<~EOS
+                better-ccflare has been installed!
+
+                Run as a background service (managed by launchd):
+                  brew services start better-ccflare
+
+                Run in foreground:
+                  better-ccflare
+
+                Service logs (durable, co-located):
+                  #{var}/log/better-ccflare/launchd.log  (stdout/stderr capture)
+                  #{var}/log/better-ccflare/app.log      (internal app log)
+
+                Database (default):
+                  ~/.config/better-ccflare/better-ccflare.db
+
+                Environment variables:
+                  Place a .env file at ~/.config/better-ccflare/.env
+                  to set persistent env vars (auto-loaded on every start,
+                  including `brew services start`).
+
+                Override DB path:
+                  BETTER_CCFLARE_DB_PATH=/custom/path.db
+
+                Default server: http://localhost:8080
+
+                For more information, visit:
+                  https://github.com/SijanC147/better-ccflare
+              EOS
+            end
+
+            test do
+              assert_match "better-ccflare", shell_output("#{bin}/better-ccflare --version 2>&1", 1)
+            end
+          end
+          EOF
+
+          # Remove leading whitespace from formula (heredoc preserves YAML indentation)
+          sed -i 's/^          //' /tmp/better-ccflare.rb
+
+          # Replace placeholders with actual values
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" /tmp/better-ccflare.rb
+          sed -i "s/TAG_PLACEHOLDER/${TAG}/g" /tmp/better-ccflare.rb
+          sed -i "s/SHA_ARM64_PLACEHOLDER/${SHA_ARM64}/g" /tmp/better-ccflare.rb
+          sed -i "s/SHA_X86_64_PLACEHOLDER/${SHA_X86_64}/g" /tmp/better-ccflare.rb
+
+          echo "Generated formula:"
+          cat /tmp/better-ccflare.rb
+
+      - name: Push to Gitea tap
+        run: |
+          # Clone the tap repo
+          WORK_DIR=$(mktemp -d)
+          git clone --depth 1 --branch main \
+            "https://oauth2:${GITEA_TOKEN}@git.seanbugeja.me/Sean/homebrew-hextap.git" \
+            "$WORK_DIR/tap"
+
+          cd "$WORK_DIR/tap"
+
+          # Configure git
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          # Ensure Formula directory exists
+          mkdir -p Formula
+
+          # Copy the formula
+          cp /tmp/better-ccflare.rb Formula/better-ccflare.rb
+
+          # Stage and commit
+          git add Formula/better-ccflare.rb
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update better-ccflare to ${{ steps.version.outputs.version }}"
+            git push origin main
+            echo "✅ Pushed formula to Gitea tap"
+          fi
+
+          # Cleanup
+          rm -rf "$WORK_DIR"
+
+      - name: Summary
+        run: |
+          echo "### 🍺 Homebrew Formula Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Users can now install with:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "brew tap seanbugeja/hextap" >> $GITHUB_STEP_SUMMARY
+          echo "brew install better-ccflare" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Architectures:**" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS ARM64 (Apple Silicon): \`${{ steps.sha.outputs.sha256_arm64 }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS x86_64 (Intel): \`${{ steps.sha.outputs.sha256_x86_64 }}\`" >> $GITHUB_STEP_SUMMARY

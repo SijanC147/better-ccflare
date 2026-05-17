@@ -1,175 +1,92 @@
-# CLAUDE.md
+# better-ccflare
 
-Load balancer proxy for Claude distributing requests across multiple account providers to avoid rate limiting.
+Load balancer proxy for Claude Code distributing requests across multiple account providers for optimal rate limit management.
 
-## ⚠️ CRITICAL: Testing Restrictions
+## CRITICAL: Account & File Safety
 
-**NEVER curl the Anthropic endpoint** — not directly, and not via the proxy using the `claude` account. Real Anthropic accounts can get banned for automated/scripted usage. The `claude` account must only be used through real Claude Code. For testing, always use non-Anthropic accounts (ollama, litellm, omniroute, etc.) and force-route with `x-better-ccflare-account-id`.
+**Testing Endpoint**: Always use non-Anthropic accounts (ollama, litellm, omniroute, etc.) for automated/scripted testing. Real Anthropic accounts get banned for automated usage. The `claude` account is reserved for real Claude Code usage only. Force-route testing via `x-better-ccflare-account-id` header.
 
-## ⚠️ CRITICAL: File Exclusions
+**Protected Files**:
+- `inline-worker.ts` is auto-generated — always exclude from all reads, edits, searches, and commits. Recovery: `git checkout -- packages/proxy/src/inline-worker.ts`
+- Always modify only `./README.md` (root). Keep `apps/cli/README.md` untouched.
 
-**README files** - Only modify `./README.md` (root). Do NOT modify `apps/cli/README.md`.
+## Quick Start
 
-**NEVER TOUCH `inline-worker.ts`** — auto-generated, must be excluded from all reads, edits, searches, and commits.
-If accidentally modified: `git checkout -- packages/proxy/src/inline-worker.ts`
+**Build & run**: `bun run build && bun start` (port 8080)
 
-## Git Refspecs
-This repo has both a `main` branch and a `main` tag. **Always use `refs/heads/main`** (not `main`) for all git log, diff, checkout, and merge-base commands to avoid ambiguous refspec errors. Applies to: `git log refs/heads/main`, `git diff refs/heads/main...`, `git merge-base refs/heads/main`, etc.
-
-## Branch Management
-Always branch from `main` with a fresh pull. Never make changes directly on main.
-PRs: `gh pr checkout <PR_NUMBER>` or `git checkout <branch-name>`.
-- If `git push origin main` fails with `src refspec main matches more than one` (branch/tag name collision), push explicitly: `git push origin refs/heads/main:refs/heads/main`.
-
-## Merging PRs from External Contributors
-When merging PRs from external contributors (not tombii), **create a merge commit** instead of squashing or rebasing. This preserves the contributor's commit history and ensures they appear in the git log as a contributor. Use:
+**Quality checks** (run after code changes):
 ```bash
-git merge --no-ff <branch-name>
+bun run lint && bun run typecheck && bun run format
 ```
-The `--no-ff` flag creates a merge commit even if the branch could be fast-forwarded.
 
-After merging, update the Acknowledgements section in README.md to thank the contributor for their specific contributions.
+**Git safety**:
+- `git status` before any changes — track pre-existing uncommitted files
+- Feature branches only (`git checkout -b feature/name`); never change main directly
+- This repo has both a `main` branch and a `main` tag. **Always use `refs/heads/main`** (not bare `main`) for git log/diff/checkout/merge-base to avoid ambiguous-refspec errors
+- Push branch: `git push origin refs/heads/main:refs/heads/main` (branch/tag collision workaround)
+- Commit: `git add <specific-files>` only (preserves inline-worker.ts)
 
-## Issue Management
-- Never close issues automatically
-- Wait for the issue reporter to confirm that fixes work for them before closing
+**Version** — Release system handles version bumps. Update `package.json`, `apps/cli/package.json`, and `packages/core/src/version.ts` only if explicitly instructed.
 
-## Issue Staleness Check (MANDATORY before implementing)
-Before implementing any GitHub issue, always run:
-```bash
-git log refs/heads/main --since='<issue-open-date>' --oneline --no-merges -- <relevant-paths>
-```
-Check if recent commits already partially or fully address the issue. Rate limiting, health, and proxy code change frequently. Ask the user "does this issue still apply given recent changes?" before proceeding. Especially check: has the reported symptom been fixed? Does the proposal conflict with new architecture?
+## ⚠️ Database Migrations — Port to PostgreSQL
 
-## Database
-- Default: `~/.config/better-ccflare/better-ccflare.db`
-- Custom: Set `BETTER_CCFLARE_DB_PATH=/path/to/dev.db` in env or .env
-- Query: `sqlite3 ~/.config/better-ccflare/better-ccflare.db "SELECT name, provider, custom_endpoint FROM accounts;"`
+Every migration added to `packages/database/src/migrations.ts` MUST also be ported to `packages/database/src/migrations-pg.ts`:
+1. `ensureSchema()` in `migrations.ts` (SQLite CREATE TABLE)
+2. `runMigrations()` in `migrations.ts` (SQLite ALTER TABLE for existing DBs)
+3. `ensureSchemaPg()` in `migrations-pg.ts` (PG CREATE TABLE for new installs)
+4. `columnsToAdd` array in `runMigrationsPg()` (PG ALTER TABLE for existing DBs)
+5. Mirror any SQLite backfill as an `adapter.unsafe(UPDATE ...)` in `runMigrationsPg()`
 
-## ⚠️ CRITICAL: Database Migrations — Port to PostgreSQL
+New tables go in `ensureSchemaPg()` AND `runMigrationsPg()` (`CREATE TABLE IF NOT EXISTS`).
 
-**Every migration added to `packages/database/src/migrations.ts` MUST also be ported to `packages/database/src/migrations-pg.ts`.**
+## Development Workflow
 
-When adding a new column or table to SQLite:
-1. Add it to `ensureSchema()` in `migrations.ts` (SQLite CREATE TABLE)
-2. Add it to `runMigrations()` in `migrations.ts` (SQLite ALTER TABLE for existing DBs)
-3. Add it to `ensureSchemaPg()` in `migrations-pg.ts` (PG CREATE TABLE for new installs)
-4. Add an entry to the `columnsToAdd` array in `runMigrationsPg()` in `migrations-pg.ts` (PG ALTER TABLE for existing DBs)
-5. If there's a backfill/data migration in SQLite, add the equivalent `adapter.unsafe(UPDATE ...)` call in `runMigrationsPg()` as well.
+**New functionality** — Write tests first, then implement, then run tests.
 
-New tables also need to be created in `ensureSchemaPg()` AND in `runMigrationsPg()` (using `CREATE TABLE IF NOT EXISTS` so upgrades work).
+**Multi-task sessions** — Spawn subagents for independent work (code changes, research, testing, exploration). Sequential execution wastes context.
 
-## Subagents for Multi-Task Work
-When a session involves multiple independent tasks, always spawn subagents rather than doing them sequentially in the main context. This conserves tokens and keeps the main context clean. Tasks don't need to run in parallel — the goal is context isolation, not speed.
+**Implementation plans** — Use subagent-driven development, dispatch fresh subagents per task.
 
-**Default to subagents for any task that can be handed off:** code changes, research, code review, test runs, exploration, impact analysis, and any work that doesn't require direct interaction with the user mid-task. Only work inline in the main session for short, one-off responses or when you need to ask the user something before proceeding.
+**External-contributor PRs** — Merge with `git merge --no-ff <branch>` (preserve contributor history), then add them to README Acknowledgements.
 
-## Plan Execution
-When executing implementation plans, always use subagent-driven development (superpowers:subagent-driven-development). Never execute plans inline in the main session. Always dispatch a fresh subagent per task.
-
-## Test-Driven Development
-When creating new functionality: write tests first, then implement, then run tests. This ensures the implementation matches the specs/request before and after coding.
-
-## After Code Changes
-Always run: `bun run lint && bun run typecheck && bun run format`
-
-## Git Commits
-- **Before making any changes, run `git status` to check for pre-existing uncommitted changes.** Note which files were already modified so you can distinguish your changes from theirs throughout the session.
-- Use `git add <specific-files>` (not `git add .`) to avoid committing inline-worker.ts
-- Check `git status` before committing
-
-## Publishing to npm
-- Use `cd apps/cli && bun publish` (avoids workspace errors)
-- When pushing to git (triggers auto-publish), show complete output including npmjs.com auth URL: `https://www.npmjs.com/auth/cli/[uuid]`
-- **NEVER bump the version** — version bumps are handled automatically by the release system
-
-## Version Updates
-**NEVER bump the version** — handled automatically by the release system.
-`CLAUDE_CLI_VERSION` in `packages/core/src/version.ts` tracks Claude Code CLI version (auto-updated by pre-push hook).
-If ever needed manually: update both `package.json` (root) and `apps/cli/package.json`.
+**Issue management** — Never close issues automatically; wait for reporter confirmation. Before implementing an issue, run `git log refs/heads/main --since='<issue-open-date>' --oneline --no-merges -- <paths>` and confirm it still applies given recent changes (rate-limit/health/proxy code changes often).
 
 ## Commands
 
-### Server
-- First run: `bun run build` (builds dashboard/CLI)
-- Start: `bun start` (port 8080) or `bun start --serve --port 8081` (testing)
-- Startup: Takes ~15 seconds, wait before testing with curl
-- Production: runs on port 8082. Test local changes on port 8081.
+**Server**:
+- First run: `bun run build`
+- Dev: `bun start --serve --port 8081` (test on 8081, not production 8082)
+- Startup takes ~15s; wait before testing
 
-### Account Management
-- Add: `bun run cli --add-account <name> --mode <claude-oauth|console|zai|minimax|anthropic-compatible|openai-compatible> --priority <number>`
-- List: `bun run cli --list`
-- Remove: `bun run cli --remove <name>`
-- Reauth: `bun run cli --reauthenticate <name>` (preserves metadata, auto-notifies servers)
-- Priority: `bun run cli --set-priority <name> <priority>` (lower = higher priority, 0 = first)
-- Provider behavior: OAuth (5hr windows, session-based), API keys (pay-as-you-go, no sessions)
-
-### Maintenance
-- `bun run cli --reset-stats|--clear-history|--stats|--analyze`
-
-### API Endpoints
-- `POST /api/accounts/:id/reload|pause|resume`
-
-### Testing OpenRouter
-Always use model `z-ai/glm-4.5-air:free`:
+**Account management**:
 ```bash
-curl -X POST http://localhost:8081/v1/messages -H "Content-Type: application/json" -H "Authorization: Bearer test" -d '{"model":"z-ai/glm-4.5-air:free","messages":[{"role":"user","content":"test"}],"max_tokens":10}'
+bun run cli --add-account <name> --mode <mode> --priority <n>
+bun run cli --list
+bun run cli --remove <name>
+bun run cli --reauthenticate <name>
+bun run cli --set-priority <name> <priority>
+bun run cli --reset-stats
 ```
 
-## Environment
-- OS timezone is UTC+2. Timestamps in logs and `/tmp` files are UTC — add 2 hours for local time.
+**Testing OpenRouter**: Use model `z-ai/glm-4.5-air:free`
+```bash
+curl -X POST http://localhost:8081/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test" \
+  -d '{"model":"z-ai/glm-4.5-air:free","messages":[{"role":"user","content":"test"}],"max_tokens":10}'
+```
 
-## Qwen Provider
-- When working on the Qwen provider or streaming transform, **always mirror the qwen-code implementation** at `/home/tom/git_repos/qwen-code/`. Check how qwen-code handles the same scenario before implementing.
-- Qwen/DashScope sends incremental tool call argument chunks (not cumulative like standard OpenAI). The streaming transform buffers all chunks and emits complete JSON at stream end, matching `StreamingToolCallParser` in qwen-code.
+## More Details
+
+- **Releases & publishing**: See `.claude/docs/release.md`
+- **CLI & account setup**: See `.claude/docs/cli-commands.md`
+- **Database configuration**: See `.claude/docs/database.md`
+- **GitNexus code intelligence**: See `.claude/docs/gitnexus.md`
 
 ## Commit Message Categories
-Automated release system uses commit prefixes for changelog:
-- Features: `feat:|add:|new:`
-- Fixes: `fix:|bug:|resolve:`
-- Security: `security:|vulnerabilit:|redact:|ReDoS:`
-- Improvements: `improve:|enhance:|update:|refactor:`
 
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
-
-This project is indexed by GitNexus as **better-ccflare** (9115 symbols, 16165 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
-
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/better-ccflare/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/better-ccflare/clusters` | All functional areas |
-| `gitnexus://repo/better-ccflare/processes` | All execution flows |
-| `gitnexus://repo/better-ccflare/process/{name}` | Step-by-step execution trace |
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
+Automated release system uses prefixes:
+- Features: `feat:`, `add:`, `new:`
+- Fixes: `fix:`, `bug:`, `resolve:`
+- Security: `security:`, `vulnerabilit:`, `redact:`, `ReDoS:`
+- Improvements: `improve:`, `enhance:`, `update:`, `refactor:`

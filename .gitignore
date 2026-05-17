@@ -40,6 +40,15 @@ test_*.sh
 *.db.backup.*
 *.db-wal
 *.db-shm
+
+**/*.bun-build
+.serena
+
+references
 .gitnexus
 .worktrees/
 docs/superpowers/
+
+_archive.worktrees/
+_archive
+

@@ -382,6 +382,15 @@ export class APIRouter {
 		);
 		this.handlers.set("GET:/api/api-keys/stats", () => apiKeysStatsHandler());
 
+		// Projects route (for filtering)
+		this.handlers.set("GET:/api/projects", async () => {
+			const statsRepository = dbOps.getStatsRepository();
+			const projects = await statsRepository.getDistinctProjects();
+			return new Response(JSON.stringify(projects), {
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
 		// Combo routes
 		this.handlers.set("GET:/api/combos", () =>
 			createCombosListHandler(dbOps)(),

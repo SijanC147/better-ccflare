@@ -21,9 +21,9 @@ export interface RequestRow {
 	output_tokens: number | null;
 	agent_used: string | null;
 	output_tokens_per_second: number | null;
+	project: string | null;
 	api_key_id: string | null;
 	api_key_name: string | null;
-	project: string | null;
 	billing_type: string | null;
 	combo_name: string | null;
 }
@@ -51,9 +51,9 @@ export interface Request {
 	outputTokens?: number;
 	agentUsed?: string;
 	tokensPerSecond?: number;
+	project?: string | null;
 	apiKeyId?: string;
 	apiKeyName?: string;
-	project?: string;
 	billingType?: string;
 	comboName?: string;
 }
@@ -81,9 +81,9 @@ export interface RequestResponse {
 	costUsd?: number;
 	agentUsed?: string;
 	tokensPerSecond?: number;
+	project?: string | null;
 	apiKeyId?: string;
 	apiKeyName?: string;
-	project?: string;
 	billingType?: string;
 	comboName?: string;
 }
@@ -115,6 +115,7 @@ export interface RequestPayload {
 		path?: string;
 		method?: string;
 		agentUsed?: string;
+		project?: string | null;
 		requestBodyTruncated?: boolean;
 		responseBodyTruncated?: boolean;
 		limitApplied?: number;
@@ -162,7 +163,7 @@ export function toRequest(row: RequestRow): Request {
 				: undefined,
 		apiKeyId: row.api_key_id || undefined,
 		apiKeyName: row.api_key_name || undefined,
-		project: row.project || undefined,
+		project: row.project,
 		billingType: row.billing_type || undefined,
 		comboName: row.combo_name || undefined,
 	};
@@ -191,9 +192,9 @@ export function toRequestResponse(request: Request): RequestResponse {
 		costUsd: request.costUsd,
 		agentUsed: request.agentUsed,
 		tokensPerSecond: request.tokensPerSecond,
+		project: request.project,
 		apiKeyId: request.apiKeyId,
 		apiKeyName: request.apiKeyName,
-		project: request.project,
 		billingType: request.billingType,
 		comboName: request.comboName,
 	};

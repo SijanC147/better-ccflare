@@ -19,6 +19,7 @@ interface AnalyticsControlsProps {
 	setFilters: (filters: FilterState) => void;
 	availableAccounts: string[];
 	availableModels: string[];
+	availableProjects: string[];
 	availableApiKeys: string[];
 	activeFilterCount: number;
 	filterOpen: boolean;
@@ -36,6 +37,7 @@ export function AnalyticsControls({
 	setFilters,
 	availableAccounts,
 	availableModels,
+	availableProjects,
 	availableApiKeys,
 	activeFilterCount,
 	filterOpen,
@@ -68,6 +70,7 @@ export function AnalyticsControls({
 					setFilters={setFilters}
 					availableAccounts={availableAccounts}
 					availableModels={availableModels}
+					availableProjects={availableProjects}
 					availableApiKeys={availableApiKeys}
 					activeFilterCount={activeFilterCount}
 					filterOpen={filterOpen}

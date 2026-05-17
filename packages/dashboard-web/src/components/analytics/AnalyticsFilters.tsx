@@ -15,6 +15,7 @@ import { Separator } from "../ui/separator";
 export interface FilterState {
 	accounts: string[];
 	models: string[];
+	projects: string[];
 	apiKeys: string[];
 	status: "all" | "success" | "error";
 }
@@ -24,6 +25,7 @@ interface AnalyticsFiltersProps {
 	setFilters: (filters: FilterState) => void;
 	availableAccounts: string[];
 	availableModels: string[];
+	availableProjects: string[];
 	availableApiKeys: string[];
 	activeFilterCount: number;
 	filterOpen: boolean;
@@ -35,6 +37,7 @@ export function AnalyticsFilters({
 	setFilters,
 	availableAccounts,
 	availableModels,
+	availableProjects,
 	availableApiKeys,
 	activeFilterCount,
 	filterOpen,
@@ -65,6 +68,7 @@ export function AnalyticsFilters({
 									setFilters({
 										accounts: [],
 										models: [],
+										projects: [],
 										apiKeys: [],
 										status: "all",
 									})
@@ -166,6 +170,43 @@ export function AnalyticsFilters({
 											}}
 										/>
 										<span className="text-sm truncate">{model}</span>
+									</label>
+								))}
+							</div>
+						</div>
+					)}
+
+					{/* Project Filter */}
+					{availableProjects.length > 0 && (
+						<div className="space-y-2">
+							<Label>Projects ({filters.projects.length} selected)</Label>
+							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+								{availableProjects.map((project) => (
+									<label
+										key={project}
+										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
+									>
+										<input
+											type="checkbox"
+											className="rounded border-gray-300"
+											checked={filters.projects.includes(project)}
+											onChange={(e) => {
+												if (e.target.checked) {
+													setFilters({
+														...filters,
+														projects: [...filters.projects, project],
+													});
+												} else {
+													setFilters({
+														...filters,
+														projects: filters.projects.filter(
+															(p) => p !== project,
+														),
+													});
+												}
+											}}
+										/>
+										<span className="text-sm truncate">{project}</span>
 									</label>
 								))}
 							</div>

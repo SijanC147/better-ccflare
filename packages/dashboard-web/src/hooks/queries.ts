@@ -41,6 +41,7 @@ export const useAnalytics = (
 	filters: {
 		accounts?: string[];
 		models?: string[];
+		projects?: string[];
 		apiKeys?: string[];
 		status?: "all" | "success" | "error";
 	},
@@ -136,6 +137,15 @@ export const useLogHistory = () => {
 	return useQuery({
 		queryKey: queryKeys.logHistory(),
 		queryFn: () => api.getLogHistory(),
+	});
+};
+
+export const useProjects = () => {
+	return useQuery({
+		queryKey: queryKeys.projects(),
+		queryFn: () => api.getProjects(),
+		staleTime: 2 * 60 * 1000, // Consider data fresh for 2 minutes
+		gcTime: 10 * 60 * 1000, // Keep in cache for 10 minutes
 	});
 };
 

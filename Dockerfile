@@ -38,9 +38,9 @@ RUN echo "=== Binary Download Information ===" && \
     fi && \
     echo "Using architecture: ${ARCH}" && \
     if [ "${VERSION}" = "latest" ]; then \
-      DOWNLOAD_URL="https://github.com/tombii/better-ccflare/releases/latest/download/better-ccflare-linux-${ARCH}"; \
+      DOWNLOAD_URL="https://github.com/SijanC147/better-ccflare/releases/latest/download/better-ccflare-linux-${ARCH}"; \
     else \
-      DOWNLOAD_URL="https://github.com/tombii/better-ccflare/releases/download/v${VERSION}/better-ccflare-linux-${ARCH}"; \
+      DOWNLOAD_URL="https://github.com/SijanC147/better-ccflare/releases/download/v${VERSION}/better-ccflare-linux-${ARCH}"; \
     fi && \
     echo "Downloading from: ${DOWNLOAD_URL}" && \
     curl -L -f -o /usr/local/bin/better-ccflare "${DOWNLOAD_URL}" || (echo "Failed to download binary from ${DOWNLOAD_URL}"; exit 1) && \

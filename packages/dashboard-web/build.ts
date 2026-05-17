@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import plugin from "bun-plugin-tailwind";
 
@@ -52,6 +52,27 @@ console.log(`📦 Output files:`);
 result.outputs.forEach((output) => {
 	console.log(`   - ${path.relative(process.cwd(), output.path)}`);
 });
+
+// Fix webmanifest icon paths (Bun doesn't rewrite references inside JSON)
+for (const output of result.outputs) {
+	const fileName = path.basename(output.path);
+	if (fileName.endsWith(".webmanifest")) {
+		const content = await readFile(output.path, "utf-8");
+		const hashedIcon = result.outputs.find((o) =>
+			path.basename(o.path).startsWith("apple-touch-icon"),
+		);
+		if (hashedIcon) {
+			const updated = content.replace(
+				"./apple-touch-icon.png",
+				`./${path.basename(hashedIcon.path)}`,
+			);
+			await writeFile(output.path, updated);
+			console.log(
+				`\n🔧 Fixed webmanifest icon path → ${path.basename(hashedIcon.path)}`,
+			);
+		}
+	}
+}
 
 // Generate embedded assets TypeScript file
 console.log(`\n📦 Generating embedded assets...`);

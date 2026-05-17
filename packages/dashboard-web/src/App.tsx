@@ -8,6 +8,7 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
+import { cn } from "./lib/utils";
 import { AccountsTab } from "./components/AccountsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
@@ -56,6 +57,9 @@ const LoadingSkeleton = () => (
 export function App() {
 	const location = useLocation();
 	const [showCombos, setShowCombos] = useState(false);
+	const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
+		localStorage.getItem("ccflare-sidebar-collapsed") === "true",
+	);
 
 	// Build routes array dynamically based on feature flags
 	const routes = useMemo(() => {
@@ -291,6 +295,12 @@ export function App() {
 		setShowAuthDialog(true);
 	};
 
+	const handleToggleSidebarCollapse = () => {
+		const newCollapsed = !isSidebarCollapsed;
+		setIsSidebarCollapsed(newCollapsed);
+		localStorage.setItem("ccflare-sidebar-collapsed", String(newCollapsed));
+	};
+
 	// Show loading state while checking authentication
 	if (isCheckingAuth) {
 		return (
@@ -316,10 +326,17 @@ export function App() {
 					<Navigation
 						onLogout={authRequired ? handleLogout : undefined}
 						showCombos={showCombos}
+						isCollapsed={isSidebarCollapsed}
+						onToggleCollapse={handleToggleSidebarCollapse}
 					/>
 
 					{/* Main Content */}
-					<main className="lg:pl-64">
+					<main
+						className={cn(
+							"transition-all duration-300",
+							isSidebarCollapsed ? "lg:pl-16" : "lg:pl-64",
+						)}
+					>
 						{/* Mobile spacer */}
 						<div className="h-16 lg:hidden" />
 

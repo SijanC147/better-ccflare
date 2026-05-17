@@ -733,6 +733,17 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added output_tokens_per_second column to requests table");
 		}
 
+		// Add project column if it doesn't exist (for X-CCFlare-Project header tracking)
+		if (!requestsColumnNames.includes("project")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN project TEXT").run();
+			log.info("Added project column to requests table");
+		}
+
+		// Add index for project filtering
+		db.run(
+			`CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project)`,
+		);
+
 		// Add api_key_id column if it doesn't exist
 		if (!requestsColumnNames.includes("api_key_id")) {
 			db.prepare("ALTER TABLE requests ADD COLUMN api_key_id TEXT").run();

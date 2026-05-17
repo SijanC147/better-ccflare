@@ -71,6 +71,8 @@ export function createAnalyticsHandler(context: APIContext) {
 		const apiKeysFilter =
 			params.get("apiKeys")?.split(",").filter(Boolean) || [];
 		const statusFilter = params.get("status") || "all";
+		const projectsFilter =
+			params.get("projects")?.split(",").filter(Boolean) || [];
 
 		// Build filter conditions
 		const conditions: string[] = ["timestamp > ?"];
@@ -107,6 +109,12 @@ export function createAnalyticsHandler(context: APIContext) {
 			conditions.push("success = TRUE");
 		} else if (statusFilter === "error") {
 			conditions.push("success = FALSE");
+		}
+
+		if (projectsFilter.length > 0) {
+			const placeholders = projectsFilter.map(() => "?").join(",");
+			conditions.push(`project IN (${placeholders})`);
+			queryParams.push(...projectsFilter);
 		}
 
 		const whereClause = conditions.join(" AND ");

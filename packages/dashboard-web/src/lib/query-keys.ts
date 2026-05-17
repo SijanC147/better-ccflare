@@ -20,6 +20,7 @@ export const queryKeys = {
 	logHistory: () => [...queryKeys.all, "logs", "history"] as const,
 	defaultAgentModel: () =>
 		[...queryKeys.all, "config", "defaultAgentModel"] as const,
+	projects: () => [...queryKeys.all, "projects"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,
 	families: () => [...queryKeys.all, "families"] as const,
 } as const;
