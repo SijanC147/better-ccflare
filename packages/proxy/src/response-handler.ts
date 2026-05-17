@@ -1,4 +1,4 @@
-import { requestEvents, ResolverSnapshot, TIME_CONSTANTS } from "@better-ccflare/core";
+import { requestEvents, TIME_CONSTANTS } from "@better-ccflare/core";
 import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
@@ -143,33 +143,14 @@ export async function forwardToClient(
 			path === "/v1/messages/count_tokens"
 		) && !isAutoRefreshProbe;
 
-	// Resolve project attribution using the path resolver.
-	// TODO(phase3c): replace ad-hoc snapshot build with ctx.dbOps.resolverManager.current().resolve()
-	// once Phase 3.C wires the ResolverManager getter onto DatabaseOperations.
+	// Resolve project attribution using the live ResolverManager snapshot
+	// maintained by the DiscoveryScheduler. This honors the configured
+	// case-sensitivity setting (Codex round 4 P2) and avoids rebuilding a
+	// snapshot per request.
 	let resolvedProjectId: string | null = null;
 	let resolvedWorktreePath: string | null = null;
 	try {
-		const [projects, rules] = await Promise.all([
-			ctx.dbOps.listProjects(),
-			ctx.dbOps.listWorktreeRules(),
-		]);
-		const snapshot = ResolverSnapshot.build(
-			projects.map((p) => ({
-				id: p.id,
-				canonicalPath: p.canonical_path,
-				enabled: p.enabled,
-				parentProjectId: p.parent_project_id,
-			})),
-			rules.map((r) => ({
-				id: r.id,
-				kind: r.kind,
-				pattern: r.pattern,
-				parentProjectId: r.parent_project_id,
-				priority: r.priority,
-				enabled: r.enabled,
-				compileError: r.compile_error,
-			})),
-		);
+		const snapshot = ctx.dbOps.resolverManager.current();
 		// Prefer explicit cwd hint; fall back to heuristic project string
 		const resolverInput = cwdHint ?? project ?? null;
 		const resolved = snapshot.resolve(resolverInput);
@@ -438,9 +419,13 @@ export async function forwardToClient(
 			} else {
 				const chunks: Uint8Array[] = [];
 				let bytesRead = 0;
+				let streamDone = false;
 				while (bytesRead < MAX_NON_STREAM_BODY_BYTES) {
 					const { value, done } = await reader.read();
-					if (done) break;
+					if (done) {
+						streamDone = true;
+						break;
+					}
 					const remaining = MAX_NON_STREAM_BODY_BYTES - bytesRead;
 					if (value.length <= remaining) {
 						chunks.push(value);
@@ -449,8 +434,17 @@ export async function forwardToClient(
 						chunks.push(value.slice(0, remaining));
 						bytesRead += remaining;
 						await reader.cancel();
+						streamDone = true;
 						break;
 					}
+				}
+				// Codex round 4 P2: if the while condition exited because bytesRead
+				// reached the cap exactly via the `<=remaining` branch, the loop
+				// terminates without cancel() and the analytics tee branch keeps
+				// the unread remainder buffered. Explicitly cancel here to release
+				// the source.
+				if (!streamDone) {
+					await reader.cancel();
 				}
 				cappedBuf = Buffer.concat(chunks);
 			}

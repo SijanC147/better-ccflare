@@ -135,9 +135,12 @@ export class DiscoveryScheduler {
 			return { added: 0, updated: 0, unchanged: 0, total: 0 };
 		}
 
-		// Filter out ambiguous sentinel paths (e.g. root-fs, tmp dirs).
+		// Filter out sentinel paths (root-fs, tmp dirs, /private/var/folders).
+		// The check is unconditional — a JSONL-resolved cwd that points to a
+		// transient tmp dir is still a sentinel and should never be persisted
+		// as a real project (Codex round 4 P2).
 		const clean = discovered.filter((d) => {
-			if (d.ambiguous && isSentinelPath(d.canonicalPath)) {
+			if (isSentinelPath(d.canonicalPath)) {
 				log.debug(
 					`Skipping sentinel path: ${d.canonicalPath} (${d.encodedName})`,
 				);
