@@ -82,6 +82,12 @@ export function createWorktreeRuleCreateHandler(dbOps: DatabaseOperations) {
 				priority: typeof priority === "number" ? priority : 0,
 			});
 
+			// Refresh the live ResolverManager snapshot so the new rule takes
+			// effect immediately. Without this, request attribution would keep
+			// using the stale snapshot until the next discovery tick (Codex
+			// round 6 P2).
+			await dbOps.rebuildResolver();
+
 			return new Response(JSON.stringify({ success: true, data: rule }), {
 				status: 201,
 				headers: { "Content-Type": "application/json" },
@@ -163,6 +169,8 @@ export function createWorktreeRuleUpdateHandler(dbOps: DatabaseOperations) {
 
 			const updated = await dbOps.updateWorktreeRule(id, fields);
 
+			await dbOps.rebuildResolver();
+
 			return new Response(JSON.stringify({ success: true, data: updated }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -187,6 +195,8 @@ export function createWorktreeRuleDeleteHandler(dbOps: DatabaseOperations) {
 			}
 
 			await dbOps.deleteWorktreeRule(id);
+
+			await dbOps.rebuildResolver();
 
 			return new Response(
 				JSON.stringify({ success: true, message: "Worktree rule deleted successfully" }),

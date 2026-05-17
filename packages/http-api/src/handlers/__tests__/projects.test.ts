@@ -42,6 +42,9 @@ function makeDbOps(overrides: Partial<DatabaseOperations> = {}): DatabaseOperati
 				source: fields.source ?? "manual",
 			}),
 		deleteProject: async (_id: string) => {},
+		// Mutations now refresh the live ResolverManager snapshot (Codex
+		// round 6 P2); the handler awaits this after every write.
+		rebuildResolver: async () => {},
 		...overrides,
 	} as unknown as DatabaseOperations;
 }

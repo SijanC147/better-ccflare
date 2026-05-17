@@ -88,6 +88,11 @@ export function createProjectCreateHandler(dbOps: DatabaseOperations) {
 				parentProjectId: parent_project_id ?? null,
 			});
 
+			// Refresh the live ResolverManager snapshot so attribution sees
+			// the new project immediately (Codex round 6 P2 — parity with the
+			// worktree-rules write handlers).
+			await dbOps.rebuildResolver();
+
 			return new Response(JSON.stringify({ success: true, data: project }), {
 				status: 201,
 				headers: { "Content-Type": "application/json" },
@@ -177,6 +182,8 @@ export function createProjectUpdateHandler(dbOps: DatabaseOperations) {
 
 			const updated = await dbOps.updateProject(id, fields);
 
+			await dbOps.rebuildResolver();
+
 			return new Response(JSON.stringify({ success: true, data: updated }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -212,6 +219,8 @@ export function createProjectDeleteHandler(dbOps: DatabaseOperations) {
 			}
 
 			await dbOps.deleteProject(id);
+
+			await dbOps.rebuildResolver();
 
 			return new Response(
 				JSON.stringify({ success: true, message: "Project deleted successfully" }),

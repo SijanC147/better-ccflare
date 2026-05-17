@@ -53,9 +53,13 @@ export class ProjectRepository extends BaseRepository<Project> {
 	}
 
 	async findAll(): Promise<Project[]> {
+		// LOWER() works on both SQLite and Postgres. COLLATE NOCASE is a
+		// SQLite-only collation that the BunSqlAdapter passes through
+		// verbatim, so on Postgres it fails with a "collation does not
+		// exist" error (Codex round 6 P1).
 		const rows = await this.query<ProjectRow>(
 			`SELECT id, canonical_path, display_name, enabled, source, parent_project_id, last_session_at, session_count, discovered_at, metadata
-       FROM projects ORDER BY display_name COLLATE NOCASE ASC`,
+       FROM projects ORDER BY LOWER(display_name) ASC`,
 		);
 		return rows.map(toProject);
 	}
@@ -188,17 +192,22 @@ export class ProjectRepository extends BaseRepository<Project> {
 			} else {
 				// Row already exists. Update session_count and last_session_at only.
 				// Leave display_name alone so manual renames are preserved.
+				// COALESCE-based null-safe value comparison works on both SQLite
+				// and Postgres. The previous `IS NOT $param` is a SQLite-ism: PG
+				// only accepts `IS [NOT] {NULL,TRUE,FALSE,UNKNOWN}` after IS, so
+				// `IS NOT $5` with a numeric placeholder errors and the whole
+				// upsert fails on existing rows (Codex round 6 P1). Sentinel -1
+				// is safe because last_session_at is a non-negative ms epoch.
 				const updateChanges = await this.runWithChanges(
 					`UPDATE projects
            SET session_count = ?, last_session_at = ?
            WHERE canonical_path = ?
-             AND (session_count != ? OR last_session_at IS NOT ? OR (last_session_at IS NULL AND ? IS NOT NULL))`,
+             AND (session_count != ? OR COALESCE(last_session_at, -1) != COALESCE(?, -1))`,
 					[
 						row.sessionCount,
 						row.lastSessionAt ?? null,
 						row.canonicalPath,
 						row.sessionCount,
-						row.lastSessionAt ?? null,
 						row.lastSessionAt ?? null,
 					],
 				);
