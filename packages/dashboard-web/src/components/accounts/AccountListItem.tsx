@@ -33,6 +33,7 @@ function formatTokenCount(n: number): string {
 interface AccountListItemProps {
 	account: Account;
 	isActive?: boolean;
+	compact?: boolean;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
@@ -54,6 +55,7 @@ interface AccountListItemProps {
 export function AccountListItem({
 	account,
 	isActive = false,
+	compact = false,
 	onPauseToggle,
 	onForceResetRateLimit,
 	onRefreshUsage,
@@ -117,7 +119,7 @@ export function AccountListItem({
 	return (
 		<div
 			key={account.name}
-			className={`p-4 border rounded-lg transition-colors space-y-4 ${
+			className={`border rounded-lg transition-colors space-y-4 ${compact ? "p-2" : "p-4"} ${
 				isActive
 					? "border-primary bg-primary/5 shadow-sm"
 					: "border-border hover:border-muted-foreground/50"
