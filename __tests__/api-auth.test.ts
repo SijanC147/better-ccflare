@@ -182,15 +182,16 @@ describe("API Authentication", () => {
 			expect(extractedKey).toBe("btr-bearer-key-456");
 		});
 
-		test("should exempt only /health at the auth layer", async () => {
+		test("should keep dashboard SPA reachable via GET/HEAD before auth", async () => {
+			// router.handleRequest() authenticates before route matching and
+			// only falls through to dashboard serving once auth passes. The
+			// initial browser navigation cannot carry the API key, so these
+			// GET/HEAD navigations must be exempt or enabling API auth would
+			// lock users out of the dashboard UI (Codex P1).
 			expect(await authService.isPathExempt("/health", "GET")).toBe(true);
-			// The dashboard SPA + static assets are served by the server
-			// before authentication is consulted, so the auth layer must NOT
-			// blanket-exempt arbitrary non-API paths (Codex P1, 2nd pass) —
-			// otherwise a disabled/unavailable dashboard turns every such
-			// path into an unauthenticated proxy request.
-			expect(await authService.isPathExempt("/", "GET")).toBe(false);
-			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(false);
+			expect(await authService.isPathExempt("/", "GET")).toBe(true);
+			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(true);
+			expect(await authService.isPathExempt("/", "HEAD")).toBe(true);
 		});
 
 		test("should NOT blanket-exempt token-mutating OAuth endpoints (Codex P1)", async () => {
@@ -216,37 +217,38 @@ describe("API Authentication", () => {
 			).toBe(false);
 		});
 
-		test("should NOT exempt static-asset-looking paths at the auth layer", async () => {
-			// Static assets are served by the server from the dashboard
-			// manifest before auth runs; if such a path reaches the auth
-			// layer the dashboard is disabled/unavailable and the request is
-			// really a proxy request that must be authenticated.
+		test("should serve static assets via GET before auth", async () => {
+			// Hashed chunks / assets are GET fetches issued by the loaded
+			// SPA; they must pass the auth layer (router authenticates first)
+			// so the server can serve them.
 			expect(await authService.isPathExempt("/chunk-abc123.js", "GET")).toBe(
-				false,
+				true,
 			);
 			expect(await authService.isPathExempt("/chunk-abc123.css", "GET")).toBe(
-				false,
+				true,
 			);
 			expect(
 				await authService.isPathExempt("/favicon-abc123.svg", "GET"),
-			).toBe(false);
+			).toBe(true);
 			expect(await authService.isPathExempt("/static/logo.png", "GET")).toBe(
-				false,
+				true,
 			);
 			expect(await authService.isPathExempt("/assets/font.woff2", "GET")).toBe(
-				false,
+				true,
 			);
 		});
 
-		test("should require authentication for API and arbitrary proxy paths", async () => {
+		test("should require authentication for API/proxy paths and non-GET arbitrary paths", async () => {
 			expect(await authService.isPathExempt("/api/stats", "GET")).toBe(false);
 			expect(await authService.isPathExempt("/v1/messages", "POST")).toBe(false);
 			expect(await authService.isPathExempt("/api/accounts", "GET")).toBe(false);
-			// Arbitrary proxy path must not be exempt (Codex P1, 2nd pass).
+			expect(await authService.isPathExempt("/messages", "POST")).toBe(false);
+			// A body-bearing request to an arbitrary path is a proxy request
+			// and must NOT be exempt — closes the arbitrary-proxy-path bypass
+			// (Codex P1) while keeping GET dashboard navigation working.
 			expect(await authService.isPathExempt("/foo", "POST")).toBe(false);
-			expect(await authService.isPathExempt("/anything/else", "GET")).toBe(
-				false,
-			);
+			expect(await authService.isPathExempt("/foo", "PUT")).toBe(false);
+			expect(await authService.isPathExempt("/bar/baz", "DELETE")).toBe(false);
 		});
 	});
 

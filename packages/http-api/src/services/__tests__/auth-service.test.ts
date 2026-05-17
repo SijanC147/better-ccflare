@@ -142,11 +142,10 @@ describe("OAuth path authentication gating (Codex P1)", () => {
 			expect(auth.isStaticPathExempt("/health")).toBe(true);
 		});
 
-		// Codex P1 (second pass): dashboard SPA + static assets are served by
-		// the server BEFORE authentication is consulted, so they must NOT be
-		// blanket-exempt at the auth layer. A broad "non-/api path => exempt"
-		// rule let arbitrary proxy paths through without a key when the
-		// dashboard was disabled/unavailable.
+		// isStaticPathExempt is /health-only. Dashboard/SPA/static reachability
+		// is handled in isPathExempt() with a GET/HEAD method gate (see below),
+		// not statically — a broad static "non-/api => exempt" rule had let
+		// arbitrary proxy paths through without a key (Codex P1).
 		test.each([
 			"/dashboard",
 			"/assets/app.js",
@@ -197,6 +196,35 @@ describe("OAuth path authentication gating (Codex P1)", () => {
 			// Method-spoofing the status path with a non-GET is not exempt
 			["POST", "/api/oauth/codex/status/abc"],
 		])("%s %s is NOT exempt (requires auth when enabled)", async (method, path) => {
+			expect(await auth.isPathExempt(path, method)).toBe(false);
+		});
+	});
+
+	describe("isPathExempt() — dashboard reachable via GET/HEAD only (Codex P1)", () => {
+		test.each([
+			["GET", "/"],
+			["HEAD", "/"],
+			["GET", "/dashboard"],
+			["GET", "/accounts"],
+			["GET", "/chunk-abc123.js"],
+			["GET", "/assets/font.woff2"],
+			["GET", "/static/logo.png"],
+		])("%s %s is exempt (dashboard/static navigation)", async (method, path) => {
+			expect(await auth.isPathExempt(path, method)).toBe(true);
+		});
+
+		test.each([
+			// Body-bearing arbitrary paths are proxy requests — not exempt.
+			["POST", "/foo"],
+			["PUT", "/foo"],
+			["DELETE", "/bar/baz"],
+			["PATCH", "/anything"],
+			// API/proxy prefixes are never exempt regardless of method.
+			["GET", "/api/stats"],
+			["GET", "/v1/models"],
+			["POST", "/v1/messages"],
+			["GET", "/messages/x"],
+		])("%s %s is NOT exempt", async (method, path) => {
 			expect(await auth.isPathExempt(path, method)).toBe(false);
 		});
 	});

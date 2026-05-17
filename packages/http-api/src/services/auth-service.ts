@@ -197,6 +197,28 @@ export class AuthService {
 			return false;
 		}
 
+		// Dashboard SPA + static assets.
+		// router.handleRequest() authenticates BEFORE route matching and only
+		// returns null (letting the server serve the dashboard HTML/assets)
+		// once auth passes. The initial browser navigation to "/" or a
+		// client-side route like "/dashboard" cannot carry the stored API
+		// key, so these requests must be auth-exempt or enabling API auth
+		// would lock users out of the dashboard UI entirely.
+		//
+		// The exemption is limited to safe, body-less navigation methods
+		// (GET/HEAD). A proxy request that consumes account quota or mutates
+		// state is never a bare GET/HEAD to a non-/api, non-/v1, non-/messages
+		// path, so this does not reopen the arbitrary-proxy-path bypass —
+		// e.g. `POST /foo` is still authenticated (Codex P1).
+		if (
+			(method === "GET" || method === "HEAD") &&
+			!path.startsWith("/api") &&
+			!path.startsWith("/v1") &&
+			!path.startsWith("/messages")
+		) {
+			return true;
+		}
+
 		return false;
 	}
 
