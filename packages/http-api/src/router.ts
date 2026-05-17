@@ -33,6 +33,7 @@ import {
 	createVertexAIAccountAddHandler,
 	createZaiAccountAddHandler,
 } from "./handlers/accounts";
+import { createAdminRestartHandler } from "./handlers/admin-restart";
 import {
 	createAgentPreferenceUpdateHandler,
 	createAgentsListHandler,
@@ -64,6 +65,7 @@ import {
 	createSlotUpdateHandler,
 } from "./handlers/combos";
 import { createConfigHandlers } from "./handlers/config";
+import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import {
 	createHeapSnapshotHandler,
 	createHeapStatsHandler,
@@ -173,6 +175,8 @@ export class APIRouter {
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
+		const postgresConfigHandlers = createPostgresConfigHandlers(config);
+		const adminRestartHandler = createAdminRestartHandler();
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
@@ -350,6 +354,15 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/usage-throttling", (req) =>
 			configHandlers.setUsageThrottling(req),
+		);
+		this.handlers.set("GET:/api/config/postgres", () =>
+			postgresConfigHandlers.getPostgresConfig(),
+		);
+		this.handlers.set("POST:/api/config/postgres", (req) =>
+			postgresConfigHandlers.setPostgresConfig(req),
+		);
+		this.handlers.set("POST:/api/admin/restart", (req) =>
+			adminRestartHandler(req),
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("POST:/api/maintenance/compact", () => compactHandler());

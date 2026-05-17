@@ -345,6 +345,38 @@ export const useCompactDb = () => {
 	});
 };
 
+// PostgreSQL configuration
+export const usePostgresConfig = () => {
+	return useQuery({
+		queryKey: ["postgres-config"],
+		queryFn: () => api.getPostgresConfig(),
+	});
+};
+
+export const useSetPostgresConfig = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: {
+			enabled?: boolean;
+			host?: string;
+			port?: number;
+			database?: string;
+			user?: string;
+			password?: string;
+			sslMode?: "disable" | "require" | "verify-ca" | "verify-full";
+		}) => api.setPostgresConfig(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["postgres-config"] });
+		},
+	});
+};
+
+export const useAdminRestart = () => {
+	return useMutation({
+		mutationFn: () => api.adminRestart(),
+	});
+};
+
 export const useCombos = () => {
 	return useQuery({
 		queryKey: queryKeys.combos(),
