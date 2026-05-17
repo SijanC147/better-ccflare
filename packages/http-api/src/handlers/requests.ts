@@ -6,7 +6,7 @@ import { jsonResponse } from "@better-ccflare/http-common";
 import type { RequestResponse } from "../types";
 
 const MAX_BODY_PREVIEW_BYTES = 256 * 1024; // 256KB - match response body cap to preserve full conversation history
-const MAX_REQUEST_DETAILS_LIMIT = 50;
+const MAX_REQUEST_DETAILS_LIMIT = 2000;
 
 function truncateBase64(body: unknown): {
 	body: string | null;
