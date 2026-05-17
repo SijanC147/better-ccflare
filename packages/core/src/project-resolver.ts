@@ -136,7 +136,15 @@ function compileRule(
   } else if (rule.kind === "glob") {
     let glob: InstanceType<typeof Bun.Glob>;
     try {
-      glob = new Bun.Glob(rule.pattern);
+      // In case-insensitive mode the candidate path is lowercased before
+      // matching, so the glob pattern must be lowercased too — otherwise a
+      // user-entered pattern with real casing like /Users/Alice/**/.worktrees/**
+      // would never match the normalized /users/alice/... (Codex round 5 P3).
+      // Directory rules already normalize their pattern via normalizePath.
+      const compiledPattern = caseSensitive
+        ? rule.pattern
+        : rule.pattern.toLowerCase();
+      glob = new Bun.Glob(compiledPattern);
     } catch {
       return null; // compilation error — skip rule
     }

@@ -9,7 +9,6 @@
  * DatabaseOperations).
  */
 
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	ClaudeCodeDiscovery,
@@ -24,12 +23,13 @@ const log = new Logger("DiscoveryScheduler");
 // Sentinel-path filters
 // ---------------------------------------------------------------------------
 
-/** Root-FS and tmpdir paths that must never be treated as real projects. */
-const SENTINEL_PREFIXES = [
-	"/private/var/folders/",
-	"/var/folders/",
-	os.tmpdir(),
-];
+// Path shapes that must never be treated as real projects. Limited to the
+// macOS-generated temp namespaces (/private/var/folders/* and /var/folders/*)
+// that Claude Code occasionally records during transient sessions. A bare
+// /tmp prefix is intentionally NOT here — valid CI/worktree/temp projects
+// commonly live under /tmp and a raw startsWith on os.tmpdir() also wrongly
+// matches paths like /tmprepo on Linux (Codex round 5 P2).
+const SENTINEL_PREFIXES = ["/private/var/folders/", "/var/folders/"];
 
 function isSentinelPath(canonicalPath: string): boolean {
 	if (canonicalPath === "/") return true;
