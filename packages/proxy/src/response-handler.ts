@@ -36,7 +36,14 @@ function getMidStreamRateLimitCooldownMs(): number {
 // 4MB so afterburn can see full conversation history for friction analysis.
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
-function safePostMessage(
+/**
+ * Best-effort post to the usage worker. Swallows errors when the worker is
+ * in `starting`/restart state (postMessage throws unless `ready`). Exported
+ * so the pool-exhausted logging path in proxy.ts can share the same safety
+ * (Codex round 2 P2 — without this, a startup-window no-accounts request
+ * could throw before returning its prepared 503).
+ */
+export function safePostMessage(
 	worker: UsageWorkerController,
 	message: StartMessage | ChunkMessage | EndMessage,
 ): void {

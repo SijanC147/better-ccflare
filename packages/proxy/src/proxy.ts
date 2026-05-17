@@ -25,6 +25,7 @@ import {
 	selectAccountsForRequest,
 	validateProviderPath,
 } from "./handlers";
+import { safePostMessage } from "./response-handler";
 import { UsageWorkerController } from "./usage-worker-controller";
 import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
 
@@ -370,8 +371,11 @@ export async function handleProxy(
 		const isAutoRefreshProbe =
 			req.headers.get("x-better-ccflare-auto-refresh") === "true";
 		if (!isAutoRefreshProbe) {
-			// Send error message to usage worker for request history logging
-			ctx.usageWorker.postMessage({
+			// Send error message to usage worker for request history logging.
+			// Use safePostMessage so a worker still in `starting` or restart state
+			// cannot throw and break the prepared 503 response to the client
+			// (Codex round 2 P2).
+			safePostMessage(ctx.usageWorker, {
 				type: "start",
 				messageId: crypto.randomUUID(),
 				requestId: requestMeta.id,
