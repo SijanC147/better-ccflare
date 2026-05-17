@@ -72,6 +72,7 @@ export interface ControlMessage {
 export interface ConfigUpdateMessage {
 	type: "config-update";
 	storePayloads: boolean;
+	headersOnly: boolean;
 }
 
 export type WorkerMessage =

@@ -64,6 +64,7 @@ import {
 	createSlotUpdateHandler,
 } from "./handlers/combos";
 import { createConfigHandlers } from "./handlers/config";
+import { createRequestStorageHandlers } from "./handlers/config-request-storage";
 import {
 	createHeapSnapshotHandler,
 	createHeapStatsHandler,
@@ -173,6 +174,7 @@ export class APIRouter {
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
+		const requestStorageHandlers = createRequestStorageHandlers(config);
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
@@ -332,6 +334,12 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/retention", (req) =>
 			configHandlers.setRetention(req),
+		);
+		this.handlers.set("GET:/api/config/request-storage", () =>
+			requestStorageHandlers.getRequestStorage(),
+		);
+		this.handlers.set("POST:/api/config/request-storage", (req) =>
+			requestStorageHandlers.setRequestStorage(req),
 		);
 		this.handlers.set("GET:/api/config/keepalive", () =>
 			configHandlers.getCacheKeepaliveTtl(),

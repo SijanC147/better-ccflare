@@ -12,6 +12,8 @@ export type {
 	ModelPerformance,
 	PoolStatus,
 	RequestResponse,
+	RequestStorageGetResponse,
+	RequestStorageSetRequest,
 	RetentionGetResponse,
 	RetentionSetRequest,
 	StatsResponse,

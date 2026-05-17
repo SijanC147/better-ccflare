@@ -277,6 +277,23 @@ export const useSetRetention = () => {
 	});
 };
 
+export const useRequestStorage = () => {
+	return useQuery({
+		queryKey: ["request-storage"],
+		queryFn: () => api.getRequestStorage(),
+	});
+};
+
+export const useSetRequestStorage = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: { headersOnly: boolean }) => api.setRequestStorage(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["request-storage"] });
+		},
+	});
+};
+
 export const useKeepaliveTtl = () => {
 	return useQuery({
 		queryKey: ["keepalive"],

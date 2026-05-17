@@ -98,7 +98,12 @@ function extractProjectFromRequest(
 
 // ===== WORKER MANAGEMENT =====
 
-let pendingStorePayloads: boolean | null = null;
+interface PendingConfigUpdate {
+	storePayloads: boolean;
+	headersOnly: boolean;
+}
+
+let pendingConfigUpdate: PendingConfigUpdate | null = null;
 
 const usageWorkerController = new UsageWorkerController(
 	(msg: SummaryMessage) => {
@@ -110,13 +115,14 @@ const usageWorkerController = new UsageWorkerController(
 	},
 	() => {
 		// Apply deferred config update once worker is ready
-		if (pendingStorePayloads !== null) {
+		if (pendingConfigUpdate !== null) {
 			const msg: ConfigUpdateMessage = {
 				type: "config-update",
-				storePayloads: pendingStorePayloads,
+				storePayloads: pendingConfigUpdate.storePayloads,
+				headersOnly: pendingConfigUpdate.headersOnly,
 			};
 			usageWorkerController.postMessage(msg);
-			pendingStorePayloads = null;
+			pendingConfigUpdate = null;
 		}
 	},
 );
@@ -129,13 +135,20 @@ export function startUsageWorker(): void {
 	usageWorkerController.start();
 }
 
-export function sendWorkerConfigUpdate(storePayloads: boolean): void {
+export function sendWorkerConfigUpdate(
+	storePayloads: boolean,
+	headersOnly: boolean,
+): void {
 	if (!usageWorkerController.isReady()) {
 		// Defer until worker is ready
-		pendingStorePayloads = storePayloads;
+		pendingConfigUpdate = { storePayloads, headersOnly };
 		return;
 	}
-	const msg: ConfigUpdateMessage = { type: "config-update", storePayloads };
+	const msg: ConfigUpdateMessage = {
+		type: "config-update",
+		storePayloads,
+		headersOnly,
+	};
 	usageWorkerController.postMessage(msg);
 }
 
