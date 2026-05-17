@@ -959,10 +959,16 @@ Examples:
 	container.registerInstance(SERVICE_KEYS.Config, new Config());
 	container.registerInstance(SERVICE_KEYS.Logger, new Logger("CLI"));
 
-	// Initialize database factory with minimal configuration for CLI commands
-	// CLI commands don't need expensive integrity checks
+	// Initialize database factory with minimal configuration for CLI commands.
+	// CLI commands don't need expensive integrity checks. Use the async
+	// factory so PostgreSQL schema/migrations are run before any sync
+	// accessor (cli-commands/runner, providers/bedrock error-handler) can
+	// see the singleton — otherwise CLI commands against a fresh
+	// PostgreSQL DB would query tables before ensureSchemaPg() ran and
+	// fail with missing relation errors (Codex P1). The call is a no-op
+	// on SQLite.
 	DatabaseFactory.initialize(undefined, undefined, false);
-	const dbOps = DatabaseFactory.getInstance(false);
+	const dbOps = await DatabaseFactory.getInstanceAsync(false);
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
 
 	// Handle non-interactive commands

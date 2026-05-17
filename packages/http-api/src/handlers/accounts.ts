@@ -845,7 +845,7 @@ export function createAccountRenameHandler(dbOps: DatabaseOperations) {
 			}
 
 			// Rename the account
-			dbOps.renameAccount(accountId, newName);
+			await dbOps.renameAccount(accountId, newName);
 
 			return jsonResponse({
 				success: true,

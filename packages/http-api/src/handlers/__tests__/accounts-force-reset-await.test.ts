@@ -11,6 +11,7 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import {
 	createAccountAutoPauseOnOverageHandler,
 	createAccountForceResetRateLimitHandler,
+	createAccountRenameHandler,
 } from "../accounts";
 
 const ACCOUNT = {
@@ -149,5 +150,66 @@ describe("auto-pause-on-overage awaits the DB write (Codex P2)", () => {
 
 		expect(res.status).toBe(200);
 		expect(data.success).toBe(true);
+	});
+});
+
+/**
+ * Codex PR #28 round 8 P2: renameAccount() now returns a Promise on the
+ * async DB adapter path. createAccountRenameHandler must await it; without
+ * the await a rejected write resolved as success and the persisted rename
+ * was silently dropped.
+ */
+function makeRenameDbOps(
+	renameAccount: (id: string, newName: string) => Promise<void>,
+): DatabaseOperations {
+	let getCall = 0;
+	return {
+		getAdapter() {
+			return {
+				async get<T>() {
+					getCall += 1;
+					// 1st call: account lookup. 2nd call: name-collision lookup.
+					if (getCall === 1) return { name: "old-name" } as unknown as T;
+					return null as unknown as T;
+				},
+			};
+		},
+		renameAccount,
+	} as unknown as DatabaseOperations;
+}
+
+const renameReq = () =>
+	new Request("http://localhost/api/accounts/acct-1/rename", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ name: "new-name" }),
+	});
+
+describe("rename account awaits the DB write (Codex P2 round 8)", () => {
+	it("returns an error when the rename write rejects", async () => {
+		const handler = createAccountRenameHandler(
+			makeRenameDbOps(async () => {
+				throw new Error("simulated rename rejection");
+			}),
+		);
+
+		const res = await handler(renameReq(), "acct-1");
+		const data = await res.json();
+
+		expect(res.status).not.toBe(200);
+		expect(data.success).not.toBe(true);
+	});
+
+	it("reports success when the rename write resolves", async () => {
+		const handler = createAccountRenameHandler(
+			makeRenameDbOps(async () => undefined),
+		);
+
+		const res = await handler(renameReq(), "acct-1");
+		const data = await res.json();
+
+		expect(res.status).toBe(200);
+		expect(data.success).toBe(true);
+		expect(data.newName).toBe("new-name");
 	});
 });
