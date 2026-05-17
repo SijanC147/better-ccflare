@@ -51,6 +51,10 @@ interface RequestState {
 	createdAt: number; // TTL tracking
 	agentUsed?: string;
 	project?: string | null;
+	/** Resolved project UUID from main-thread attribution (Phase 3) */
+	projectId?: string | null;
+	/** Resolved worktree path from main-thread attribution (Phase 3) */
+	worktreePath?: string | null;
 	billingType?: string;
 	firstTokenTimestamp?: number;
 	lastTokenTimestamp?: number;
@@ -67,7 +71,14 @@ log.info("Post-processor worker started");
 
 // Limits to prevent unbounded growth
 const MAX_REQUESTS_MAP_SIZE = 10000;
-const REQUEST_TTL_MS = 2 * 60 * 1000; // 2 minutes - hard limit for request lifecycle
+// Hard ceiling on request state lifetime. Must exceed the longest possible
+// upstream stream (STREAM_FORWARD_TOTAL_TIMEOUT_MS = 30 min) plus a small
+// grace window for the post-end logging to flush; otherwise TTL eviction
+// would race long-running valid streams (Codex round 2 P1: a 2-minute TTL
+// would delete state for any stream over 2 minutes, and the eventual `end`
+// message would log "No state found"). Inactivity-based eviction below
+// remains the primary cleanup mechanism for true orphans.
+const REQUEST_TTL_MS = TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS + 5 * 60 * 1000;
 const MAX_RESPONSE_BODY_BYTES = 256 * 1024; // 256KB - cap stored response body
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024; // 4MB - afterburn needs full conversation history
 
@@ -523,6 +534,10 @@ async function handleStart(msg: StartMessage): Promise<void> {
 		);
 	}
 
+	// Store pre-resolved project attribution from main thread (Phase 3)
+	state.projectId = msg.projectId ?? null;
+	state.worktreePath = msg.worktreePath ?? null;
+
 	// Detect billing type from response headers
 	const overageInUse =
 		msg.responseHeaders["anthropic-ratelimit-unified-overage-in-use"];
@@ -806,6 +821,8 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 				projectAtEnd,
 				state.billingType,
 				startMessage.comboName || null,
+				state.projectId ?? null,
+				state.worktreePath ?? null,
 			);
 		} catch (error) {
 			log.error(`Failed to save request for ${startMessage.requestId}:`, error);
@@ -959,12 +976,16 @@ const cleanupStaleRequests = () => {
 	const now = Date.now();
 	let removedCount = 0;
 
-	// 1. Remove TTL-expired requests (hard limit)
+	// 1. Remove TTL-expired requests (hard limit) — but only when the state
+	// is also inactive. An actively-streaming request whose chunks are still
+	// arriving must never be evicted by the hard cap; rely on inactivity
+	// eviction below for true orphan cleanup (Codex round 2 P1).
 	for (const [id, state] of requests) {
 		const age = now - state.createdAt;
-		if (age > REQUEST_TTL_MS) {
+		const inactivity = now - state.lastActivity;
+		if (age > REQUEST_TTL_MS && inactivity > TIMEOUT_MS) {
 			log.warn(
-				`Request ${id} exceeded TTL (age: ${Math.round(age / 1000)}s, limit: ${REQUEST_TTL_MS / 1000}s), removing...`,
+				`Request ${id} exceeded TTL (age: ${Math.round(age / 1000)}s, limit: ${REQUEST_TTL_MS / 1000}s, inactivity: ${Math.round(inactivity / 1000)}s), removing...`,
 			);
 			freeRequestState(state);
 			requests.delete(id);

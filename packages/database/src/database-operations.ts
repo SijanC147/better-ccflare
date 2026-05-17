@@ -13,9 +13,17 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	IntegrityStatus,
+	Project,
 	RateLimitReason,
 	StrategyStore,
+	WorktreeRule,
+	WorktreeRuleKind,
 } from "@better-ccflare/types";
+import {
+	ResolverManager,
+	type ResolverProjectInput,
+	type ResolverRuleInput,
+} from "@better-ccflare/core";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { ensureSchema, runMigrations } from "./migrations";
@@ -26,6 +34,8 @@ import { AgentPreferenceRepository } from "./repositories/agent-preference.repos
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
+import { ProjectRepository } from "./repositories/project.repository";
+import { WorktreeRuleRepository } from "./repositories/worktree-rule.repository";
 import {
 	type RequestData,
 	RequestRepository,
@@ -189,6 +199,15 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private agentPreferences: AgentPreferenceRepository;
 	private apiKeys: ApiKeyRepository;
 	private combo: ComboRepository;
+	private projects: ProjectRepository;
+	private worktreeRules: WorktreeRuleRepository;
+
+	// ── Resolver manager (lazy-initialised on first access) ─────────────────
+	private _resolverManager: ResolverManager | null = null;
+	/** Whether the host filesystem is case-sensitive (set at bootstrap). */
+	private _caseSensitive = process.platform !== "darwin";
+	/** Injected by DiscoveryScheduler to break the circular-import cycle. */
+	private _discoveryRunner: (() => Promise<unknown>) | null = null;
 
 	constructor(
 		dbPath?: string,
@@ -280,6 +299,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.agentPreferences = new AgentPreferenceRepository(this.adapter);
 		this.apiKeys = new ApiKeyRepository(this.adapter);
 		this.combo = new ComboRepository(this.adapter);
+		this.projects = new ProjectRepository(this.adapter);
+		this.worktreeRules = new WorktreeRuleRepository(this.adapter);
 	}
 
 	/**
@@ -682,6 +703,8 @@ OAuth tokens will need to be re-authenticated.
 		project?: string | null,
 		billingType?: string,
 		comboName?: string | null,
+		projectId?: string | null,
+		worktreePath?: string | null,
 	): Promise<void> {
 		await withDatabaseRetry(
 			() =>
@@ -702,6 +725,8 @@ OAuth tokens will need to be re-authenticated.
 					project,
 					billingType,
 					comboName,
+					projectId,
+					worktreePath,
 				}),
 			this.retryConfig,
 			"saveRequest",
@@ -1351,5 +1376,186 @@ OAuth tokens will need to be re-authenticated.
 		family: ComboFamily,
 	): Promise<ComboWithSlots | null> {
 		return this.combo.getActiveComboForFamily(family);
+	}
+
+	// ── Project operations delegated to repository ─────────────────────────────
+
+	async createProject(fields: {
+		canonicalPath: string;
+		displayName: string;
+		source?: "discovered" | "manual";
+		enabled?: boolean;
+		parentProjectId?: string | null;
+		metadata?: object | null;
+	}): Promise<Project> {
+		return this.projects.create(fields);
+	}
+
+	async listProjects(): Promise<Project[]> {
+		return this.projects.findAll();
+	}
+
+	async getProject(id: string): Promise<Project | null> {
+		return this.projects.findById(id);
+	}
+
+	async getProjectByPath(path: string): Promise<Project | null> {
+		return this.projects.findByCanonicalPath(path);
+	}
+
+	async getProjectChildren(id: string): Promise<Project[]> {
+		return this.projects.findByParent(id);
+	}
+
+	async updateProject(
+		id: string,
+		fields: Partial<{
+			displayName: string;
+			enabled: boolean;
+			parentProjectId: string | null;
+			metadata: object | null;
+		}>,
+	): Promise<Project> {
+		return this.projects.update(id, fields);
+	}
+
+	async deleteProject(id: string): Promise<void> {
+		await this.projects.delete(id);
+	}
+
+	async upsertProjectsFromDiscovery(
+		rows: Array<{
+			canonicalPath: string;
+			displayName: string;
+			sessionCount: number;
+			lastSessionAt: number | null;
+		}>,
+	): Promise<{ added: number; updated: number; unchanged: number }> {
+		return this.projects.upsertFromDiscovery(rows);
+	}
+
+	// ── Worktree rule operations delegated to repository ───────────────────────
+
+	async createWorktreeRule(fields: {
+		kind: WorktreeRuleKind;
+		pattern: string;
+		parentProjectId?: string | null;
+		priority?: number;
+	}): Promise<WorktreeRule> {
+		return this.worktreeRules.create(fields);
+	}
+
+	async listWorktreeRules(): Promise<WorktreeRule[]> {
+		return this.worktreeRules.findAllOrdered();
+	}
+
+	async getWorktreeRule(id: string): Promise<WorktreeRule | null> {
+		return this.worktreeRules.findById(id);
+	}
+
+	async updateWorktreeRule(
+		id: string,
+		fields: Partial<{
+			kind: WorktreeRuleKind;
+			pattern: string;
+			parentProjectId: string | null;
+			priority: number;
+			enabled: boolean;
+		}>,
+	): Promise<WorktreeRule> {
+		return this.worktreeRules.update(id, fields);
+	}
+
+	async deleteWorktreeRule(id: string): Promise<void> {
+		await this.worktreeRules.delete(id);
+	}
+
+	// ── Resolver manager ────────────────────────────────────────────────────
+
+	/**
+	 * Lazy accessor for the in-memory ResolverManager.
+	 * Safe to call from any context after construction.
+	 */
+	get resolverManager(): ResolverManager {
+		if (!this._resolverManager) {
+			this._resolverManager = new ResolverManager({
+				caseSensitive: this._caseSensitive,
+			});
+		}
+		return this._resolverManager;
+	}
+
+	/**
+	 * Whether the resolver treats paths as case-sensitive.
+	 * Reflects the value passed by the server bootstrap.
+	 */
+	getProjectsCaseSensitive(): boolean {
+		return this._caseSensitive;
+	}
+
+	/**
+	 * Call after the server reads Config.isProjectsCaseSensitive() to propagate
+	 * the setting into the resolver manager.  Must be called before the first
+	 * rebuildResolver(); calling it afterwards resets the manager.
+	 */
+	setProjectsCaseSensitive(value: boolean): void {
+		if (this._caseSensitive !== value) {
+			this._caseSensitive = value;
+			// Reset the manager so the next access re-creates it with the new setting.
+			this._resolverManager = null;
+		}
+	}
+
+	/**
+	 * Rebuild the in-memory resolver snapshot from the current DB state.
+	 * Call after every upsertProjectsFromDiscovery() or worktree-rule write.
+	 */
+	async rebuildResolver(): Promise<void> {
+		const [projects, rules] = await Promise.all([
+			this.projects.findAll(),
+			this.worktreeRules.findAllOrdered(),
+		]);
+
+		const projectInputs: ResolverProjectInput[] = projects.map((p) => ({
+			id: p.id,
+			canonicalPath: p.canonical_path,
+			enabled: p.enabled,
+			parentProjectId: p.parent_project_id,
+		}));
+
+		const ruleInputs: ResolverRuleInput[] = rules.map((r) => ({
+			id: r.id,
+			kind: r.kind,
+			pattern: r.pattern,
+			parentProjectId: r.parent_project_id,
+			priority: r.priority,
+			enabled: r.enabled,
+			compileError: r.compile_error ?? null,
+		}));
+
+		this.resolverManager.rebuild(projectInputs, ruleInputs);
+	}
+
+	// ── Discovery runner injection ───────────────────────────────────────────
+
+	/**
+	 * Register the discovery runner function.
+	 * Called by DiscoveryScheduler.start() so HTTP handlers can trigger an
+	 * on-demand scan without a direct import of the scheduler.
+	 *
+	 * Pass null to de-register (called by DiscoveryScheduler.stop()).
+	 */
+	setDiscoveryRunner(fn: (() => Promise<unknown>) | null): void {
+		this._discoveryRunner = fn;
+	}
+
+	/**
+	 * Trigger an on-demand discovery scan.
+	 * Returns the ScanResult from the scheduler, or null when no runner is
+	 * registered (e.g. in test environments that don't start a scheduler).
+	 */
+	async runDiscoveryScan(): Promise<unknown> {
+		if (!this._discoveryRunner) return null;
+		return this._discoveryRunner();
 	}
 }

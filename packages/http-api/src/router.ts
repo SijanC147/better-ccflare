@@ -64,6 +64,21 @@ import {
 	createSlotReorderHandler,
 	createSlotUpdateHandler,
 } from "./handlers/combos";
+import {
+	createProjectCreateHandler,
+	createProjectDeleteHandler,
+	createProjectGetHandler,
+	createProjectsDiscoverHandler,
+	createProjectsListHandler,
+	createProjectUpdateHandler,
+} from "./handlers/projects";
+import {
+	createWorktreeRuleCreateHandler,
+	createWorktreeRuleDeleteHandler,
+	createWorktreeRulesListHandler,
+	createWorktreeRuleTestHandler,
+	createWorktreeRuleUpdateHandler,
+} from "./handlers/worktree-rules";
 import { createConfigHandlers } from "./handlers/config";
 import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import { createRequestStorageHandlers } from "./handlers/config-request-storage";
@@ -403,14 +418,38 @@ export class APIRouter {
 		);
 		this.handlers.set("GET:/api/api-keys/stats", () => apiKeysStatsHandler());
 
-		// Projects route (for filtering)
-		this.handlers.set("GET:/api/projects", async () => {
-			const statsRepository = dbOps.getStatsRepository();
-			const projects = await statsRepository.getDistinctProjects();
-			return new Response(JSON.stringify(projects), {
-				headers: { "Content-Type": "application/json" },
-			});
-		});
+		// Projects handlers
+		const projectsListHandler = createProjectsListHandler(dbOps);
+		const projectCreateHandler = createProjectCreateHandler(dbOps);
+		const projectGetHandler = createProjectGetHandler(dbOps);
+		const projectUpdateHandler = createProjectUpdateHandler(dbOps);
+		const projectDeleteHandler = createProjectDeleteHandler(dbOps);
+		const projectsDiscoverHandler = createProjectsDiscoverHandler(dbOps);
+
+		// Worktree rule handlers
+		const worktreeRulesListHandler = createWorktreeRulesListHandler(dbOps);
+		const worktreeRuleCreateHandler = createWorktreeRuleCreateHandler(dbOps);
+		const worktreeRuleUpdateHandler = createWorktreeRuleUpdateHandler(dbOps);
+		const worktreeRuleDeleteHandler = createWorktreeRuleDeleteHandler(dbOps);
+		const worktreeRuleTestHandler = createWorktreeRuleTestHandler();
+
+		// Projects routes
+		this.handlers.set("GET:/api/projects", (req) => projectsListHandler(req));
+		this.handlers.set("POST:/api/projects", (req) => projectCreateHandler(req));
+		this.handlers.set("POST:/api/projects/discover", () =>
+			projectsDiscoverHandler(),
+		);
+
+		// Worktree rules routes
+		this.handlers.set("GET:/api/worktree-rules", () =>
+			worktreeRulesListHandler(),
+		);
+		this.handlers.set("POST:/api/worktree-rules", (req) =>
+			worktreeRuleCreateHandler(req),
+		);
+		this.handlers.set("POST:/api/worktree-rules/test", (req) =>
+			worktreeRuleTestHandler(req),
+		);
 
 		// Combo routes
 		this.handlers.set("GET:/api/combos", () =>
@@ -781,6 +820,51 @@ export class APIRouter {
 			if (parts.length === 4 && method === "DELETE") {
 				const handler = createComboDeleteHandler(this.context.dbOps);
 				return await this.wrapHandler(() => handler(comboId))(req, url);
+			}
+		}
+
+		// Check for dynamic project endpoints (/api/projects/:id)
+		if (path.startsWith("/api/projects/")) {
+			const parts = path.split("/");
+			const projectId = decodeURIComponent(parts[3]);
+
+			// GET /api/projects/:id
+			if (parts.length === 4 && method === "GET") {
+				const handler = createProjectGetHandler(this.context.dbOps);
+				return await this.wrapHandler(() => handler(projectId))(req, url);
+			}
+
+			// PATCH /api/projects/:id
+			if (parts.length === 4 && method === "PATCH") {
+				const handler = createProjectUpdateHandler(this.context.dbOps);
+				return await this.wrapHandler((req) => handler(req, projectId))(
+					req,
+					url,
+				);
+			}
+
+			// DELETE /api/projects/:id
+			if (parts.length === 4 && method === "DELETE") {
+				const handler = createProjectDeleteHandler(this.context.dbOps);
+				return await this.wrapHandler(() => handler(projectId))(req, url);
+			}
+		}
+
+		// Check for dynamic worktree-rule endpoints (/api/worktree-rules/:id)
+		if (path.startsWith("/api/worktree-rules/")) {
+			const parts = path.split("/");
+			const ruleId = decodeURIComponent(parts[3]);
+
+			// PATCH /api/worktree-rules/:id
+			if (parts.length === 4 && method === "PATCH") {
+				const handler = createWorktreeRuleUpdateHandler(this.context.dbOps);
+				return await this.wrapHandler((req) => handler(req, ruleId))(req, url);
+			}
+
+			// DELETE /api/worktree-rules/:id
+			if (parts.length === 4 && method === "DELETE") {
+				const handler = createWorktreeRuleDeleteHandler(this.context.dbOps);
+				return await this.wrapHandler(() => handler(ruleId))(req, url);
 			}
 		}
 

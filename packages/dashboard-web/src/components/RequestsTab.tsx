@@ -14,6 +14,7 @@ import {
 	Eye,
 	Filter,
 	FolderOpen,
+	GitBranch,
 	Hash,
 	Key,
 	RefreshCw,
@@ -692,6 +693,18 @@ export function RequestsTab() {
 							>
 								<FolderOpen className="h-3 w-3 mr-1" />
 								{summary?.project || request.meta.project}
+							</Badge>
+						)}
+						{(summary?.worktreePath || request.meta.worktreePath) && (
+							<Badge
+								variant="outline"
+								className="text-xs border-teal-500 text-teal-600 dark:text-teal-400"
+							>
+								<GitBranch className="h-3 w-3 mr-1" />
+								{(summary?.worktreePath || request.meta.worktreePath || "")
+									.split("/")
+									.filter(Boolean)
+									.pop() || "worktree"}
 							</Badge>
 						)}
 						{(summary?.agentUsed || request.meta.agentUsed) && (

@@ -22,6 +22,8 @@ export interface RequestRow {
 	agent_used: string | null;
 	output_tokens_per_second: number | null;
 	project: string | null;
+	project_id: string | null;
+	worktree_path: string | null;
 	api_key_id: string | null;
 	api_key_name: string | null;
 	billing_type: string | null;
@@ -52,6 +54,8 @@ export interface Request {
 	agentUsed?: string;
 	tokensPerSecond?: number;
 	project?: string | null;
+	projectId?: string | null;
+	worktreePath?: string | null;
 	apiKeyId?: string;
 	apiKeyName?: string;
 	billingType?: string;
@@ -82,6 +86,8 @@ export interface RequestResponse {
 	agentUsed?: string;
 	tokensPerSecond?: number;
 	project?: string | null;
+	projectId?: string | null;
+	worktreePath?: string | null;
 	apiKeyId?: string;
 	apiKeyName?: string;
 	billingType?: string;
@@ -116,6 +122,8 @@ export interface RequestPayload {
 		method?: string;
 		agentUsed?: string;
 		project?: string | null;
+		projectId?: string | null;
+		worktreePath?: string | null;
 		requestBodyTruncated?: boolean;
 		responseBodyTruncated?: boolean;
 		limitApplied?: number;
@@ -164,6 +172,8 @@ export function toRequest(row: RequestRow): Request {
 		apiKeyId: row.api_key_id || undefined,
 		apiKeyName: row.api_key_name || undefined,
 		project: row.project,
+		projectId: row.project_id ?? null,
+		worktreePath: row.worktree_path ?? null,
 		billingType: row.billing_type || undefined,
 		comboName: row.combo_name || undefined,
 	};
@@ -193,6 +203,8 @@ export function toRequestResponse(request: Request): RequestResponse {
 		agentUsed: request.agentUsed,
 		tokensPerSecond: request.tokensPerSecond,
 		project: request.project,
+		projectId: request.projectId ?? null,
+		worktreePath: request.worktreePath ?? null,
 		apiKeyId: request.apiKeyId,
 		apiKeyName: request.apiKeyName,
 		billingType: request.billingType,

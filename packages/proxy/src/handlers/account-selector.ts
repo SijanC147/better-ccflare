@@ -178,15 +178,17 @@ export async function selectAccountsForRequest(
 						});
 					}
 
-					// Store combo slot info for downstream consumption
-					const slotInfo: ComboSlotInfo = {
-						comboName: combo.name,
-						slots: slotEntries,
-					};
-					setComboSlotInfo(meta, slotInfo);
-					meta.comboName = combo.name;
-
 					if (availableAccounts.length > 0) {
+						// Stamp combo metadata only when we will actually combo-route;
+						// otherwise the fallback path would persist comboName on a
+						// request handled by SessionStrategy and a downstream retry
+						// could re-enter the combo branch (Codex round 5 P2).
+						const slotInfo: ComboSlotInfo = {
+							comboName: combo.name,
+							slots: slotEntries,
+						};
+						setComboSlotInfo(meta, slotInfo);
+						meta.comboName = combo.name;
 						return availableAccounts;
 					}
 

@@ -36,7 +36,14 @@ function getMidStreamRateLimitCooldownMs(): number {
 // 4MB so afterburn can see full conversation history for friction analysis.
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
-function safePostMessage(
+/**
+ * Best-effort post to the usage worker. Swallows errors when the worker is
+ * in `starting`/restart state (postMessage throws unless `ready`). Exported
+ * so the pool-exhausted logging path in proxy.ts can share the same safety
+ * (Codex round 2 P2 — without this, a startup-window no-accounts request
+ * could throw before returning its prepared 503).
+ */
+export function safePostMessage(
 	worker: UsageWorkerController,
 	message: StartMessage | ChunkMessage | EndMessage,
 ): void {
@@ -69,6 +76,8 @@ export interface ResponseHandlerOptions {
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
 	project?: string | null;
+	/** Optional explicit cwd hint from X-CCFlare-CWD header — fed into resolver before heuristics */
+	cwdHint?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -96,6 +105,7 @@ export async function forwardToClient(
 		requestHeaders,
 		requestBody,
 		project,
+		cwdHint,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -133,6 +143,23 @@ export async function forwardToClient(
 			path === "/v1/messages/count_tokens"
 		) && !isAutoRefreshProbe;
 
+	// Resolve project attribution using the live ResolverManager snapshot
+	// maintained by the DiscoveryScheduler. This honors the configured
+	// case-sensitivity setting (Codex round 4 P2) and avoids rebuilding a
+	// snapshot per request.
+	let resolvedProjectId: string | null = null;
+	let resolvedWorktreePath: string | null = null;
+	try {
+		const snapshot = ctx.dbOps.resolverManager.current();
+		// Prefer explicit cwd hint; fall back to heuristic project string
+		const resolverInput = cwdHint ?? project ?? null;
+		const resolved = snapshot.resolve(resolverInput);
+		resolvedProjectId = resolved.projectId;
+		resolvedWorktreePath = resolved.worktreePath;
+	} catch {
+		// Non-fatal — attribution is best-effort; proceed without it
+	}
+
 	// Send START message immediately if not filtered
 	if (shouldProcessRequest) {
 		const startMessage: StartMessage = {
@@ -154,6 +181,8 @@ export async function forwardToClient(
 						).toString("base64")
 					: null,
 			project: project ?? null,
+			projectId: resolvedProjectId,
+			worktreePath: resolvedWorktreePath,
 			responseStatus: response.status,
 			responseHeaders: responseHeadersObj,
 			isStream,
@@ -390,9 +419,13 @@ export async function forwardToClient(
 			} else {
 				const chunks: Uint8Array[] = [];
 				let bytesRead = 0;
+				let streamDone = false;
 				while (bytesRead < MAX_NON_STREAM_BODY_BYTES) {
 					const { value, done } = await reader.read();
-					if (done) break;
+					if (done) {
+						streamDone = true;
+						break;
+					}
 					const remaining = MAX_NON_STREAM_BODY_BYTES - bytesRead;
 					if (value.length <= remaining) {
 						chunks.push(value);
@@ -401,8 +434,17 @@ export async function forwardToClient(
 						chunks.push(value.slice(0, remaining));
 						bytesRead += remaining;
 						await reader.cancel();
+						streamDone = true;
 						break;
 					}
+				}
+				// Codex round 4 P2: if the while condition exited because bytesRead
+				// reached the cap exactly via the `<=remaining` branch, the loop
+				// terminates without cancel() and the analytics tee branch keeps
+				// the unread remainder buffered. Explicitly cancel here to release
+				// the source.
+				if (!streamDone) {
+					await reader.cancel();
 				}
 				cappedBuf = Buffer.concat(chunks);
 			}

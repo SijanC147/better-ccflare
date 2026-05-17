@@ -1,4 +1,4 @@
-import type { AgentUpdatePayload } from "@better-ccflare/types";
+import type { AgentUpdatePayload, Project, WorktreeRule } from "@better-ccflare/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { queryKeys } from "../lib/query-keys";
@@ -531,6 +531,120 @@ export const useReorderComboSlots = () => {
 		onSuccess: (_data, { comboId }) => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
 			queryClient.invalidateQueries({ queryKey: ["combo", comboId] });
+		},
+	});
+};
+
+// ── Projects ─────────────────────────────────────────────────────────────────
+
+export const useProjectsAll = () => {
+	return useQuery<Project[]>({
+		queryKey: queryKeys.projectsAll(),
+		queryFn: () => api.getProjectsAll(),
+		staleTime: 2 * 60 * 1000,
+		gcTime: 10 * 60 * 1000,
+	});
+};
+
+export const useDiscoverProjects = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: () => api.discoverProjects(),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.projectsAll() });
+			queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
+		},
+	});
+};
+
+export const useUpdateProject = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			id,
+			body,
+		}: {
+			id: string;
+			body: Partial<{ display_name: string; enabled: boolean; parent_project_id: string | null }>;
+		}) => api.updateProject(id, body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.projectsAll() });
+			queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
+		},
+	});
+};
+
+export const useCreateProject = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: {
+			canonical_path: string;
+			display_name?: string;
+			parent_project_id?: string | null;
+			enabled?: boolean;
+		}) => api.createProject(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.projectsAll() });
+			queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
+		},
+	});
+};
+
+export const useDeleteProject = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (id: string) => api.deleteProject(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.projectsAll() });
+			queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
+		},
+	});
+};
+
+// ── Worktree Rules ────────────────────────────────────────────────────────────
+
+export const useWorktreeRules = () => {
+	return useQuery<WorktreeRule[]>({
+		queryKey: queryKeys.worktreeRules(),
+		queryFn: () => api.getWorktreeRules(),
+		staleTime: 2 * 60 * 1000,
+		gcTime: 10 * 60 * 1000,
+	});
+};
+
+export const useCreateWorktreeRule = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: { kind: string; pattern: string; parent_project_id?: string | null; priority?: number }) =>
+			api.createWorktreeRule(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });
+		},
+	});
+};
+
+export const useUpdateWorktreeRule = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			id,
+			body,
+		}: {
+			id: string;
+			body: Partial<{ kind: string; pattern: string; parent_project_id: string | null; priority: number; enabled: boolean }>;
+		}) => api.updateWorktreeRule(id, body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });
+		},
+	});
+};
+
+export const useDeleteWorktreeRule = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (id: string) => api.deleteWorktreeRule(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });
 		},
 	});
 };
