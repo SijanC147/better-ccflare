@@ -160,8 +160,12 @@ export function createRequestsDetailHandler(dbOps: DatabaseOperations) {
 					}
 				}
 
-				data.request = request;
-				data.response = response;
+				// Ensure request/response are always objects, even when the
+				// payload row was absent (e.g. headers-only storage mode).
+				// Otherwise the dashboard's "Copy as JSON" path crashes on
+				// `data.request.body` (Codex P2).
+				data.request = request ?? {};
+				data.response = response ?? {};
 
 				if (r.account_name) {
 					meta.accountName = r.account_name;

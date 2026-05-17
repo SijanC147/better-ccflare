@@ -128,6 +128,18 @@ class API extends HttpClient {
 	}
 
 	/**
+	 * Append the stored API key as a query param to an SSE URL.
+	 * EventSource has no header API, so the dashboard authenticates
+	 * streams via `?api_key=`. Returns the URL unchanged when no key.
+	 */
+	appendApiKeyToUrl(url: string): string {
+		const key = this.getApiKey();
+		if (!key) return url;
+		const sep = url.includes("?") ? "&" : "?";
+		return `${url}${sep}api_key=${encodeURIComponent(key)}`;
+	}
+
+	/**
 	 * Check if API key is stored
 	 */
 	hasApiKey(): boolean {
@@ -760,7 +772,9 @@ class API extends HttpClient {
 
 	// SSE streaming requires special handling, keep as-is
 	streamLogs(onLog: (log: LogEntry) => void): EventSource {
-		const eventSource = new EventSource(`/api/logs/stream`);
+		const eventSource = new EventSource(
+			this.appendApiKeyToUrl(`/api/logs/stream`),
+		);
 		eventSource.addEventListener("message", (event) => {
 			try {
 				const data = JSON.parse(event.data);
