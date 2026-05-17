@@ -157,7 +157,11 @@ export async function forwardToClient(
 			responseStatus: response.status,
 			responseHeaders: responseHeadersObj,
 			isStream,
-			providerName: ctx.provider.name,
+			// Use the selected account's provider for billing fallback in the
+			// post-processor worker; ctx.provider.name is the server-wide default
+			// (anthropic) and would misclassify plan-only providers like qwen,
+			// codex, zai, ollama, ollama-cloud as "api" billing (Codex P2).
+			providerName: account?.provider ?? ctx.provider.name,
 			accountBillingType: account?.billing_type ?? null,
 			accountAutoPauseOnOverageEnabled: account?.auto_pause_on_overage_enabled
 				? 1
