@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -11,9 +11,59 @@ interface DebugLog {
 	details?: unknown;
 }
 
+const STORAGE_KEY = "bcf:debug:size";
+const DEFAULT_SIZE = { w: "95vw", h: "384px" };
+const MIN_W = 280;
+const MIN_H = 180;
+
+function loadSize(): { w: string; h: string } {
+	try {
+		const raw = localStorage.getItem(STORAGE_KEY);
+		if (raw) {
+			const parsed = JSON.parse(raw) as { w: string; h: string };
+			if (parsed.w && parsed.h) return parsed;
+		}
+	} catch {
+		// ignore
+	}
+	return DEFAULT_SIZE;
+}
+
 export function DebugPanel() {
 	const [logs, setLogs] = useState<DebugLog[]>([]);
 	const [isVisible, setIsVisible] = useState(false);
+	const [size, setSize] = useState<{ w: string; h: string }>(loadSize);
+	const cardRef = useRef<HTMLDivElement>(null);
+
+	// Persist size whenever it changes
+	useEffect(() => {
+		try {
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(size));
+		} catch {
+			// ignore
+		}
+	}, [size]);
+
+	// Observe resize events on the card element so state stays in sync
+	useEffect(() => {
+		const el = cardRef.current;
+		if (!el) return;
+
+		const observer = new ResizeObserver((entries) => {
+			for (const entry of entries) {
+				const { width, height } = entry.contentRect;
+				if (width > 0 && height > 0) {
+					setSize({
+						w: `${Math.round(width)}px`,
+						h: `${Math.round(height)}px`,
+					});
+				}
+			}
+		});
+
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, []);
 
 	useEffect(() => {
 		if (!isVisible) return;
@@ -78,7 +128,19 @@ export function DebugPanel() {
 	};
 
 	return (
-		<Card className="fixed bottom-4 right-4 w-96 max-h-96 z-50">
+		<Card
+			ref={cardRef}
+			className="fixed bottom-4 right-4 z-50 overflow-auto"
+			style={{
+				width: size.w,
+				height: size.h,
+				minWidth: `${MIN_W}px`,
+				minHeight: `${MIN_H}px`,
+				maxWidth: "98vw",
+				maxHeight: "90vh",
+				resize: "both",
+			}}
+		>
 			<CardHeader className="pb-2">
 				<div className="flex items-center justify-between">
 					<CardTitle className="text-sm">Debug Panel</CardTitle>
@@ -87,8 +149,8 @@ export function DebugPanel() {
 					</Button>
 				</div>
 			</CardHeader>
-			<CardContent className="pt-0">
-				<div className="space-y-1 max-h-64 overflow-y-auto text-xs font-mono">
+			<CardContent className="pt-0 h-[calc(100%-3.5rem)] overflow-auto">
+				<div className="space-y-1 h-full overflow-y-auto text-xs font-mono">
 					{logs.length === 0 ? (
 						<p className="text-muted-foreground">No logs yet...</p>
 					) : (
