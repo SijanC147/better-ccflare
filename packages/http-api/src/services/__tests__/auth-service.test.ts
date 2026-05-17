@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { DatabaseOperations } from "@better-ccflare/database";
+import { AuthService } from "../auth-service";
 import { extractApiKey } from "../extract-api-key";
 
 /**
@@ -115,6 +117,76 @@ describe("API Key Header Extraction", () => {
 				"content-type": "application/json",
 			});
 			expect(extractApiKey(req)).toBe("sk-ant-api03-test-key");
+		});
+	});
+});
+
+/**
+ * Regression tests for the Codex P1 fix: OAuth token-mutating endpoints must
+ * not be blanket-exempt from authentication. Only read-only status polling
+ * stays exempt; init / reauth / callback fall through to API-key validation
+ * once authentication is enabled.
+ */
+describe("OAuth path authentication gating (Codex P1)", () => {
+	// isPathExempt() never touches the DB for /api/oauth or static paths, so a
+	// stub that throws if countActiveApiKeys is called also asserts that.
+	const stubDbOps = {
+		countActiveApiKeys: () => {
+			throw new Error("DB must not be hit for OAuth/static path gating");
+		},
+	} as unknown as DatabaseOperations;
+	const auth = new AuthService(stubDbOps);
+
+	describe("isStaticPathExempt() — no blanket OAuth exemption", () => {
+		test("/health stays exempt", () => {
+			expect(auth.isStaticPathExempt("/health")).toBe(true);
+		});
+
+		test("dashboard/static routes stay exempt", () => {
+			expect(auth.isStaticPathExempt("/dashboard")).toBe(true);
+			expect(auth.isStaticPathExempt("/assets/app.js")).toBe(true);
+		});
+
+		test.each([
+			"/api/oauth/init",
+			"/api/oauth/callback",
+			"/api/oauth/qwen/init",
+			"/api/oauth/qwen/reauth",
+			"/api/oauth/anthropic/reauth/init",
+			"/api/oauth/anthropic/reauth/callback",
+			"/api/oauth/codex/init",
+			"/api/oauth/codex/reauth",
+			"/api/oauth/qwen/status/abc",
+			"/api/oauth/codex/status/abc",
+		])("%s is NOT statically exempt", (path) => {
+			expect(auth.isStaticPathExempt(path)).toBe(false);
+		});
+	});
+
+	describe("isPathExempt() — only read-only status polling is exempt", () => {
+		test.each([
+			["GET", "/api/oauth/qwen/status/session-1"],
+			["GET", "/api/oauth/codex/status/session-2"],
+		])("%s %s is exempt (read-only status)", async (method, path) => {
+			expect(await auth.isPathExempt(path, method)).toBe(true);
+		});
+
+		test.each([
+			["POST", "/api/oauth/init"],
+			["POST", "/api/oauth/callback"],
+			["POST", "/api/oauth/qwen/init"],
+			["POST", "/api/oauth/qwen/reauth"],
+			["POST", "/api/oauth/anthropic/reauth/init"],
+			["POST", "/api/oauth/anthropic/reauth/callback"],
+			["POST", "/api/oauth/codex/init"],
+			["POST", "/api/oauth/codex/reauth"],
+			// A GET on a mutating endpoint must not slip through the status check
+			["GET", "/api/oauth/init"],
+			["GET", "/api/oauth/codex/reauth"],
+			// Method-spoofing the status path with a non-GET is not exempt
+			["POST", "/api/oauth/codex/status/abc"],
+		])("%s %s is NOT exempt (requires auth when enabled)", async (method, path) => {
+			expect(await auth.isPathExempt(path, method)).toBe(false);
 		});
 	});
 });

@@ -128,10 +128,12 @@ export class AuthService {
 			return true;
 		}
 
-		// OAuth endpoints are exempt (needed for account setup)
-		if (path.startsWith("/api/oauth")) {
-			return true;
-		}
+		// NOTE: OAuth endpoints are intentionally NOT blanket-exempt here.
+		// Token-mutating endpoints (/api/oauth/**/init|reauth|callback) must
+		// require an admin API key once authentication is enabled — see the
+		// method-aware gating in isPathExempt(). A blanket static exemption
+		// allowed any unauthenticated caller to overwrite stored account
+		// tokens when dashboard auth was configured (Codex P1).
 
 		// All other paths are dashboard routes (client-side routing) or static assets
 		// These should be exempt to allow serving the dashboard HTML and assets
@@ -165,6 +167,24 @@ export class AuthService {
 			}
 			// All other API key operations require authentication
 			return false;
+		}
+
+		// OAuth endpoints.
+		// Read-only status polling (GET /api/oauth/{qwen,codex}/status/*) stays
+		// exempt — it returns transient setup progress only, no secrets or
+		// mutation, and the setup UI polls it before an API key may exist.
+		// Token-mutating endpoints (init / reauth / callback) are NOT exempt:
+		// when no API keys exist authenticateRequest() still allows them
+		// (initial account setup); once authentication is enabled they fall
+		// through to API-key validation and authorizeEndpoint(), which only
+		// grants admin keys access to non-proxy paths. This closes the
+		// unauthenticated token-overwrite vector (Codex P1).
+		if (path.startsWith("/api/oauth")) {
+			const isReadOnlyStatus =
+				method === "GET" &&
+				(path.startsWith("/api/oauth/qwen/status/") ||
+					path.startsWith("/api/oauth/codex/status/"));
+			return isReadOnlyStatus;
 		}
 
 		// Proxy endpoints (/v1/*, /messages/*, etc.) require authentication if enabled

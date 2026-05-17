@@ -186,7 +186,29 @@ describe("API Authentication", () => {
 			expect(await authService.isPathExempt("/", "GET")).toBe(true);
 			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(true);
 			expect(await authService.isPathExempt("/health", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/api/oauth/init", "POST")).toBe(true);
+		});
+
+		test("should NOT blanket-exempt token-mutating OAuth endpoints (Codex P1)", async () => {
+			// Read-only status polling stays exempt (used by the setup UI).
+			expect(
+				await authService.isPathExempt("/api/oauth/codex/status/abc", "GET"),
+			).toBe(true);
+			expect(
+				await authService.isPathExempt("/api/oauth/qwen/status/abc", "GET"),
+			).toBe(true);
+			// Token-mutating endpoints must require auth once it is enabled.
+			expect(await authService.isPathExempt("/api/oauth/init", "POST")).toBe(
+				false,
+			);
+			expect(
+				await authService.isPathExempt("/api/oauth/codex/reauth", "POST"),
+			).toBe(false);
+			expect(
+				await authService.isPathExempt(
+					"/api/oauth/anthropic/reauth/init",
+					"POST",
+				),
+			).toBe(false);
 		});
 
 		test("should exempt static assets from authentication", async () => {
