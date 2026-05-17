@@ -613,7 +613,7 @@ export function createAnthropicReauthInitHandler(
 				});
 
 				// Store session; use accountName field so callback can look it up by name
-				dbOps.createOAuthSession(
+				await dbOps.createOAuthSession(
 					flowResult.sessionId,
 					account.name,
 					flowResult.pkce.verifier,
@@ -820,7 +820,7 @@ export function createOAuthInitHandler(dbOps: DatabaseOperations) {
 				});
 
 				// Store custom endpoint in session for later use
-				dbOps.createOAuthSession(
+				await dbOps.createOAuthSession(
 					flowResult.sessionId,
 					name,
 					flowResult.pkce.verifier,
