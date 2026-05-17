@@ -723,7 +723,7 @@ export function createAnthropicReauthCallbackHandler(
 					flowData,
 				);
 
-				dbOps.deleteOAuthSession(sessionId);
+				await dbOps.deleteOAuthSession(sessionId);
 
 				log.info(`Successfully re-authenticated Anthropic account '${name}'`);
 
@@ -937,7 +937,7 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 				);
 
 				// Clean up OAuth session from database
-				dbOps.deleteOAuthSession(sessionId);
+				await dbOps.deleteOAuthSession(sessionId);
 
 				log.info(`Successfully added account '${name}' via OAuth`);
 

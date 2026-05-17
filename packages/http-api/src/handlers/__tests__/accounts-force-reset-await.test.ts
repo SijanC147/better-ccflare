@@ -8,7 +8,10 @@
 import { describe, expect, it } from "bun:test";
 import "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
-import { createAccountForceResetRateLimitHandler } from "../accounts";
+import {
+	createAccountAutoPauseOnOverageHandler,
+	createAccountForceResetRateLimitHandler,
+} from "../accounts";
 
 const ACCOUNT = {
 	id: "acct-1",
@@ -73,6 +76,75 @@ describe("force-reset rate limit awaits the DB write (Codex P2)", () => {
 		);
 
 		const res = await handler(req, ACCOUNT.id);
+		const data = await res.json();
+
+		expect(res.status).toBe(200);
+		expect(data.success).toBe(true);
+	});
+});
+
+/**
+ * Same await-bug class as force-reset: createAccountAutoPauseOnOverageHandler
+ * must await dbOps.setAutoPauseOnOverageEnabled() (Promise<void> on the async
+ * adapter path). Without the await, a rejected write was unhandled and the
+ * handler returned 200 / success:true even though the toggle never committed
+ * (Codex PR #28 P2).
+ */
+const ANTHROPIC_ACCOUNT = {
+	id: "acct-anthropic-1",
+	name: "test-anthropic",
+	provider: "anthropic",
+};
+
+function makeAutoPauseDbOps(
+	setAutoPause: (accountId: string, enabled: boolean) => Promise<void>,
+): DatabaseOperations {
+	return {
+		getAdapter() {
+			return {
+				async get() {
+					return ANTHROPIC_ACCOUNT;
+				},
+			};
+		},
+		setAutoPauseOnOverageEnabled: setAutoPause,
+	} as unknown as DatabaseOperations;
+}
+
+const autoPauseReq = () =>
+	new Request(
+		"http://localhost/api/accounts/acct-anthropic-1/auto-pause-on-overage",
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ enabled: 1 }),
+		},
+	);
+
+describe("auto-pause-on-overage awaits the DB write (Codex P2)", () => {
+	it("returns an error when the toggle write rejects", async () => {
+		const handler = createAccountAutoPauseOnOverageHandler(
+			makeAutoPauseDbOps(async () => {
+				throw new Error("simulated DB rejection");
+			}),
+		);
+
+		const res = await handler(autoPauseReq(), ANTHROPIC_ACCOUNT.id);
+		const data = await res.json();
+
+		// Pre-fix: write was unawaited -> handler returned 200/success:true
+		// regardless of the rejection. Post-fix: rejection is awaited and
+		// caught -> error response.
+		expect(res.status).not.toBe(200);
+		expect(data.success).not.toBe(true);
+	});
+
+	it("reports success when the toggle write resolves", async () => {
+		const handler = createAccountAutoPauseOnOverageHandler(
+			makeAutoPauseDbOps(async () => undefined),
+		);
+
+		const res = await handler(autoPauseReq(), ANTHROPIC_ACCOUNT.id);
 		const data = await res.json();
 
 		expect(res.status).toBe(200);

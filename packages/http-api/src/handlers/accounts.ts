@@ -537,7 +537,7 @@ export function createAccountPriorityUpdateHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			dbOps.updateAccountPriority(accountId, priority);
+			await dbOps.updateAccountPriority(accountId, priority);
 
 			return jsonResponse({ success: true, priority });
 		} catch (_error) {
@@ -2111,7 +2111,7 @@ export function createAccountAutoFallbackHandler(dbOps: DatabaseOperations) {
 			}
 
 			// Update auto-fallback setting
-			dbOps.setAutoFallbackEnabled(accountId, enabled === 1);
+			await dbOps.setAutoFallbackEnabled(accountId, enabled === 1);
 
 			const action = enabled === 1 ? "enabled" : "disabled";
 
@@ -2172,7 +2172,7 @@ export function createAccountAutoPauseOnOverageHandler(
 			}
 
 			// Update auto-pause-on-overage setting
-			dbOps.setAutoPauseOnOverageEnabled(accountId, enabled === 1);
+			await dbOps.setAutoPauseOnOverageEnabled(accountId, enabled === 1);
 
 			const action = enabled === 1 ? "enabled" : "disabled";
 
