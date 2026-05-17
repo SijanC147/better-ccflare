@@ -833,16 +833,22 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		// Use the column names we already defined above
 		// Drop account_tier column from accounts table if it exists
 		if (finalAccountsColumnNames.includes("account_tier")) {
-			// SQLite doesn't support DROP COLUMN directly, so we need to recreate the table
+			// SQLite doesn't support DROP COLUMN directly, so we need to recreate the table.
+			// Include EVERY non-tier column the migrations above may have added — otherwise
+			// the rebuild silently drops columns (refresh_token_issued_at,
+			// peak_hours_pause_enabled, rate_limited_reason, rate_limited_at) that
+			// AccountRepository.findAll/findById select unconditionally, causing
+			// "no such column" errors at runtime (Codex P1).
 			db.prepare(`
 			CREATE TABLE accounts_new AS
-			SELECT id, name, provider, api_key, refresh_token, access_token, expires_at,
+			SELECT id, name, provider, api_key, refresh_token, refresh_token_issued_at,
+			       access_token, expires_at,
 			       created_at, last_used, request_count, total_requests, priority,
 			       rate_limited_until, session_start, session_request_count, paused,
 			       rate_limit_reset, rate_limit_status, rate_limit_remaining,
 			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
 			       cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
-			       pause_reason
+			       peak_hours_pause_enabled, pause_reason, rate_limited_reason, rate_limited_at
 			FROM accounts
 		`).run();
 
