@@ -21,6 +21,13 @@ export interface ResolverProjectInput {
   /** Already normalized by caller: lowercased on darwin, realpath'd, no trailing slash. */
   canonicalPath: string;
   enabled: boolean;
+  /**
+   * If this project is itself a worktree of another project (manual assignment
+   * via UI, or auto-assigned by the discovery scheduler), the parent's id.
+   * When the resolver scores a prefix match against this row, it rolls the
+   * result up to the parent and stamps worktreePath on the request.
+   */
+  parentProjectId?: string | null;
 }
 
 export interface ResolverRuleInput {
@@ -64,6 +71,7 @@ export interface ResolverOptions {
 interface CompiledProject {
   id: string;
   canonicalPath: string; // already normalised (caller responsibility)
+  parentProjectId: string | null;
 }
 
 interface CompiledRule {
@@ -201,6 +209,7 @@ export class ResolverSnapshot {
         canonicalPath: caseSensitive
           ? p.canonicalPath
           : p.canonicalPath.toLowerCase(),
+        parentProjectId: p.parentProjectId ?? null,
       }))
       .sort((a, b) => b.canonicalPath.length - a.canonicalPath.length);
 
@@ -277,6 +286,22 @@ export class ResolverSnapshot {
     // Step 3 — direct prefix match
     const prefixMatch = longestPrefixMatch(normalized, this.prefixIndex);
     if (prefixMatch !== null) {
+      // If the matched project is itself a child worktree (parentProjectId
+      // set — either via manual UI assignment or by the discovery scheduler),
+      // roll up to the parent and stamp the worktree path. This preserves
+      // built-in worktree grouping for users who never created an explicit
+      // worktree_rule (Codex round 1 P2).
+      if (prefixMatch.parentProjectId !== null) {
+        const parent =
+          this.prefixIndex.find((p) => p.id === prefixMatch.parentProjectId) ??
+          null;
+        return {
+          projectId: prefixMatch.parentProjectId,
+          worktreePath: normalized,
+          matchedRuleId: null,
+          matchedProjectPath: parent ? parent.canonicalPath : null,
+        };
+      }
       return {
         projectId: prefixMatch.id,
         worktreePath: null,

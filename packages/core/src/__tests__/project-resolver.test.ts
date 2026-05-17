@@ -526,3 +526,42 @@ describe("disabled rule is ignored", () => {
     expect(r.worktreePath).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 17. Worktree-child project rolls up to its parent (Codex round 1 P2)
+// ---------------------------------------------------------------------------
+// When the discovery scheduler (or a manual UI edit) sets parent_project_id
+// on a project row, the resolver should attribute requests under that row's
+// path to the PARENT and stamp worktreePath on the request — without the
+// user needing to create a matching worktree_rule.
+
+describe("worktree-child project rolls up to parent", () => {
+  const snap = buildCS([
+    makeProject({ id: "main", canonicalPath: "/repos/myapp" }),
+    makeProject({
+      id: "wt-feature",
+      canonicalPath: "/repos/myapp/.worktrees/feature",
+      parentProjectId: "main",
+    }),
+  ]);
+
+  it("returns parent projectId and worktreePath for a path inside the child", () => {
+    const r = snap.resolve("/repos/myapp/.worktrees/feature/src/app.ts");
+    expect(r.projectId).toBe("main");
+    expect(r.worktreePath).toBe("/repos/myapp/.worktrees/feature/src/app.ts");
+    expect(r.matchedRuleId).toBeNull();
+    expect(r.matchedProjectPath).toBe("/repos/myapp");
+  });
+
+  it("rolls up exact-path matches too", () => {
+    const r = snap.resolve("/repos/myapp/.worktrees/feature");
+    expect(r.projectId).toBe("main");
+    expect(r.worktreePath).toBe("/repos/myapp/.worktrees/feature");
+  });
+
+  it("non-worktree sibling paths still hit main directly", () => {
+    const r = snap.resolve("/repos/myapp/src/app.ts");
+    expect(r.projectId).toBe("main");
+    expect(r.worktreePath).toBeNull();
+  });
+});

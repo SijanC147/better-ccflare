@@ -1520,6 +1520,7 @@ OAuth tokens will need to be re-authenticated.
 			id: p.id,
 			canonicalPath: p.canonical_path,
 			enabled: p.enabled,
+			parentProjectId: p.parent_project_id,
 		}));
 
 		const ruleInputs: ResolverRuleInput[] = rules.map((r) => ({

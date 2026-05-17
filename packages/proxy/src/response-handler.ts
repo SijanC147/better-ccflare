@@ -151,6 +151,7 @@ export async function forwardToClient(
 				id: p.id,
 				canonicalPath: p.canonical_path,
 				enabled: p.enabled,
+				parentProjectId: p.parent_project_id,
 			})),
 			rules.map((r) => ({
 				id: r.id,
