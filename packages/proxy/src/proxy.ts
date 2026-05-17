@@ -279,11 +279,14 @@ export async function handleProxy(
 	requestMeta.agentUsed = agentUsed;
 	requestMeta.project = project;
 
-	// 6. Select accounts
+	// 6. Select accounts — use the post-intercept model so combo selection
+	// reflects any agent-driven rewrite of the request body (Codex P2). If
+	// `appliedModel` is undefined (no agent matched), fall back to the
+	// originally-extracted requestModel.
 	const selectedAccounts = await selectAccountsForRequest(
 		requestMeta,
 		ctx,
-		requestModel ?? undefined,
+		appliedModel ?? requestModel ?? undefined,
 	);
 
 	const applyUsageThrottling = (accounts: Account[]) => {

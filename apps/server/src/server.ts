@@ -603,6 +603,13 @@ export default async function startServer(options?: {
 	if (port !== runtime.port) {
 		runtime.port = port;
 	}
+	// Bridge persisted Postgres config → DATABASE_URL so DatabaseOperations
+	// (which only inspects process.env.DATABASE_URL) picks up settings written
+	// through the dashboard Settings tab. Env var takes precedence (Codex P2).
+	if (!process.env.DATABASE_URL) {
+		const pgUrl = config.buildPgConnectionUrl();
+		if (pgUrl) process.env.DATABASE_URL = pgUrl;
+	}
 	DatabaseFactory.initialize(undefined, runtime);
 	const dbOps = await DatabaseFactory.getInstanceAsync();
 

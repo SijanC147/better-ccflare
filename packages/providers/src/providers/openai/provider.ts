@@ -58,9 +58,6 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			endpoint = "https://api.openai.com";
 		}
 
-		// Store endpoint for provider-specific transformations (e.g., Alibaba caching)
-		this.currentEndpoint = endpoint;
-
 		// Convert Anthropic paths to OpenAI-compatible paths
 		// Anthropic: /v1/messages → OpenAI: /v1/chat/completions
 		let openaiPath = convertAnthropicPathToOpenAI(path);
@@ -181,15 +178,30 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		try {
 			const body = await request.json();
+			// Derive request-local endpoint + model — never read shared instance
+			// state across concurrent requests (Codex P2). The provider is a
+			// singleton; without this, two requests racing through buildUrl/
+			// transformRequestBody can clobber each other's currentEndpoint/
+			// currentModel and inject DashScope-only fields into the wrong call.
+			let endpoint = "https://api.openai.com";
+			try {
+				if (account) {
+					endpoint = validateEndpointUrl(getEndpointUrl(account), "endpoint");
+				}
+			} catch {
+				endpoint = "https://api.openai.com";
+			}
+			const model = typeof body?.model === "string" ? body.model : undefined;
+
 			const effectiveAccount = this.beforeConvert(body, account);
 			const openaiBody = convertAnthropicRequestToOpenAI(
 				body,
 				effectiveAccount,
 			);
-			this.afterConvert(openaiBody);
+			this.afterConvert(openaiBody, endpoint, model);
 
 			// Inject enable_thinking for reasoning models on DashScope
-			this.injectDashScopeReasoning(openaiBody, body);
+			this.injectDashScopeReasoning(openaiBody, body, endpoint, model);
 
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
@@ -344,9 +356,13 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	 * Hook called after converting Anthropic request to OpenAI format.
 	 * Override to inject provider-specific fields (e.g., cache_control, vision flags).
 	 */
-	protected afterConvert(body: OpenAIRequest): void {
+	protected afterConvert(
+		body: OpenAIRequest,
+		endpoint?: string,
+		model?: string,
+	): void {
 		// Inject cache_control for Alibaba/DashScope endpoints
-		if (this.shouldInjectAlibabaCaching()) {
+		if (this.shouldInjectAlibabaCaching(endpoint, model)) {
 			this.injectAlibabaCaching(body);
 		}
 	}
@@ -360,10 +376,6 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		_body: Record<string, unknown>,
 		account?: Account,
 	): Account | undefined {
-		// Store model for provider-specific transformations (e.g., Alibaba caching for Qwen)
-		if (_body.model && typeof _body.model === "string") {
-			this.currentModel = _body.model;
-		}
 		return account;
 	}
 
@@ -372,9 +384,11 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	 * Only triggered for Qwen models on DashScope or OpenCode Go endpoints.
 	 * These endpoints support Alibaba's cacheControl format for Qwen models only.
 	 */
-	private shouldInjectAlibabaCaching(): boolean {
-		// Check if current request is for a DashScope or OpenCode Go endpoint
-		const endpoint = this.currentEndpoint?.toLowerCase() || "";
+	private shouldInjectAlibabaCaching(
+		endpointParam?: string,
+		modelParam?: string,
+	): boolean {
+		const endpoint = endpointParam?.toLowerCase() || "";
 		const isDashScopeEndpoint =
 			endpoint.includes("dashscope.aliyuncs.com") ||
 			endpoint.includes("opencode.ai/zen/go");
@@ -383,7 +397,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		// Only apply caching for Qwen models (qwen3.5-plus, qwen3.6-plus, etc.)
 		// Other models on these endpoints use different SDKs (openai-compatible, anthropic)
-		const model = this.currentModel?.toLowerCase() || "";
+		const model = modelParam?.toLowerCase() || "";
 		return model.includes("qwen");
 	}
 
@@ -446,9 +460,11 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	private injectDashScopeReasoning(
 		openaiBody: OpenAIRequest,
 		anthropicBody: Record<string, unknown>,
+		endpointParam?: string,
+		modelParam?: string,
 	): void {
 		// Only apply for DashScope endpoints
-		const endpoint = this.currentEndpoint?.toLowerCase() || "";
+		const endpoint = endpointParam?.toLowerCase() || "";
 		if (
 			!endpoint.includes("dashscope.aliyuncs.com") &&
 			!endpoint.includes("opencode.ai/zen/go")
@@ -456,7 +472,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			return;
 
 		// Check if model is a reasoning model (has thinking/reasoning capabilities)
-		const modelId = this.currentModel?.toLowerCase() || "";
+		const modelId = modelParam?.toLowerCase() || "";
 		const isReasoningModel =
 			modelId.includes("qwen") ||
 			modelId.includes("qwq") ||
@@ -475,14 +491,4 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			);
 		}
 	}
-
-	/**
-	 * Store current endpoint for provider-specific transformations
-	 */
-	private currentEndpoint?: string;
-
-	/**
-	 * Store current model for provider-specific transformations (e.g., Qwen caching)
-	 */
-	private currentModel?: string;
 }

@@ -23,6 +23,12 @@ export async function runCli(argv: string[]): Promise<void> {
 	// Initialize DI container and services
 	container.registerInstance(SERVICE_KEYS.Config, new Config());
 	const config = container.resolve<Config>(SERVICE_KEYS.Config);
+	// Bridge persisted Postgres config → DATABASE_URL so DatabaseOperations
+	// picks up settings written through the dashboard (Codex P2).
+	if (!process.env.DATABASE_URL) {
+		const pgUrl = config.buildPgConnectionUrl();
+		if (pgUrl) process.env.DATABASE_URL = pgUrl;
+	}
 	DatabaseFactory.initialize();
 	const dbOps = DatabaseFactory.getInstance();
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);

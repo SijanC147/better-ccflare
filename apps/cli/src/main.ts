@@ -990,6 +990,13 @@ Examples:
 	// PostgreSQL DB would query tables before ensureSchemaPg() ran and
 	// fail with missing relation errors (Codex P1). The call is a no-op
 	// on SQLite.
+	// Bridge persisted Postgres config → DATABASE_URL so DatabaseOperations
+	// picks up settings written through the dashboard (Codex P2). Env var
+	// always wins.
+	if (!process.env.DATABASE_URL) {
+		const pgUrl = new Config().buildPgConnectionUrl();
+		if (pgUrl) process.env.DATABASE_URL = pgUrl;
+	}
 	DatabaseFactory.initialize(undefined, undefined, false);
 	const dbOps = await DatabaseFactory.getInstanceAsync(false);
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
