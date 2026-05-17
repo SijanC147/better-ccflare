@@ -487,12 +487,20 @@ export async function handleProxy(
 		log.warn(
 			`All combo slots failed for combo "${filteredComboInfo.comboName}", falling back to SessionStrategy routing`,
 		);
-		// Clear combo info and retry with normal routing
+		// Clear combo info and retry with normal routing. We intentionally
+		// omit the `model` argument: selectAccountsForRequest only consults
+		// the active combo when a model is provided (see account-selector.ts),
+		// so leaving it undefined here guarantees the fallback skips combo
+		// lookup entirely and uses SessionStrategy ordering against healthy
+		// non-combo accounts (Codex P2 — this defends the no-model invariant
+		// at the call site so a future change that re-introduces a model
+		// argument doesn't silently re-enter the exhausted combo).
 		requestMeta.comboName = null;
 		requestMeta.comboSlotIndex = null;
 		const selectedFallbackAccounts = await selectAccountsForRequest(
 			requestMeta,
 			ctx,
+			/* model */ undefined,
 		);
 		const {
 			available: filteredFallbackAccounts,
