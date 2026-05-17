@@ -1482,6 +1482,15 @@ if (import.meta.main) {
 		process.env.SSL_CERT_PATH = sslCertPath;
 	}
 
-	// Start the server asynchronously
-	void startServer({ port, sslKeyPath, sslCertPath });
+	// Start the server asynchronously. Attach a rejection handler so
+	// initialization failures (DB migrations, port bind, etc.) surface
+	// as a non-zero exit instead of leaving the process hung without a
+	// working server (Codex P2 on PR #29).
+	startServer({ port, sslKeyPath, sslCertPath }).catch((err) => {
+		console.error(
+			"Failed to start server:",
+			err instanceof Error ? err.message : err,
+		);
+		process.exit(1);
+	});
 }
