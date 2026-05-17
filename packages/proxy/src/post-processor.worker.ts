@@ -51,6 +51,10 @@ interface RequestState {
 	createdAt: number; // TTL tracking
 	agentUsed?: string;
 	project?: string | null;
+	/** Resolved project UUID from main-thread attribution (Phase 3) */
+	projectId?: string | null;
+	/** Resolved worktree path from main-thread attribution (Phase 3) */
+	worktreePath?: string | null;
 	billingType?: string;
 	firstTokenTimestamp?: number;
 	lastTokenTimestamp?: number;
@@ -523,6 +527,10 @@ async function handleStart(msg: StartMessage): Promise<void> {
 		);
 	}
 
+	// Store pre-resolved project attribution from main thread (Phase 3)
+	state.projectId = msg.projectId ?? null;
+	state.worktreePath = msg.worktreePath ?? null;
+
 	// Detect billing type from response headers
 	const overageInUse =
 		msg.responseHeaders["anthropic-ratelimit-unified-overage-in-use"];
@@ -806,6 +814,8 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 				projectAtEnd,
 				state.billingType,
 				startMessage.comboName || null,
+				state.projectId ?? null,
+				state.worktreePath ?? null,
 			);
 		} catch (error) {
 			log.error(`Failed to save request for ${startMessage.requestId}:`, error);

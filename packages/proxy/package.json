@@ -10,6 +10,7 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
+		"@better-ccflare/claude-code-discovery": "workspace:*",
 		"@better-ccflare/agents": "workspace:*",
 		"@better-ccflare/config": "workspace:*",
 		"@better-ccflare/core": "workspace:*",

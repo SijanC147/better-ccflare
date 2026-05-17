@@ -9,6 +9,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
 import { AccountsTab } from "./components/AccountsTab";
+import { ProjectsTab } from "./components/ProjectsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
 import { ApiKeysTab } from "./components/ApiKeysTab";
@@ -91,6 +92,12 @@ export function App() {
 				element: <AccountsTab />,
 				title: "Account Management",
 				subtitle: "Manage your OAuth accounts and settings",
+			},
+			{
+				path: "/projects",
+				element: <ProjectsTab />,
+				title: "Projects",
+				subtitle: "Manage discovered and manual Claude Code projects",
 			},
 			{
 				path: "/agents",

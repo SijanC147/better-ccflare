@@ -24,6 +24,10 @@ export interface StartMessage {
 	responseHeaders: Record<string, string>;
 	isStream: boolean;
 
+	// Project attribution (resolved on main thread before worker handoff)
+	projectId: string | null;
+	worktreePath: string | null;
+
 	// Provider info for rate limit parsing
 	providerName: string;
 

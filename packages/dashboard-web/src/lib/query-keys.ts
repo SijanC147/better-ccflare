@@ -21,6 +21,8 @@ export const queryKeys = {
 	defaultAgentModel: () =>
 		[...queryKeys.all, "config", "defaultAgentModel"] as const,
 	projects: () => [...queryKeys.all, "projects"] as const,
+	projectsAll: () => [...queryKeys.all, "projects", "all"] as const,
+	worktreeRules: () => [...queryKeys.all, "worktree-rules"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,
 	families: () => [...queryKeys.all, "families"] as const,
 } as const;

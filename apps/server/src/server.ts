@@ -40,6 +40,7 @@ import {
 import {
 	AutoRefreshScheduler,
 	CacheKeepaliveScheduler,
+	DiscoveryScheduler,
 	getUsageWorker,
 	getUsageWorkerHealth,
 	getValidAccessToken,
@@ -214,6 +215,7 @@ let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
+let discoveryScheduler: DiscoveryScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -612,6 +614,19 @@ export default async function startServer(options?: {
 	}
 	DatabaseFactory.initialize(undefined, runtime);
 	const dbOps = await DatabaseFactory.getInstanceAsync();
+
+	// Propagate filesystem case-sensitivity into the resolver manager before
+	// the first scan so projects are matched correctly.
+	dbOps.setProjectsCaseSensitive(config.isProjectsCaseSensitive());
+
+	// Start the discovery scheduler — scans ~/.claude/projects/ every 60 s and
+	// keeps the in-memory resolver snapshot fresh.
+	discoveryScheduler = new DiscoveryScheduler(
+		dbOps,
+		60_000,
+		config.getClaudeProjectsDir(),
+	);
+	discoveryScheduler.start();
 
 	// Run integrity check if database was initialized in fast mode (SQLite only)
 	if (dbOps.isSQLite) {
@@ -1404,6 +1419,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (cacheKeepaliveScheduler) {
 			cacheKeepaliveScheduler.stop();
 			cacheKeepaliveScheduler = null;
+		}
+		if (discoveryScheduler) {
+			discoveryScheduler.stop();
+			discoveryScheduler = null;
 		}
 
 		// Stop memory monitoring

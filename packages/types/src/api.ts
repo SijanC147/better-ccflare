@@ -13,6 +13,8 @@ export interface RequestMeta {
 	timestamp: number;
 	agentUsed?: string | null;
 	project?: string | null;
+	/** Optional explicit cwd hint from X-CCFlare-CWD header — fed into resolver before heuristics */
+	cwdHint?: string | null;
 	headers?: Headers;
 	/** Active combo name (set when combo routing is used) */
 	comboName?: string | null;

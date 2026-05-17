@@ -105,6 +105,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			api_key_id TEXT,
 			api_key_name TEXT,
 			project TEXT,
+			project_id TEXT,
+			worktree_path TEXT,
 			billing_type TEXT DEFAULT 'api',
 			combo_name TEXT
 		)
@@ -260,6 +262,47 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 		)
 	`);
 
+	// Create projects table (fork-specific: projects + worktree-rules feature)
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS projects (
+			id TEXT PRIMARY KEY,
+			canonical_path TEXT NOT NULL UNIQUE,
+			display_name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			source TEXT NOT NULL DEFAULT 'discovered',
+			parent_project_id TEXT,
+			last_session_at BIGINT,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			discovered_at BIGINT NOT NULL,
+			metadata TEXT,
+			FOREIGN KEY (parent_project_id) REFERENCES projects(id) ON DELETE SET NULL
+		)
+	`);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects(parent_project_id)`,
+	);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_projects_enabled ON projects(enabled)`,
+	);
+
+	// Create worktree_rules table
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS worktree_rules (
+			id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			pattern TEXT NOT NULL,
+			parent_project_id TEXT,
+			priority INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			compile_error TEXT,
+			created_at BIGINT NOT NULL,
+			FOREIGN KEY (parent_project_id) REFERENCES projects(id) ON DELETE SET NULL
+		)
+	`);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_worktree_rules_priority_enabled ON worktree_rules(priority DESC, enabled)`,
+	);
+
 	log.info("PostgreSQL schema ensured");
 }
 
@@ -354,6 +397,16 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			table: "accounts",
 			column: "pause_reason",
 			definition: "ALTER TABLE accounts ADD COLUMN pause_reason TEXT",
+		},
+		{
+			table: "requests",
+			column: "project_id",
+			definition: "ALTER TABLE requests ADD COLUMN project_id TEXT",
+		},
+		{
+			table: "requests",
+			column: "worktree_path",
+			definition: "ALTER TABLE requests ADD COLUMN worktree_path TEXT",
 		},
 		{
 			table: "requests",
@@ -492,6 +545,57 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		VALUES ('opus', NULL, 0), ('sonnet', NULL, 0), ('haiku', NULL, 0)
 		ON CONFLICT (family) DO NOTHING
 	`);
+
+	// Ensure projects + worktree_rules tables exist (for upgrades from
+	// pre-projects-feature installs). Fork-specific.
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS projects (
+			id TEXT PRIMARY KEY,
+			canonical_path TEXT NOT NULL UNIQUE,
+			display_name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			source TEXT NOT NULL DEFAULT 'discovered',
+			parent_project_id TEXT,
+			last_session_at BIGINT,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			discovered_at BIGINT NOT NULL,
+			metadata TEXT,
+			FOREIGN KEY (parent_project_id) REFERENCES projects(id) ON DELETE SET NULL
+		)
+	`);
+	try {
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects(parent_project_id)`,
+		);
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_projects_enabled ON projects(enabled)`,
+		);
+	} catch (_error) {
+		// Indexes may already exist
+	}
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS worktree_rules (
+			id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			pattern TEXT NOT NULL,
+			parent_project_id TEXT,
+			priority INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			compile_error TEXT,
+			created_at BIGINT NOT NULL,
+			FOREIGN KEY (parent_project_id) REFERENCES projects(id) ON DELETE SET NULL
+		)
+	`);
+	try {
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_worktree_rules_priority_enabled ON worktree_rules(priority DESC, enabled)`,
+		);
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_requests_project_id ON requests(project_id)`,
+		);
+	} catch (_error) {
+		// Indexes may already exist
+	}
 
 	// Rename oauth_sessions.mode 'max' → 'claude-oauth'
 	try {

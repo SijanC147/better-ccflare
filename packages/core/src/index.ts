@@ -90,6 +90,15 @@ export {
 	validateString,
 } from "./validation";
 export {
+	ResolverManager,
+	ResolverSnapshot,
+	type ResolverOptions,
+	type ResolverProjectInput,
+	type ResolverRuleInput,
+	type ResolveResult,
+} from "./project-resolver";
+
+export {
 	CLAUDE_CLI_VERSION,
 	extractClaudeVersion,
 	getClientVersion,

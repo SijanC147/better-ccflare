@@ -1,4 +1,4 @@
-import { requestEvents, TIME_CONSTANTS } from "@better-ccflare/core";
+import { requestEvents, ResolverSnapshot, TIME_CONSTANTS } from "@better-ccflare/core";
 import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
@@ -69,6 +69,8 @@ export interface ResponseHandlerOptions {
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
 	project?: string | null;
+	/** Optional explicit cwd hint from X-CCFlare-CWD header — fed into resolver before heuristics */
+	cwdHint?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -96,6 +98,7 @@ export async function forwardToClient(
 		requestHeaders,
 		requestBody,
 		project,
+		cwdHint,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -133,6 +136,41 @@ export async function forwardToClient(
 			path === "/v1/messages/count_tokens"
 		) && !isAutoRefreshProbe;
 
+	// Resolve project attribution using the path resolver.
+	// TODO(phase3c): replace ad-hoc snapshot build with ctx.dbOps.resolverManager.current().resolve()
+	// once Phase 3.C wires the ResolverManager getter onto DatabaseOperations.
+	let resolvedProjectId: string | null = null;
+	let resolvedWorktreePath: string | null = null;
+	try {
+		const [projects, rules] = await Promise.all([
+			ctx.dbOps.listProjects(),
+			ctx.dbOps.listWorktreeRules(),
+		]);
+		const snapshot = ResolverSnapshot.build(
+			projects.map((p) => ({
+				id: p.id,
+				canonicalPath: p.canonical_path,
+				enabled: p.enabled,
+			})),
+			rules.map((r) => ({
+				id: r.id,
+				kind: r.kind,
+				pattern: r.pattern,
+				parentProjectId: r.parent_project_id,
+				priority: r.priority,
+				enabled: r.enabled,
+				compileError: r.compile_error,
+			})),
+		);
+		// Prefer explicit cwd hint; fall back to heuristic project string
+		const resolverInput = cwdHint ?? project ?? null;
+		const resolved = snapshot.resolve(resolverInput);
+		resolvedProjectId = resolved.projectId;
+		resolvedWorktreePath = resolved.worktreePath;
+	} catch {
+		// Non-fatal — attribution is best-effort; proceed without it
+	}
+
 	// Send START message immediately if not filtered
 	if (shouldProcessRequest) {
 		const startMessage: StartMessage = {
@@ -154,6 +192,8 @@ export async function forwardToClient(
 						).toString("base64")
 					: null,
 			project: project ?? null,
+			projectId: resolvedProjectId,
+			worktreePath: resolvedWorktreePath,
 			responseStatus: response.status,
 			responseHeaders: responseHeadersObj,
 			isStream,

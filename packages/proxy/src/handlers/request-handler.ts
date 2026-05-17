@@ -14,6 +14,10 @@ export function createRequestMetadata(req: Request, url: URL): RequestMeta {
 	// Extract X-CCFlare-Project header for project-level analytics
 	const project = req.headers.get("X-CCFlare-Project") || null;
 
+	// Optional explicit working-directory hint from the client (Path B attribution).
+	// When present the resolver uses this directly instead of the heuristic project string.
+	const cwdHint = req.headers.get("X-CCFlare-CWD") || null;
+
 	return {
 		id: crypto.randomUUID(),
 		method: req.method,
@@ -21,6 +25,7 @@ export function createRequestMetadata(req: Request, url: URL): RequestMeta {
 		timestamp: Date.now(),
 		headers: req.headers,
 		project,
+		cwdHint,
 	};
 }
 

@@ -3,6 +3,7 @@ import {
 	BarChart3,
 	Bot,
 	FileText,
+	FolderOpen,
 	GitBranch,
 	Key,
 	LayoutDashboard,
@@ -80,6 +81,7 @@ export function Navigation({
 			{ label: "Analytics", icon: BarChart3, path: "/analytics" },
 			{ label: "Requests", icon: Activity, path: "/requests" },
 			{ label: "Accounts", icon: Users, path: "/accounts" },
+			{ label: "Projects", icon: FolderOpen, path: "/projects" },
 		];
 
 		// Add combos item if feature is enabled

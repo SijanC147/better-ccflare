@@ -50,6 +50,8 @@ export function ensureSchema(db: Database): void {
 			output_tokens INTEGER DEFAULT 0,
 			agent_used TEXT,
 			project TEXT,
+			project_id TEXT,
+			worktree_path TEXT,
 			billing_type TEXT DEFAULT 'api'
 		)
 	`);
@@ -221,6 +223,52 @@ export function ensureSchema(db: Database): void {
 		       ('sonnet', NULL, 0),
 		       ('haiku',  NULL, 0);
 	`);
+
+	// Create projects table — canonical Claude Code project entities, sourced
+	// by scanning ~/.claude/projects/ on the host or added manually via the
+	// dashboard. Parent linkage (parent_project_id) is for manual worktree
+	// assignments; pattern-based worktree detection lives in worktree_rules.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS projects (
+			id TEXT PRIMARY KEY,
+			canonical_path TEXT NOT NULL UNIQUE,
+			display_name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			source TEXT NOT NULL DEFAULT 'discovered',
+			parent_project_id TEXT,
+			last_session_at INTEGER,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			discovered_at INTEGER NOT NULL,
+			metadata TEXT,
+			FOREIGN KEY (parent_project_id) REFERENCES projects(id) ON DELETE SET NULL
+		)
+	`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects(parent_project_id)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_projects_enabled ON projects(enabled)`,
+	);
+
+	// Create worktree_rules table — pattern-based worktree detection.
+	// On compile failure, the rule is kept but disabled and compile_error is
+	// populated so the user can fix it in the UI.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS worktree_rules (
+			id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			pattern TEXT NOT NULL,
+			parent_project_id TEXT,
+			priority INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			compile_error TEXT,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (parent_project_id) REFERENCES projects(id) ON DELETE SET NULL
+		)
+	`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_worktree_rules_priority_enabled ON worktree_rules(priority DESC, enabled)`,
+	);
 }
 
 export function runMigrations(db: Database, dbPath?: string): void {
@@ -340,6 +388,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		!requestsColumnNames.includes("project") ||
 		!requestsColumnNames.includes("billing_type") ||
 		!requestsColumnNames.includes("combo_name") ||
+		!requestsColumnNames.includes("project_id") ||
+		!requestsColumnNames.includes("worktree_path") ||
 		!requestPayloadsColumnNames.includes("timestamp") ||
 		!apiKeysColumnNames.includes("role") ||
 		!initialOauthSessionsColumnNames.includes("custom_endpoint") ||
@@ -778,6 +828,23 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		if (!requestsColumnNames.includes("combo_name")) {
 			db.prepare("ALTER TABLE requests ADD COLUMN combo_name TEXT").run();
 			log.info("Added combo_name column to requests table");
+		}
+
+		// Add project_id column for canonical project linkage (fork-specific:
+		// projects + worktree-rules feature). Looseness intentional — no FK on
+		// the high-write requests table.
+		if (!requestsColumnNames.includes("project_id")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN project_id TEXT").run();
+			log.info("Added project_id column to requests table");
+		}
+		db.run(
+			`CREATE INDEX IF NOT EXISTS idx_requests_project_id ON requests(project_id)`,
+		);
+
+		// Add worktree_path column for the raw worktree subdir tag
+		if (!requestsColumnNames.includes("worktree_path")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN worktree_path TEXT").run();
+			log.info("Added worktree_path column to requests table");
 		}
 
 		// Add timestamp column to request_payloads if it doesn't exist

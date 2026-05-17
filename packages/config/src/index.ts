@@ -82,6 +82,9 @@ export interface ConfigData {
 	db_retry_delay_ms?: number;
 	db_retry_backoff?: number;
 	db_retry_max_delay_ms?: number;
+	// Discovery configuration
+	claude_projects_dir?: string;
+	projects_case_sensitive?: boolean;
 	[key: string]: string | number | boolean | undefined;
 }
 
@@ -568,6 +571,41 @@ export class Config extends EventEmitter {
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
 			health_detail_enabled: this.getHealthDetailEnabled(),
 		};
+	}
+
+	// ── Discovery configuration ─────────────────────────────────────────────
+
+	/**
+	 * Root directory where Claude Code stores project session JSONL files.
+	 * Env: CLAUDE_PROJECTS_DIR → persisted config → default (~/.claude/projects)
+	 *
+	 * UI persistence is a Phase 4.C concern — for now this is read-only
+	 * (env var or hardcoded default).
+	 * TODO(Phase 4.C): wire up a Settings UI toggle + setClaudeProjectsDir()
+	 */
+	getClaudeProjectsDir(): string | undefined {
+		const fromEnv = process.env.CLAUDE_PROJECTS_DIR;
+		if (fromEnv) return fromEnv;
+		const fromFile = this.data.claude_projects_dir;
+		if (typeof fromFile === "string" && fromFile.trim()) return fromFile;
+		return undefined; // caller uses ClaudeCodeDiscovery default (~/.claude/projects)
+	}
+
+	/**
+	 * Whether the host filesystem is case-sensitive.
+	 * Env: PROJECTS_CASE_SENSITIVE=true|1 → persisted config → default false (darwin).
+	 *
+	 * TODO(Phase 4.C): wire up a Settings UI toggle + setProjectsCaseSensitive()
+	 */
+	isProjectsCaseSensitive(): boolean {
+		const fromEnv = process.env.PROJECTS_CASE_SENSITIVE;
+		if (fromEnv !== undefined) {
+			return fromEnv === "true" || fromEnv === "1";
+		}
+		const fromFile = this.data.projects_case_sensitive;
+		if (typeof fromFile === "boolean") return fromFile;
+		// Default: darwin is case-insensitive; everything else is case-sensitive.
+		return process.platform !== "darwin";
 	}
 
 	getRuntime(): RuntimeConfig {

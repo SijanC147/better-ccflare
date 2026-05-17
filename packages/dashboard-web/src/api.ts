@@ -14,9 +14,12 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	LogEvent,
+	Project,
+	ProjectWithChildren,
 	RequestPayload,
 	RequestResponse,
 	StatsWithAccounts,
+	WorktreeRule,
 } from "@better-ccflare/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
 
@@ -33,8 +36,11 @@ export type RequestSummary = RequestResponse;
 export type {
 	Agent,
 	AgentWorkspace,
+	Project,
+	ProjectWithChildren,
 	RequestPayload,
 	RequestResponse,
+	WorktreeRule,
 } from "@better-ccflare/types";
 
 // Agent response interface
@@ -2196,9 +2202,10 @@ class API extends HttpClient {
 		}
 	}
 
+	/** Legacy: returns display_name strings for backwards compat with existing filter UI. */
 	async getProjects(): Promise<string[]> {
 		const startTime = Date.now();
-		const url = "/api/projects";
+		const url = "/api/projects?legacy=1";
 
 		this.logger.debug(`→ GET ${url}`);
 
@@ -2215,6 +2222,84 @@ class API extends HttpClient {
 			});
 			throw error;
 		}
+	}
+
+	/** Full project list with metadata. */
+	async getProjectsAll(): Promise<Project[]> {
+		const response = await this.get<{ success: boolean; data: Project[]; count: number }>("/api/projects");
+		return response.data;
+	}
+
+	async createProject(body: {
+		canonical_path: string;
+		display_name?: string;
+		parent_project_id?: string | null;
+		enabled?: boolean;
+	}): Promise<Project> {
+		const response = await this.post<{ success: boolean; data: Project }>("/api/projects", body);
+		return response.data;
+	}
+
+	async updateProject(
+		id: string,
+		body: Partial<{
+			display_name: string;
+			enabled: boolean;
+			parent_project_id: string | null;
+		}>,
+	): Promise<Project> {
+		const response = await this.patch<{ success: boolean; data: Project }>(`/api/projects/${id}`, body);
+		return response.data;
+	}
+
+	async deleteProject(id: string): Promise<void> {
+		await this.delete(`/api/projects/${id}`);
+	}
+
+	async discoverProjects(): Promise<{ added: number; updated: number; unchanged: number; total: number } | null> {
+		const response = await this.post<{ success: boolean; data: unknown }>("/api/projects/discover", {});
+		return response.data as { added: number; updated: number; unchanged: number; total: number } | null;
+	}
+
+	async getWorktreeRules(): Promise<WorktreeRule[]> {
+		const response = await this.get<{ success: boolean; data: WorktreeRule[]; count: number }>("/api/worktree-rules");
+		return response.data;
+	}
+
+	async createWorktreeRule(body: {
+		kind: string;
+		pattern: string;
+		parent_project_id?: string | null;
+		priority?: number;
+	}): Promise<WorktreeRule> {
+		const response = await this.post<{ success: boolean; data: WorktreeRule }>("/api/worktree-rules", body);
+		return response.data;
+	}
+
+	async updateWorktreeRule(
+		id: string,
+		body: Partial<{
+			kind: string;
+			pattern: string;
+			parent_project_id: string | null;
+			priority: number;
+			enabled: boolean;
+		}>,
+	): Promise<WorktreeRule> {
+		const response = await this.patch<{ success: boolean; data: WorktreeRule }>(`/api/worktree-rules/${id}`, body);
+		return response.data;
+	}
+
+	async deleteWorktreeRule(id: string): Promise<void> {
+		await this.delete(`/api/worktree-rules/${id}`);
+	}
+
+	async testWorktreeRule(body: {
+		kind: string;
+		pattern: string;
+		samplePaths: string[];
+	}): Promise<{ matches: Array<{ path: string; matched: boolean; error?: string }> }> {
+		return this.post("/api/worktree-rules/test", body);
 	}
 
 	async getFeatures(): Promise<{ showCombos: boolean }> {

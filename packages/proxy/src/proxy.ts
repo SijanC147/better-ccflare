@@ -387,6 +387,9 @@ export async function handleProxy(
 					poolExhaustedResponse.headers.entries(),
 				),
 				isStream: false,
+				// Project attribution (resolved on main thread before worker handoff)
+				projectId: null,
+				worktreePath: null,
 				providerName: ctx.provider.name,
 				accountBillingType: null,
 				accountAutoPauseOnOverageEnabled: 0,
