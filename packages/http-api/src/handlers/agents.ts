@@ -74,7 +74,7 @@ export function createAgentPreferenceUpdateHandler(dbOps: DatabaseOperations) {
 			}
 
 			// Update preference
-			dbOps.setAgentPreference(agentId, model);
+			await dbOps.setAgentPreference(agentId, model);
 
 			return jsonResponse({
 				success: true,
@@ -151,7 +151,7 @@ export function createBulkAgentPreferenceUpdateHandler(
 			}
 
 			// Update all agent preferences in bulk
-			dbOps.setBulkAgentPreferences(agentIds, modelValidation);
+			await dbOps.setBulkAgentPreferences(agentIds, modelValidation);
 
 			log.info(
 				`Updated ${agentIds.length} agent preferences to model: ${modelValidation}`,

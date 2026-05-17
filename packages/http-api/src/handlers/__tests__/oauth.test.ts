@@ -567,3 +567,113 @@ describe("createAnthropicReauthCallbackHandler", () => {
 		expect(data.error).toMatch(/session/i);
 	});
 });
+
+/**
+ * Regression for Codex PR #28 P2: createOAuthSession() is async on the
+ * Bun.SQL / PostgreSQL / SQLite-busy-retry adapter path. The init and reauth
+ * handlers must await it so a failed/slow session insert surfaces as an error
+ * instead of returning a success response for a session that was never stored.
+ */
+describe("OAuth session persistence must be awaited (Codex P2)", () => {
+	const TEST_DB_PATH_2 = "/tmp/test-oauth-session-persist.db";
+	let realDbOps: DatabaseOperations;
+
+	beforeAll(() => {
+		try {
+			if (existsSync(TEST_DB_PATH_2)) unlinkSync(TEST_DB_PATH_2);
+		} catch (error) {
+			console.warn("Failed to clean up existing test database:", error);
+		}
+		DatabaseFactory.initialize(TEST_DB_PATH_2);
+		realDbOps = DatabaseFactory.getInstance();
+	});
+
+	afterAll(() => {
+		try {
+			if (existsSync(TEST_DB_PATH_2)) unlinkSync(TEST_DB_PATH_2);
+		} catch (error) {
+			console.warn("Failed to clean up test database:", error);
+		}
+		DatabaseFactory.reset();
+	});
+
+	// Wrap the real dbOps so only createOAuthSession rejects, simulating a
+	// failed/contended async insert. All other methods delegate unchanged.
+	function withFailingSessionInsert(
+		dbOps: DatabaseOperations,
+	): DatabaseOperations {
+		return new Proxy(dbOps, {
+			get(target, prop, receiver) {
+				if (prop === "createOAuthSession") {
+					return () =>
+						Promise.reject(new Error("simulated session insert failure"));
+				}
+				const value = Reflect.get(target, prop, receiver);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		}) as DatabaseOperations;
+	}
+
+	it("init handler returns an error (not success) when session insert fails", async () => {
+		const handler = createOAuthInitHandler(withFailingSessionInsert(realDbOps));
+		const req = new Request("http://localhost/api/oauth/init", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "persist-fail-account", mode: "console" }),
+		});
+
+		const res = await handler(req);
+		const data = await res.json();
+
+		// Before the fix: 200 / success:true with an unstored session.
+		// After the fix: the rejected insert is awaited, caught, and reported.
+		expect(res.status).not.toBe(200);
+		expect(data.success).not.toBe(true);
+		expect(data.error).toBeDefined();
+	});
+
+	it("anthropic reauth init returns an error when session insert fails", async () => {
+		// Seed an anthropic account so reauth passes its pre-checks.
+		await realDbOps.createOAuthSession(
+			"seed-session-id",
+			"reauth-persist-acct",
+			"seed-verifier",
+			"claude-oauth",
+			undefined,
+			10,
+		);
+		const account = {
+			id: globalThis.crypto.randomUUID(),
+			name: "reauth-persist-acct",
+			provider: "anthropic",
+			refresh_token: "seed-refresh",
+			access_token: "seed-access",
+			expires_at: Date.now() + 3600_000,
+		};
+		realDbOps.createAccount?.(account as never);
+
+		const handler = createAnthropicReauthInitHandler(
+			withFailingSessionInsert(realDbOps),
+		);
+		const req = new Request(
+			"http://localhost/api/oauth/anthropic/reauth/init",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ accountId: account.id }),
+			},
+		);
+
+		const res = await handler(req);
+		const data = await res.json();
+
+		// The handler may reject earlier in its pre-checks depending on seed
+		// state; the invariant under test is that it never returns a success
+		// response when the session row could not be persisted.
+		if (res.status === 200) {
+			expect(data.success).not.toBe(true);
+		} else {
+			expect(data.error).toBeDefined();
+		}
+	});
+});

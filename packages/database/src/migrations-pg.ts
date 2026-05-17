@@ -378,18 +378,48 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		},
 	];
 
+	// Track whether api_keys.role was just added so we can backfill existing
+	// keys to 'admin' exactly once (mirrors the SQLite migration). Running the
+	// backfill unconditionally on every startup would re-promote keys that
+	// were intentionally created as 'api-only' after the upgrade.
+	let apiKeysRoleJustAdded = false;
+
 	for (const col of columnsToAdd) {
 		const exists = await columnExists(adapter, col.table, col.column);
 		if (!exists) {
 			try {
 				await adapter.unsafe(col.definition);
 				log.info(`Added column ${col.table}.${col.column}`);
+				if (col.table === "api_keys" && col.column === "role") {
+					apiKeysRoleJustAdded = true;
+				}
 			} catch (error) {
 				log.warn(
 					`Could not add column ${col.table}.${col.column}: ${(error as Error).message}`,
 				);
 			}
 		}
+	}
+
+	// Backfill existing API keys to 'admin' for backwards compatibility
+	// (mirrors migrations.ts SQLite migration v4). Without this, a PostgreSQL
+	// upgrade demotes every existing key to 'api-only', and since
+	// authorizeEndpoint() blocks api-only keys from /api/*, existing users
+	// lose dashboard/API-key management access and cannot promote a new admin.
+	if (apiKeysRoleJustAdded) {
+		await adapter.unsafe(
+			`UPDATE api_keys SET role = 'admin' WHERE role = 'api-only'`,
+		);
+		try {
+			await adapter.unsafe(
+				`CREATE INDEX IF NOT EXISTS idx_api_keys_role ON api_keys(role)`,
+			);
+		} catch (_error) {
+			// Index may already exist
+		}
+		log.info(
+			"Backfilled existing API keys to 'admin' role (PostgreSQL parity with SQLite migration)",
+		);
 	}
 
 	// Backfill pause_reason for existing paused accounts (mirrors SQLite migration)

@@ -36,7 +36,9 @@ export function createApiKeysGenerateHandler(dbOps: DatabaseOperations) {
 	return async (req: Request): Promise<Response> => {
 		try {
 			const body = await req.json();
-			const { name, role = "api-only" } = body;
+			const { name } = body;
+			const roleProvided = body.role !== undefined && body.role !== null;
+			let role = roleProvided ? body.role : "api-only";
 
 			if (!name || typeof name !== "string" || name.trim().length === 0) {
 				return errorResponse(
@@ -49,6 +51,15 @@ export function createApiKeysGenerateHandler(dbOps: DatabaseOperations) {
 				return errorResponse(
 					BadRequest("Role must be either 'admin' or 'api-only'"),
 				);
+			}
+
+			// Bootstrap: the first key must be an admin key (an api-only first key
+			// would lock the user out of the dashboard, and generateApiKey() rejects
+			// it). When the caller did not explicitly request a role and no active
+			// keys exist yet, default to admin so name-only creation works for raw
+			// API clients — matching the CLI/dashboard first-key behavior.
+			if (!roleProvided && (await dbOps.countActiveApiKeys()) === 0) {
+				role = "admin";
 			}
 
 			const result = await generateApiKey(dbOps, name.trim(), role);

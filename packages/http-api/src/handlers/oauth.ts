@@ -613,7 +613,7 @@ export function createAnthropicReauthInitHandler(
 				});
 
 				// Store session; use accountName field so callback can look it up by name
-				dbOps.createOAuthSession(
+				await dbOps.createOAuthSession(
 					flowResult.sessionId,
 					account.name,
 					flowResult.pkce.verifier,
@@ -723,7 +723,7 @@ export function createAnthropicReauthCallbackHandler(
 					flowData,
 				);
 
-				dbOps.deleteOAuthSession(sessionId);
+				await dbOps.deleteOAuthSession(sessionId);
 
 				log.info(`Successfully re-authenticated Anthropic account '${name}'`);
 
@@ -820,7 +820,7 @@ export function createOAuthInitHandler(dbOps: DatabaseOperations) {
 				});
 
 				// Store custom endpoint in session for later use
-				dbOps.createOAuthSession(
+				await dbOps.createOAuthSession(
 					flowResult.sessionId,
 					name,
 					flowResult.pkce.verifier,
@@ -937,7 +937,7 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 				);
 
 				// Clean up OAuth session from database
-				dbOps.deleteOAuthSession(sessionId);
+				await dbOps.deleteOAuthSession(sessionId);
 
 				log.info(`Successfully added account '${name}' via OAuth`);
 
