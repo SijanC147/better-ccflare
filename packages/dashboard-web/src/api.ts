@@ -2185,6 +2185,91 @@ class API extends HttpClient {
 			throw error;
 		}
 	}
+	// PostgreSQL configuration
+	async getPostgresConfig(): Promise<{
+		enabled: boolean;
+		host: string;
+		port: number;
+		database: string;
+		user: string;
+		passwordSet: boolean;
+		sslMode: "disable" | "require" | "verify-ca" | "verify-full";
+	}> {
+		const startTime = Date.now();
+		const url = "/api/config/postgres";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{
+				enabled: boolean;
+				host: string;
+				port: number;
+				database: string;
+				user: string;
+				passwordSet: boolean;
+				sslMode: "disable" | "require" | "verify-ca" | "verify-full";
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async setPostgresConfig(body: {
+		enabled?: boolean;
+		host?: string;
+		port?: number;
+		database?: string;
+		user?: string;
+		password?: string;
+		sslMode?: "disable" | "require" | "verify-ca" | "verify-full";
+	}): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/config/postgres";
+
+		this.logger.debug(`→ POST ${url}`, { body });
+
+		try {
+			await this.post(url, body);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 204 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async adminRestart(): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/admin/restart";
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			await this.post(url, {});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 202 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
 }
 
 export const api = new API();

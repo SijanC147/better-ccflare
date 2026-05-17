@@ -62,6 +62,14 @@ export interface ConfigData {
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
 	health_detail_enabled?: boolean;
+	// PostgreSQL backend configuration
+	pg_enabled?: boolean;
+	pg_host?: string;
+	pg_port?: number;
+	pg_database?: string;
+	pg_user?: string;
+	pg_password?: string;
+	pg_ssl_mode?: "disable" | "require" | "verify-ca" | "verify-full";
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -414,6 +422,117 @@ export class Config extends EventEmitter {
 		const fromFile = this.data.health_detail_enabled;
 		if (typeof fromFile === "boolean") return fromFile;
 		return false;
+	}
+
+	// ── PostgreSQL backend ──────────────────────────────────────────────────────
+
+	getPgEnabled(): boolean {
+		const fromEnv = parseEnabledEnvFlag(process.env.PG_ENABLED);
+		if (fromEnv !== undefined) return fromEnv;
+		// Also treat DATABASE_URL presence as implicit enablement
+		if (process.env.DATABASE_URL) return true;
+		const fromFile = this.data.pg_enabled;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false;
+	}
+
+	setPgEnabled(value: boolean): void {
+		this.set("pg_enabled", value);
+	}
+
+	getPgHost(): string {
+		return (
+			process.env.PGHOST ||
+			(typeof this.data.pg_host === "string" ? this.data.pg_host : "localhost")
+		);
+	}
+
+	setPgHost(host: string): void {
+		this.set("pg_host", host);
+	}
+
+	getPgPort(): number {
+		if (process.env.PGPORT) {
+			const n = parseInt(process.env.PGPORT, 10);
+			if (!Number.isNaN(n)) return n;
+		}
+		if (typeof this.data.pg_port === "number") return this.data.pg_port;
+		return 5432;
+	}
+
+	setPgPort(port: number): void {
+		this.set("pg_port", port);
+	}
+
+	getPgDatabase(): string {
+		return (
+			process.env.PGDATABASE ||
+			(typeof this.data.pg_database === "string"
+				? this.data.pg_database
+				: "better_ccflare")
+		);
+	}
+
+	setPgDatabase(db: string): void {
+		this.set("pg_database", db);
+	}
+
+	getPgUser(): string {
+		return (
+			process.env.PGUSER ||
+			(typeof this.data.pg_user === "string" ? this.data.pg_user : "postgres")
+		);
+	}
+
+	setPgUser(user: string): void {
+		this.set("pg_user", user);
+	}
+
+	getPgPassword(): string {
+		return (
+			process.env.PGPASSWORD ||
+			(typeof this.data.pg_password === "string" ? this.data.pg_password : "")
+		);
+	}
+
+	setPgPassword(password: string): void {
+		this.set("pg_password", password);
+	}
+
+	getPgSslMode(): "disable" | "require" | "verify-ca" | "verify-full" {
+		const fromEnv = process.env.PGSSLMODE as
+			| "disable"
+			| "require"
+			| "verify-ca"
+			| "verify-full"
+			| undefined;
+		if (fromEnv) return fromEnv;
+		const fromFile = this.data.pg_ssl_mode;
+		if (typeof fromFile === "string")
+			return fromFile as "disable" | "require" | "verify-ca" | "verify-full";
+		return "disable";
+	}
+
+	setPgSslMode(
+		mode: "disable" | "require" | "verify-ca" | "verify-full",
+	): void {
+		this.set("pg_ssl_mode", mode);
+	}
+
+	/**
+	 * Build a PostgreSQL connection URL from stored config (excluding env overrides).
+	 * Returns null when PG is not enabled.
+	 */
+	buildPgConnectionUrl(): string | null {
+		if (!this.getPgEnabled()) return null;
+		const user = encodeURIComponent(this.getPgUser());
+		const password = encodeURIComponent(this.getPgPassword());
+		const host = this.getPgHost();
+		const port = this.getPgPort();
+		const db = encodeURIComponent(this.getPgDatabase());
+		const ssl = this.getPgSslMode();
+		const sslParam = ssl !== "disable" ? `?sslmode=${ssl}` : "";
+		return `postgresql://${user}:${password}@${host}:${port}/${db}${sslParam}`;
 	}
 
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
