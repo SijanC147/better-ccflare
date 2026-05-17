@@ -42,6 +42,14 @@ export interface RetentionSetRequest {
 	storePayloads?: boolean;
 }
 
+export interface RequestStorageGetResponse {
+	headersOnly: boolean;
+}
+
+export interface RequestStorageSetRequest {
+	headersOnly: boolean;
+}
+
 export interface CleanupResponse {
 	removedRequests: number;
 	removedPayloads: number;

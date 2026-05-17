@@ -56,6 +56,7 @@ export interface ConfigData {
 	data_retention_days?: number;
 	request_retention_days?: number;
 	store_payloads?: boolean;
+	request_storage_headers_only?: boolean;
 	usage_poll_interval_ms?: number;
 	cache_keepalive_ttl_minutes?: number;
 	system_prompt_cache_ttl_1h?: boolean;
@@ -335,6 +336,20 @@ export class Config extends EventEmitter {
 		this.set("store_payloads", value);
 	}
 
+	getRequestStorageHeadersOnly(): boolean {
+		const fromEnv = process.env.REQUEST_STORAGE_HEADERS_ONLY;
+		if (fromEnv) {
+			return fromEnv !== "false" && fromEnv !== "0";
+		}
+		const fromFile = this.data.request_storage_headers_only;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false; // default: store full bodies
+	}
+
+	setRequestStorageHeadersOnly(value: boolean): void {
+		this.set("request_storage_headers_only", value);
+	}
+
 	getUsagePollIntervalMs(): number {
 		const fromEnv = process.env.USAGE_POLL_INTERVAL_MS;
 		if (fromEnv) {
@@ -544,6 +559,7 @@ export class Config extends EventEmitter {
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
 			store_payloads: this.getStorePayloads(),
+			request_storage_headers_only: this.getRequestStorageHeadersOnly(),
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
 			cache_keepalive_ttl_minutes: this.getCacheKeepaliveTtlMinutes(),
 			system_prompt_cache_ttl_1h: this.getSystemPromptCacheTtl1h(),

@@ -791,7 +791,10 @@ export default async function startServer(options?: {
 
 	// Proxy context
 	const usageWorker = getUsageWorker();
-	sendWorkerConfigUpdate(config.getStorePayloads());
+	sendWorkerConfigUpdate(
+		config.getStorePayloads(),
+		config.getRequestStorageHeadersOnly(),
+	);
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
@@ -868,8 +871,11 @@ export default async function startServer(options?: {
 			strategy.initialize?.(strategyStore);
 			proxyContext.strategy = strategy;
 		}
-		if (key === "store_payloads") {
-			sendWorkerConfigUpdate(config.getStorePayloads());
+		if (key === "store_payloads" || key === "request_storage_headers_only") {
+			sendWorkerConfigUpdate(
+				config.getStorePayloads(),
+				config.getRequestStorageHeadersOnly(),
+			);
 		}
 	});
 
