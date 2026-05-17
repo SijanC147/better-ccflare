@@ -111,7 +111,8 @@ export function AccountsTab() {
 			| "openrouter"
 			| "alibaba-coding-plan"
 			| "codex"
-			| "qwen";
+			| "qwen"
+			| "ollama";
 		priority: number;
 		customEndpoint?: string;
 	}) => {
@@ -315,6 +316,40 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAddOllamaAccount = async (params: {
+		name: string;
+		priority: number;
+		customEndpoint?: string;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addOllamaAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddOllamaCloudAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addOllamaCloudAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
 	const handleRemoveAccount = (name: string) => {
 		setConfirmDelete({ show: true, accountName: name, confirmInput: "" });
 	};
@@ -385,8 +420,6 @@ export function AccountsTab() {
 	const handleRefreshUsage = async (account: Account) => {
 		try {
 			await api.refreshUsage(account.id);
-			// Wait briefly then reload so fresh usage data has time to arrive
-			await new Promise((resolve) => setTimeout(resolve, 5000));
 			await loadAccounts();
 			setActionError(null);
 		} catch (err) {
@@ -476,6 +509,18 @@ export function AccountsTab() {
 		setCodexReauthDialog({ isOpen: true, account });
 	};
 
+	const handlePeakHoursPauseToggle = async (account: Account) => {
+		try {
+			await api.updateAccountPeakHoursPause(
+				account.id,
+				!account.peakHoursPauseEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleUpdateCustomEndpoint = async (
 		accountId: string,
 		customEndpoint: string | null,
@@ -559,6 +604,8 @@ export function AccountsTab() {
 								handleAddAnthropicCompatibleAccount
 							}
 							onAddOpenAIAccount={handleAddOpenAIAccount}
+							onAddOllamaAccount={handleAddOllamaAccount}
+							onAddOllamaCloudAccount={handleAddOllamaCloudAccount}
 							onCancel={() => {
 								setAdding(false);
 								setActionError(null);
@@ -582,6 +629,7 @@ export function AccountsTab() {
 						onAutoRefreshToggle={handleAutoRefreshToggle}
 						onBillingTypeToggle={handleBillingTypeToggle}
 						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
+						onPeakHoursPauseToggle={handlePeakHoursPauseToggle}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}
 						onReauth={handleReauth}

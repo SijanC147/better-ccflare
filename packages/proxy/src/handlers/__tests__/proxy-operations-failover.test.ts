@@ -18,6 +18,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		last_used: null,
 		created_at: Date.now(),
 		rate_limited_until: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
 		session_start: null,
 		session_request_count: 0,
 		paused: false,
@@ -27,10 +29,15 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		priority: 0,
 		auto_fallback_enabled: false,
 		auto_refresh_enabled: false,
+		auto_pause_on_overage_enabled: false,
+		peak_hours_pause_enabled: false,
 		custom_endpoint: "https://openrouter.ai/api/v1",
 		model_mappings: JSON.stringify({ sonnet: "qwen/qwen3.6-plus:free" }),
 		cross_region_mode: null,
 		model_fallbacks: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
 		...overrides,
 	};
 }
@@ -58,7 +65,11 @@ function makeProxyContext(): ProxyContext {
 	return {
 		strategy: { getNextAccount: () => null } as never,
 		dbOps: {
-			markAccountRateLimited: mock(() => Promise.resolve()),
+			markAccountRateLimited: mock(
+				(_accountId: string, _until: number, _reason: string) =>
+					Promise.resolve(),
+			),
+			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
 			getAdapter: mock(() => ({
 				run: mock(() => Promise.resolve()),
@@ -85,6 +96,7 @@ function makeProxyContext(): ProxyContext {
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) } as never,
 		usageWorker: { postMessage: mock(() => {}) } as never,
+		config: { getStorePayloads: () => true } as never,
 	};
 }
 
@@ -334,6 +346,213 @@ describe("proxyWithAccount — 429 failover", () => {
 		);
 
 		expect(result).toBeNull();
+	});
+});
+
+function makeProxyContextWithAsyncExec(): ProxyContext {
+	const ctx = makeProxyContext();
+	return {
+		...ctx,
+		asyncWriter: {
+			enqueue: mock(async (job: () => void | Promise<void>) => {
+				await job();
+			}),
+		} as never,
+	};
+}
+
+describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("calls markAccountRateLimited with reason='model_fallback_429' on no-fallback 429", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					error: {
+						type: "api_error",
+						message:
+							"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
+					},
+				},
+				429,
+			),
+		);
+
+		const ctx = makeProxyContextWithAsyncExec();
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+
+		await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeAccount(), // no model_fallbacks
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		// The asyncWriter.enqueue mock captures calls; markAccountRateLimited
+		// is called inside the enqueued job. Since asyncWriter.enqueue is mocked
+		// (does not execute the job), we verify via markAccountRateLimited directly.
+		// The feature requires markAccountRateLimited to receive a third `reason` arg.
+		const markMock = ctx.dbOps.markAccountRateLimited as ReturnType<
+			typeof mock
+		>;
+		expect(markMock.mock.calls.length).toBeGreaterThan(0);
+		const [, , reason] = markMock.mock.calls[0] as [string, number, string];
+		expect(reason).toBe("model_fallback_429");
+	});
+
+	it("calls markAccountRateLimited with reason='all_models_exhausted_429' when all models fail", async () => {
+		// All fetch calls return 429 — primary + every fallback model
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					error: {
+						type: "api_error",
+						message: "Rate limit exceeded: limit_rpm/model/abc",
+					},
+				},
+				429,
+			),
+		);
+
+		const ctx = makeProxyContextWithAsyncExec();
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+
+		await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeAccount({
+				model_mappings: JSON.stringify({
+					sonnet: [
+						"qwen/qwen3.6-plus:free",
+						"bytedance-seed/dola-seed-2.0-pro:free",
+					],
+				}),
+			}),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		const markMock = ctx.dbOps.markAccountRateLimited as ReturnType<
+			typeof mock
+		>;
+		// At least one call should carry the all_models_exhausted_429 reason
+		const reasons = markMock.mock.calls.map(
+			(args: unknown[]) => args[2] as string,
+		);
+		expect(reasons).toContain("all_models_exhausted_429");
+	});
+});
+
+describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("sets account.rate_limited_until on model_fallback_429 path", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					error: {
+						type: "api_error",
+						message:
+							"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
+					},
+				},
+				429,
+			),
+		);
+
+		const ctx = makeProxyContextWithAsyncExec();
+		const account = makeAccount();
+		const before = Date.now();
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+
+		await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		// In-memory mutation should be set immediately (before DB write completes)
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(account.rate_limited_until ?? 0).toBeGreaterThan(before);
+		// Default cooldown from extractCooldownUntil is at least 60s
+		expect(account.rate_limited_until ?? 0).toBeGreaterThanOrEqual(
+			before + 60_000,
+		);
+	});
+
+	it("sets account.rate_limited_until on all_models_exhausted_429 path", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					error: {
+						type: "api_error",
+						message: "Rate limit exceeded: limit_rpm/model/abc",
+					},
+				},
+				429,
+			),
+		);
+
+		const ctx = makeProxyContextWithAsyncExec();
+		const account = makeAccount({
+			model_mappings: JSON.stringify({
+				sonnet: [
+					"qwen/qwen3.6-plus:free",
+					"bytedance-seed/dola-seed-2.0-pro:free",
+				],
+			}),
+		});
+		const before = Date.now();
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+
+		await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(account.rate_limited_until ?? 0).toBeGreaterThan(before);
+		expect(account.rate_limited_until ?? 0).toBeGreaterThanOrEqual(
+			before + 60_000,
+		);
 	});
 });
 

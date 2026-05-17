@@ -3,6 +3,7 @@ node_modules/
 .env.local
 .claude/
 .planning/
+.codex
 ccflare.db
 ccflare.db-wal
 ccflare.db-shm
@@ -16,6 +17,7 @@ packages/dashboard-web/dist/
 tsconfig.tsbuildinfo
 packages/proxy/src/inline-worker.ts
 packages/proxy/src/embedded-tiktoken-wasm.ts
+packages/database/src/inline-vacuum-worker.ts
 CLAUDE.md
 AGENTS.md
 # Disallow .sh files except in .github/scripts/

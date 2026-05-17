@@ -1,8 +1,19 @@
-import { getModelList, logError, ProviderError } from "@better-ccflare/core";
+import {
+	getModelList,
+	logError,
+	ProviderError,
+	TIME_CONSTANTS,
+} from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
-import { getProvider } from "@better-ccflare/providers";
-import type { Account, RequestMeta } from "@better-ccflare/types";
+import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-formats";
+import { getProvider, usageCache } from "@better-ccflare/providers";
+import type {
+	Account,
+	RateLimitReason,
+	RequestMeta,
+} from "@better-ccflare/types";
 import { cacheBodyStore } from "../cache-body-store";
+import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
@@ -10,6 +21,75 @@ import { handleProxyError, processProxyResponse } from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
 
 const log = new Logger("ProxyOperations");
+
+/**
+ * Determines the absolute epoch timestamp (ms since epoch) until which an account
+ * should be marked rate-limited after model exhaustion. Priority:
+ *   1. retry-after / x-ratelimit-reset response header (actual upstream backoff)
+ *   2. getRateLimitedUntil — usage-window reset time if known
+ *   3. probe-cooldown default (TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS,
+ *      60s by default, overridable via CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) as
+ *      last resort. Was a 1-hour ban prior to v3.5.x — that locked accounts
+ *      out unnecessarily when upstream returned a transient 429 without a
+ *      reset hint, draining small pools to zero routable accounts on a
+ *      single burst. Aligns with the same default used in
+ *      response-processor.ts when 429s arrive without a reset header.
+ *
+ * The result is always clamped to at least 60 seconds in the future to avoid a
+ * zero or negative value when a parsed timestamp is already in the past.
+ *
+ * NOTE: getRateLimitedUntil is injected rather than called directly on usageCache
+ * so that callers in production pass usageCache.getRateLimitedUntil.bind(usageCache)
+ * and tests pass a plain stub — avoiding module-mock symlink issues with Bun.
+ */
+export function extractCooldownUntil(
+	response: Response,
+	accountId: string,
+	getRateLimitedUntil: (accountId: string) => number | null,
+): number {
+	const MIN_COOLDOWN_MS = 60 * 1000; // 60 seconds floor
+	// Use `||` (not `??`) so empty-string and non-numeric env values
+	// (Number("") === 0, Number("abc") === NaN) fall through to the
+	// default — `??` would coalesce the empty string to 0 and silently
+	// disable the cooldown entirely.
+	const DEFAULT_COOLDOWN_MS =
+		Number(process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) ||
+		TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS;
+	const now = Date.now();
+
+	// 1. Check retry-after / x-ratelimit-reset headers
+	const retryAfter =
+		response.headers.get("retry-after") ??
+		response.headers.get("x-ratelimit-reset");
+	if (retryAfter) {
+		const parsed = Number(retryAfter);
+		if (!Number.isNaN(parsed) && parsed > 0) {
+			// Unix timestamp (seconds) if value looks like an epoch (> 1 billion)
+			const isUnixTimestamp = parsed > 1_000_000_000;
+			const epochMs = isUnixTimestamp ? parsed * 1000 : now + parsed * 1000;
+			if (epochMs > now) {
+				return Math.max(epochMs, now + MIN_COOLDOWN_MS);
+			}
+			// epochMs <= now: stale/already-past timestamp — fall through to next priority
+		} else {
+			// Try HTTP-date format (RFC 7231), e.g. "Wed, 21 Oct 2026 07:28:00 GMT"
+			const dateMs = new Date(retryAfter).getTime();
+			if (!Number.isNaN(dateMs) && dateMs > now) {
+				return Math.max(dateMs, now + MIN_COOLDOWN_MS);
+			}
+			// Invalid or past date — fall through to next priority
+		}
+	}
+
+	// 2. Fall back to usage-window reset time if available
+	const rateLimitedUntil = getRateLimitedUntil(accountId);
+	if (rateLimitedUntil !== null && rateLimitedUntil > now) {
+		return Math.max(rateLimitedUntil, now + MIN_COOLDOWN_MS);
+	}
+
+	// 3. Last resort: 1 hour
+	return now + DEFAULT_COOLDOWN_MS;
+}
 
 /**
  * Bedrock provider currently returns a synthetic Request containing the
@@ -40,13 +120,18 @@ function materializeSyntheticResponse(request: Request): Response {
  * @returns New buffer with thinking blocks filtered out, or null if filtering fails
  */
 function filterThinkingBlocks(
-	requestBodyBuffer: ArrayBuffer | null,
+	requestBody: ArrayBuffer | RequestBodyContext | null,
 ): ArrayBuffer | null {
+	const bodyContext =
+		requestBody instanceof RequestBodyContext
+			? requestBody
+			: new RequestBodyContext(requestBody);
+	const requestBodyBuffer = bodyContext.getBuffer();
 	if (!requestBodyBuffer) return null;
 
 	try {
-		const bodyText = new TextDecoder().decode(requestBodyBuffer);
-		const body = JSON.parse(bodyText);
+		const body = bodyContext.getParsedJson();
+		if (!body) return null;
 
 		// Only process if there are messages
 		if (!body.messages || !Array.isArray(body.messages)) {
@@ -146,8 +231,10 @@ function filterThinkingBlocks(
 				// This prevents Claude from requiring the final message to start with thinking
 				thinking: undefined,
 			};
-			const filteredText = JSON.stringify(filteredBody);
-			return new TextEncoder().encode(filteredText).buffer;
+			return RequestBodyContext.fromParsed(
+				requestBodyBuffer,
+				filteredBody,
+			).getBuffer();
 		}
 
 		return requestBodyBuffer;
@@ -196,6 +283,43 @@ async function isInvalidThinkingSignatureError(
 	}
 
 	return false;
+}
+
+/**
+ * In-memory set of (accountId, model) pairs known to reject cache_control.
+ * Populated on first 400 rejection; cleared on server restart (fast re-learn).
+ */
+const cacheControlRejectors = new Set<string>();
+
+function cacheControlRejectorKey(accountId: string, model: string): string {
+	return `${accountId}:${model}`;
+}
+
+/**
+ * Checks if a 400 response is caused by an upstream provider rejecting the
+ * cache_control field (e.g. GLM-5.1 strict OpenAI-compatible validation).
+ */
+async function isCacheControlRejectionError(
+	response: Response,
+): Promise<boolean> {
+	if (response.status !== 400) return false;
+
+	try {
+		const clone = response.clone();
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+
+		const json = await clone.json();
+		const message: string = json.error?.message ?? json.message ?? "";
+		return (
+			typeof message === "string" &&
+			message.includes("cache_control") &&
+			(message.includes("Extra inputs are not permitted") ||
+				message.includes("unknown field"))
+		);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -305,12 +429,12 @@ export async function proxyUnauthenticated(
 				account: null,
 				requestHeaders: req.headers,
 				requestBody: requestBodyBuffer,
+				project: requestMeta.project,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts: 0,
 				agentUsed: requestMeta.agentUsed,
-				project: requestMeta.project,
 				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
@@ -354,6 +478,7 @@ export async function proxyWithAccount(
 	modelOverride?: string | null,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+	requestBodyContext?: RequestBodyContext | null,
 ): Promise<Response | null> {
 	try {
 		if (
@@ -367,15 +492,15 @@ export async function proxyWithAccount(
 		}
 
 		// Apply model override from combo slot (per D-04, REQ-12)
-		let effectiveBodyBuffer = requestBodyBuffer;
-		if (modelOverride && requestBodyBuffer) {
-			try {
-				const bodyText = new TextDecoder().decode(requestBodyBuffer);
-				const body = JSON.parse(bodyText);
-				body.model = modelOverride;
-				effectiveBodyBuffer = new TextEncoder().encode(
-					JSON.stringify(body),
-				).buffer;
+		const baseBodyContext =
+			requestBodyContext ?? new RequestBodyContext(requestBodyBuffer);
+		let effectiveBodyContext = baseBodyContext;
+		let effectiveBodyBuffer = baseBodyContext.getBuffer();
+		if (modelOverride && effectiveBodyBuffer) {
+			const overriddenContext = baseBodyContext.withPatchedModel(modelOverride);
+			if (overriddenContext) {
+				effectiveBodyContext = overriddenContext;
+				effectiveBodyBuffer = overriddenContext.getBuffer();
 
 				if (
 					process.env.DEBUG?.includes("proxy") ||
@@ -386,11 +511,11 @@ export async function proxyWithAccount(
 						`Combo model override: applying model "${modelOverride}" for account ${account.name}`,
 					);
 				}
-			} catch {
+			} else {
 				log.warn(
 					"Failed to patch request body with model override, using original body",
 				);
-				effectiveBodyBuffer = requestBodyBuffer;
+				effectiveBodyBuffer = baseBodyContext.getBuffer();
 			}
 		}
 
@@ -400,12 +525,22 @@ export async function proxyWithAccount(
 		// Headers are stored because Anthropic's prepareHeaders() copies incoming
 		// client headers (anthropic-version, anthropic-beta, x-stainless-*, etc.)
 		// and augments them — providers that build headers from scratch ignore them.
-		// Skip staging for internal keepalive replays to prevent infinite loop.
-		if (!req.headers.get("x-better-ccflare-keepalive")) {
+		// Skip staging for internal synthetic requests:
+		//   - keepalive replays — prevent infinite loop
+		//   - auto-refresh probes — same loop-prevention concern, plus these
+		//     hit known-cooled accounts and shouldn't pollute the staged-body cache
+		//     (issue #199, bug 2).
+		// Both checks are truthy (not strict-equality) to preserve the original
+		// keepalive guard's behaviour: any non-empty header value triggers the
+		// skip, matching what `!req.headers.get(...)` returned before.
+		const isSyntheticInternal =
+			!!req.headers.get("x-better-ccflare-keepalive") ||
+			!!req.headers.get("x-better-ccflare-auto-refresh");
+		if (!isSyntheticInternal) {
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
 				account.id,
-				requestBodyBuffer,
+				baseBodyContext.getBuffer(),
 				req.headers,
 				url.pathname,
 			);
@@ -444,9 +579,41 @@ export async function proxyWithAccount(
 
 		const providerRequest = new Request(targetUrl, requestInit);
 
-		const transformedRequest = provider.transformRequestBody
+		let transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
+
+		// Pre-strip cache_control for (account, model) pairs known to reject it
+		const transformedBodyText = await transformedRequest.clone().text();
+		let transformedBodyJson: Record<string, unknown> | null = null;
+		try {
+			transformedBodyJson = JSON.parse(transformedBodyText);
+		} catch {
+			// ignore
+		}
+		const transformedModel =
+			(transformedBodyJson?.model as string | undefined) ?? "";
+		if (
+			transformedModel &&
+			cacheControlRejectors.has(
+				cacheControlRejectorKey(account.id, transformedModel),
+			) &&
+			transformedBodyJson
+		) {
+			stripCacheControlFromOpenAIRequest(
+				transformedBodyJson as unknown as Parameters<
+					typeof stripCacheControlFromOpenAIRequest
+				>[0],
+			);
+			transformedRequest = new Request(transformedRequest.url, {
+				method: transformedRequest.method,
+				headers: transformedRequest.headers,
+				body: JSON.stringify(transformedBodyJson),
+			});
+			log.debug(
+				`Pre-stripped cache_control for known rejector: account=${account.name} model=${transformedModel}`,
+			);
+		}
 
 		// Make the request (or unwrap a synthetic provider response)
 		let rawResponse = isSyntheticProviderResponse(transformedRequest)
@@ -465,7 +632,7 @@ export async function proxyWithAccount(
 			);
 
 			// Filter thinking blocks from the request body
-			const filteredBodyBuffer = filterThinkingBlocks(effectiveBodyBuffer);
+			const filteredBodyBuffer = filterThinkingBlocks(effectiveBodyContext);
 
 			if (filteredBodyBuffer && filteredBodyBuffer !== effectiveBodyBuffer) {
 				// Retry the request with filtered body
@@ -490,6 +657,36 @@ export async function proxyWithAccount(
 				log.warn(
 					"Failed to filter thinking blocks or no changes made, proceeding with original error response",
 				);
+			}
+		}
+
+		// Retry without cache_control if provider rejected it (e.g. GLM-5.1 strict validation).
+		// Mark (accountId, model) so subsequent requests skip cache_control immediately.
+		if (await isCacheControlRejectionError(rawResponse)) {
+			const rejectorKey = cacheControlRejectorKey(account.id, transformedModel);
+			if (!cacheControlRejectors.has(rejectorKey)) {
+				// Mark before retry so subsequent requests pre-strip without a round-trip.
+				// The current caller still receives the retried response (or the original
+				// 400 if the retry also fails).
+				cacheControlRejectors.add(rejectorKey);
+				log.info(
+					`Provider rejected cache_control for account=${account.name} model=${transformedModel}, retrying without it`,
+				);
+			}
+
+			try {
+				const retryBodyJson = JSON.parse(transformedBodyText);
+				stripCacheControlFromOpenAIRequest(retryBodyJson);
+				const retryRequest = new Request(transformedRequest.url, {
+					method: transformedRequest.method,
+					headers: transformedRequest.headers,
+					body: JSON.stringify(retryBodyJson),
+				});
+				rawResponse = isSyntheticProviderResponse(retryRequest)
+					? materializeSyntheticResponse(retryRequest)
+					: await makeProxyRequest(retryRequest);
+			} catch (err) {
+				log.warn("Failed to retry without cache_control:", err);
 			}
 		}
 
@@ -519,14 +716,7 @@ export async function proxyWithAccount(
 				);
 			}
 			let requestedModel: string | null = null;
-			if (effectiveBodyBuffer) {
-				try {
-					const bodyText = new TextDecoder().decode(effectiveBodyBuffer);
-					requestedModel = JSON.parse(bodyText).model ?? null;
-				} catch {
-					// ignore
-				}
-			}
+			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
 			if (requestedModel) {
 				const modelList = getModelList(requestedModel, account);
@@ -536,8 +726,62 @@ export async function proxyWithAccount(
 					// accounts are available; only genuine model-not-found
 					// errors (404/400) warrant returning the upstream response.
 					if (rawResponse.status === 429) {
+						// Skip cooldown on synthetic cache-keepalive replays. The
+						// keepalive scheduler fires parallel requests to every
+						// cached account; a burst of 4+ simultaneous requests
+						// trips Anthropic's per-IP burst limit and 429s every
+						// account at the same instant. Applying real cooldowns
+						// here drains the pool to zero routable accounts even
+						// though no real user-facing rate limit was hit.
+						const isKeepalive =
+							req.headers.get("x-better-ccflare-keepalive") === "true";
+						if (isKeepalive) {
+							log.warn(
+								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
+							);
+							return null;
+						}
+
 						log.warn(
 							`Account ${account.name} rate-limited (429), no model fallbacks — failing over to next account`,
+						);
+						const cooldownUntil = extractCooldownUntil(
+							rawResponse,
+							account.id,
+							usageCache.getRateLimitedUntil.bind(usageCache),
+						);
+						const reason: RateLimitReason = "model_fallback_429";
+						log.warn(
+							`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()}`,
+						);
+						account.rate_limited_until = cooldownUntil;
+						const responseTime = Date.now() - requestMeta.timestamp;
+						ctx.asyncWriter.enqueue(() =>
+							ctx.dbOps.saveRequest(
+								crypto.randomUUID(),
+								req.method,
+								url.pathname,
+								account.id,
+								429,
+								false,
+								reason,
+								responseTime,
+								failoverAttempts,
+								undefined,
+								requestMeta.agentUsed ?? undefined,
+								apiKeyId ?? undefined,
+								apiKeyName ?? undefined,
+								requestMeta.project ?? null,
+								undefined,
+								requestMeta.comboName ?? null,
+							),
+						);
+						ctx.asyncWriter.enqueue(() =>
+							ctx.dbOps.markAccountRateLimited(
+								account.id,
+								cooldownUntil,
+								reason,
+							),
 						);
 						return null;
 					}
@@ -557,13 +801,10 @@ export async function proxyWithAccount(
 					// mapModelName internally which remaps non-Claude names back to the primary
 					// model (no family match → sonnet fallback). We always want nextModel to
 					// reach the upstream provider verbatim.
-					let patchedBody: ArrayBuffer | null = null;
-					try {
-						const bodyText = new TextDecoder().decode(effectiveBodyBuffer!);
-						const body = JSON.parse(bodyText);
-						body.model = nextModel;
-						patchedBody = new TextEncoder().encode(JSON.stringify(body)).buffer;
-					} catch {
+					const patchedContext =
+						effectiveBodyContext.withPatchedModel(nextModel);
+					const patchedBody = patchedContext?.getBuffer() ?? null;
+					if (!patchedBody) {
 						log.warn("Failed to patch request body for model retry");
 						break;
 					}
@@ -624,13 +865,89 @@ export async function proxyWithAccount(
 				log.warn(
 					`All models exhausted on account ${account.name}, failing over to next account`,
 				);
+				// Mark account rate-limited for 1 hour so that isAccountAvailable()
+				// excludes it from future requests until the cooldown expires.
+				// Without this write the DB state stays stale (rate_limited_until = null)
+				// and the same account is retried on every subsequent request.
+				// Only fire for genuine rate-limit responses (429); model-not-found
+				// (404/400) is a configuration issue, not account exhaustion.
+				if (rawResponse.status === 429) {
+					// Same keepalive-skip as the no-fallback path above: synthetic
+					// keepalive bursts can trip Anthropic's per-IP limit even when
+					// individual accounts are healthy.
+					const isKeepalive =
+						req.headers.get("x-better-ccflare-keepalive") === "true";
+					if (isKeepalive) {
+						log.warn(
+							`Keepalive replay for ${account.name} got 429 (post-model-list) — skipping cooldown`,
+						);
+					} else {
+						const cooldownUntil = extractCooldownUntil(
+							rawResponse,
+							account.id,
+							usageCache.getRateLimitedUntil.bind(usageCache),
+						);
+						const reason: RateLimitReason = "all_models_exhausted_429";
+						log.warn(
+							`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()}`,
+						);
+						account.rate_limited_until = cooldownUntil;
+						const responseTime = Date.now() - requestMeta.timestamp;
+						ctx.asyncWriter.enqueue(() =>
+							ctx.dbOps.saveRequest(
+								crypto.randomUUID(),
+								req.method,
+								url.pathname,
+								account.id,
+								429,
+								false,
+								reason,
+								responseTime,
+								failoverAttempts,
+								undefined,
+								requestMeta.agentUsed ?? undefined,
+								apiKeyId ?? undefined,
+								apiKeyName ?? undefined,
+								requestMeta.project ?? null,
+								undefined,
+								requestMeta.comboName ?? null,
+							),
+						);
+						ctx.asyncWriter.enqueue(() =>
+							ctx.dbOps.markAccountRateLimited(
+								account.id,
+								cooldownUntil,
+								reason,
+							),
+						);
+					}
+				}
 				return null;
 			}
 		}
 
+		// Inject request metadata into response headers so providers can read
+		// stream intent and request ID without needing the original request object.
+		const responseHeaders = new Headers(rawResponse.headers);
+		responseHeaders.set("x-better-ccflare-request-id", requestMeta.id);
+		const internalRequestStream = transformedRequest.headers.get(
+			"x-better-ccflare-request-stream",
+		);
+		if (internalRequestStream === "true" || internalRequestStream === "false") {
+			responseHeaders.set(
+				"x-better-ccflare-request-stream",
+				internalRequestStream,
+			);
+		}
+		const taggedRawResponse = new Response(rawResponse.body, {
+			status: rawResponse.status,
+			statusText: rawResponse.statusText,
+			headers: responseHeaders,
+		});
+
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
 		const response = await provider.processResponse(
-			rawResponse,
+			taggedRawResponse,
 			account,
 			req.headers,
 		);
@@ -667,12 +984,12 @@ export async function proxyWithAccount(
 				account,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
+				project: requestMeta.project,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts,
 				agentUsed: requestMeta.agentUsed,
-				project: requestMeta.project,
 				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
@@ -683,4 +1000,86 @@ export async function proxyWithAccount(
 		handleProxyError(err, account, log);
 		return null;
 	}
+}
+
+/**
+ * Create a 503 Service Unavailable response when the account pool is exhausted.
+ * All accounts are paused, rate-limited, or filtered out.
+ * @param accounts - All accounts that were considered but are unavailable
+ * @returns 503 response with pool_exhausted error and Retry-After header
+ */
+export function createPoolExhaustedResponse(accounts: Account[]): Response {
+	const now = Date.now();
+
+	// Build account info list
+	const accountInfos = accounts.map((account) => {
+		const reason = account.paused
+			? "paused"
+			: account.rate_limited_until && account.rate_limited_until > now
+				? "rate_limited"
+				: "unavailable";
+
+		const availableAt =
+			account.rate_limited_until && account.rate_limited_until > now
+				? new Date(account.rate_limited_until).toISOString()
+				: null;
+
+		return {
+			name: account.name,
+			reason,
+			available_at: availableAt,
+		};
+	});
+
+	// Calculate next_available_at from earliest rate_limited_until
+	const rateLimitedAccounts = accounts.filter(
+		(account) => account.rate_limited_until && account.rate_limited_until > now,
+	);
+	const nextAvailableAt =
+		rateLimitedAccounts.length > 0
+			? new Date(
+					Math.min(
+						...rateLimitedAccounts.map(
+							(account) => account.rate_limited_until!,
+						),
+					),
+				).toISOString()
+			: null;
+
+	// Calculate Retry-After header (seconds) directly from numeric min
+	const retryAfterSeconds =
+		rateLimitedAccounts.length > 0
+			? Math.max(
+					1,
+					Math.round(
+						(Math.min(
+							...rateLimitedAccounts.map(
+								(account) => account.rate_limited_until!,
+							),
+						) -
+							now) /
+							1000,
+					),
+				)
+			: 60; // Default 60s if no cooldown info
+
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "pool_exhausted",
+				message: ERROR_MESSAGES.POOL_EXHAUSTED,
+				next_available_at: nextAvailableAt,
+				accounts: accountInfos,
+			},
+		}),
+		{
+			status: 503,
+			headers: {
+				"Content-Type": "application/json",
+				"Retry-After": String(retryAfterSeconds),
+				"x-better-ccflare-pool-status": "exhausted",
+			},
+		},
+	);
 }

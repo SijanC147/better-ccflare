@@ -1,6 +1,7 @@
 import {
 	type Account,
 	type AccountRow,
+	type RateLimitReason,
 	toAccount,
 } from "@better-ccflare/types";
 import { BaseRepository } from "./base.repository";
@@ -11,13 +12,14 @@ export class AccountRepository extends BaseRepository<Account> {
 			SELECT
 				id, name, provider, api_key, refresh_token, access_token,
 				expires_at, created_at, last_used, request_count, total_requests,
-				rate_limited_until, session_start, session_request_count,
+				rate_limited_until, rate_limited_reason, rate_limited_at, session_start, session_request_count,
 				COALESCE(paused, 0) as paused,
 				rate_limit_reset, rate_limit_status, rate_limit_remaining,
 				COALESCE(priority, 0) as priority,
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 				COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 				COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
+				COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 				custom_endpoint,
 				model_mappings,
 				cross_region_mode,
@@ -37,13 +39,14 @@ export class AccountRepository extends BaseRepository<Account> {
 			SELECT
 				id, name, provider, api_key, refresh_token, access_token,
 				expires_at, created_at, last_used, request_count, total_requests,
-				rate_limited_until, session_start, session_request_count,
+				rate_limited_until, rate_limited_reason, rate_limited_at, session_start, session_request_count,
 				COALESCE(paused, 0) as paused,
 				rate_limit_reset, rate_limit_status, rate_limit_remaining,
 				COALESCE(priority, 0) as priority,
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 				COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 				COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
+				COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 				custom_endpoint,
 				model_mappings,
 				cross_region_mode,
@@ -106,11 +109,15 @@ export class AccountRepository extends BaseRepository<Account> {
 		);
 	}
 
-	async setRateLimited(accountId: string, until: number): Promise<void> {
-		await this.run(`UPDATE accounts SET rate_limited_until = ? WHERE id = ?`, [
-			until,
-			accountId,
-		]);
+	async setRateLimited(
+		accountId: string,
+		until: number,
+		reason: RateLimitReason,
+	): Promise<void> {
+		await this.run(
+			`UPDATE accounts SET rate_limited_until = ?, rate_limited_reason = ?, rate_limited_at = ? WHERE id = ?`,
+			[until, reason, Date.now(), accountId],
+		);
 	}
 
 	async updateRateLimitMeta(
@@ -130,6 +137,8 @@ export class AccountRepository extends BaseRepository<Account> {
 			`UPDATE accounts
 			 SET
 			 	rate_limited_until = NULL,
+			 	rate_limited_reason = NULL,
+			 	rate_limited_at = NULL,
 			 	rate_limit_reset = NULL,
 			 	rate_limit_status = NULL,
 			 	rate_limit_remaining = NULL

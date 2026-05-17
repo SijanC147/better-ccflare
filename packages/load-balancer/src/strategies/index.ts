@@ -11,6 +11,8 @@ import {
 	requiresSessionDurationTracking,
 } from "@better-ccflare/types";
 
+export { LeastUsedStrategy } from "./least-used";
+
 export class SessionStrategy implements LoadBalancingStrategy {
 	private sessionDurationMs: number;
 	private store: StrategyStore | null = null;
@@ -124,43 +126,63 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			return availabilityCache.get(account.id) || false;
 		};
 
-		// Check for higher priority accounts that have become available due to rate limit reset
+		// Check for higher priority accounts that have become available due to rate limit reset.
+		// Iterate through all candidates in priority order to find the first usable one.
 		const fallbackCandidates = this.checkForAutoFallbackAccounts(accounts, now);
-		if (fallbackCandidates.length > 0) {
-			const chosenFallback = fallbackCandidates[0];
+		let chosenFallback: Account | null = null;
+		const skippedByReason = new Map<string, string[]>();
+		for (const candidate of fallbackCandidates) {
+			// If the candidate is paused, only auto-unpause if it was paused due to
+			// overage, or `rate_limit_window` (reserved/future pause reason) — never auto-unpause
+			// manual or failure_threshold pauses.
+			if (candidate.paused && this.store?.resumeAccount) {
+				const canAutoUnpause =
+					!candidate.pause_reason ||
+					candidate.pause_reason === "overage" ||
+					candidate.pause_reason === "rate_limit_window";
+				if (canAutoUnpause) {
+					this.log.info(
+						`Unpausing account ${candidate.name} due to auto-fallback reactivation`,
+					);
+					this.store.resumeAccount(candidate.id);
+					candidate.paused = false;
+					// Invalidate the cache so getCachedAvailability reflects the unpause
+					availabilityCache.delete(candidate.id);
+				} else {
+					const reason = candidate.pause_reason || "unknown";
+					if (!skippedByReason.has(reason)) {
+						skippedByReason.set(reason, []);
+					}
+					skippedByReason.get(reason)?.push(candidate.name);
+					continue;
+				}
+			}
+
+			if (getCachedAvailability(candidate)) {
+				chosenFallback = candidate;
+				break;
+			}
+		}
+
+		for (const [reason, names] of skippedByReason) {
+			this.log.info(
+				`Skipping auto-unpause of ${names.length} account(s) paused for '${reason}': ${names.join(", ")}`,
+			);
+		}
+
+		if (chosenFallback !== null) {
 			if (!bypassSession) {
 				this.resetSessionIfExpired(chosenFallback);
 			}
 			this.log.info(
 				`Auto-fallback triggered to account ${chosenFallback.name} (priority: ${chosenFallback.priority}, auto-fallback enabled)`,
 			);
-
-			// If the chosen fallback account was paused, only auto-unpause if it was paused due to
-			// overage, or `rate_limit_window` (reserved/future pause reason) — never auto-unpause
-			// manual or failure_threshold pauses.
-			if (chosenFallback.paused && this.store?.resumeAccount) {
-				const canAutoUnpause =
-					!chosenFallback.pause_reason ||
-					chosenFallback.pause_reason === "overage" ||
-					chosenFallback.pause_reason === "rate_limit_window";
-				if (canAutoUnpause) {
-					this.log.info(
-						`Unpausing account ${chosenFallback.name} due to auto-fallback reactivation`,
-					);
-					this.store.resumeAccount(chosenFallback.id);
-					chosenFallback.paused = false;
-				} else {
-					this.log.info(
-						`Skipping auto-unpause of account ${chosenFallback.name} — paused with reason '${chosenFallback.pause_reason}' which requires manual intervention`,
-					);
-				}
-			}
-
-			// Return fallback account first, then others sorted by priority
-			const others = accounts
-				.filter((a) => a.id !== chosenFallback.id && getCachedAvailability(a))
+			// Return all available accounts sorted by priority — chosenFallback will appear
+			// first naturally if it is the highest-priority available account, avoiding
+			// priority inversion when other accounts rank higher.
+			return accounts
+				.filter((a) => getCachedAvailability(a))
 				.sort((a, b) => a.priority - b.priority);
-			return [chosenFallback, ...others];
 		}
 
 		// Find account with active session (most recent session_start within window)
@@ -225,10 +247,22 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 
 		// No active session or active account is rate limited
-		// Filter available accounts and sort by priority (lower number = higher priority)
+		// Filter available accounts and sort by priority (lower number = higher priority).
+		// Within the same priority, break ties by utilization (ascending) so that the
+		// account with the most remaining capacity is chosen first.
 		const available = accounts
 			.filter((a) => getCachedAvailability(a))
-			.sort((a, b) => a.priority - b.priority);
+			.sort((a, b) => {
+				if (a.priority !== b.priority) return a.priority - b.priority;
+				// Treat null as 0: an account with no usage data is assumed fresh
+				// (maximum remaining capacity). This prevents newly-added accounts
+				// from being permanently sidelined until all others expire.
+				const utilA =
+					this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
+				const utilB =
+					this.store?.getAccountUtilization?.(b.id, b.provider) ?? 0;
+				return utilA - utilB;
+			});
 
 		if (available.length === 0) return [];
 

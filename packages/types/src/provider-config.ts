@@ -16,6 +16,8 @@ export const PROVIDER_NAMES = {
 	ALIBABA_CODING_PLAN: "alibaba-coding-plan",
 	CODEX: "codex",
 	QWEN: "qwen",
+	OLLAMA: "ollama",
+	OLLAMA_CLOUD: "ollama-cloud",
 } as const;
 
 export type ProviderName = (typeof PROVIDER_NAMES)[keyof typeof PROVIDER_NAMES];
@@ -129,6 +131,18 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		supportsUsageTracking: true, // Usage tracked via response body (OpenAI-compatible)
 		supportsOAuth: true, // Qwen uses OAuth 2.0 device code flow
 		defaultEndpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+	},
+	[PROVIDER_NAMES.OLLAMA]: {
+		requiresSessionTracking: false,
+		supportsUsageTracking: false,
+		supportsOAuth: false,
+		defaultEndpoint: "http://localhost:11434",
+	},
+	[PROVIDER_NAMES.OLLAMA_CLOUD]: {
+		requiresSessionTracking: false,
+		supportsUsageTracking: false,
+		supportsOAuth: false,
+		defaultEndpoint: "https://ollama.com",
 	},
 } as const satisfies Record<ProviderName, ProviderConfig>;
 

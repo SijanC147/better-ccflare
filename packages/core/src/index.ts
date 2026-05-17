@@ -73,6 +73,12 @@ export {
 } from "./pricing";
 export * from "./request-events";
 export * from "./strategy";
+export {
+	computeWindowStartMs,
+	FIXED_WINDOW_DURATION_MS,
+	type SupportedWindow,
+} from "./throttle-utils";
+export { TtlCache } from "./ttl-cache";
 export { levenshteinDistance } from "./utils";
 export {
 	patterns,

@@ -22,9 +22,16 @@ import {
 	initPayloadEncryption,
 } from "@better-ccflare/database";
 import { APIRouter, AuthService } from "@better-ccflare/http-api";
-import { SessionStrategy } from "@better-ccflare/load-balancer";
+import {
+	LeastUsedStrategy,
+	SessionStrategy,
+} from "@better-ccflare/load-balancer";
 import { Logger } from "@better-ccflare/logger";
-import { getProvider, usageCache } from "@better-ccflare/providers";
+import {
+	getProvider,
+	getRepresentativeUtilizationForProvider,
+	usageCache,
+} from "@better-ccflare/providers";
 import {
 	canUseInferenceProfileDynamic,
 	parseBedrockConfig,
@@ -42,13 +49,35 @@ import {
 	registerRefreshClearer,
 	sendWorkerConfigUpdate,
 	startGlobalTokenHealthChecks,
+	startIntegrityScheduler,
 	startUsageWorker,
 	stopGlobalTokenHealthChecks,
 	terminateUsageWorker,
 } from "@better-ccflare/proxy";
 import { validatePathOrThrow } from "@better-ccflare/security";
-import type { Account } from "@better-ccflare/types";
+import {
+	type Account,
+	type LoadBalancingStrategy,
+	StrategyName,
+	type StrategyStore,
+} from "@better-ccflare/types";
 import { serve } from "bun";
+
+/**
+ * Build a load-balancing strategy from its enum name. Add new strategies here
+ * as additional cases. Falls back to SessionStrategy on unknown values.
+ */
+function buildStrategy(
+	name: StrategyName,
+	sessionDurationMs: number,
+): LoadBalancingStrategy {
+	switch (name) {
+		case StrategyName.LeastUsed:
+			return new LeastUsedStrategy();
+		default:
+			return new SessionStrategy(sessionDurationMs);
+	}
+}
 
 // Import embedded dashboard assets (will be bundled in compiled binary)
 let embeddedDashboard: Record<
@@ -182,6 +211,7 @@ let stopOAuthCleanupJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
+let stopIntegritySchedulerJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
@@ -340,6 +370,33 @@ function startUsagePollingWithRefresh(
 						.catch((err) =>
 							logger.warn(
 								`Failed to reset session for account ${accountId} on window reset: ${err}`,
+							),
+						);
+				},
+				(accountId) => {
+					// Usage API shows available capacity (<100%). If rate_limited_until is
+					// set in the future (seat-reassignment case), clear it now rather than
+					// waiting for the natural expiry timer — the polling loop has confirmed
+					// the seat is available again.
+					proxyContext.dbOps
+						.getAccount(accountId)
+						.then((acc) => {
+							if (
+								acc?.rate_limited_until &&
+								Number(acc.rate_limited_until) > Date.now()
+							) {
+								return proxyContext.dbOps
+									.forceResetAccountRateLimit(accountId)
+									.then(() => {
+										logger.info(
+											`Cleared stale rate_limited_until for account ${acc.name} (${accountId}): usage polling shows available capacity (seat reassignment or early reset)`,
+										);
+									});
+							}
+						})
+						.catch((err) =>
+							logger.warn(
+								`Failed to check/clear rate_limited_until for account ${accountId} on capacity restore: ${err}`,
 							),
 						);
 				},
@@ -554,6 +611,9 @@ export default async function startServer(options?: {
 		dbOps.runIntegrityCheck();
 	}
 
+	// Start periodic integrity scheduler
+	stopIntegritySchedulerJob = startIntegrityScheduler(dbOps);
+
 	const db = dbOps.getAdapter();
 	const log = container.resolve<Logger>(SERVICE_KEYS.Logger);
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
@@ -578,6 +638,7 @@ export default async function startServer(options?: {
 		},
 		getAsyncWriterHealth: () => asyncWriter.getHealth(),
 		getUsageWorkerHealth: () => getUsageWorkerHealth(),
+		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 	});
 
 	// Initialize AuthService for proxy authentication
@@ -709,8 +770,21 @@ export default async function startServer(options?: {
 	};
 
 	// Now create the strategy with runtime config
-	const strategy = new SessionStrategy(runtimeConfig.sessionDurationMs);
-	strategy.initialize(dbOps);
+	const strategy = buildStrategy(
+		config.getStrategy(),
+		runtimeConfig.sessionDurationMs,
+	);
+	log.info(`Load-balancing strategy: ${config.getStrategy()}`);
+
+	const strategyStore: StrategyStore = Object.assign(dbOps, {
+		getAccountUtilization(accountId: string, provider: string): number | null {
+			const data = usageCache.get(accountId);
+			if (!data) return null;
+			return getRepresentativeUtilizationForProvider(data, provider);
+		},
+	});
+
+	strategy.initialize?.(strategyStore);
 
 	// Start usage worker eagerly (before first request)
 	startUsageWorker();
@@ -785,14 +859,14 @@ export default async function startServer(options?: {
 	// Hot reload strategy configuration
 	config.on("change", ({ key }: { key: string }) => {
 		if (key === "lb_strategy") {
-			log.info(`Strategy configuration changed to: ${config.getStrategy()}`);
 			const newStrategyName = config.getStrategy();
-			// For now, only SessionStrategy is supported
-			if (newStrategyName === "session") {
-				const strategy = new SessionStrategy(runtimeConfig.sessionDurationMs);
-				strategy.initialize(dbOps);
-				proxyContext.strategy = strategy;
-			}
+			log.info(`Strategy configuration changed to: ${newStrategyName}`);
+			const strategy = buildStrategy(
+				newStrategyName,
+				runtimeConfig.sessionDurationMs,
+			);
+			strategy.initialize?.(strategyStore);
+			proxyContext.strategy = strategy;
 		}
 		if (key === "store_payloads") {
 			sendWorkerConfigUpdate(config.getStorePayloads());
@@ -1287,6 +1361,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (stopWalCheckpointJob) {
 			stopWalCheckpointJob();
 			stopWalCheckpointJob = null;
+		}
+		if (stopIntegritySchedulerJob) {
+			stopIntegritySchedulerJob();
+			stopIntegritySchedulerJob = null;
 		}
 		if (autoRefreshScheduler) {
 			autoRefreshScheduler.stop();

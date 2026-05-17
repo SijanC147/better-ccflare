@@ -11,11 +11,25 @@ import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import type { UsageWorkerController } from "./usage-worker-controller";
 import type { ChunkMessage, EndMessage, StartMessage } from "./worker-messages";
 
+type ResponseWithAnalyticsStream = Response & {
+	[ANALYTICS_STREAM_SYMBOL]?: ReadableStream<Uint8Array>;
+};
+
 // Default cooldown for rate-limit errors detected mid-stream. SSE error
 // frames don't carry reset headers (HTTP headers were sent before the
-// error occurred), so we fall back to the same 5h default that
-// response-processor.ts uses for headerless 429 responses.
-const MID_STREAM_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 60 * 1000;
+// error occurred), so we fall back to the same probe-friendly default
+// that response-processor.ts uses for headerless 429 responses.
+//
+// Read on every call (not module load) so a runtime change to the env
+// var is picked up without a server restart. Use `||` (not `??`) so an
+// empty-string env value (Number("") === 0) falls through to the default
+// instead of silently disabling the cooldown.
+function getMidStreamRateLimitCooldownMs(): number {
+	return (
+		Number(process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) ||
+		TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS
+	);
+}
 
 // Must match MAX_REQUEST_BODY_BYTES in post-processor.worker.ts.
 // Cap applied before postMessage to avoid multi-MB structured clones.
@@ -54,12 +68,12 @@ export interface ResponseHandlerOptions {
 	account: Account | null;
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
+	project?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
 	failoverAttempts: number;
 	agentUsed?: string | null;
-	project?: string | null;
 	apiKeyId?: string | null;
 	apiKeyName?: string | null;
 	comboName?: string | null;
@@ -81,12 +95,12 @@ export async function forwardToClient(
 		account,
 		requestHeaders,
 		requestBody,
+		project,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
 		failoverAttempts,
 		agentUsed,
-		project,
 		apiKeyId,
 		apiKeyName,
 		comboName,
@@ -102,12 +116,22 @@ export async function forwardToClient(
 	const responseHeadersObj = Object.fromEntries(response.headers.entries());
 
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
+	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
 
-	// Filter out count_tokens requests for OpenAI-compatible providers from request logs and worker
-	const shouldProcessRequest = !(
-		ctx.provider.name === "openai-compatible" &&
-		path === "/v1/messages/count_tokens"
-	);
+	// Filter out:
+	//   - count_tokens requests on OpenAI-compatible providers (existing
+	//     filter — these aren't billable user traffic).
+	//   - synthetic auto-refresh probes (issue #199, bug 2). Logging these
+	//     pollutes the user-visible 503/200 metrics on the dashboard with
+	//     internal scheduler activity. Header set by AutoRefreshScheduler
+	//     mirrors the existing keepalive pattern.
+	const isAutoRefreshProbe =
+		requestHeaders.get("x-better-ccflare-auto-refresh") === "true";
+	const shouldProcessRequest =
+		!(
+			ctx.provider.name === "openai-compatible" &&
+			path === "/v1/messages/count_tokens"
+		) && !isAutoRefreshProbe;
 
 	// Send START message immediately if not filtered
 	if (shouldProcessRequest) {
@@ -120,25 +144,16 @@ export async function forwardToClient(
 			path,
 			timestamp,
 			requestHeaders: requestHeadersObj,
-			// Cap request body BEFORE postMessage to avoid sending multi-MB
-			// conversation contexts via structured clone. The worker already
-			// caps stored payloads, but the full body was being cloned
-			// across the worker boundary first. See #67.
-			//
-			// TODO(future): The worker only uses requestBody for DB payload
-			// storage — _extractSystemPrompt() in the worker is dead code
-			// (agent-interceptor.ts handles that on the main thread). Consider
-			// writing the payload directly from the main thread and removing
-			// requestBody from StartMessage entirely to avoid the postMessage
-			// copy altogether.
-			requestBody: requestBody
-				? Buffer.from(
-						new Uint8Array(requestBody).subarray(
-							0,
-							Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
-						),
-					).toString("base64")
-				: null,
+			requestBody:
+				shouldStorePayloads && requestBody
+					? Buffer.from(
+							new Uint8Array(requestBody).subarray(
+								0,
+								Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
+							),
+						).toString("base64")
+					: null,
+			project: project ?? null,
 			responseStatus: response.status,
 			responseHeaders: responseHeadersObj,
 			isStream,
@@ -149,7 +164,6 @@ export async function forwardToClient(
 				: 0,
 			accountName: account?.name ?? null,
 			agentUsed: agentUsed || null,
-			project: project || null,
 			comboName: comboName || null,
 			apiKeyId: apiKeyId || null,
 			apiKeyName: apiKeyName || null,
@@ -174,20 +188,33 @@ export async function forwardToClient(
 	}
 
 	/*********************************************************************
-	 *  STREAMING RESPONSES — tee with Response.clone() and send chunks
+	 *  STREAMING RESPONSES — tee the body and send analytics chunks
 	 *********************************************************************/
 	if (isStream && response.body) {
-		// For OpenAI providers, use pre-teed analytics stream if available
-		// Otherwise clone the response
-		const preTeedStream = (response as any)[ANALYTICS_STREAM_SYMBOL];
-		const analyticsClone =
-			preTeedStream && preTeedStream instanceof ReadableStream
-				? new Response(preTeedStream, {
-						status: response.status,
-						statusText: response.statusText,
-						headers: response.headers,
-					})
-				: response.clone();
+		let clientResponse = response;
+
+		// For OpenAI providers, use pre-teed analytics stream if available.
+		// Otherwise tee the sanitized response body to avoid Response.clone().
+		const preTeedStream = (response as ResponseWithAnalyticsStream)[
+			ANALYTICS_STREAM_SYMBOL
+		];
+		let analyticsStream: ReadableStream<Uint8Array>;
+		if (preTeedStream && preTeedStream instanceof ReadableStream) {
+			analyticsStream = preTeedStream;
+		} else {
+			const [clientStream, analyticsBranch] = response.body.tee();
+			clientResponse = new Response(clientStream, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: response.headers,
+			});
+			analyticsStream = analyticsBranch;
+		}
+		const analyticsResponse = new Response(analyticsStream, {
+			status: response.status,
+			statusText: response.statusText,
+			headers: response.headers,
+		});
 
 		// Mid-stream rate-limit detection for issue #114 Fix 1.2. Only
 		// create a sniffer when we know which account to mark — anonymous
@@ -208,7 +235,7 @@ export async function forwardToClient(
 			);
 
 			try {
-				const reader = analyticsClone.body?.getReader();
+				const reader = analyticsResponse.body?.getReader();
 				if (!reader) return; // Safety check
 
 				const startTime = Date.now();
@@ -261,12 +288,14 @@ export async function forwardToClient(
 
 						if (value) {
 							lastChunkTime = Date.now();
-							const chunkMsg: ChunkMessage = {
-								type: "chunk",
-								requestId,
-								data: value,
-							};
-							safePostMessage(ctx.usageWorker, chunkMsg);
+							if (shouldProcessRequest) {
+								const chunkMsg: ChunkMessage = {
+									type: "chunk",
+									requestId,
+									data: value,
+								};
+								safePostMessage(ctx.usageWorker, chunkMsg);
+							}
 
 							// Mid-stream rate-limit detection. The sniffer
 							// fires exactly once; after that feed() is a no-op.
@@ -275,7 +304,7 @@ export async function forwardToClient(
 									account,
 									{
 										isRateLimited: true,
-										resetTime: Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS,
+										resetTime: Date.now() + getMidStreamRateLimitCooldownMs(),
 									},
 									ctx,
 								);
@@ -291,37 +320,66 @@ export async function forwardToClient(
 					}
 				}
 				// Finished without errors
-				const endMsg: EndMessage = {
-					type: "end",
-					requestId,
-					success: isExpectedResponse(path, analyticsClone),
-				};
-				safePostMessage(ctx.usageWorker, endMsg);
+				if (shouldProcessRequest) {
+					const endMsg: EndMessage = {
+						type: "end",
+						requestId,
+						success: isExpectedResponse(path, analyticsResponse),
+					};
+					safePostMessage(ctx.usageWorker, endMsg);
+				}
 			} catch (err) {
-				const endMsg: EndMessage = {
-					type: "end",
-					requestId,
-					success: false,
-					error: (err as Error).message,
-				};
-				safePostMessage(ctx.usageWorker, endMsg);
+				if (shouldProcessRequest) {
+					const endMsg: EndMessage = {
+						type: "end",
+						requestId,
+						success: false,
+						error: (err as Error).message,
+					};
+					safePostMessage(ctx.usageWorker, endMsg);
+				}
 			}
 		})();
 
-		// Return the sanitized response
-		return response;
+		// Return the sanitized response backed by the client stream branch.
+		return clientResponse;
 	}
 
 	/*********************************************************************
 	 *  NON-STREAMING RESPONSES — read body in background, send END once
 	 *********************************************************************/
+	if (!response.body) {
+		if (shouldProcessRequest) {
+			const endMsg: EndMessage = {
+				type: "end",
+				requestId,
+				responseBody: null,
+				success: isExpectedResponse(path, response),
+			};
+			safePostMessage(ctx.usageWorker, endMsg);
+		}
+
+		return response;
+	}
+
+	const [clientStream, analyticsStream] = response.body.tee();
+	const clientResponse = new Response(clientStream, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: response.headers,
+	});
+	const analyticsResponse = new Response(analyticsStream, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: response.headers,
+	});
+
 	(async () => {
 		const MAX_NON_STREAM_BODY_BYTES = 256 * 1024; // 256KB cap for stored body
 		try {
-			const clone = response.clone();
 			// Read body via stream, stopping once the cap is reached to avoid
 			// loading an unbounded response into memory before truncation.
-			const reader = clone.body?.getReader();
+			const reader = analyticsResponse.body?.getReader();
 			let cappedBuf: Buffer;
 			if (!reader) {
 				cappedBuf = Buffer.alloc(0);
@@ -344,25 +402,29 @@ export async function forwardToClient(
 				}
 				cappedBuf = Buffer.concat(chunks);
 			}
-			const endMsg: EndMessage = {
-				type: "end",
-				requestId,
-				responseBody:
-					cappedBuf.byteLength > 0 ? cappedBuf.toString("base64") : null,
-				success: isExpectedResponse(path, clone),
-			};
-			safePostMessage(ctx.usageWorker, endMsg);
+			if (shouldProcessRequest) {
+				const endMsg: EndMessage = {
+					type: "end",
+					requestId,
+					responseBody:
+						cappedBuf.byteLength > 0 ? cappedBuf.toString("base64") : null,
+					success: isExpectedResponse(path, analyticsResponse),
+				};
+				safePostMessage(ctx.usageWorker, endMsg);
+			}
 		} catch (err) {
-			const endMsg: EndMessage = {
-				type: "end",
-				requestId,
-				success: false,
-				error: (err as Error).message,
-			};
-			safePostMessage(ctx.usageWorker, endMsg);
+			if (shouldProcessRequest) {
+				const endMsg: EndMessage = {
+					type: "end",
+					requestId,
+					success: false,
+					error: (err as Error).message,
+				};
+				safePostMessage(ctx.usageWorker, endMsg);
+			}
 		}
 	})();
 
 	// Return the sanitized response
-	return response;
+	return clientResponse;
 }

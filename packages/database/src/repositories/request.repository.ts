@@ -57,40 +57,6 @@ export interface RequestData {
 }
 
 export class RequestRepository extends BaseRepository<RequestData> {
-	async saveMeta(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		timestamp?: number,
-		apiKeyId?: string,
-		apiKeyName?: string,
-		project?: string | null,
-	): Promise<void> {
-		await this.run(
-			`
-			INSERT INTO requests (
-				id, timestamp, method, path, account_used,
-				status_code, success, error_message, response_time_ms, failover_attempts,
-				api_key_id, api_key_name, project
-			)
-			VALUES (?, ?, ?, ?, ?, ?, FALSE, NULL, 0, 0, ?, ?, ?)
-		`,
-			[
-				id,
-				timestamp || Date.now(),
-				method,
-				path,
-				accountUsed,
-				statusCode,
-				apiKeyId || null,
-				apiKeyName || null,
-				project || null,
-			],
-		);
-	}
-
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
 		await this.run(
@@ -261,18 +227,24 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		);
 	}
 
-	async listPayloadsWithAccountNames(
-		limit = 50,
-	): Promise<Array<{ id: string; json: string; account_name: string | null }>> {
+	async listPayloadsWithAccountNames(limit = 50): Promise<
+		Array<{
+			id: string;
+			json: string | null;
+			timestamp: number;
+			account_name: string | null;
+		}>
+	> {
 		const rows = await this.query<{
 			id: string;
-			json: string;
+			json: string | null;
+			timestamp: number;
 			account_name: string | null;
 		}>(
 			`
-			SELECT rp.id, rp.json, a.name as account_name
-			FROM request_payloads rp
-			JOIN requests r ON rp.id = r.id
+			SELECT r.id, r.timestamp, rp.json, a.name as account_name
+			FROM requests r
+			LEFT JOIN request_payloads rp ON rp.id = r.id
 			LEFT JOIN accounts a ON r.account_used = a.id
 			ORDER BY r.timestamp DESC
 			LIMIT ?
@@ -282,7 +254,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		return Promise.all(
 			rows.map(async (row) => ({
 				id: row.id,
-				json: await decryptForList(row.id, row.json),
+				timestamp: row.timestamp,
+				json: row.json ? await decryptForList(row.id, row.json) : null,
 				account_name: row.account_name,
 			})),
 		);

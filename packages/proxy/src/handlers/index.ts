@@ -1,4 +1,8 @@
 export {
+	RequestBodyContext,
+	type RequestJsonBody,
+} from "../request-body-context";
+export {
 	getComboSlotInfo,
 	selectAccountsForRequest,
 	setComboSlotInfo,
@@ -7,7 +11,11 @@ export {
 	type AgentInterceptResult,
 	interceptAndModifyRequest,
 } from "./agent-interceptor";
-export { proxyUnauthenticated, proxyWithAccount } from "./proxy-operations";
+export {
+	createPoolExhaustedResponse,
+	proxyUnauthenticated,
+	proxyWithAccount,
+} from "./proxy-operations";
 export { ERROR_MESSAGES, type ProxyContext, TIMING } from "./proxy-types";
 export {
 	createRequestMetadata,
@@ -36,3 +44,8 @@ export {
 	registerRefreshClearer,
 	restartUsagePollingForAccount,
 } from "./token-manager";
+export {
+	createUsageThrottledResponse,
+	getUsageThrottleStatus,
+	getUsageThrottleUntil,
+} from "./usage-throttling";

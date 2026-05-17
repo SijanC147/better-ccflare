@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "../proxy-types";
-import { processProxyResponse } from "../response-processor";
+import {
+	handleRateLimitResponse,
+	processProxyResponse,
+} from "../response-processor";
 
 // Minimal Account fixture used by every test in this file. Only the fields
 // the response-processor actually reads matter — the rest exist to satisfy
@@ -64,7 +67,11 @@ function makeCtx(opts: {
 			extractUsageInfo: undefined,
 		},
 		dbOps: {
-			markAccountRateLimited: (accountId: string, resetTime: number) => {
+			markAccountRateLimited: (
+				accountId: string,
+				resetTime: number,
+				_reason: string,
+			) => {
 				calls.markRateLimited.push({ accountId, resetTime });
 			},
 			updateAccountUsage: () => {},
@@ -89,6 +96,130 @@ function makeCtx(opts: {
 
 	return { ctx, calls };
 }
+
+// Extended spy context that captures the reason argument passed to markAccountRateLimited.
+function makeCtxWithReason(opts: {
+	isStream: boolean;
+	rateLimited: boolean;
+	resetTime?: number;
+}) {
+	const calls = {
+		markRateLimited: [] as Array<{
+			accountId: string;
+			resetTime: number;
+			reason: string;
+		}>,
+		enqueueCount: 0,
+	};
+
+	const ctx = {
+		provider: {
+			name: "anthropic",
+			isStreamingResponse: () => opts.isStream,
+			parseRateLimit: () => ({
+				isRateLimited: opts.rateLimited,
+				resetTime: opts.resetTime,
+				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
+				remaining: undefined,
+			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
+		},
+		dbOps: {
+			markAccountRateLimited: (
+				accountId: string,
+				resetTime: number,
+				reason: string,
+			) => {
+				calls.markRateLimited.push({ accountId, resetTime, reason });
+			},
+			updateAccountUsage: () => {},
+			updateAccountRateLimitMeta: () => {},
+			getAdapter: () => ({
+				get: async () => ({ rate_limited_until: null }),
+				run: async () => {},
+			}),
+			updateRequestUsage: async () => {},
+		},
+		asyncWriter: {
+			enqueue: (job: () => void | Promise<void>) => {
+				calls.enqueueCount++;
+				void job();
+			},
+		},
+	} as unknown as ProxyContext;
+
+	return { ctx, calls };
+}
+
+describe("processProxyResponse — rate limit audit trail (issue #178)", () => {
+	it("passes reason='upstream_429_with_reset' when resetTime is present", async () => {
+		const account = makeAccount();
+		const resetTime = Date.now() + 30 * 60_000;
+		const { ctx, calls } = makeCtxWithReason({
+			isStream: false,
+			rateLimited: true,
+			resetTime,
+		});
+		const response = new Response('{"error":"rate_limit"}', {
+			status: 429,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		expect(calls.markRateLimited).toHaveLength(1);
+		expect(calls.markRateLimited[0]?.accountId).toBe(account.id);
+		expect(calls.markRateLimited[0]?.resetTime).toBe(resetTime);
+		expect(calls.markRateLimited[0]?.reason).toBe("upstream_429_with_reset");
+	});
+
+	it("passes reason='upstream_429_no_reset_probe_cooldown' when no resetTime", async () => {
+		const account = makeAccount();
+		const before = Date.now();
+		const { ctx, calls } = makeCtxWithReason({
+			isStream: false,
+			rateLimited: true,
+			resetTime: undefined,
+		});
+		const response = new Response('{"error":"rate_limit"}', {
+			status: 429,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		expect(calls.markRateLimited).toHaveLength(1);
+		expect(calls.markRateLimited[0]?.accountId).toBe(account.id);
+		expect(calls.markRateLimited[0]?.reason).toBe(
+			"upstream_429_no_reset_probe_cooldown",
+		);
+		// Default cooldown is 60s (DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS). Allow ±1s drift.
+		const SIXTY_SECONDS = 60 * 1000;
+		const reset = calls.markRateLimited[0]?.resetTime ?? 0;
+		expect(reset).toBeGreaterThanOrEqual(before + SIXTY_SECONDS - 1000);
+		expect(reset).toBeLessThanOrEqual(Date.now() + SIXTY_SECONDS + 1000);
+	});
+
+	it("passes reason='upstream_429_with_reset' on streaming 429 with resetTime", async () => {
+		const account = makeAccount();
+		const resetTime = Date.now() + 60 * 60_000;
+		const { ctx, calls } = makeCtxWithReason({
+			isStream: true,
+			rateLimited: true,
+			resetTime,
+		});
+		const response = new Response("rate limited", {
+			status: 429,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		expect(calls.markRateLimited).toHaveLength(1);
+		expect(calls.markRateLimited[0]?.reason).toBe("upstream_429_with_reset");
+	});
+});
 
 describe("processProxyResponse — streaming rate-limit failover (issue #114)", () => {
 	it("returns true and marks the account on a streaming 429", async () => {
@@ -153,10 +284,10 @@ describe("processProxyResponse — streaming rate-limit failover (issue #114)", 
 		expect(calls.markRateLimited).toHaveLength(0);
 	});
 
-	it("falls back to a default 5h window when a streaming 429 has no resetTime", async () => {
+	it("falls back to a default 60s probe cooldown when a streaming 429 has no resetTime", async () => {
 		// Some providers return 429s without rate-limit headers. The current
-		// code path defaults to a 5h cooldown — make sure that still fires
-		// for the streaming case after the !isStream guard removal.
+		// code path defaults to a 60s probe cooldown (DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS)
+		// instead of the old 5h hard-ban, to avoid pool exhaustion on transient errors.
 		const account = makeAccount();
 		const before = Date.now();
 		const { ctx, calls } = makeCtx({
@@ -173,10 +304,134 @@ describe("processProxyResponse — streaming rate-limit failover (issue #114)", 
 
 		expect(result).toBe(true);
 		expect(calls.markRateLimited).toHaveLength(1);
-		// Default cooldown is Date.now() + 5h. Allow ±1s for test runtime drift.
-		const FIVE_HOURS = 5 * 60 * 60 * 1000;
+		// Default cooldown is 60s. Allow ±1s for test runtime drift.
+		const SIXTY_SECONDS = 60 * 1000;
 		const reset = calls.markRateLimited[0]?.resetTime ?? 0;
-		expect(reset).toBeGreaterThanOrEqual(before + FIVE_HOURS - 1000);
-		expect(reset).toBeLessThanOrEqual(Date.now() + FIVE_HOURS + 1000);
+		expect(reset).toBeGreaterThanOrEqual(before + SIXTY_SECONDS - 1000);
+		expect(reset).toBeLessThanOrEqual(Date.now() + SIXTY_SECONDS + 1000);
+	});
+});
+
+describe("handleRateLimitResponse — in-memory cooldown mutation", () => {
+	it("sets account.rate_limited_until to resetTime when resetTime is present", () => {
+		const account = makeAccount();
+		const resetTime = Date.now() + 30 * 60_000;
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: true,
+			resetTime,
+		});
+		const rateLimitInfo = {
+			isRateLimited: true,
+			resetTime,
+			statusHeader: "rate_limited",
+			remaining: undefined,
+		};
+
+		handleRateLimitResponse(account, rateLimitInfo, ctx);
+
+		// In-memory mutation should be set immediately
+		expect(account.rate_limited_until).toBe(resetTime);
+	});
+
+	it("does not mutate account.rate_limited_until when resetTime is undefined", () => {
+		const account = makeAccount();
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: true,
+			resetTime: undefined,
+		});
+		const rateLimitInfo = {
+			isRateLimited: true,
+			resetTime: undefined,
+			statusHeader: "rate_limited",
+			remaining: undefined,
+		};
+
+		handleRateLimitResponse(account, rateLimitInfo, ctx);
+
+		// handleRateLimitResponse only mutates when resetTime is present
+		expect(account.rate_limited_until).toBeNull();
+	});
+});
+
+describe("processProxyResponse — in-memory cooldown mutation", () => {
+	it("sets account.rate_limited_until on 429 with resetTime", async () => {
+		const account = makeAccount();
+		const resetTime = Date.now() + 30 * 60_000;
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: true,
+			resetTime,
+		});
+		const response = new Response('{"error":"rate_limit"}', {
+			status: 429,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		expect(account.rate_limited_until).toBe(resetTime);
+	});
+
+	it("sets account.rate_limited_until to ~60s on 429 without resetTime", async () => {
+		const account = makeAccount();
+		const before = Date.now();
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: true,
+			resetTime: undefined,
+		});
+		const response = new Response('{"error":"rate_limit"}', {
+			status: 429,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		expect(account.rate_limited_until).not.toBeNull();
+		const SIXTY_SECONDS = 60 * 1000;
+		expect(account.rate_limited_until ?? 0).toBeGreaterThanOrEqual(
+			before + SIXTY_SECONDS - 1000,
+		);
+		expect(account.rate_limited_until ?? 0).toBeLessThanOrEqual(
+			Date.now() + SIXTY_SECONDS + 1000,
+		);
+	});
+
+	it("clears account.rate_limited_until on successful response", async () => {
+		const account = makeAccount({
+			rate_limited_until: Date.now() + 60_000, // previously rate-limited
+		});
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: false,
+		});
+		const response = new Response('{"id":"msg_1"}', {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		// Successful response clears cooldown
+		expect(account.rate_limited_until).toBeNull();
+	});
+
+	it("does not clear account.rate_limited_until when already null on success", async () => {
+		const account = makeAccount(); // rate_limited_until is null by default
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: false,
+		});
+		const response = new Response('{"id":"msg_1"}', {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+
+		// No mutation needed — already null
+		expect(account.rate_limited_until).toBeNull();
 	});
 });

@@ -17,6 +17,7 @@ export interface StartMessage {
 	// Request details
 	requestHeaders: Record<string, string>;
 	requestBody: string | null; // base64 encoded
+	project: string | null;
 
 	// Response details
 	responseStatus: number;
@@ -37,9 +38,6 @@ export interface StartMessage {
 
 	// Agent info
 	agentUsed: string | null;
-
-	// Project info (from X-CCFlare-Project header)
-	project: string | null;
 
 	// Combo info
 	comboName: string | null;

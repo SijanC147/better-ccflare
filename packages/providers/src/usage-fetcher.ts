@@ -15,6 +15,7 @@ import {
 } from "./kilo-usage-fetcher";
 import {
 	fetchNanoGPTUsageData,
+	getRepresentativeNanoGPTUtilization,
 	type NanoGPTUsageData,
 } from "./nanogpt-usage-fetcher";
 import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
@@ -266,6 +267,59 @@ export function getRepresentativeWindow(
 }
 
 /**
+ * Get the representative utilization for any supported provider type.
+ * Returns null if the provider is not supported or data is unavailable.
+ */
+export function getRepresentativeUtilizationForProvider(
+	data: AnyUsageData,
+	provider: string,
+): number | null {
+	switch (provider) {
+		case "anthropic":
+		case "codex": {
+			const d = data as UsageData;
+			// Only account-level windows count as hard limits. Model-specific windows
+			// (seven_day_sonnet, seven_day_opus) are excluded: they are mutual fallbacks
+			// and Anthropic never exposes both simultaneously, so neither is a hard limit.
+			const utils: number[] = [];
+			for (const key of [
+				"five_hour",
+				"seven_day",
+				"seven_day_oauth_apps",
+			] as const) {
+				const w = d[key] as UsageWindow | undefined;
+				if (w?.utilization != null) utils.push(w.utilization);
+			}
+			// extra_usage has utilization: number | null
+			if (d.extra_usage?.utilization != null)
+				utils.push(d.extra_usage.utilization);
+			return utils.length > 0 ? Math.max(...utils) : null;
+		}
+		case "nanogpt": {
+			return getRepresentativeNanoGPTUtilization(data as NanoGPTUsageData);
+		}
+		case "zai": {
+			const zai = data as ZaiUsageData;
+			const candidates = [
+				zai.time_limit?.percentage ?? null,
+				zai.tokens_limit?.percentage ?? null,
+			].filter((v): v is number => v !== null);
+			return candidates.length > 0 ? Math.max(...candidates) : null;
+		}
+		case "kilo": {
+			return getRepresentativeKiloUtilization(data as KiloUsageData);
+		}
+		case "alibaba-coding-plan": {
+			return getRepresentativeAlibabaCodingPlanUtilization(
+				data as AlibabaCodingPlanUsageData,
+			);
+		}
+		default:
+			return null;
+	}
+}
+
+/**
  * Type for a function that retrieves a fresh access token or API key
  */
 export type AccessTokenProvider = () => Promise<string>;
@@ -281,6 +335,15 @@ class UsageCache {
 	private providerTypes = new Map<string, string>(); // Track provider type for each account
 	private customEndpoints = new Map<string, string | null>(); // Track custom endpoints
 	private windowResetCallbacks = new Map<string, (accountId: string) => void>();
+	private usageRateLimitedUntil = new Map<string, number>(); // Tracks when usage API 429 clears
+	private capacityRestoredCallbacks = new Map<
+		string,
+		(accountId: string) => void
+	>();
+	private inFlightFetches = new Map<
+		string,
+		Promise<{ success: boolean; retryAfterMs: number | null }>
+	>();
 
 	/**
 	 * Schedule the next poll with exponential backoff on failures.
@@ -357,6 +420,7 @@ class UsageCache {
 		intervalMs?: number,
 		customEndpoint?: string | null,
 		onWindowReset?: (accountId: string) => void,
+		onCapacityRestored?: (accountId: string) => void,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -396,6 +460,11 @@ class UsageCache {
 			this.windowResetCallbacks.set(accountId, onWindowReset);
 		} else {
 			this.windowResetCallbacks.delete(accountId);
+		}
+		if (onCapacityRestored) {
+			this.capacityRestoredCallbacks.set(accountId, onCapacityRestored);
+		} else {
+			this.capacityRestoredCallbacks.delete(accountId);
 		}
 
 		// Default to 90s if not provided
@@ -459,8 +528,12 @@ class UsageCache {
 			this.tokenProviders.delete(accountId);
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
+			this.capacityRestoredCallbacks.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
 			this.cache.delete(accountId);
+			this.usageRateLimitedUntil.delete(accountId);
+			// Clear any in-flight fetch so it doesn't linger after polling stops.
+			this.inFlightFetches.delete(accountId);
 			log.info(
 				`Stopped usage polling and cleared cache for account ${accountId}`,
 			);
@@ -473,6 +546,35 @@ class UsageCache {
 	 * server returns a retry-after header on a 429 response.
 	 */
 	private async fetchAndCache(
+		accountId: string,
+		tokenProvider: AccessTokenProvider,
+		provider?: string,
+		customEndpoint?: string | null,
+	): Promise<{ success: boolean; retryAfterMs: number | null }> {
+		// Deduplicate concurrent fetches for the same account — return the
+		// existing in-flight promise rather than starting a second HTTP request.
+		const inflight = this.inFlightFetches.get(accountId);
+		if (inflight) {
+			log.debug(
+				`Reusing in-flight fetch for account ${accountId} — skipping duplicate request`,
+			);
+			return inflight;
+		}
+
+		const promise = this._doFetchAndCache(
+			accountId,
+			tokenProvider,
+			provider,
+			customEndpoint,
+		);
+		this.inFlightFetches.set(accountId, promise);
+		promise.finally(() => {
+			this.inFlightFetches.delete(accountId);
+		});
+		return promise;
+	}
+
+	private async _doFetchAndCache(
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
 		provider?: string,
@@ -588,6 +690,9 @@ class UsageCache {
 				// Default to Anthropic usage data
 				const result = await fetchUsageData(token);
 				if (result.data) {
+					// Snapshot before clearing — needed for the capacity-restored guard below.
+					const wasRateLimited = this.usageRateLimitedUntil.has(accountId);
+					this.usageRateLimitedUntil.delete(accountId);
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(
@@ -603,11 +708,30 @@ class UsageCache {
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,
 					);
+					// Notify capacity-restored listener only when the account was previously
+					// rate-limited (usageRateLimitedUntil set) and usage now shows < 100%.
+					// This handles seat-reassignment: org admin reassigns a seat mid-window,
+					// Anthropic resets usage, polling detects available capacity and lets
+					// the caller clear stale rate_limited_until in the DB.
+					if (utilization !== null && utilization < 100 && wasRateLimited) {
+						const capacityCallback =
+							this.capacityRestoredCallbacks.get(accountId);
+						if (capacityCallback) capacityCallback(accountId);
+					}
 					const window = getRepresentativeWindow(result.data as UsageData);
 					log.debug(
 						`Successfully fetched usage data for account ${accountId}: ${utilization}% (${window} window)`,
 					);
 					return { success: true, retryAfterMs: null };
+				}
+				if (result.retryAfterMs != null && result.retryAfterMs > 0) {
+					this.usageRateLimitedUntil.set(
+						accountId,
+						Date.now() + result.retryAfterMs,
+					);
+				} else if (result.retryAfterMs == null) {
+					// Non-429 failure: clear any stale rate-limit marker
+					this.usageRateLimitedUntil.delete(accountId);
 				}
 				return { success: false, retryAfterMs: result.retryAfterMs };
 			}
@@ -715,6 +839,20 @@ class UsageCache {
 	}
 
 	/**
+	 * Returns the timestamp (ms since epoch) until which the usage API is rate-limited
+	 * for this account, or null if not currently rate-limited.
+	 */
+	getRateLimitedUntil(accountId: string): number | null {
+		const until = this.usageRateLimitedUntil.get(accountId);
+		if (until === undefined) return null;
+		if (Date.now() >= until) {
+			this.usageRateLimitedUntil.delete(accountId);
+			return null;
+		}
+		return until;
+	}
+
+	/**
 	 * Get cached data age in milliseconds
 	 */
 	getAge(accountId: string): number | null {
@@ -748,6 +886,7 @@ class UsageCache {
 			this.stopPolling(accountId);
 		}
 		this.cache.clear();
+		this.usageRateLimitedUntil.clear();
 		log.info("Cleared all usage cache and stopped polling");
 	}
 }

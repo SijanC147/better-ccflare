@@ -1,3 +1,12 @@
+import type { RateLimitReason } from "./account";
+
+// Integrity status type
+export interface IntegrityStatus {
+	status: "ok" | "corrupt" | "unchecked";
+	lastCheckAt: number | null;
+	lastError: string | null;
+}
+
 // Stats types
 export interface Stats {
 	totalRequests: number;
@@ -107,23 +116,50 @@ export interface AnalyticsResponse {
 	modelPerformance: ModelPerformance[];
 }
 
+// Pool status for health check
+export interface PoolStatus {
+	configured: number; // Total accounts in database
+	routable: number; // Available for routing
+	paused: number; // Manually or automatically paused
+	rate_limited: number; // Temporarily rate-limited
+	next_available_at: string | null; // ISO timestamp when earliest rate-limit expires
+}
+
+// Account detail for ?detail=1
+export interface AccountDetail {
+	name: string;
+	status: "available" | "paused" | "rate_limited";
+	rate_limited_until: number | null;
+	rate_limited_reason: RateLimitReason | null;
+	rate_limited_at: number | null;
+}
+
 // Health check response
 export interface HealthResponse {
 	status: string;
 	accounts: number;
 	timestamp: string;
 	strategy: string;
+	pool?: PoolStatus;
+	accounts_detail?: Array<AccountDetail>;
 	runtime?: {
-		asyncWriter: {
+		asyncWriter?: {
 			healthy: boolean;
 			failureCount: number;
 			queuedJobs: number;
 		};
-		usageWorker: {
+		usageWorker?: {
 			state: string;
 			pendingAcks: number;
 			lastError: string | null;
 			startedAt: number | null;
+		};
+		storage?: {
+			integrity: {
+				status: "ok" | "corrupt" | "unchecked";
+				lastCheckAt: string | null;
+				lastError: string | null;
+			};
 		};
 	};
 }
@@ -136,6 +172,8 @@ export interface ConfigResponse {
 	default_agent_model: string;
 	tls_enabled: boolean;
 	system_prompt_cache_ttl_1h: boolean;
+	usage_throttling_five_hour_enabled: boolean;
+	usage_throttling_weekly_enabled: boolean;
 }
 
 export interface StrategyUpdateRequest {

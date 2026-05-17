@@ -188,13 +188,54 @@ jobs:
               # Dated sub-commits like feat(04-03): or feat(02-01): are filtered out
               VERSION_SKIP='grep -v "chore: update CLAUDE_CLI_VERSION" | grep -v "chore: update CLI versions" | grep -v "chore: update CODEX_VERSION"'
               DATED_SKIP='grep -vE "[a-f0-9]+ [a-z]+\([0-9]{2}-[0-9]{2}\):" | grep -vE "\([0-9]{2}\): (WR|CR)-[0-9]+"'
-              FEATURES=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (feat|add|new)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
-              FIXES=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (fix|bug|resolve)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
-              SECURITY=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (security|vulnerabilit|redact|ReDoS)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
-              IMPROVEMENTS=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (improve|enhance|update|refactor)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
+              THANKS_SKIP='grep -viE "^[a-f0-9]+ [a-z]+:.*\bthank\b"'
+              FEATURES=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (feat|add|new)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | eval "$THANKS_SKIP" | sort -u)
+              FIXES=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (fix|bug|resolve)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | eval "$THANKS_SKIP" | sort -u)
+              SECURITY=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (security|vulnerabilit|redact|ReDoS)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | eval "$THANKS_SKIP" | sort -u)
+              IMPROVEMENTS=$(echo "$COMMITS" | grep -E "^[a-f0-9]+ (improve|enhance|update|refactor)[\(:]" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | eval "$THANKS_SKIP" | sort -u)
+
+              # Breaking changes detection (check prefix and footer)
+              BREAKING=$(echo "$COMMITS" | while IFS= read -r commit; do
+                if [ -n "$commit" ]; then
+                  HASH=$(echo "$commit" | cut -d' ' -f1)
+                  MSG=$(echo "$commit" | cut -d' ' -f2-)
+                  BODY=$(git log -1 --format="%s%n%n%b" "$HASH")
+
+                  # Check prefix pattern: feat!: or fix!: etc
+                  if echo "$MSG" | grep -qE '^[a-z]+!:'; then
+                    echo "$commit"
+                  # Check footer pattern: BREAKING CHANGE:
+                  elif echo "$BODY" | grep -qi 'BREAKING[- ]CHANGE'; then
+                    echo "$commit"
+                  fi
+                fi
+              done | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u)
 
               # Also filter out duplicate chore messages specifically
               CHORE_UNIQUE=$(echo "$COMMITS" | grep -E "chore" | eval "$VERSION_SKIP" | eval "$DATED_SKIP" | sort -u | head -3)
+
+              if [ -n "$BREAKING" ]; then
+                CHANGELOG="$CHANGELOG
+
+          ### ⚠️ Breaking Changes
+          "
+                while IFS= read -r commit; do
+                  if [ -n "$commit" ]; then
+                    HASH=$(echo "$commit" | cut -d' ' -f1)
+                    MSG=$(echo "$commit" | cut -d' ' -f2-)
+
+                    # Extract breaking change explanation from footer
+                    EXPLANATION=$(git log -1 --format="%b" "$HASH" | grep -Pzo 'BREAKING[- ]CHANGE[s]?:\s*\K[^\n]+' || true)
+
+                    if [ -n "$EXPLANATION" ]; then
+                      ENTRY=$(printf -- '- **%s** ([`%s`](https://github.com/tombii/better-ccflare/commit/%s))\n\n  %s\n' "$MSG" "$HASH" "$HASH" "$EXPLANATION")
+                    else
+                      ENTRY=$(printf -- '- %s ([`%s`](https://github.com/tombii/better-ccflare/commit/%s))\n' "$MSG" "$HASH" "$HASH")
+                    fi
+                    CHANGELOG="${CHANGELOG}${ENTRY}"
+                  fi
+                done <<< "$BREAKING"
+              fi
 
               if [ -n "$FEATURES" ]; then
                 CHANGELOG="$CHANGELOG

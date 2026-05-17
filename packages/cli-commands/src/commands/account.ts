@@ -47,7 +47,9 @@ export interface AddAccountOptionsWithAdapter {
 		| "openrouter"
 		| "alibaba-coding-plan"
 		| "codex"
-		| "qwen";
+		| "qwen"
+		| "ollama"
+		| "ollama-cloud";
 	priority?: number;
 	customEndpoint?: string;
 	modelMappings?: { [key: string]: string | string[] };
@@ -77,7 +79,9 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "openrouter"
 		| "alibaba-coding-plan"
 		| "codex"
-		| "qwen";
+		| "qwen"
+		| "ollama"
+		| "ollama-cloud";
 }
 
 /**
@@ -369,6 +373,7 @@ async function createAnthropicCompatibleAccount(
 	customEndpoint?: string,
 	modelMappings?: { [key: string]: string | string[] } | null,
 	modelFallbacks?: { [key: string]: string | string[] } | null,
+	provider = "anthropic-compatible",
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -408,7 +413,7 @@ async function createAnthropicCompatibleAccount(
 		[
 			accountId,
 			name,
-			"anthropic-compatible",
+			provider,
 			validatedApiKey,
 			now,
 			validatedPriority,
@@ -1056,6 +1061,14 @@ export async function addAccount(
 				label: "OpenAI-compatible provider (API key)",
 				value: "openai-compatible",
 			},
+			{
+				label: "Ollama (v0.14.0+, local, no API key required)",
+				value: "ollama",
+			},
+			{
+				label: "Ollama Cloud (ollama.com, API key required)",
+				value: "ollama-cloud",
+			},
 		]));
 
 	if (mode === "bedrock") {
@@ -1470,6 +1483,74 @@ export async function addAccount(
 		console.log(`\nAccount '${name}' added successfully!`);
 		console.log("Type: Anthropic-compatible (API key)");
 		console.log(`Endpoint: ${endpoint}`);
+	} else if (mode === "ollama") {
+		// Ollama uses the Anthropic-compatible endpoint at /v1/messages (no API key required)
+		const endpoint =
+			customEndpoint ||
+			(await adapter.input(
+				"\nEnter Ollama endpoint URL (press Enter for default http://localhost:11434): ",
+			)) ||
+			"http://localhost:11434";
+
+		const priority =
+			providedPriority ??
+			(await adapter.input(
+				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+			));
+
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createAnthropicCompatibleAccount(
+			dbOps,
+			name,
+			"ollama",
+			typeof priority === "string"
+				? parseInt(priority, 10) || 0
+				: priority || 0,
+			endpoint,
+			finalModelMappings,
+			null,
+			"ollama",
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: Ollama (v0.14.0+)");
+		console.log(`Endpoint: ${endpoint}`);
+	} else if (mode === "ollama-cloud") {
+		const apiKey = await adapter.input("\nEnter Ollama Cloud API key: ");
+
+		if (!apiKey) {
+			throw new Error("API key is required for Ollama Cloud");
+		}
+
+		const priority =
+			providedPriority ??
+			(await adapter.input(
+				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+			));
+
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createAnthropicCompatibleAccount(
+			dbOps,
+			name,
+			apiKey,
+			typeof priority === "string"
+				? parseInt(priority, 10) || 0
+				: priority || 0,
+			undefined,
+			finalModelMappings,
+			undefined,
+			"ollama-cloud",
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: Ollama Cloud");
+		console.log(`Endpoint: https://ollama.com/api/chat`);
 	} else {
 		// Handle OAuth accounts (Anthropic)
 		const flowResult = await oauthFlow.begin({

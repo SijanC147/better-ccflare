@@ -4,6 +4,7 @@ import {
 	type ApiKeyRole,
 	NodeCryptoUtils,
 } from "@better-ccflare/types";
+import { extractApiKey } from "./extract-api-key";
 
 export interface AuthenticationResult {
 	isAuthenticated: boolean;
@@ -113,26 +114,8 @@ export class AuthService {
 		return { authorized: true };
 	}
 
-	/**
-	 * Extract API key from request headers
-	 */
 	extractApiKey(req: Request): string | null {
-		// Check x-api-key header first (Anthropic format)
-		const apiKey = req.headers.get("x-api-key");
-		if (apiKey) {
-			return apiKey;
-		}
-
-		// Check Authorization header with Bearer token
-		const authHeader = req.headers.get("authorization");
-		if (authHeader) {
-			const parts = authHeader.trim().split(/\s+/);
-			if (parts.length === 2 && parts[0].toLowerCase() === "bearer") {
-				return parts[1];
-			}
-		}
-
-		return null;
+		return extractApiKey(req);
 	}
 
 	/**

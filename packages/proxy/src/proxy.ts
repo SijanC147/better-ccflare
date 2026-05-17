@@ -4,18 +4,24 @@ import {
 	trackClientVersion,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
+import { usageCache } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
+	createPoolExhaustedResponse,
 	createRequestMetadata,
+	createUsageThrottledResponse,
 	ERROR_MESSAGES,
 	getComboSlotInfo,
+	getUsageThrottleUntil,
 	interceptAndModifyRequest,
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
 	proxyUnauthenticated,
 	proxyWithAccount,
+	RequestBodyContext,
+	type RequestJsonBody,
 	selectAccountsForRequest,
 	validateProviderPath,
 } from "./handlers";
@@ -25,6 +31,70 @@ import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
 export type { ProxyContext } from "./handlers";
 
 const log = new Logger("Proxy");
+
+const PROJECT_NAME_MAX_LEN = 64;
+
+function sanitizeProjectName(raw: string | undefined | null): string | null {
+	if (!raw) return null;
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+	const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
+	if (!cleaned) return null;
+	return cleaned.length > PROJECT_NAME_MAX_LEN
+		? cleaned.slice(0, PROJECT_NAME_MAX_LEN)
+		: cleaned;
+}
+
+function extractSystemPrompt(body: RequestJsonBody | null): string | null {
+	if (!body) return null;
+	const system = body.system;
+
+	if (typeof system === "string") {
+		return system;
+	}
+
+	if (Array.isArray(system)) {
+		return system
+			.filter(
+				(item): item is { type?: string; text: string } =>
+					typeof item === "object" &&
+					item !== null &&
+					(item as { type?: string }).type === "text" &&
+					typeof (item as { text?: unknown }).text === "string",
+			)
+			.map((item) => item.text)
+			.join("\n");
+	}
+
+	return null;
+}
+
+function extractProjectFromRequest(
+	headers: Headers,
+	body: RequestJsonBody | null,
+): string | null {
+	const headerProject = headers.get("x-project");
+	const sanitizedHeader = sanitizeProjectName(headerProject);
+	if (sanitizedHeader) return sanitizedHeader;
+
+	const systemPrompt = extractSystemPrompt(body);
+	if (!systemPrompt) return null;
+
+	const pathMatch = systemPrompt.match(
+		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+	);
+	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
+	if (sanitizedPath) return sanitizedPath;
+
+	const headingMatch = systemPrompt.match(/^#\s+([^\n\r]{1,100})/m);
+	if (headingMatch) {
+		const heading = sanitizeProjectName(headingMatch[1]);
+		if (heading && !heading.toLowerCase().startsWith("claude")) {
+			return heading;
+		}
+	}
+
+	return null;
+}
 
 // ===== WORKER MANAGEMENT =====
 
@@ -125,28 +195,19 @@ export async function handleProxy(
 	validateProviderPath(ctx.provider, url.pathname);
 
 	// 3. Prepare request body
-	let { buffer: requestBodyBuffer } = await prepareRequestBody(req);
+	const { buffer: requestBodyBuffer } = await prepareRequestBody(req);
+	const requestBodyContext = new RequestBodyContext(requestBodyBuffer);
 
 	// 3b. Optionally inject 1h TTL into system prompt cache_control blocks
 	if (ctx.config.getSystemPromptCacheTtl1h() && requestBodyBuffer) {
-		const injected = injectSystemCacheTtl(requestBodyBuffer);
-		if (injected) requestBodyBuffer = injected;
+		injectSystemCacheTtl(requestBodyContext);
 	}
 
 	// Extract model from request body for family detection (used by combo routing)
 	// and reuse parsed body for /v1/messages validation (consolidate parses)
-	let requestModel: string | null = null;
-	let parsedBody: Record<string, unknown> | null = null;
-	if (requestBodyBuffer) {
-		try {
-			const bodyText = new TextDecoder().decode(requestBodyBuffer);
-			parsedBody = JSON.parse(bodyText);
-			requestModel =
-				((parsedBody as Record<string, unknown>).model as string) ?? null;
-		} catch {
-			// If body can't be parsed, model stays null — combo routing won't activate
-		}
-	}
+	const parsedBody = requestBodyContext.getParsedJson();
+	const requestModel = requestBodyContext.getModel();
+	const project = extractProjectFromRequest(req.headers, parsedBody);
 
 	// 3a. Validate request body for /v1/messages endpoint
 	if (url.pathname === "/v1/messages" && requestBodyBuffer) {
@@ -185,10 +246,10 @@ export async function handleProxy(
 
 	// 4. Intercept and modify request for agent model preferences
 	const { modifiedBody, agentUsed, originalModel, appliedModel } =
-		await interceptAndModifyRequest(requestBodyBuffer, ctx.dbOps);
+		await interceptAndModifyRequest(requestBodyContext, ctx.dbOps);
 
 	// Use modified body if available
-	const finalBodyBuffer = modifiedBody || requestBodyBuffer;
+	const finalBodyBuffer = modifiedBody || requestBodyContext.getBuffer();
 	const finalCreateBodyStream = () => {
 		if (!finalBodyBuffer) return undefined;
 		return new Response(finalBodyBuffer).body ?? undefined;
@@ -203,26 +264,134 @@ export async function handleProxy(
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
 	requestMeta.agentUsed = agentUsed;
+	requestMeta.project = project;
 
 	// 6. Select accounts
-	const accounts = await selectAccountsForRequest(
+	const selectedAccounts = await selectAccountsForRequest(
 		requestMeta,
 		ctx,
 		requestModel ?? undefined,
 	);
 
+	const applyUsageThrottling = (accounts: Account[]) => {
+		const settings = {
+			fiveHourEnabled: ctx.config.getUsageThrottlingFiveHourEnabled(),
+			weeklyEnabled: ctx.config.getUsageThrottlingWeeklyEnabled(),
+		};
+		if (!settings.fiveHourEnabled && !settings.weeklyEnabled) {
+			return { available: accounts, throttled: [] as Account[] };
+		}
+
+		const now = Date.now();
+		const available: Account[] = [];
+		const throttled: Account[] = [];
+
+		for (const account of accounts) {
+			const throttleUntil = getUsageThrottleUntil(
+				usageCache.get(account.id),
+				settings,
+				now,
+			);
+			if (throttleUntil && throttleUntil > now) {
+				throttled.push(account);
+				continue;
+			}
+			available.push(account);
+		}
+
+		if (throttled.length > 0) {
+			log.info(
+				`Usage-throttled ${throttled.length} account(s): ${throttled.map((account) => account.name).join(", ")}`,
+			);
+		}
+
+		return { available, throttled };
+	};
+
+	const { available: accounts, throttled: throttledAccounts } =
+		applyUsageThrottling(selectedAccounts);
+
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
-		return proxyUnauthenticated(
-			req,
-			url,
-			requestMeta,
-			finalBodyBuffer,
-			finalCreateBodyStream,
-			ctx,
-			apiKeyId,
-			apiKeyName,
+		if (throttledAccounts.length > 0) {
+			return createUsageThrottledResponse(throttledAccounts);
+		}
+
+		// Check feature flag for backwards compatibility
+		if (process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL === "1") {
+			log.warn(ERROR_MESSAGES.NO_ACCOUNTS);
+			return proxyUnauthenticated(
+				req,
+				url,
+				requestMeta,
+				finalBodyBuffer,
+				finalCreateBodyStream,
+				ctx,
+				apiKeyId,
+				apiKeyName,
+			);
+		}
+
+		// Return 503 pool_exhausted response (default behavior)
+		log.error(ERROR_MESSAGES.POOL_EXHAUSTED);
+
+		// Log to request history via worker
+		// Re-fetch from DB — selectedAccounts is empty here (strategy already
+		// filtered out unavailable accounts), so we need fresh data to populate
+		// per-account cooldown info in the 503 body.
+		const allAccounts = (await ctx.dbOps.getAllAccounts()).filter(
+			(a) => a.provider === ctx.provider.name,
 		);
+
+		const poolExhaustedResponse = createPoolExhaustedResponse(allAccounts);
+
+		// Skip request-log staging for synthetic auto-refresh probes that
+		// 503 because their target account is on a known cooldown. Logging
+		// these as user-facing 503s inflates the dashboard fail-rate without
+		// reflecting any real client impact (issue #199, bug 2). The keepalive
+		// scheduler already gets the equivalent treatment via its loop-prevention
+		// header path; this brings auto-refresh in line.
+		const isAutoRefreshProbe =
+			req.headers.get("x-better-ccflare-auto-refresh") === "true";
+		if (!isAutoRefreshProbe) {
+			// Send error message to usage worker for request history logging
+			ctx.usageWorker.postMessage({
+				type: "start",
+				messageId: crypto.randomUUID(),
+				requestId: requestMeta.id,
+				accountId: null,
+				method: req.method,
+				path: url.pathname,
+				timestamp: requestMeta.timestamp,
+				requestHeaders: Object.fromEntries(req.headers.entries()),
+				requestBody: null,
+				project: project ?? null,
+				responseStatus: 503,
+				responseHeaders: Object.fromEntries(
+					poolExhaustedResponse.headers.entries(),
+				),
+				isStream: false,
+				providerName: ctx.provider.name,
+				accountBillingType: null,
+				accountAutoPauseOnOverageEnabled: 0,
+				accountName: null,
+				agentUsed: agentUsed || null,
+				comboName: null,
+				apiKeyId: apiKeyId || null,
+				apiKeyName: apiKeyName || null,
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			});
+
+			ctx.usageWorker.postMessage({
+				type: "end",
+				requestId: requestMeta.id,
+				success: false,
+				error: "pool_exhausted",
+			});
+		}
+
+		return poolExhaustedResponse;
 	}
 
 	// 8. Log selected accounts
@@ -239,13 +408,22 @@ export async function handleProxy(
 
 	// 9. Try each account
 	const comboInfo = getComboSlotInfo(requestMeta);
+	const allowedAccountIds = new Set(accounts.map((account) => account.id));
+	const filteredComboInfo = comboInfo
+		? {
+				...comboInfo,
+				slots: comboInfo.slots.filter((slot) =>
+					allowedAccountIds.has(slot.accountId),
+				),
+			}
+		: null;
 	let response: Response | null = null;
 
 	for (let i = 0; i < accounts.length; i++) {
 		// For combo routing: enrich metadata with slot index and look up model override
 		let modelOverride: string | null = null;
-		if (comboInfo?.slots[i]) {
-			const slot = comboInfo.slots[i];
+		if (filteredComboInfo?.slots[i]) {
+			const slot = filteredComboInfo.slots[i];
 			if (slot.accountId !== accounts[i].id) {
 				log.error(
 					`Combo slot/account desync: slot ${i} expects account ${slot.accountId} but got ${accounts[i].id}`,
@@ -271,6 +449,7 @@ export async function handleProxy(
 			modelOverride,
 			apiKeyId,
 			apiKeyName,
+			requestBodyContext,
 		);
 
 		if (response) {
@@ -278,7 +457,7 @@ export async function handleProxy(
 		}
 
 		// Log combo slot failure
-		if (comboInfo) {
+		if (filteredComboInfo) {
 			log.info(
 				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
 			);
@@ -288,14 +467,22 @@ export async function handleProxy(
 	// 10. Combo fallback: if combo routing was active and all slots failed,
 	//     fall back to normal SessionStrategy routing (REQ-14)
 	let fallbackAccounts: Account[] | null = null;
-	if (comboInfo?.comboName) {
+	if (filteredComboInfo?.comboName) {
 		log.warn(
-			`All combo slots failed for combo "${comboInfo.comboName}", falling back to SessionStrategy routing`,
+			`All combo slots failed for combo "${filteredComboInfo.comboName}", falling back to SessionStrategy routing`,
 		);
 		// Clear combo info and retry with normal routing
 		requestMeta.comboName = null;
 		requestMeta.comboSlotIndex = null;
-		fallbackAccounts = await selectAccountsForRequest(requestMeta, ctx);
+		const selectedFallbackAccounts = await selectAccountsForRequest(
+			requestMeta,
+			ctx,
+		);
+		const {
+			available: filteredFallbackAccounts,
+			throttled: throttledFallbackAccounts,
+		} = applyUsageThrottling(selectedFallbackAccounts);
+		fallbackAccounts = filteredFallbackAccounts;
 
 		if (fallbackAccounts.length > 0) {
 			log.info(
@@ -314,17 +501,20 @@ export async function handleProxy(
 					undefined, // No model override for fallback path
 					apiKeyId,
 					apiKeyName,
+					requestBodyContext,
 				);
 
 				if (response) {
 					return response;
 				}
 			}
+		} else if (throttledFallbackAccounts.length > 0) {
+			return createUsageThrottledResponse(throttledFallbackAccounts);
 		}
 	}
 
 	// 11. All accounts failed - check if OAuth token issues are the cause
-	const allAttemptedAccounts = comboInfo
+	const allAttemptedAccounts = filteredComboInfo
 		? [...accounts, ...(fallbackAccounts ?? [])]
 		: accounts;
 	const oauthAccounts = allAttemptedAccounts.filter((acc) => acc.refresh_token);
@@ -354,24 +544,43 @@ export async function handleProxy(
 
 /**
  * Injects `ttl: "1h"` into system-level cache_control blocks that are missing a TTL.
- * Returns a new ArrayBuffer with the modified body, or null if no changes were made.
+ * ArrayBuffer overload: returns modified buffer or null (no changes).
+ * RequestBodyContext overload: mutates in-place via markDirty(); return value unused.
  */
-export function injectSystemCacheTtl(buf: ArrayBuffer): ArrayBuffer | null {
+export function injectSystemCacheTtl(buf: ArrayBuffer): ArrayBuffer | null;
+export function injectSystemCacheTtl(context: RequestBodyContext): void;
+export function injectSystemCacheTtl(
+	input: ArrayBuffer | RequestBodyContext,
+): ArrayBuffer | null {
+	const bodyContext =
+		input instanceof RequestBodyContext ? input : new RequestBodyContext(input);
 	try {
-		const body = JSON.parse(new TextDecoder().decode(buf));
+		const body = bodyContext.getParsedJson() as
+			| (RequestJsonBody & {
+					system?: Array<{ cache_control?: { type?: string; ttl?: string } }>;
+			  })
+			| null;
+		if (!body) return null;
 		if (!Array.isArray(body.system)) return null;
-		let changed = false;
-		for (const block of body.system) {
-			if (
-				block.cache_control?.type === "ephemeral" &&
-				!block.cache_control.ttl
-			) {
-				block.cache_control.ttl = "1h";
-				changed = true;
+		const blocksToUpdate = body.system.filter(
+			(block) =>
+				block.cache_control?.type === "ephemeral" && !block.cache_control.ttl,
+		);
+		if (blocksToUpdate.length === 0) return null;
+		bodyContext.mutateParsedJson((b) => {
+			const typedBody = b as RequestJsonBody & {
+				system: Array<{ cache_control?: { type?: string; ttl?: string } }>;
+			};
+			for (const block of typedBody.system) {
+				if (
+					block.cache_control?.type === "ephemeral" &&
+					!block.cache_control.ttl
+				) {
+					block.cache_control.ttl = "1h";
+				}
 			}
-		}
-		if (!changed) return null;
-		return new TextEncoder().encode(JSON.stringify(body)).buffer;
+		});
+		return bodyContext.getBuffer();
 	} catch {
 		return null;
 	}

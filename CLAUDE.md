@@ -21,11 +21,23 @@ bun run lint && bun run typecheck && bun run format
 
 **Git safety**:
 - `git status` before any changes — track pre-existing uncommitted files
-- Feature branches only (`git checkout -b feature/name`)
-- Push branch: `git push origin refs/heads/main:refs/heads/main` (branch/tag name collision workaround)
+- Feature branches only (`git checkout -b feature/name`); never change main directly
+- This repo has both a `main` branch and a `main` tag. **Always use `refs/heads/main`** (not bare `main`) for git log/diff/checkout/merge-base to avoid ambiguous-refspec errors
+- Push branch: `git push origin refs/heads/main:refs/heads/main` (branch/tag collision workaround)
 - Commit: `git add <specific-files>` only (preserves inline-worker.ts)
 
 **Version** — Release system handles version bumps. Update `package.json`, `apps/cli/package.json`, and `packages/core/src/version.ts` only if explicitly instructed.
+
+## ⚠️ Database Migrations — Port to PostgreSQL
+
+Every migration added to `packages/database/src/migrations.ts` MUST also be ported to `packages/database/src/migrations-pg.ts`:
+1. `ensureSchema()` in `migrations.ts` (SQLite CREATE TABLE)
+2. `runMigrations()` in `migrations.ts` (SQLite ALTER TABLE for existing DBs)
+3. `ensureSchemaPg()` in `migrations-pg.ts` (PG CREATE TABLE for new installs)
+4. `columnsToAdd` array in `runMigrationsPg()` (PG ALTER TABLE for existing DBs)
+5. Mirror any SQLite backfill as an `adapter.unsafe(UPDATE ...)` in `runMigrationsPg()`
+
+New tables go in `ensureSchemaPg()` AND `runMigrationsPg()` (`CREATE TABLE IF NOT EXISTS`).
 
 ## Development Workflow
 
@@ -35,7 +47,9 @@ bun run lint && bun run typecheck && bun run format
 
 **Implementation plans** — Use subagent-driven development, dispatch fresh subagents per task.
 
-**Issue management** — Wait for reporter confirmation before closing issues.
+**External-contributor PRs** — Merge with `git merge --no-ff <branch>` (preserve contributor history), then add them to README Acknowledgements.
+
+**Issue management** — Never close issues automatically; wait for reporter confirmation. Before implementing an issue, run `git log refs/heads/main --since='<issue-open-date>' --oneline --no-merges -- <paths>` and confirm it still applies given recent changes (rate-limit/health/proxy code changes often).
 
 ## Commands
 

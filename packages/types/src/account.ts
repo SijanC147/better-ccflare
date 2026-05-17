@@ -1,3 +1,14 @@
+export type RateLimitReason =
+	| "upstream_429_with_reset"
+	/** @deprecated written by ccflare ≤ v3.5.x when no-reset 429s used a 5h ban.
+	 *  v3.5.2+ emits `upstream_429_no_reset_probe_cooldown` for the same path
+	 *  with a configurable shorter default. Existing DB rows keep the old
+	 *  value for history. */
+	| "upstream_429_no_reset_default_5h"
+	| "upstream_429_no_reset_probe_cooldown"
+	| "model_fallback_429"
+	| "all_models_exhausted_429";
+
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
 	utilization: number | null;
@@ -93,6 +104,8 @@ export interface AccountRow {
 	request_count: number;
 	total_requests: number;
 	rate_limited_until?: number | null;
+	rate_limited_reason?: RateLimitReason | null;
+	rate_limited_at?: number | null;
 	session_start?: number | null;
 	session_request_count?: number;
 	paused?: boolean | number | null;
@@ -103,6 +116,7 @@ export interface AccountRow {
 	auto_fallback_enabled?: boolean | number | null;
 	auto_refresh_enabled?: boolean | number | null;
 	auto_pause_on_overage_enabled?: boolean | number | null;
+	peak_hours_pause_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	cross_region_mode?: string | null; // Bedrock cross-region inference mode
@@ -126,6 +140,8 @@ export interface Account {
 	last_used: number | null;
 	created_at: number;
 	rate_limited_until: number | null;
+	rate_limited_reason: RateLimitReason | null;
+	rate_limited_at: number | null;
 	session_start: number | null;
 	session_request_count: number;
 	paused: boolean;
@@ -136,6 +152,7 @@ export interface Account {
 	auto_fallback_enabled: boolean;
 	auto_refresh_enabled: boolean;
 	auto_pause_on_overage_enabled: boolean;
+	peak_hours_pause_enabled: boolean;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	cross_region_mode: string | null; // Bedrock cross-region inference mode
@@ -172,16 +189,22 @@ export interface AccountResponse {
 	rateLimitReset: string | null;
 	rateLimitRemaining: number | null;
 	rateLimitedUntil: number | null;
+	rateLimitedReason: RateLimitReason | null;
+	rateLimitedAt: number | null;
 	sessionInfo: string;
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
 	autoPauseOnOverageEnabled?: boolean;
+	peakHoursPauseEnabled?: boolean;
 	customEndpoint: string | null;
 	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
+	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
+	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
+	usageThrottledWindows: string[]; // Exact usage windows currently being throttled
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	crossRegionMode?: string | null; // Cross-region inference mode for Bedrock accounts
 	modelFallbacks?: { [key: string]: string } | null;
@@ -203,6 +226,8 @@ export interface AccountDisplay {
 	sessionInfo: string;
 	paused: boolean;
 	rate_limited_until?: number | null;
+	rate_limited_reason?: RateLimitReason | null;
+	rate_limited_at?: number | null;
 	session_start?: number | null;
 	session_request_count?: number;
 	access_token?: string | null;
@@ -224,6 +249,8 @@ export interface AccountListItem {
 	tokenStatus: "valid" | "expired";
 	rateLimitStatus: string;
 	sessionInfo: string;
+	rate_limited_reason?: RateLimitReason | null;
+	rate_limited_at?: number | null;
 	mode:
 		| "claude-oauth"
 		| "console"
@@ -238,7 +265,9 @@ export interface AccountListItem {
 		| "openrouter"
 		| "alibaba-coding-plan"
 		| "codex"
-		| "qwen";
+		| "qwen"
+		| "ollama"
+		| "ollama-cloud";
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
@@ -290,6 +319,8 @@ export function toAccount(row: AccountRow): Account {
 		request_count: toNum(row.request_count),
 		total_requests: toNum(row.total_requests),
 		rate_limited_until: toNumOrNull(row.rate_limited_until),
+		rate_limited_reason: row.rate_limited_reason ?? null,
+		rate_limited_at: toNumOrNull(row.rate_limited_at),
 		session_start: toNumOrNull(row.session_start),
 		session_request_count: toNum(row.session_request_count),
 		paused: !!row.paused,
@@ -300,6 +331,7 @@ export function toAccount(row: AccountRow): Account {
 		auto_fallback_enabled: !!row.auto_fallback_enabled,
 		auto_refresh_enabled: !!row.auto_refresh_enabled,
 		auto_pause_on_overage_enabled: !!row.auto_pause_on_overage_enabled,
+		peak_hours_pause_enabled: !!row.peak_hours_pause_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
 		cross_region_mode: row.cross_region_mode || null,
@@ -379,17 +411,24 @@ export function toAccountResponse(account: Account): AccountResponse {
 			: null,
 		rateLimitRemaining: account.rate_limit_remaining,
 		rateLimitedUntil: account.rate_limited_until || null,
+		rateLimitedReason: account.rate_limited_reason ?? null,
+		rateLimitedAt: account.rate_limited_at ?? null,
 		sessionInfo,
 		priority: account.priority,
 		autoFallbackEnabled: account.auto_fallback_enabled,
 		autoRefreshEnabled: account.auto_refresh_enabled,
 		autoPauseOnOverageEnabled: account.auto_pause_on_overage_enabled,
+		peakHoursPauseEnabled: account.peak_hours_pause_enabled,
 		customEndpoint: account.custom_endpoint,
 		modelMappings,
 		usageUtilization: null, // Will be filled in by API handler from cache
 		usageWindow: null, // Will be filled in by API handler from cache
 		usageData: null, // Will be filled in by API handler from cache
+		usageRateLimitedUntil: null, // Will be filled in by API handler from cache
+		usageThrottledUntil: null,
+		usageThrottledWindows: [],
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+		crossRegionMode: account.cross_region_mode,
 		modelFallbacks,
 		billingType: account.billing_type,
 		sessionStats: null,

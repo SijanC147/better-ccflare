@@ -42,6 +42,7 @@ export interface AgentsResponse {
 	agents: Agent[];
 	globalAgents: Agent[];
 	workspaceAgents: Agent[];
+	pluginAgents: Agent[];
 	workspaces: AgentWorkspace[];
 }
 
@@ -224,7 +225,8 @@ class API extends HttpClient {
 			| "openrouter"
 			| "alibaba-coding-plan"
 			| "codex"
-			| "qwen";
+			| "qwen"
+			| "ollama";
 		apiKey?: string;
 		priority: number;
 		customEndpoint?: string;
@@ -626,6 +628,70 @@ class API extends HttpClient {
 		}
 	}
 
+	async addOllamaAccount(data: {
+		name: string;
+		priority: number;
+		customEndpoint?: string;
+		modelMappings?: { [key: string]: string };
+	}): Promise<{ message: string; account: Account }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/ollama";
+
+		this.logger.debug(`→ POST ${url}`, { data });
+
+		try {
+			const response = await this.post<{ message: string; account: Account }>(
+				url,
+				data,
+			);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async addOllamaCloudAccount(data: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}): Promise<{ message: string; account: Account }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/ollama-cloud";
+
+		this.logger.debug(`→ POST ${url}`, { data });
+
+		try {
+			const response = await this.post<{ message: string; account: Account }>(
+				url,
+				data,
+			);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async removeAccount(name: string, confirm: string): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${name}`;
@@ -722,6 +788,27 @@ class API extends HttpClient {
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async getRequestPayload(id: string): Promise<RequestPayload> {
+		const startTime = Date.now();
+		const url = `/api/requests/payload/${encodeURIComponent(id)}`;
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<Omit<RequestPayload, "id">>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return { id, ...response };
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
@@ -1588,11 +1675,67 @@ class API extends HttpClient {
 		}
 	}
 
+	async getUsageThrottling(): Promise<{
+		fiveHourEnabled: boolean;
+		weeklyEnabled: boolean;
+	}> {
+		const startTime = Date.now();
+		const url = "/api/config/usage-throttling";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{
+				fiveHourEnabled: boolean;
+				weeklyEnabled: boolean;
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async setUsageThrottling(settings: {
+		fiveHourEnabled: boolean;
+		weeklyEnabled: boolean;
+	}): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/config/usage-throttling";
+
+		this.logger.debug(`→ POST ${url}`, settings);
+
+		try {
+			await this.post(url, settings);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
 	async cleanupNow(): Promise<{
 		removedRequests: number;
 		removedPayloads: number;
-		payloadCutoffIso: string;
+		payloadCutoffIso: string | null;
 		requestCutoffIso: string;
+		dbSizeBytes: number;
+		tableRowCounts: Array<{
+			name: string;
+			rowCount: number;
+			dataBytes?: number;
+		}>;
 	}> {
 		const startTime = Date.now();
 		const url = "/api/maintenance/cleanup";
@@ -1603,8 +1746,14 @@ class API extends HttpClient {
 			const response = await this.post<{
 				removedRequests: number;
 				removedPayloads: number;
-				payloadCutoffIso: string;
+				payloadCutoffIso: string | null;
 				requestCutoffIso: string;
+				dbSizeBytes: number;
+				tableRowCounts: Array<{
+					name: string;
+					rowCount: number;
+					dataBytes?: number;
+				}>;
 			}>(url, undefined, { timeout: 10 * 60 * 1000 });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
@@ -1962,6 +2111,15 @@ class API extends HttpClient {
 			if (error instanceof HttpError) throw new Error(error.message);
 			throw error;
 		}
+	}
+
+	async updateAccountPeakHoursPause(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.post(`/api/accounts/${accountId}/peak-hours-pause`, {
+			enabled: enabled ? 1 : 0,
+		});
 	}
 
 	async getQwenAuthStatus(

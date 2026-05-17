@@ -2,6 +2,7 @@ import type { Account } from "./account";
 
 export enum StrategyName {
 	Session = "session",
+	LeastUsed = "least-used",
 }
 
 /**
@@ -39,4 +40,10 @@ export interface StrategyStore {
 	 * Resume a paused account
 	 */
 	resumeAccount?(accountId: string): void;
+
+	/**
+	 * Get the representative utilization (0–100) for an account based on its
+	 * most-constrained usage window. Returns null when no usage data is available.
+	 */
+	getAccountUtilization?(accountId: string, provider: string): number | null;
 }

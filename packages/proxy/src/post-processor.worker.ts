@@ -32,6 +32,7 @@ import type {
 interface RequestState {
 	startMessage: StartMessage;
 	buffer: string;
+	streamDecoder: TextDecoder;
 	chunks: Uint8Array[];
 	chunksBytes: number;
 	chunksTruncated: boolean;
@@ -163,8 +164,8 @@ function sanitizeProjectName(raw: string | undefined | null): string | null {
  * Returns null when no project can be inferred.
  */
 function extractProjectFromRequest(startMessage: StartMessage): string | null {
-	const sanitizedPreset = sanitizeProjectName(startMessage.project);
-	if (sanitizedPreset) return sanitizedPreset;
+	const messageProject = sanitizeProjectName(startMessage.project);
+	if (messageProject) return messageProject;
 
 	if (startMessage.requestHeaders) {
 		// The Web Headers API normalizes keys to lowercase, but defensively
@@ -233,13 +234,56 @@ function _extractSystemPrompt(requestBody: string | null): string | null {
 
 // Parse SSE lines to extract usage (reuse existing logic)
 function parseSSELine(line: string): { event?: string; data?: string } {
-	if (line.startsWith("event: ")) {
-		return { event: line.slice(7).trim() };
+	// Handle both "event: message_start" and "event:message_start" formats
+	// Some providers use no space after colon, Anthropic uses space
+	if (line.startsWith("event: ") || line.startsWith("event:")) {
+		const event = line.startsWith("event: ")
+			? line.slice(7).trim()
+			: line.slice(6).trim();
+		return { event };
 	}
-	if (line.startsWith("data: ")) {
-		return { data: line.slice(6).trim() };
+	// Handle both "data: {...}" and "data:{...}" formats
+	if (line.startsWith("data: ") || line.startsWith("data:")) {
+		const data = line.startsWith("data: ")
+			? line.slice(6).trim()
+			: line.slice(5).trim();
+		return { data };
 	}
 	return {};
+}
+
+function shouldParseSSEData(data: string, eventType: string): boolean {
+	if (!data.startsWith("{")) return false;
+
+	switch (eventType) {
+		case "message_start":
+		case "message_delta":
+		case "content_block_start":
+		case "content_block_delta":
+			return true;
+		default:
+			return (
+				data.includes("usage") ||
+				data.includes("message") ||
+				data.includes("model")
+			);
+	}
+}
+
+function processSSELine(line: string, state: RequestState): void {
+	const trimmed = line.trim();
+	if (!trimmed) return;
+
+	const parsed = parseSSELine(trimmed);
+	if (parsed.event) {
+		state.currentEvent = parsed.event;
+	} else if (
+		parsed.data &&
+		state.currentEvent &&
+		shouldParseSSEData(parsed.data, state.currentEvent)
+	) {
+		extractUsageFromData(parsed.data, state.currentEvent, state);
+	}
 }
 
 // Extract usage data from non-stream JSON response bodies
@@ -277,12 +321,19 @@ function extractUsageFromJson(
 	state.usage.totalTokens = prompt + completion;
 }
 
-function extractUsageFromData(data: string, state: RequestState): void {
+function extractUsageFromData(
+	data: string,
+	eventType: string,
+	state: RequestState,
+): void {
 	try {
 		const parsed = JSON.parse(data);
 
-		// Handle message_start
-		if (parsed.type === "message_start") {
+		// Handle message_start - check both parsed.type and eventType
+		// (Some providers put type in event line, Anthropic puts it in JSON)
+		const isMessageStart =
+			parsed.type === "message_start" || eventType === "message_start";
+		if (isMessageStart) {
 			if (parsed.message?.usage) {
 				const usage = parsed.message.usage;
 				state.usage.inputTokens = usage.input_tokens || 0;
@@ -301,8 +352,10 @@ function extractUsageFromData(data: string, state: RequestState): void {
 			state.firstTokenTimestamp = Date.now();
 		}
 
-		// Handle message_delta - provider's authoritative token counts AND end time
-		if (parsed.type === "message_delta") {
+		// Handle message_delta - check both parsed.type and eventType
+		const isMessageDelta =
+			parsed.type === "message_delta" || eventType === "message_delta";
+		if (isMessageDelta) {
 			state.lastTokenTimestamp = Date.now();
 
 			if (parsed.usage) {
@@ -375,7 +428,7 @@ function extractUsageFromData(data: string, state: RequestState): void {
 }
 
 function processStreamChunk(chunk: Uint8Array, state: RequestState): void {
-	const text = new TextDecoder().decode(chunk);
+	const text = state.streamDecoder.decode(chunk, { stream: true });
 	state.buffer += text;
 	state.lastActivity = Date.now();
 
@@ -392,21 +445,17 @@ function processStreamChunk(chunk: Uint8Array, state: RequestState): void {
 		}
 	}
 
-	// Process complete lines
-	const lines = state.buffer.split("\n");
-	state.buffer = lines.pop() || "";
+	let lineStart = 0;
+	for (;;) {
+		const lineEnd = state.buffer.indexOf("\n", lineStart);
+		if (lineEnd === -1) break;
 
-	// Use state.currentEvent to persist event type across chunks
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
+		processSSELine(state.buffer.slice(lineStart, lineEnd), state);
+		lineStart = lineEnd + 1;
+	}
 
-		const parsed = parseSSELine(trimmed);
-		if (parsed.event) {
-			state.currentEvent = parsed.event;
-		} else if (parsed.data && state.currentEvent) {
-			extractUsageFromData(parsed.data, state);
-		}
+	if (lineStart > 0) {
+		state.buffer = state.buffer.slice(lineStart);
 	}
 }
 
@@ -449,6 +498,7 @@ async function handleStart(msg: StartMessage): Promise<void> {
 	const state: RequestState = {
 		startMessage: msg,
 		buffer: "",
+		streamDecoder: new TextDecoder(),
 		chunks: [],
 		chunksBytes: 0,
 		chunksTruncated: false,
@@ -510,7 +560,9 @@ async function handleStart(msg: StartMessage): Promise<void> {
 		const planProviders = new Set([
 			"zai",
 			"alibaba-coding-plan",
-			"qwen",
+			"ollama",
+				"ollama-cloud",
+				"qwen",
 			"codex",
 		]);
 		state.billingType = planProviders.has(msg.providerName) ? "plan" : "api";
@@ -523,42 +575,6 @@ async function handleStart(msg: StartMessage): Promise<void> {
 		log.debug(`Skipping logging for ${msg.path} (${msg.responseStatus})`);
 		return;
 	}
-
-	// Save minimal request info immediately
-	if (
-		process.env.DEBUG?.includes("worker") ||
-		process.env.DEBUG === "true" ||
-		process.env.NODE_ENV === "development"
-	) {
-		log.debug(
-			`Saving request meta for ${msg.requestId} (${msg.method} ${msg.path})`,
-		);
-	}
-	const projectAtStart = state.project ?? null;
-	asyncWriter.enqueue(async () => {
-		try {
-			await dbOps.saveRequestMeta(
-				msg.requestId,
-				msg.method,
-				msg.path,
-				msg.accountId,
-				msg.responseStatus,
-				msg.timestamp,
-				msg.apiKeyId || undefined,
-				msg.apiKeyName || undefined,
-				projectAtStart,
-			);
-			if (
-				process.env.DEBUG?.includes("worker") ||
-				process.env.DEBUG === "true" ||
-				process.env.NODE_ENV === "development"
-			) {
-				log.debug(`Successfully saved request meta for ${msg.requestId}`);
-			}
-		} catch (error) {
-			log.error(`Failed to save request meta for ${msg.requestId}:`, error);
-		}
-	});
 
 	// Update account usage if authenticated
 	if (msg.accountId && msg.accountId !== NO_ACCOUNT_ID) {
@@ -575,7 +591,7 @@ function handleChunk(msg: ChunkMessage): void {
 	}
 
 	// Store chunk for later payload saving (capped at MAX_RESPONSE_BODY_BYTES)
-	if (!state.chunksTruncated) {
+	if (storePayloads && !state.chunksTruncated) {
 		if (state.chunksBytes + msg.data.byteLength <= MAX_RESPONSE_BODY_BYTES) {
 			state.chunks.push(msg.data);
 			state.chunksBytes += msg.data.byteLength;
@@ -609,6 +625,17 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		// Clean up state without logging
 		requests.delete(msg.requestId);
 		return;
+	}
+
+	// Flush any incomplete multi-byte UTF-8 sequences held in the streaming decoder
+	const trailing = state.streamDecoder.decode();
+	if (trailing) {
+		state.buffer += trailing;
+		const lines = state.buffer.split("\n");
+		state.buffer = lines.pop() ?? "";
+		for (const line of lines) {
+			processSSELine(line, state);
+		}
 	}
 
 	// For non-stream responses, extract usage data from response body
@@ -741,99 +768,107 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		log.debug(`Saving final request data for ${startMessage.requestId}`);
 	}
 	const projectAtEnd = state.project ?? null;
-	asyncWriter.enqueue(async () =>
-		dbOps.saveRequest(
-			startMessage.requestId,
-			startMessage.method,
-			startMessage.path,
-			startMessage.accountId,
-			startMessage.responseStatus,
-			msg.success,
-			msg.error || null,
-			responseTime,
-			startMessage.failoverAttempts,
-			state.usage.model
-				? {
-						model: state.usage.model,
-						promptTokens:
-							(state.usage.inputTokens || 0) +
-							(state.usage.cacheReadInputTokens || 0) +
-							(state.usage.cacheCreationInputTokens || 0),
-						completionTokens: state.usage.outputTokens,
-						totalTokens: state.usage.totalTokens,
-						costUsd: state.usage.costUsd,
-						// Keep original breakdown for payload
-						inputTokens: state.usage.inputTokens,
-						outputTokens: state.usage.outputTokens,
-						cacheReadInputTokens: state.usage.cacheReadInputTokens,
-						cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
-						tokensPerSecond: state.usage.tokensPerSecond,
-					}
-				: undefined,
-			state.agentUsed,
-			startMessage.apiKeyId || undefined,
-			startMessage.apiKeyName || undefined,
-			projectAtEnd,
-			state.billingType,
-			startMessage.comboName || null,
-		),
-	);
-
-	// Save payload - eagerly serialize to break closure references
-	let responseBody: string | null = null;
-
-	if (msg.responseBody) {
-		// Non-streaming response
-		responseBody = msg.responseBody;
-	} else if (state.chunks.length > 0) {
-		// Streaming response - combine chunks
-		const combined = combineChunks(state.chunks);
-		if (combined.length > 0) {
-			responseBody = combined.toString("base64");
+	// No preliminary INSERT needed — dashboard tracks pending requests via SSE events, not DB queries.
+	asyncWriter.enqueue(async () => {
+		try {
+			await dbOps.saveRequest(
+				startMessage.requestId,
+				startMessage.method,
+				startMessage.path,
+				startMessage.accountId,
+				startMessage.responseStatus,
+				msg.success,
+				msg.error || null,
+				responseTime,
+				startMessage.failoverAttempts,
+				state.usage.model
+					? {
+							model: state.usage.model,
+							promptTokens:
+								(state.usage.inputTokens || 0) +
+								(state.usage.cacheReadInputTokens || 0) +
+								(state.usage.cacheCreationInputTokens || 0),
+							completionTokens: state.usage.outputTokens,
+							totalTokens: state.usage.totalTokens,
+							costUsd: state.usage.costUsd,
+							// Keep original breakdown for payload
+							inputTokens: state.usage.inputTokens,
+							outputTokens: state.usage.outputTokens,
+							cacheReadInputTokens: state.usage.cacheReadInputTokens,
+							cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
+							tokensPerSecond: state.usage.tokensPerSecond,
+						}
+					: undefined,
+				state.agentUsed,
+				startMessage.apiKeyId || undefined,
+				startMessage.apiKeyName || undefined,
+				projectAtEnd,
+				state.billingType,
+				startMessage.comboName || null,
+			);
+		} catch (error) {
+			log.error(`Failed to save request for ${startMessage.requestId}:`, error);
 		}
-	}
-
-	// Cap request body to prevent unbounded payload storage
-	let requestBody = startMessage.requestBody;
-	if (requestBody) {
-		const rawBytes = Buffer.byteLength(requestBody, "base64");
-		if (rawBytes > MAX_REQUEST_BODY_BYTES) {
-			requestBody = Buffer.from(requestBody, "base64")
-				.subarray(0, MAX_REQUEST_BODY_BYTES)
-				.toString("base64");
-		}
-	}
-
-	const payloadJson = JSON.stringify({
-		request: {
-			headers: startMessage.requestHeaders,
-			body: requestBody,
-		},
-		response: {
-			status: startMessage.responseStatus,
-			headers: startMessage.responseHeaders,
-			body: responseBody,
-		},
-		meta: {
-			accountId: startMessage.accountId || NO_ACCOUNT_ID,
-			timestamp: startMessage.timestamp,
-			success: msg.success,
-			isStream: startMessage.isStream,
-			retry: startMessage.retryAttempt,
-			project: state.project ?? undefined,
-		},
 	});
-
-	// Null out large references now that we have the serialized JSON
-	responseBody = null;
-	freeRequestState(state);
 
 	const requestId = startMessage.requestId;
 	if (storePayloads) {
-		asyncWriter.enqueue(async () =>
-			dbOps.saveRequestPayloadRaw(requestId, payloadJson),
-		);
+		// Save payload - eagerly serialize to break closure references
+		let responseBody: string | null = null;
+
+		if (msg.responseBody) {
+			// Non-streaming response
+			responseBody = msg.responseBody;
+		} else if (state.chunks.length > 0) {
+			// Streaming response - combine chunks
+			const combined = combineChunks(state.chunks);
+			if (combined.length > 0) {
+				responseBody = combined.toString("base64");
+			}
+		}
+
+		// Cap request body to prevent unbounded payload storage
+		let requestBody = startMessage.requestBody;
+		if (requestBody) {
+			const rawBytes = Buffer.byteLength(requestBody, "base64");
+			if (rawBytes > MAX_REQUEST_BODY_BYTES) {
+				requestBody = Buffer.from(requestBody, "base64")
+					.subarray(0, MAX_REQUEST_BODY_BYTES)
+					.toString("base64");
+			}
+		}
+
+		const payloadJson = JSON.stringify({
+			request: {
+				headers: startMessage.requestHeaders,
+				body: requestBody,
+			},
+			response: {
+				status: startMessage.responseStatus,
+				headers: startMessage.responseHeaders,
+				body: responseBody,
+			},
+			meta: {
+				accountId: startMessage.accountId || NO_ACCOUNT_ID,
+				timestamp: startMessage.timestamp,
+				success: msg.success,
+				isStream: startMessage.isStream,
+				retry: startMessage.retryAttempt,
+				project: state.project ?? undefined,
+			},
+		});
+
+		// Null out large references now that we have the serialized JSON
+		responseBody = null;
+		asyncWriter.enqueue(async () => {
+			try {
+				await dbOps.saveRequestPayloadRaw(requestId, payloadJson);
+			} catch (error) {
+				log.error(`Failed to save payload for ${requestId}:`, error);
+			}
+		});
 	}
+	freeRequestState(state);
 
 	// Log if we have usage
 	if (state.usage.model && startMessage.accountId !== NO_ACCOUNT_ID) {

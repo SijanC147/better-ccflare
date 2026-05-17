@@ -23,6 +23,7 @@ import {
 } from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
 import {
+	type AnyUsageData,
 	fetchUsageData,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
@@ -32,13 +33,31 @@ import {
 } from "@better-ccflare/providers";
 import {
 	clearAccountRefreshCache,
+	getUsageThrottleStatus,
 	restartUsagePollingForAccount,
 } from "@better-ccflare/proxy";
-import type { FullUsageData } from "@better-ccflare/types";
+import type { FullUsageData, RateLimitReason } from "@better-ccflare/types";
 import { requiresSessionDurationTracking } from "@better-ccflare/types";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
+
+const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
+	"upstream_429_with_reset",
+	// Kept for backwards-compat with DB rows written by ccflare ≤ v3.5.x;
+	// new code emits `upstream_429_no_reset_probe_cooldown` instead.
+	"upstream_429_no_reset_default_5h",
+	"upstream_429_no_reset_probe_cooldown",
+	"model_fallback_429",
+	"all_models_exhausted_429",
+]);
+
+function toRateLimitReason(v: string | null): RateLimitReason | null {
+	if (v === null) return null;
+	return RATE_LIMIT_REASONS.has(v as RateLimitReason)
+		? (v as RateLimitReason)
+		: null;
+}
 
 function normalizeCodexUsageData(usage: UsageData): UsageData | null {
 	const normalized: UsageData = {
@@ -125,7 +144,10 @@ async function getCachedOrPersistedCodexUsage(
 /**
  * Create an accounts list handler
  */
-export function createAccountsListHandler(dbOps: DatabaseOperations) {
+export function createAccountsListHandler(
+	dbOps: DatabaseOperations,
+	config: Config,
+) {
 	return async (): Promise<Response> => {
 		const db = dbOps.getAdapter();
 		const now = Date.now();
@@ -141,6 +163,8 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 			created_at: number;
 			expires_at: number | null;
 			rate_limited_until: number | null;
+			rate_limited_reason: string | null;
+			rate_limited_at: number | null;
 			rate_limit_reset: number | null;
 			rate_limit_status: string | null;
 			rate_limit_remaining: number | null;
@@ -156,6 +180,7 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 			auto_fallback_enabled: 0 | 1;
 			auto_refresh_enabled: 0 | 1;
 			auto_pause_on_overage_enabled: 0 | 1;
+			peak_hours_pause_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			cross_region_mode: string | null;
@@ -173,6 +198,8 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					created_at,
 					expires_at,
 					rate_limited_until,
+						rate_limited_reason,
+						rate_limited_at,
 					rate_limit_reset,
 					rate_limit_status,
 					rate_limit_remaining,
@@ -186,6 +213,7 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 					custom_endpoint,
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
+					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 
 					model_mappings,
 					cross_region_mode,
@@ -208,49 +236,6 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 				ORDER BY priority DESC, request_count DESC
 			`,
 			[now, now, now, sessionDuration],
-		);
-
-		// Fetch usage data for all Claude CLI OAuth accounts (those with refresh tokens)
-		// API key accounts don't have usage tracking available
-		const oauthAccounts = accounts.filter(
-			(acc) =>
-				acc.provider === "anthropic" &&
-				acc.access_token &&
-				acc.refresh_token &&
-				acc.refresh_token !== acc.access_token, // Exclude API key accounts where they're the same
-		);
-
-		// Fetch usage data in parallel for all OAuth accounts that don't have fresh cache data
-		// Cache is considered stale after 90 seconds (aligned with auto-refresh scheduler polling)
-		const CACHE_FRESHNESS_THRESHOLD_MS = 90000;
-		await Promise.all(
-			oauthAccounts.map(async (account) => {
-				// Check if we already have cached data and if it's still fresh
-				const cacheAge = usageCache.getAge(account.id);
-				const isCacheFresh =
-					cacheAge !== null && cacheAge < CACHE_FRESHNESS_THRESHOLD_MS;
-
-				if (!isCacheFresh && account.access_token) {
-					// Fetch usage data if cache is stale or missing
-					try {
-						const { data: usageData } = await fetchUsageData(
-							account.access_token,
-						);
-						if (usageData) {
-							// Update the cache using the public set method
-							usageCache.set(account.id, usageData);
-							log.debug(
-								`Fetched usage data for ${account.name}: 5h=${usageData.five_hour.utilization}%, 7d=${usageData.seven_day.utilization}%`,
-							);
-						}
-					} catch (error) {
-						log.warn(
-							`Failed to fetch usage data for account ${account.name}:`,
-							error,
-						);
-					}
-				}
-			}),
 		);
 
 		// Fetch session-window token stats only for providers with session-based limits
@@ -302,6 +287,8 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 				let usageUtilization: number | null = null;
 				let usageWindow: string | null = null;
 				let fullUsageData: FullUsageData | null = null;
+				let usageThrottledUntil: number | null = null;
+				let usageThrottledWindows: string[] = [];
 
 				if (
 					(account.provider === "anthropic" || account.provider === "codex") &&
@@ -407,6 +394,24 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					}
 				}
 
+				const usageThrottleSettings = {
+					fiveHourEnabled: config.getUsageThrottlingFiveHourEnabled(),
+					weeklyEnabled: config.getUsageThrottlingWeeklyEnabled(),
+				};
+				if (
+					(usageThrottleSettings.fiveHourEnabled ||
+						usageThrottleSettings.weeklyEnabled) &&
+					fullUsageData
+				) {
+					const usageThrottleStatus = getUsageThrottleStatus(
+						fullUsageData as AnyUsageData,
+						usageThrottleSettings,
+						now,
+					);
+					usageThrottledUntil = usageThrottleStatus.throttleUntil;
+					usageThrottledWindows = usageThrottleStatus.throttledWindows;
+				}
+
 				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, NanoGPT, and OpenRouter providers
 				let modelMappings: { [key: string]: string } | null = null;
 				if (account.model_mappings) {
@@ -472,16 +477,25 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					rateLimitedUntil: account.rate_limited_until
 						? Number(account.rate_limited_until)
 						: null,
+					rateLimitedReason: toRateLimitReason(account.rate_limited_reason),
+					rateLimitedAt:
+						account.rate_limited_at != null
+							? Number(account.rate_limited_at)
+							: null,
 					sessionInfo: account.session_info || "",
 					autoFallbackEnabled: account.auto_fallback_enabled === 1,
 					autoRefreshEnabled: account.auto_refresh_enabled === 1,
 					autoPauseOnOverageEnabled:
 						account.auto_pause_on_overage_enabled === 1,
+					peakHoursPauseEnabled: account.peak_hours_pause_enabled === 1,
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
 					usageUtilization,
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
+					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
+					usageThrottledUntil,
+					usageThrottledWindows,
 					hasRefreshToken:
 						!!account.refresh_token &&
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields
@@ -1776,6 +1790,291 @@ export function createAnthropicCompatibleAccountAddHandler(
 }
 
 /**
+ * Create an Ollama account add handler
+ */
+export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			const customEndpoint = validateString(
+				body.customEndpoint || null,
+				"customEndpoint",
+				{
+					required: false,
+					transform: (value: string) => {
+						if (!value) return "";
+						const trimmed = value.trim();
+						if (!trimmed) return "";
+						try {
+							new URL(trimmed);
+							return trimmed;
+						} catch {
+							throw new Error("Invalid URL format");
+						}
+					},
+				},
+			);
+
+			let modelMappings = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				const validatedMappings = validateAndSanitizeModelMappings(
+					body.modelMappings,
+				);
+				modelMappings = JSON.stringify(validatedMappings);
+			}
+
+			// Ollama doesn't require an API key; use a placeholder
+			const apiKey = "ollama";
+
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"ollama",
+					apiKey,
+					apiKey,
+					apiKey,
+					now + 365 * 24 * 60 * 60 * 1000,
+					now,
+					0,
+					0,
+					priority,
+					customEndpoint || null,
+					modelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added Ollama account: ${name} (Priority ${priority})`,
+			);
+
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `Ollama account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("Ollama account creation error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create Ollama account"),
+			);
+		}
+	};
+}
+
+export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			const apiKey = validateString(body.apiKey, "apiKey", {
+				required: true,
+				minLength: 1,
+				transform: sanitizers.trim,
+			});
+
+			if (!apiKey) {
+				return errorResponse(
+					BadRequest("API key is required for Ollama Cloud"),
+				);
+			}
+
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			let modelMappings = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				const validatedMappings = validateAndSanitizeModelMappings(
+					body.modelMappings,
+				);
+				modelMappings = JSON.stringify(validatedMappings);
+			}
+
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"ollama-cloud",
+					apiKey,
+					apiKey,
+					apiKey,
+					now + 365 * 24 * 60 * 60 * 1000,
+					now,
+					0,
+					0,
+					priority,
+					"https://ollama.com",
+					modelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added Ollama Cloud account: ${name} (Priority ${priority})`,
+			);
+
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `Ollama Cloud account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("Ollama Cloud account creation error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create Ollama Cloud account"),
+			);
+		}
+	};
+}
+
+/**
  * Create an account auto-fallback toggle handler
  */
 export function createAccountAutoFallbackHandler(dbOps: DatabaseOperations) {
@@ -1888,6 +2187,71 @@ export function createAccountAutoPauseOnOverageHandler(
 				error instanceof Error
 					? error
 					: new Error("Failed to toggle auto-pause-on-overage"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account peak-hours-pause toggle handler (Zai accounts only)
+ */
+export function createAccountPeakHoursPauseHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate enabled parameter
+			const enabled = validateNumber(body.enabled, "enabled", {
+				required: true,
+				allowedValues: [0, 1] as const,
+			});
+
+			if (enabled === undefined) {
+				return errorResponse(BadRequest("Enabled field is required (0 or 1)"));
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Only zai accounts support peak hours pause
+			if (account.provider !== "zai") {
+				return errorResponse(
+					BadRequest("Peak hours pause is only available for Zai accounts"),
+				);
+			}
+
+			// Update peak-hours-pause setting
+			await dbOps.setPeakHoursPauseEnabled(accountId, enabled === 1);
+
+			// Immediate resume when disabling — don't make users wait for scheduler
+			if (enabled === 0) {
+				await db.run(
+					"UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ? AND COALESCE(paused, 0) = 1 AND pause_reason = 'peak_hours'",
+					[accountId],
+				);
+			}
+
+			const action = enabled === 1 ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Peak hours pause ${action} for account '${account.name}'`,
+				peakHoursPauseEnabled: enabled === 1,
+			});
+		} catch (error) {
+			log.error("Account peak-hours-pause toggle error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle peak-hours-pause"),
 			);
 		}
 	};
@@ -3161,17 +3525,21 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 
 			clearAccountRefreshCache(accountId);
 			const pollingRestarted = await restartUsagePollingForAccount(accountId);
+			const cacheRefreshed = await usageCache.refreshNow(accountId);
 
 			log.info(
-				`Usage refresh requested for account '${account.name}' (polling restarted: ${pollingRestarted})`,
+				`Usage refresh requested for account '${account.name}' (polling restarted: ${pollingRestarted}, cache refreshed: ${cacheRefreshed})`,
 			);
 
 			return jsonResponse({
 				success: true,
 				message: pollingRestarted
-					? `Usage polling restarted for account '${account.name}'. Fresh usage data will appear within 5-10 seconds.`
-					: `Usage cache cleared for account '${account.name}'. Note: server-side polling could not be restarted - usage data may not update until a request is proxied.`,
+					? `Usage polling restarted for account '${account.name}'. Fresh usage data is now available.`
+					: cacheRefreshed
+						? `Usage cache refreshed for account '${account.name}'.`
+						: `Polling could not be restarted for account '${account.name}' — usage data may not update.`,
 				pollingRestarted,
+				cacheRefreshed,
 			});
 		} catch (error) {
 			log.error("Account refresh usage error:", error);

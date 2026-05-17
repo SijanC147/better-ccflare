@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RuntimeConfig } from "@better-ccflare/config";
 import type { Disposable } from "@better-ccflare/core";
+import { TIME_CONSTANTS } from "@better-ccflare/core";
 import type {
 	Account,
 	Combo,
@@ -10,9 +12,12 @@ import type {
 	ComboFamilyAssignment,
 	ComboSlot,
 	ComboWithSlots,
+	IntegrityStatus,
+	RateLimitReason,
 	StrategyStore,
 } from "@better-ccflare/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
+import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { ensureSchema, runMigrations } from "./migrations";
 import { ensureSchemaPg, runMigrationsPg } from "./migrations-pg";
 import { resolveDbPath } from "./paths";
@@ -139,9 +144,9 @@ function configureSqlite(
 		db.run("PRAGMA temp_store = MEMORY");
 		db.run("PRAGMA foreign_keys = ON");
 
-		// Add checkpoint interval for WAL mode (100 pages = ~200KB with 2KB pages)
-		// Lower threshold reduces WAL file size at the cost of slightly more frequent checkpoints
-		db.run("PRAGMA wal_autocheckpoint = 100");
+		// Add checkpoint interval for WAL mode (1000 pages = ~4MB with 4KB pages)
+		// Higher threshold reduces checkpoint frequency for better throughput under high traffic
+		db.run("PRAGMA wal_autocheckpoint = 1000");
 	} catch (error) {
 		console.error("Database configuration failed:", error);
 		throw new Error(`Failed to configure SQLite database: ${error}`);
@@ -159,11 +164,21 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private adapter: BunSqlAdapter;
 	/** Raw bun:sqlite Database — only set in SQLite mode */
 	private sqliteDb?: Database;
+	/** Resolved path to the SQLite DB file — used by the vacuum worker */
+	private resolvedDbPath?: string;
+	/** Prevents concurrent compact() calls from spawning multiple vacuum workers */
+	private compacting = false;
 	private runtime?: RuntimeConfig;
 	private dbConfig: DatabaseConfig;
 	private retryConfig: DatabaseRetryConfig;
 	private fastMode: boolean;
 	readonly isSQLite: boolean;
+	/** Cached integrity check status for doctor command */
+	private integrityStatus: IntegrityStatus = {
+		status: "unchecked",
+		lastCheckAt: null,
+		lastError: null,
+	};
 
 	// Repositories
 	private accounts: AccountRepository;
@@ -223,6 +238,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		} else {
 			this.isSQLite = true;
 			const resolvedPath = dbPath ?? resolveDbPath();
+			this.resolvedDbPath = resolvedPath;
 
 			// Ensure the directory exists
 			const dir = dirname(resolvedPath);
@@ -316,6 +332,150 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		}
 	}
 
+	async runQuickIntegrityCheck(): Promise<string> {
+		if (!this.sqliteDb) {
+			// PostgreSQL: verify connectivity with a lightweight query
+			await this.adapter.get("SELECT 1 AS ok");
+			return "ok";
+		}
+		const result = this.sqliteDb.query("PRAGMA quick_check").get() as {
+			quick_check: string;
+		};
+		return result.quick_check;
+	}
+
+	async runFullIntegrityCheck(): Promise<string> {
+		if (!this.sqliteDb) {
+			// PostgreSQL: verify connectivity with a lightweight query
+			await this.adapter.get("SELECT 1 AS ok");
+			return "ok";
+		}
+		// integrity_check can return multiple rows for long error reports
+		const rows = this.sqliteDb.query("PRAGMA integrity_check").all() as Array<{
+			integrity_check: string;
+		}>;
+		// Join all rows into a single string (most cases return single 'ok' row)
+		return rows.map((r) => r.integrity_check).join("\n");
+	}
+
+	/**
+	 * Get cached integrity status
+	 */
+	getIntegrityStatus(): IntegrityStatus {
+		return { ...this.integrityStatus };
+	}
+
+	/**
+	 * Update cached integrity status
+	 */
+	updateIntegrityStatus(status: "ok" | "corrupt", error?: string | null): void {
+		this.integrityStatus = {
+			status,
+			lastCheckAt: Date.now(),
+			lastError: error ?? null,
+		};
+	}
+
+	/**
+	 * Get storage metrics for database health monitoring
+	 */
+	async getStorageMetrics(): Promise<{
+		dbBytes: number;
+		walBytes: number;
+		orphanPages: number;
+		lastRetentionSweepAt: number | null;
+		nullAccountRows: number;
+	}> {
+		// Database file size
+		const dbBytes = await this.getDbSizeBytes();
+
+		// WAL file size (if exists)
+		let walBytes = 0;
+		if (this.resolvedDbPath) {
+			const walPath = `${this.resolvedDbPath}-wal`;
+			try {
+				const { size } = await stat(walPath);
+				walBytes = size;
+			} catch {
+				// WAL file doesn't exist or can't be accessed
+			}
+		}
+
+		// Orphan pages (freelist count) - only in SQLite mode
+		let orphanPages = 0;
+		if (this.sqliteDb) {
+			const result = this.sqliteDb.query("PRAGMA freelist_count").get() as {
+				freelist_count: number;
+			};
+			orphanPages = result.freelist_count;
+		}
+
+		// Last retention sweep timestamp
+		let lastRetentionSweepAt: number | null = null;
+		try {
+			const strategy = await this.getStrategy("data-retention");
+			if (strategy?.config?.lastSweepAt) {
+				lastRetentionSweepAt = strategy.config.lastSweepAt as number;
+			}
+		} catch {
+			// strategies table may not exist in SQLite mode
+		}
+
+		// Null account rows (requests with account_used IS NULL in last 24h)
+		const cutoff = Date.now() - TIME_CONSTANTS.DAY;
+		const nullAccountRow = await this.adapter.get<{ count: number }>(
+			"SELECT COUNT(*) AS count FROM requests WHERE account_used IS NULL AND timestamp >= ?",
+			[cutoff],
+		);
+		const nullAccountRows = nullAccountRow?.count ?? 0;
+
+		return {
+			dbBytes,
+			walBytes,
+			orphanPages,
+			lastRetentionSweepAt,
+			nullAccountRows,
+		};
+	}
+
+	/**
+	 * Generate manual recovery instructions for corrupted database
+	 */
+	generateRecoveryInstructions(): string {
+		const dbPath =
+			this.resolvedDbPath ?? "~/.config/better-ccflare/better-ccflare.db";
+		return `
+DATABASE RECOVERY INSTRUCTIONS
+
+If your database is corrupted, follow these steps:
+
+1. STOP THE SERVER
+   bun run cli --stop
+
+2. BACKUP CORRUPTED DATABASE
+   cp ${dbPath} ${dbPath}.corrupted.backup
+   cp ${dbPath}-wal ${dbPath}-wal.corrupted.backup 2>/dev/null || true
+   cp ${dbPath}-shm ${dbPath}-shm.corrupted.backup 2>/dev/null || true
+
+3. ATTEMPT RECOVERY (optional)
+   sqlite3 ${dbPath}.corrupted.backup ".recover" > recovered.sql
+   sqlite3 ${dbPath}.new < recovered.sql
+   # If successful, replace original:
+   mv ${dbPath}.new ${dbPath}
+
+4. START FRESH (if recovery fails)
+   rm ${dbPath} ${dbPath}-wal ${dbPath}-shm
+   # Restart server - it will create a new empty database
+   bun start
+
+5. RE-ADD ACCOUNTS
+   bun run cli --add-account <name> --mode <mode> --priority <number>
+
+NOTE: You will lose all historical request data and account configurations.
+OAuth tokens will need to be re-authenticated.
+`.trim();
+	}
+
 	/**
 	 * Get the current retry configuration
 	 */
@@ -372,9 +532,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	async markAccountRateLimited(
 		accountId: string,
 		until: number,
+		reason: RateLimitReason,
 	): Promise<void> {
 		await withDatabaseRetry(
-			() => this.accounts.setRateLimited(accountId, until),
+			() => this.accounts.setRateLimited(accountId, until, reason),
 			this.retryConfig,
 			"markAccountRateLimited",
 		);
@@ -472,39 +633,21 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		await this.accounts.setAutoPauseOnOverageEnabled(accountId, enabled);
 	}
 
+	async setPeakHoursPauseEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET peak_hours_pause_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
 	async hasAccountsForProvider(provider: string): Promise<boolean> {
 		return this.accounts.hasAccountsForProvider(provider);
 	}
 
 	// Request operations delegated to repository
-	async saveRequestMeta(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		timestamp?: number,
-		apiKeyId?: string,
-		apiKeyName?: string,
-		project?: string | null,
-	): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.requests.saveMeta(
-					id,
-					method,
-					path,
-					accountUsed,
-					statusCode,
-					timestamp,
-					apiKeyId,
-					apiKeyName,
-					project,
-				),
-			this.retryConfig,
-			"saveRequestMeta",
-		);
-	}
 
 	async saveRequest(
 		id: string,
@@ -586,9 +729,14 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		return this.requests.listPayloads(limit);
 	}
 
-	async listRequestPayloadsWithAccountNames(
-		limit = 50,
-	): Promise<Array<{ id: string; json: string; account_name: string | null }>> {
+	async listRequestPayloadsWithAccountNames(limit = 50): Promise<
+		Array<{
+			id: string;
+			json: string | null;
+			timestamp: number;
+			account_name: string | null;
+		}>
+	> {
 		return this.requests.listPayloadsWithAccountNames(limit);
 	}
 
@@ -742,6 +890,59 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		};
 	}
 
+	async getTableRowCounts(): Promise<
+		Array<{ name: string; rowCount: number; dataBytes?: number }>
+	> {
+		if (!this.adapter.isSQLite) {
+			return [];
+		}
+		try {
+			const tables = await this.adapter.query<{ name: string }>(
+				"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+			);
+			const rows = await Promise.all(
+				tables.map(async ({ name }) => {
+					const countRow = await this.adapter.get<{ rowCount: number }>(
+						`SELECT COUNT(*) AS rowCount FROM "${name}"`,
+					);
+					const rowCount = countRow?.rowCount ?? 0;
+					// Measure actual data bytes for tables with known large text/blob columns
+					if (name === "request_payloads") {
+						const sizeRow = await this.adapter.get<{ dataBytes: number }>(
+							`SELECT SUM(LENGTH(json)) AS dataBytes FROM "${name}"`,
+						);
+						return { name, rowCount, dataBytes: sizeRow?.dataBytes ?? 0 };
+					}
+					return { name, rowCount };
+				}),
+			);
+			// Sort: tables with dataBytes first (largest first), then by rowCount
+			return rows.sort((a, b) => {
+				if (a.dataBytes !== undefined && b.dataBytes !== undefined)
+					return b.dataBytes - a.dataBytes;
+				if (a.dataBytes !== undefined) return -1;
+				if (b.dataBytes !== undefined) return 1;
+				return b.rowCount - a.rowCount;
+			});
+		} catch (err) {
+			console.debug("[getTableRowCounts] query failed:", err);
+			return [];
+		}
+	}
+
+	async getDbSizeBytes(): Promise<number> {
+		if (!this.adapter.isSQLite || !this.resolvedDbPath) {
+			return 0;
+		}
+		try {
+			const { size } = await stat(this.resolvedDbPath);
+			return size;
+		} catch (err) {
+			console.debug("[getDbSizeBytes] stat failed:", err);
+			return 0;
+		}
+	}
+
 	// Agent preference operations delegated to repository
 	async getAgentPreference(agentId: string): Promise<{ model: string } | null> {
 		return this.agentPreferences.getPreference(agentId);
@@ -806,68 +1007,79 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		walTruncateBusy?: number;
 		error?: string;
 	}> {
-		if (!this.sqliteDb) {
+		if (!this.sqliteDb || !this.resolvedDbPath) {
 			return { walBusy: 0, walLog: 0, walCheckpointed: 0, vacuumed: false };
 		}
 
-		let walBusy = 0;
-		let walLog = 0;
-		let walCheckpointed = 0;
-		let vacuumed = false;
-		let walTruncateBusy: number | undefined;
-
-		try {
-			// Step 1: RESTART checkpoint — drains WAL into main DB and resets WAL
-			// write position so the next VACUUM starts with a clean slate.
-			const ckpt = this.sqliteDb
-				.query("PRAGMA wal_checkpoint(RESTART)")
-				.get() as { busy: number; log: number; checkpointed: number } | null;
-
-			if (ckpt) {
-				walBusy = ckpt.busy;
-				walLog = ckpt.log;
-				walCheckpointed = ckpt.checkpointed;
-				if (ckpt.busy > 0) {
-					console.warn(
-						`[compact] WAL checkpoint: ${ckpt.busy} busy reader(s), ` +
-							`${ckpt.checkpointed}/${ckpt.log} frames checkpointed. ` +
-							"VACUUM will still run but WAL may not fully shrink.",
-					);
-				}
-			}
-
-			// Step 2: VACUUM — rewrites the main DB file, reclaiming free pages.
-			this.sqliteDb.exec("VACUUM");
-			vacuumed = true;
-
-			// Step 3: TRUNCATE checkpoint — resets WAL to zero bytes now that
-			// VACUUM has produced a clean main DB.
-			const truncCkpt = this.sqliteDb
-				.query("PRAGMA wal_checkpoint(TRUNCATE)")
-				.get() as { busy: number; log: number; checkpointed: number } | null;
-
-			if (truncCkpt) {
-				walTruncateBusy = truncCkpt.busy;
-				if (truncCkpt.busy > 0) {
-					console.warn(
-						`[compact] TRUNCATE checkpoint: ${truncCkpt.busy} busy reader(s) — WAL file may not be zeroed.`,
-					);
-				}
-			}
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			console.error(`[compact] Database compaction failed: ${msg}`);
+		if (this.compacting) {
 			return {
-				walBusy,
-				walLog,
-				walCheckpointed,
-				vacuumed,
-				walTruncateBusy,
-				error: msg,
+				walBusy: 0,
+				walLog: 0,
+				walCheckpointed: 0,
+				vacuumed: false,
+				error: "Compaction already in progress",
 			};
 		}
 
-		return { walBusy, walLog, walCheckpointed, vacuumed, walTruncateBusy };
+		// Run the WAL checkpoint + VACUUM + TRUNCATE sequence in a Worker thread
+		// so the main Bun event loop stays free to serve health checks and other
+		// requests during what can be a minutes-long exclusive DB operation.
+		const dbPath = this.resolvedDbPath;
+		let worker: Worker;
+		if (EMBEDDED_VACUUM_WORKER_CODE) {
+			const workerCode = Buffer.from(
+				EMBEDDED_VACUUM_WORKER_CODE,
+				"base64",
+			).toString("utf8");
+			const blob = new Blob([workerCode], { type: "text/javascript" });
+			worker = new Worker(URL.createObjectURL(blob), { smol: true });
+		} else {
+			worker = new Worker(new URL("./vacuum-worker.ts", import.meta.url).href);
+		}
+		this.compacting = true;
+
+		try {
+			const result = await new Promise<{
+				ok: boolean;
+				walBusy?: number;
+				walLog?: number;
+				walCheckpointed?: number;
+				walTruncateBusy?: number;
+				error?: string;
+			}>((resolve, reject) => {
+				worker.onmessage = (event: MessageEvent) => resolve(event.data);
+				worker.onerror = (event: ErrorEvent) =>
+					reject(new Error(event.message));
+				worker.postMessage({
+					dbPath,
+					busyTimeoutMs: this.dbConfig.busyTimeoutMs ?? 10000,
+				});
+			});
+
+			if (!result.ok) {
+				const msg = result.error ?? "Unknown error in vacuum worker";
+				console.error(`[compact] Database compaction failed: ${msg}`);
+				return {
+					walBusy: result.walBusy ?? 0,
+					walLog: result.walLog ?? 0,
+					walCheckpointed: result.walCheckpointed ?? 0,
+					vacuumed: false,
+					walTruncateBusy: result.walTruncateBusy,
+					error: msg,
+				};
+			}
+
+			return {
+				walBusy: result.walBusy ?? 0,
+				walLog: result.walLog ?? 0,
+				walCheckpointed: result.walCheckpointed ?? 0,
+				vacuumed: true,
+				walTruncateBusy: result.walTruncateBusy,
+			};
+		} finally {
+			this.compacting = false;
+			worker.terminate();
+		}
 	}
 
 	/** Incremental vacuum - reclaims space without blocking (SQLite only) */

@@ -11,6 +11,7 @@ import {
 	createAccountModelFallbacksUpdateHandler,
 	createAccountModelMappingsUpdateHandler,
 	createAccountPauseHandler,
+	createAccountPeakHoursPauseHandler,
 	createAccountPriorityUpdateHandler,
 	createAccountRefreshUsageHandler,
 	createAccountReloadHandler,
@@ -25,6 +26,8 @@ import {
 	createKiloAccountAddHandler,
 	createMinimaxAccountAddHandler,
 	createNanoGPTAccountAddHandler,
+	createOllamaAccountAddHandler,
+	createOllamaCloudAccountAddHandler,
 	createOpenAIAccountAddHandler,
 	createOpenRouterAccountAddHandler,
 	createVertexAIAccountAddHandler,
@@ -93,6 +96,7 @@ import {
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
+import { createStorageHandler } from "./handlers/storage";
 import { createSystemInfoHandler } from "./handlers/system";
 import {
 	createAccountTokenHealthHandler,
@@ -127,19 +131,26 @@ export class APIRouter {
 	}
 
 	private registerHandlers(): void {
-		const { db, config, dbOps, getAsyncWriterHealth, getUsageWorkerHealth } =
-			this.context;
+		const {
+			config,
+			dbOps,
+			getAsyncWriterHealth,
+			getUsageWorkerHealth,
+			getIntegrityStatus,
+		} = this.context;
 
 		// Create handlers
 		const healthHandler = createHealthHandler(
-			dbOps.getAdapter(),
+			dbOps,
 			config,
 			getAsyncWriterHealth,
 			getUsageWorkerHealth,
+			getIntegrityStatus,
 		);
 		const statsHandler = createStatsHandler(dbOps);
 		const statsResetHandler = createStatsResetHandler(dbOps);
-		const accountsHandler = createAccountsListHandler(dbOps);
+		const storageHandler = createStorageHandler(dbOps);
+		const accountsHandler = createAccountsListHandler(dbOps, config);
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
@@ -154,6 +165,7 @@ export class APIRouter {
 		const nanogptAccountAddHandler = createNanoGPTAccountAddHandler(dbOps);
 		const anthropicCompatibleAccountAddHandler =
 			createAnthropicCompatibleAccountAddHandler(dbOps);
+		const ollamaAccountAddHandler = createOllamaAccountAddHandler(dbOps);
 		const openaiAccountAddHandler = createOpenAIAccountAddHandler(dbOps);
 		const _accountRemoveHandler = createAccountRemoveHandler(dbOps);
 		const requestsSummaryHandler = createRequestsSummaryHandler(
@@ -198,9 +210,10 @@ export class APIRouter {
 		const apiKeysStatsHandler = createApiKeysStatsHandler(dbOps);
 
 		// Register routes
-		this.handlers.set("GET:/health", () => healthHandler());
+		this.handlers.set("GET:/health", (_req, url) => healthHandler(url));
 		this.handlers.set("GET:/api/stats", (_req, url) => statsHandler(url));
 		this.handlers.set("POST:/api/stats/reset", () => statsResetHandler());
+		this.handlers.set("GET:/api/storage", (_req, _url) => storageHandler());
 		this.handlers.set("GET:/api/accounts", () => accountsHandler());
 		this.handlers.set("POST:/api/accounts", (req) => accountAddHandler(req));
 		this.handlers.set("POST:/api/accounts/zai", (req) =>
@@ -230,6 +243,14 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/accounts/anthropic-compatible", (req) =>
 			anthropicCompatibleAccountAddHandler(req),
+		);
+		this.handlers.set("POST:/api/accounts/ollama", (req) =>
+			ollamaAccountAddHandler(req),
+		);
+		const ollamaCloudAccountAddHandler =
+			createOllamaCloudAccountAddHandler(dbOps);
+		this.handlers.set("POST:/api/accounts/ollama-cloud", (req) =>
+			ollamaCloudAccountAddHandler(req),
 		);
 		this.handlers.set("POST:/api/accounts/openai-compatible", (req) =>
 			openaiAccountAddHandler(req),
@@ -323,6 +344,12 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/cache-ttl", (req) =>
 			configHandlers.setCacheTtl(req),
+		);
+		this.handlers.set("GET:/api/config/usage-throttling", () =>
+			configHandlers.getUsageThrottling(),
+		);
+		this.handlers.set("POST:/api/config/usage-throttling", (req) =>
+			configHandlers.setUsageThrottling(req),
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("POST:/api/maintenance/compact", () => compactHandler());
@@ -532,6 +559,16 @@ export class APIRouter {
 					createAccountAutoPauseOnOverageHandler(this.context.dbOps);
 				return await this.wrapHandler((req) =>
 					autoPauseOnOverageHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Account peak-hours-pause toggle (Zai accounts only)
+			if (path.endsWith("/peak-hours-pause") && method === "POST") {
+				const peakHoursPauseHandler = createAccountPeakHoursPauseHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					peakHoursPauseHandler(req, accountId),
 				)(req, url);
 			}
 
