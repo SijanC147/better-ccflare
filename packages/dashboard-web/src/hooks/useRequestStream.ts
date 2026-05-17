@@ -1,6 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
-import type { Account, RequestPayload, RequestResponse } from "../api";
+import {
+	type Account,
+	api,
+	type RequestPayload,
+	type RequestResponse,
+} from "../api";
 import { queryKeys } from "../lib/query-keys";
 
 // Connection pool management
@@ -228,7 +233,7 @@ export function useRequestStream(limit = 200) {
 			}
 
 			console.log(`Creating new SSE connection: ${connectionKey}`);
-			const es = new EventSource("/api/requests/stream");
+			const es = new EventSource(api.appendApiKeyToUrl("/api/requests/stream"));
 
 			// Setup event handlers
 			es.addEventListener("open", () => {

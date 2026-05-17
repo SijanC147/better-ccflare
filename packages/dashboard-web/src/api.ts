@@ -128,6 +128,18 @@ class API extends HttpClient {
 	}
 
 	/**
+	 * Append the stored API key as a query param to an SSE URL.
+	 * EventSource has no header API, so the dashboard authenticates
+	 * streams via `?api_key=`. Returns the URL unchanged when no key.
+	 */
+	appendApiKeyToUrl(url: string): string {
+		const key = this.getApiKey();
+		if (!key) return url;
+		const sep = url.includes("?") ? "&" : "?";
+		return `${url}${sep}api_key=${encodeURIComponent(key)}`;
+	}
+
+	/**
 	 * Check if API key is stored
 	 */
 	hasApiKey(): boolean {
@@ -760,7 +772,9 @@ class API extends HttpClient {
 
 	// SSE streaming requires special handling, keep as-is
 	streamLogs(onLog: (log: LogEntry) => void): EventSource {
-		const eventSource = new EventSource(`/api/logs/stream`);
+		const eventSource = new EventSource(
+			this.appendApiKeyToUrl(`/api/logs/stream`),
+		);
 		eventSource.addEventListener("message", (event) => {
 			try {
 				const data = JSON.parse(event.data);
@@ -1591,6 +1605,47 @@ class API extends HttpClient {
 		}
 	}
 
+	async getRequestStorage(): Promise<{ headersOnly: boolean }> {
+		const startTime = Date.now();
+		const url = "/api/config/request-storage";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{ headersOnly: boolean }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async setRequestStorage(body: { headersOnly: boolean }): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/config/request-storage";
+
+		this.logger.debug(`→ POST ${url}`, { body });
+
+		try {
+			await this.post(url, body);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
 	async getCacheKeepaliveTtl(): Promise<{ ttlMinutes: number }> {
 		const startTime = Date.now();
 		const url = "/api/config/keepalive";
@@ -2179,6 +2234,91 @@ class API extends HttpClient {
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+	// PostgreSQL configuration
+	async getPostgresConfig(): Promise<{
+		enabled: boolean;
+		host: string;
+		port: number;
+		database: string;
+		user: string;
+		passwordSet: boolean;
+		sslMode: "disable" | "require" | "verify-ca" | "verify-full";
+	}> {
+		const startTime = Date.now();
+		const url = "/api/config/postgres";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{
+				enabled: boolean;
+				host: string;
+				port: number;
+				database: string;
+				user: string;
+				passwordSet: boolean;
+				sslMode: "disable" | "require" | "verify-ca" | "verify-full";
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async setPostgresConfig(body: {
+		enabled?: boolean;
+		host?: string;
+		port?: number;
+		database?: string;
+		user?: string;
+		password?: string;
+		sslMode?: "disable" | "require" | "verify-ca" | "verify-full";
+	}): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/config/postgres";
+
+		this.logger.debug(`→ POST ${url}`, { body });
+
+		try {
+			await this.post(url, body);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 204 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async adminRestart(): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/admin/restart";
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			await this.post(url, {});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 202 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
 				error: error instanceof Error ? error.message : String(error),
 				stack: error instanceof Error ? error.stack : undefined,
 			});

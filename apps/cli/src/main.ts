@@ -96,10 +96,14 @@ interface ParsedArgs {
 		| "openai-compatible"
 		| "nanogpt"
 		| "bedrock"
+		| "vertex-ai"
 		| "kilo"
 		| "alibaba-coding-plan"
 		| "codex"
+		| "qwen"
+		| "openrouter"
 		| "ollama"
+		| "ollama-cloud"
 		| null;
 	priority: number | null;
 	profile: string | null;
@@ -133,7 +137,10 @@ interface ParsedArgs {
 /**
  * Helper function to start server with unified environment variable handling
  */
-function startServerWithConfig(args: ParsedArgs, config: Config) {
+async function startServerWithConfig(
+	args: ParsedArgs,
+	config: Config,
+): Promise<void> {
 	const runtime = config.getRuntime();
 
 	// Proper precedence: command line args > environment variables > config defaults
@@ -148,7 +155,11 @@ function startServerWithConfig(args: ParsedArgs, config: Config) {
 		`Dashboard will be available at ${protocol}://localhost:${port}/dashboard`,
 	);
 
-	startServer({
+	// `startServer` is async — await it so initialization failures (DB
+	// migrations, port bind, etc.) surface as caught errors rather than
+	// unhandled promise rejections that leave the CLI running without a
+	// working server (Codex P2 on PR #29).
+	await startServer({
 		port,
 		withDashboard: true,
 		sslKeyPath,
@@ -574,10 +585,14 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "anthropic-compatible"
 					| "openai-compatible"
 					| "bedrock"
+					| "vertex-ai"
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
-					| "ollama";
+					| "qwen"
+					| "openrouter"
+					| "ollama"
+					| "ollama-cloud";
 				const validModes: Array<
 					| "claude-oauth"
 					| "console"
@@ -587,10 +602,14 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "anthropic-compatible"
 					| "openai-compatible"
 					| "bedrock"
+					| "vertex-ai"
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
+					| "qwen"
+					| "openrouter"
 					| "ollama"
+					| "ollama-cloud"
 				> = [
 					"claude-oauth",
 					"console",
@@ -600,10 +619,14 @@ function parseArgs(args: string[]): ParsedArgs {
 					"anthropic-compatible",
 					"openai-compatible",
 					"bedrock",
+					"vertex-ai",
 					"kilo",
 					"alibaba-coding-plan",
 					"codex",
+					"qwen",
+					"openrouter",
 					"ollama",
+					"ollama-cloud",
 				];
 				if (!validModes.includes(modeValue)) {
 					console.error(`❌ Invalid mode: ${modeValue}`);
@@ -967,6 +990,13 @@ Examples:
 	// PostgreSQL DB would query tables before ensureSchemaPg() ran and
 	// fail with missing relation errors (Codex P1). The call is a no-op
 	// on SQLite.
+	// Bridge persisted Postgres config → DATABASE_URL so DatabaseOperations
+	// picks up settings written through the dashboard (Codex P2). Env var
+	// always wins.
+	if (!process.env.DATABASE_URL) {
+		const pgUrl = new Config().buildPgConnectionUrl();
+		if (pgUrl) process.env.DATABASE_URL = pgUrl;
+	}
 	DatabaseFactory.initialize(undefined, undefined, false);
 	const dbOps = await DatabaseFactory.getInstanceAsync(false);
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
@@ -974,7 +1004,7 @@ Examples:
 	// Handle non-interactive commands
 	if (parsed.serve) {
 		const config = new Config();
-		startServerWithConfig(parsed, config);
+		await startServerWithConfig(parsed, config);
 		// Keep process alive
 		await new Promise(() => {});
 		return;
@@ -1381,7 +1411,7 @@ Examples:
 	// Default: Start server if no command specified
 	console.log("Starting better-ccflare server...");
 	const config = new Config();
-	startServerWithConfig(parsed, config);
+	await startServerWithConfig(parsed, config);
 
 	// Keep process alive
 	await new Promise(() => {});

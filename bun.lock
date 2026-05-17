@@ -13,7 +13,7 @@
     },
     "apps/cli": {
       "name": "better-ccflare",
-      "version": "3.3.25",
+      "version": "3.7.0",
       "bin": {
         "better-ccflare": "dist/better-ccflare",
       },
@@ -139,6 +139,7 @@
       "name": "@better-ccflare/database",
       "version": "0.1.0",
       "dependencies": {
+        "@better-ccflare/config": "workspace:*",
         "@better-ccflare/core": "workspace:*",
         "@better-ccflare/logger": "workspace:*",
       },

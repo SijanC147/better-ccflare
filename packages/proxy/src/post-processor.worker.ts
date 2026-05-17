@@ -121,6 +121,7 @@ const TIMEOUT_MS = Number(
 
 // Runtime config (can be updated via config-update message)
 let storePayloads = true;
+let headersOnlyStorage = false;
 
 // Check if a request should be logged
 function shouldLogRequest(path: string, status: number): boolean {
@@ -561,8 +562,8 @@ async function handleStart(msg: StartMessage): Promise<void> {
 			"zai",
 			"alibaba-coding-plan",
 			"ollama",
-				"ollama-cloud",
-				"qwen",
+			"ollama-cloud",
+			"qwen",
 			"codex",
 		]);
 		state.billingType = planProviders.has(msg.providerName) ? "plan" : "api";
@@ -841,12 +842,12 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		const payloadJson = JSON.stringify({
 			request: {
 				headers: startMessage.requestHeaders,
-				body: requestBody,
+				body: headersOnlyStorage ? null : requestBody,
 			},
 			response: {
 				status: startMessage.responseStatus,
 				headers: startMessage.responseHeaders,
-				body: responseBody,
+				body: headersOnlyStorage ? null : responseBody,
 			},
 			meta: {
 				accountId: startMessage.accountId || NO_ACCOUNT_ID,
@@ -1050,6 +1051,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 			break;
 		case "config-update":
 			storePayloads = (msg as ConfigUpdateMessage).storePayloads;
+			headersOnlyStorage = (msg as ConfigUpdateMessage).headersOnly;
 			break;
 		default:
 			log.warn(`Unknown message type: ${(msg as { type: string }).type}`);

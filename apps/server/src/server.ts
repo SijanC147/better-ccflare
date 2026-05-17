@@ -603,6 +603,13 @@ export default async function startServer(options?: {
 	if (port !== runtime.port) {
 		runtime.port = port;
 	}
+	// Bridge persisted Postgres config → DATABASE_URL so DatabaseOperations
+	// (which only inspects process.env.DATABASE_URL) picks up settings written
+	// through the dashboard Settings tab. Env var takes precedence (Codex P2).
+	if (!process.env.DATABASE_URL) {
+		const pgUrl = config.buildPgConnectionUrl();
+		if (pgUrl) process.env.DATABASE_URL = pgUrl;
+	}
 	DatabaseFactory.initialize(undefined, runtime);
 	const dbOps = await DatabaseFactory.getInstanceAsync();
 
@@ -791,7 +798,10 @@ export default async function startServer(options?: {
 
 	// Proxy context
 	const usageWorker = getUsageWorker();
-	sendWorkerConfigUpdate(config.getStorePayloads());
+	sendWorkerConfigUpdate(
+		config.getStorePayloads(),
+		config.getRequestStorageHeadersOnly(),
+	);
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
@@ -868,8 +878,11 @@ export default async function startServer(options?: {
 			strategy.initialize?.(strategyStore);
 			proxyContext.strategy = strategy;
 		}
-		if (key === "store_payloads") {
-			sendWorkerConfigUpdate(config.getStorePayloads());
+		if (key === "store_payloads" || key === "request_storage_headers_only") {
+			sendWorkerConfigUpdate(
+				config.getStorePayloads(),
+				config.getRequestStorageHeadersOnly(),
+			);
 		}
 	});
 
@@ -1476,6 +1489,15 @@ if (import.meta.main) {
 		process.env.SSL_CERT_PATH = sslCertPath;
 	}
 
-	// Start the server asynchronously
-	void startServer({ port, sslKeyPath, sslCertPath });
+	// Start the server asynchronously. Attach a rejection handler so
+	// initialization failures (DB migrations, port bind, etc.) surface
+	// as a non-zero exit instead of leaving the process hung without a
+	// working server (Codex P2 on PR #29).
+	startServer({ port, sslKeyPath, sslCertPath }).catch((err) => {
+		console.error(
+			"Failed to start server:",
+			err instanceof Error ? err.message : err,
+		);
+		process.exit(1);
+	});
 }

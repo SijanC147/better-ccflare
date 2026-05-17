@@ -277,6 +277,23 @@ export const useSetRetention = () => {
 	});
 };
 
+export const useRequestStorage = () => {
+	return useQuery({
+		queryKey: ["request-storage"],
+		queryFn: () => api.getRequestStorage(),
+	});
+};
+
+export const useSetRequestStorage = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: { headersOnly: boolean }) => api.setRequestStorage(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["request-storage"] });
+		},
+	});
+};
+
 export const useKeepaliveTtl = () => {
 	return useQuery({
 		queryKey: ["keepalive"],
@@ -342,6 +359,38 @@ export const useCleanupNow = () => {
 export const useCompactDb = () => {
 	return useMutation({
 		mutationFn: () => api.compactDb(),
+	});
+};
+
+// PostgreSQL configuration
+export const usePostgresConfig = () => {
+	return useQuery({
+		queryKey: ["postgres-config"],
+		queryFn: () => api.getPostgresConfig(),
+	});
+};
+
+export const useSetPostgresConfig = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: {
+			enabled?: boolean;
+			host?: string;
+			port?: number;
+			database?: string;
+			user?: string;
+			password?: string;
+			sslMode?: "disable" | "require" | "verify-ca" | "verify-full";
+		}) => api.setPostgresConfig(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["postgres-config"] });
+		},
+	});
+};
+
+export const useAdminRestart = () => {
+	return useMutation({
+		mutationFn: () => api.adminRestart(),
 	});
 };
 

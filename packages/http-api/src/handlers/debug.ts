@@ -45,6 +45,24 @@ export function createHeapStatsHandler() {
  */
 export function createHeapSnapshotHandler() {
 	return (): Response => {
+		// Defense in depth: the dashboard's bootstrap mode (zero API keys)
+		// treats every non-exempt path as authenticated, which would expose
+		// this endpoint publicly. Heap snapshots can contain in-memory OAuth
+		// tokens / API keys and the dump blocks the event loop for seconds,
+		// so require an explicit opt-in env var on top of any auth gate
+		// (Codex P1). Set BETTER_CCFLARE_DEBUG_SNAPSHOT_ENABLED=1 to enable.
+		if (process.env.BETTER_CCFLARE_DEBUG_SNAPSHOT_ENABLED !== "1") {
+			return new Response(
+				JSON.stringify({
+					error:
+						"Heap snapshot endpoint is disabled. Set BETTER_CCFLARE_DEBUG_SNAPSHOT_ENABLED=1 to enable on a non-production instance.",
+				}),
+				{
+					status: 403,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		}
 		const snapshot = generateHeapSnapshotForDebugging();
 		return new Response(JSON.stringify(snapshot), {
 			headers: {

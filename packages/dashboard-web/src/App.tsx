@@ -8,7 +8,6 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
-import { cn } from "./lib/utils";
 import { AccountsTab } from "./components/AccountsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
@@ -22,6 +21,7 @@ import { RequestsTab } from "./components/RequestsTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { ThemeProvider } from "./contexts/theme-context";
+import { cn } from "./lib/utils";
 import "./index.css";
 
 // Lazy load heavy components for better bundle splitting

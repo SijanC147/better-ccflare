@@ -6,7 +6,7 @@ import { jsonResponse } from "@better-ccflare/http-common";
 import type { RequestResponse } from "../types";
 
 const MAX_BODY_PREVIEW_BYTES = 256 * 1024; // 256KB - match response body cap to preserve full conversation history
-const MAX_REQUEST_DETAILS_LIMIT = 50;
+const MAX_REQUEST_DETAILS_LIMIT = 2000;
 
 function truncateBase64(body: unknown): {
 	body: string | null;
@@ -160,8 +160,12 @@ export function createRequestsDetailHandler(dbOps: DatabaseOperations) {
 					}
 				}
 
-				data.request = request;
-				data.response = response;
+				// Ensure request/response are always objects, even when the
+				// payload row was absent (e.g. headers-only storage mode).
+				// Otherwise the dashboard's "Copy as JSON" path crashes on
+				// `data.request.body` (Codex P2).
+				data.request = request ?? {};
+				data.response = response ?? {};
 
 				if (r.account_name) {
 					meta.accountName = r.account_name;

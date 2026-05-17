@@ -230,7 +230,7 @@ export function createSlotAddHandler(dbOps: DatabaseOperations) {
 export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 	return async (
 		req: Request,
-		_comboId: string,
+		comboId: string,
 		slotId: string,
 	): Promise<Response> => {
 		try {
@@ -256,6 +256,16 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 				fields.enabled = enabled;
 			}
 
+			// Scope the update to the combo declared on the path so stale UI state
+			// or scripted calls (PUT /api/combos/A/slots/<slot-from-B>) can't
+			// mutate slots that belong to a different combo (Codex P2).
+			const slotsForCombo = await dbOps.getComboSlots(comboId);
+			if (!slotsForCombo.some((s) => s.id === slotId)) {
+				return errorResponse(
+					BadRequest(`Slot ${slotId} does not belong to combo ${comboId}`),
+				);
+			}
+
 			const updatedSlot = await dbOps.updateComboSlot(slotId, fields);
 
 			return new Response(
@@ -275,8 +285,18 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
  * DELETE /api/combos/:id/slots/:slotId — Remove a slot from a combo
  */
 export function createSlotRemoveHandler(dbOps: DatabaseOperations) {
-	return async (_comboId: string, slotId: string): Promise<Response> => {
+	return async (comboId: string, slotId: string): Promise<Response> => {
 		try {
+			// Same scoping defense as the update handler: never delete a slot
+			// that belongs to a different combo, even if the slotId looks valid
+			// (Codex P2).
+			const slotsForCombo = await dbOps.getComboSlots(comboId);
+			if (!slotsForCombo.some((s) => s.id === slotId)) {
+				return errorResponse(
+					BadRequest(`Slot ${slotId} does not belong to combo ${comboId}`),
+				);
+			}
+
 			await dbOps.removeComboSlot(slotId);
 
 			return new Response(

@@ -15,7 +15,6 @@ packages/dashboard-web/dist/
 .DS_Store
 *.log
 tsconfig.tsbuildinfo
-packages/proxy/src/inline-worker.ts
 packages/proxy/src/embedded-tiktoken-wasm.ts
 CLAUDE.md
 AGENTS.md

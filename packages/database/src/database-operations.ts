@@ -218,8 +218,24 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			...retryConfig,
 		};
 
-		// Detect PostgreSQL mode from DATABASE_URL
-		const databaseUrl = process.env.DATABASE_URL;
+		// Detect PostgreSQL mode. Prefer DATABASE_URL when set (CI, Docker,
+		// k8s, traditional deployments). When unset, consult the persisted
+		// dashboard Postgres config (Codex P2 round 9) — operators who flip
+		// the Settings card toggle must get PostgreSQL after the supervisor-
+		// triggered restart, even when no env var is present.
+		let databaseUrl: string | undefined = process.env.DATABASE_URL;
+		if (!databaseUrl) {
+			try {
+				// Lazy import to avoid initializing Config in tests that mock the
+				// adapter and to keep this dependency optional in source order.
+				const { Config } = require("@better-ccflare/config") as {
+					Config: new () => { buildPgConnectionUrl(): string | null };
+				};
+				databaseUrl = new Config().buildPgConnectionUrl() ?? undefined;
+			} catch {
+				// Config unavailable (e.g. isolated unit tests) — fall through.
+			}
+		}
 		const isPostgres =
 			databaseUrl &&
 			(databaseUrl.startsWith("postgres://") ||

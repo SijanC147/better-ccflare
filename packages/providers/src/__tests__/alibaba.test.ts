@@ -49,7 +49,11 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			};
 
 			// Call afterConvert to inject caching
-			provider.afterConvert(openaiBody);
+			(provider as any).afterConvert(
+				openaiBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
 
 			// Verify system message has cache_control
 			const systemMsg = openaiBody.messages[0];
@@ -89,7 +93,11 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				],
 			};
 
-			provider.afterConvert(openaiBody);
+			(provider as any).afterConvert(
+				openaiBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
 
 			// Verify NO cache_control was injected
 			const systemMsg = openaiBody.messages[0];
@@ -117,7 +125,11 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			};
 
-			provider.afterConvert(openaiBody);
+			(provider as any).afterConvert(
+				openaiBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
 
 			// Verify NO cache_control was injected (wrong endpoint)
 			const userMsg = openaiBody.messages[0];
@@ -143,10 +155,19 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			};
 
 			// Call afterConvert first (injects caching)
-			provider.afterConvert(openaiBody);
+			(provider as any).afterConvert(
+				openaiBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
 
 			// Then call injectDashScopeReasoning (as done in transformRequestBody)
-			(provider as any).injectDashScopeReasoning(openaiBody, anthropicBody);
+			(provider as any).injectDashScopeReasoning(
+				openaiBody,
+				anthropicBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
 
 			// enable_thinking should be injected for Qwen reasoning models
 			expect((openaiBody as any).enable_thinking).toBe(true);
@@ -167,8 +188,17 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			};
 
-			provider.afterConvert(openaiBody);
-			(provider as any).injectDashScopeReasoning(openaiBody, anthropicBody);
+			(provider as any).afterConvert(
+				openaiBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
+			(provider as any).injectDashScopeReasoning(
+				openaiBody,
+				anthropicBody,
+				mockAccount.custom_endpoint,
+				anthropicBody.model,
+			);
 
 			expect((openaiBody as any).enable_thinking).toBeUndefined();
 		});

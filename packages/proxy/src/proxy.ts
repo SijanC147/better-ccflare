@@ -98,7 +98,12 @@ function extractProjectFromRequest(
 
 // ===== WORKER MANAGEMENT =====
 
-let pendingStorePayloads: boolean | null = null;
+interface PendingConfigUpdate {
+	storePayloads: boolean;
+	headersOnly: boolean;
+}
+
+let pendingConfigUpdate: PendingConfigUpdate | null = null;
 
 const usageWorkerController = new UsageWorkerController(
 	(msg: SummaryMessage) => {
@@ -110,13 +115,14 @@ const usageWorkerController = new UsageWorkerController(
 	},
 	() => {
 		// Apply deferred config update once worker is ready
-		if (pendingStorePayloads !== null) {
+		if (pendingConfigUpdate !== null) {
 			const msg: ConfigUpdateMessage = {
 				type: "config-update",
-				storePayloads: pendingStorePayloads,
+				storePayloads: pendingConfigUpdate.storePayloads,
+				headersOnly: pendingConfigUpdate.headersOnly,
 			};
 			usageWorkerController.postMessage(msg);
-			pendingStorePayloads = null;
+			pendingConfigUpdate = null;
 		}
 	},
 );
@@ -129,13 +135,20 @@ export function startUsageWorker(): void {
 	usageWorkerController.start();
 }
 
-export function sendWorkerConfigUpdate(storePayloads: boolean): void {
+export function sendWorkerConfigUpdate(
+	storePayloads: boolean,
+	headersOnly: boolean,
+): void {
 	if (!usageWorkerController.isReady()) {
 		// Defer until worker is ready
-		pendingStorePayloads = storePayloads;
+		pendingConfigUpdate = { storePayloads, headersOnly };
 		return;
 	}
-	const msg: ConfigUpdateMessage = { type: "config-update", storePayloads };
+	const msg: ConfigUpdateMessage = {
+		type: "config-update",
+		storePayloads,
+		headersOnly,
+	};
 	usageWorkerController.postMessage(msg);
 }
 
@@ -266,11 +279,14 @@ export async function handleProxy(
 	requestMeta.agentUsed = agentUsed;
 	requestMeta.project = project;
 
-	// 6. Select accounts
+	// 6. Select accounts — use the post-intercept model so combo selection
+	// reflects any agent-driven rewrite of the request body (Codex P2). If
+	// `appliedModel` is undefined (no agent matched), fall back to the
+	// originally-extracted requestModel.
 	const selectedAccounts = await selectAccountsForRequest(
 		requestMeta,
 		ctx,
-		requestModel ?? undefined,
+		appliedModel ?? requestModel ?? undefined,
 	);
 
 	const applyUsageThrottling = (accounts: Account[]) => {
@@ -471,12 +487,20 @@ export async function handleProxy(
 		log.warn(
 			`All combo slots failed for combo "${filteredComboInfo.comboName}", falling back to SessionStrategy routing`,
 		);
-		// Clear combo info and retry with normal routing
+		// Clear combo info and retry with normal routing. We intentionally
+		// omit the `model` argument: selectAccountsForRequest only consults
+		// the active combo when a model is provided (see account-selector.ts),
+		// so leaving it undefined here guarantees the fallback skips combo
+		// lookup entirely and uses SessionStrategy ordering against healthy
+		// non-combo accounts (Codex P2 — this defends the no-model invariant
+		// at the call site so a future change that re-introduces a model
+		// argument doesn't silently re-enter the exhausted combo).
 		requestMeta.comboName = null;
 		requestMeta.comboSlotIndex = null;
 		const selectedFallbackAccounts = await selectAccountsForRequest(
 			requestMeta,
 			ctx,
+			/* model */ undefined,
 		);
 		const {
 			available: filteredFallbackAccounts,

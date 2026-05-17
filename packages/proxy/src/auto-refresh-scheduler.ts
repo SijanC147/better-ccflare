@@ -187,24 +187,24 @@ export class AutoRefreshScheduler {
 				this.shouldRefreshAccount(account, now),
 			);
 
-			if (accountsToRefresh.length === 0) {
-				return;
+			if (accountsToRefresh.length > 0) {
+				log.info(
+					`Found ${accountsToRefresh.length} account(s) with new windows for auto-refresh`,
+				);
+				// Send dummy message to each account. The sendDummyMessage method
+				// will update lastRefreshResetTime with the NEW rate_limit_reset
+				// from the API.
+				for (const accountRow of accountsToRefresh) {
+					await this.sendDummyMessage(accountRow);
+				}
 			}
 
-			log.info(
-				`Found ${accountsToRefresh.length} account(s) with new windows for auto-refresh`,
-			);
-
-			// Send dummy message to each account
-			// The sendDummyMessage method will update lastRefreshResetTime with the NEW rate_limit_reset from the API
-			for (const accountRow of accountsToRefresh) {
-				await this.sendDummyMessage(accountRow);
-			}
-
-			// Proactively refresh Qwen OAuth tokens expiring within the safety window
+			// Qwen + Codex proactive OAuth refresh must run regardless of usage-
+			// window probe candidates — otherwise installs with only Qwen
+			// accounts, or with Codex tokens near expiry but no anthropic/zai
+			// windows currently due, would never refresh their access tokens
+			// even though the proactive-refresh code is present (Codex P2).
 			await this.checkAndRefreshQwenTokens();
-
-			// Proactively refresh Codex OAuth tokens expiring within the safety window
 			await this.checkAndRefreshCodexTokens();
 		} catch (error) {
 			if (error instanceof Error) {

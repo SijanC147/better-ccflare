@@ -56,12 +56,21 @@ export interface ConfigData {
 	data_retention_days?: number;
 	request_retention_days?: number;
 	store_payloads?: boolean;
+	request_storage_headers_only?: boolean;
 	usage_poll_interval_ms?: number;
 	cache_keepalive_ttl_minutes?: number;
 	system_prompt_cache_ttl_1h?: boolean;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
 	health_detail_enabled?: boolean;
+	// PostgreSQL backend configuration
+	pg_enabled?: boolean;
+	pg_host?: string;
+	pg_port?: number;
+	pg_database?: string;
+	pg_user?: string;
+	pg_password?: string;
+	pg_ssl_mode?: "disable" | "require" | "verify-ca" | "verify-full";
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -327,6 +336,20 @@ export class Config extends EventEmitter {
 		this.set("store_payloads", value);
 	}
 
+	getRequestStorageHeadersOnly(): boolean {
+		const fromEnv = process.env.REQUEST_STORAGE_HEADERS_ONLY;
+		if (fromEnv) {
+			return fromEnv !== "false" && fromEnv !== "0";
+		}
+		const fromFile = this.data.request_storage_headers_only;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false; // default: store full bodies
+	}
+
+	setRequestStorageHeadersOnly(value: boolean): void {
+		this.set("request_storage_headers_only", value);
+	}
+
 	getUsagePollIntervalMs(): number {
 		const fromEnv = process.env.USAGE_POLL_INTERVAL_MS;
 		if (fromEnv) {
@@ -416,6 +439,117 @@ export class Config extends EventEmitter {
 		return false;
 	}
 
+	// ── PostgreSQL backend ──────────────────────────────────────────────────────
+
+	getPgEnabled(): boolean {
+		const fromEnv = parseEnabledEnvFlag(process.env.PG_ENABLED);
+		if (fromEnv !== undefined) return fromEnv;
+		// Also treat DATABASE_URL presence as implicit enablement
+		if (process.env.DATABASE_URL) return true;
+		const fromFile = this.data.pg_enabled;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false;
+	}
+
+	setPgEnabled(value: boolean): void {
+		this.set("pg_enabled", value);
+	}
+
+	getPgHost(): string {
+		return (
+			process.env.PGHOST ||
+			(typeof this.data.pg_host === "string" ? this.data.pg_host : "localhost")
+		);
+	}
+
+	setPgHost(host: string): void {
+		this.set("pg_host", host);
+	}
+
+	getPgPort(): number {
+		if (process.env.PGPORT) {
+			const n = parseInt(process.env.PGPORT, 10);
+			if (!Number.isNaN(n)) return n;
+		}
+		if (typeof this.data.pg_port === "number") return this.data.pg_port;
+		return 5432;
+	}
+
+	setPgPort(port: number): void {
+		this.set("pg_port", port);
+	}
+
+	getPgDatabase(): string {
+		return (
+			process.env.PGDATABASE ||
+			(typeof this.data.pg_database === "string"
+				? this.data.pg_database
+				: "better_ccflare")
+		);
+	}
+
+	setPgDatabase(db: string): void {
+		this.set("pg_database", db);
+	}
+
+	getPgUser(): string {
+		return (
+			process.env.PGUSER ||
+			(typeof this.data.pg_user === "string" ? this.data.pg_user : "postgres")
+		);
+	}
+
+	setPgUser(user: string): void {
+		this.set("pg_user", user);
+	}
+
+	getPgPassword(): string {
+		return (
+			process.env.PGPASSWORD ||
+			(typeof this.data.pg_password === "string" ? this.data.pg_password : "")
+		);
+	}
+
+	setPgPassword(password: string): void {
+		this.set("pg_password", password);
+	}
+
+	getPgSslMode(): "disable" | "require" | "verify-ca" | "verify-full" {
+		const fromEnv = process.env.PGSSLMODE as
+			| "disable"
+			| "require"
+			| "verify-ca"
+			| "verify-full"
+			| undefined;
+		if (fromEnv) return fromEnv;
+		const fromFile = this.data.pg_ssl_mode;
+		if (typeof fromFile === "string")
+			return fromFile as "disable" | "require" | "verify-ca" | "verify-full";
+		return "disable";
+	}
+
+	setPgSslMode(
+		mode: "disable" | "require" | "verify-ca" | "verify-full",
+	): void {
+		this.set("pg_ssl_mode", mode);
+	}
+
+	/**
+	 * Build a PostgreSQL connection URL from stored config (excluding env overrides).
+	 * Returns null when PG is not enabled.
+	 */
+	buildPgConnectionUrl(): string | null {
+		if (!this.getPgEnabled()) return null;
+		const user = encodeURIComponent(this.getPgUser());
+		const password = encodeURIComponent(this.getPgPassword());
+		const host = this.getPgHost();
+		const port = this.getPgPort();
+		const db = encodeURIComponent(this.getPgDatabase());
+		const ssl = this.getPgSslMode();
+		const sslParam = ssl !== "disable" ? `?sslmode=${ssl}` : "";
+		return `postgresql://${user}:${password}@${host}:${port}/${db}${sslParam}`;
+	}
+
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
 		// Include current strategy (which might come from env)
 		return {
@@ -425,6 +559,7 @@ export class Config extends EventEmitter {
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
 			store_payloads: this.getStorePayloads(),
+			request_storage_headers_only: this.getRequestStorageHeadersOnly(),
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
 			cache_keepalive_ttl_minutes: this.getCacheKeepaliveTtlMinutes(),
 			system_prompt_cache_ttl_1h: this.getSystemPromptCacheTtl1h(),

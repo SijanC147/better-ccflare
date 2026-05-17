@@ -1,6 +1,8 @@
 import React from "react";
 import { CacheKeepaliveCard } from "./overview/CacheKeepaliveCard";
 import { DataRetentionCard } from "./overview/DataRetentionCard";
+import { PostgresConfigCard } from "./overview/PostgresConfigCard";
+import { RequestStorageCard } from "./overview/RequestStorageCard";
 import { SystemCacheTtlCard } from "./overview/SystemCacheTtlCard";
 import { UsageThrottlingCard } from "./overview/UsageThrottlingCard";
 
@@ -13,6 +15,8 @@ export const SettingsTab = React.memo(() => {
 				<SystemCacheTtlCard />
 				<UsageThrottlingCard />
 				<DataRetentionCard />
+				<RequestStorageCard />
+				<PostgresConfigCard />
 			</div>
 		</div>
 	);
