@@ -406,7 +406,10 @@ export async function handleProxy(
 				failoverAttempts: 0,
 			});
 
-			ctx.usageWorker.postMessage({
+			// Match the safePostMessage treatment of the paired `start` above
+			// so a worker still in `starting`/restart state cannot throw the
+			// 503 response away (Codex round 3 P2).
+			safePostMessage(ctx.usageWorker, {
 				type: "end",
 				requestId: requestMeta.id,
 				success: false,
