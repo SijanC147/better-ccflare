@@ -200,7 +200,12 @@ describe("OAuth path authentication gating (Codex P1)", () => {
 		});
 	});
 
-	describe("isPathExempt() — dashboard reachable via GET/HEAD only (Codex P1)", () => {
+	describe("isPathExempt() — dashboard NOT exempt at shared auth path (Codex P1)", () => {
+		// Final resolution: dashboard SPA + static assets are served by the
+		// server BEFORE this shared auth path (and only when the dashboard is
+		// available). The auth layer must NOT exempt them — doing so reopened
+		// a proxy bypass for dashboard-disabled deployments. Only /health and
+		// OAuth read-only status polling are exempt here.
 		test.each([
 			["GET", "/"],
 			["HEAD", "/"],
@@ -209,23 +214,22 @@ describe("OAuth path authentication gating (Codex P1)", () => {
 			["GET", "/chunk-abc123.js"],
 			["GET", "/assets/font.woff2"],
 			["GET", "/static/logo.png"],
-		])("%s %s is exempt (dashboard/static navigation)", async (method, path) => {
-			expect(await auth.isPathExempt(path, method)).toBe(true);
-		});
-
-		test.each([
-			// Body-bearing arbitrary paths are proxy requests — not exempt.
+			["GET", "/foo"],
+			["HEAD", "/foo"],
 			["POST", "/foo"],
 			["PUT", "/foo"],
 			["DELETE", "/bar/baz"],
 			["PATCH", "/anything"],
-			// API/proxy prefixes are never exempt regardless of method.
 			["GET", "/api/stats"],
 			["GET", "/v1/models"],
 			["POST", "/v1/messages"],
 			["GET", "/messages/x"],
 		])("%s %s is NOT exempt", async (method, path) => {
 			expect(await auth.isPathExempt(path, method)).toBe(false);
+		});
+
+		test("/health remains exempt", async () => {
+			expect(await auth.isPathExempt("/health", "GET")).toBe(true);
 		});
 	});
 });

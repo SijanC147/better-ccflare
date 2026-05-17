@@ -182,16 +182,18 @@ describe("API Authentication", () => {
 			expect(extractedKey).toBe("btr-bearer-key-456");
 		});
 
-		test("should keep dashboard SPA reachable via GET/HEAD before auth", async () => {
-			// router.handleRequest() authenticates before route matching and
-			// only falls through to dashboard serving once auth passes. The
-			// initial browser navigation cannot carry the API key, so these
-			// GET/HEAD navigations must be exempt or enabling API auth would
-			// lock users out of the dashboard UI (Codex P1).
+		test("auth layer exempts only /health (dashboard is served pre-auth)", async () => {
+			// Final Codex P1 resolution: the dashboard SPA + static assets are
+			// served by apps/server/src/server.ts BEFORE this shared,
+			// auth-gated path is reached — and only when the dashboard is
+			// actually available. They are therefore NOT exempt here. If such
+			// a path reaches authenticateRequest() the dashboard is
+			// disabled/unavailable and the request is really a proxy request
+			// that must be authenticated (providers accept arbitrary paths).
 			expect(await authService.isPathExempt("/health", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(true);
-			expect(await authService.isPathExempt("/", "HEAD")).toBe(true);
+			expect(await authService.isPathExempt("/", "GET")).toBe(false);
+			expect(await authService.isPathExempt("/", "HEAD")).toBe(false);
+			expect(await authService.isPathExempt("/dashboard", "GET")).toBe(false);
 		});
 
 		test("should NOT blanket-exempt token-mutating OAuth endpoints (Codex P1)", async () => {
@@ -217,35 +219,37 @@ describe("API Authentication", () => {
 			).toBe(false);
 		});
 
-		test("should serve static assets via GET before auth", async () => {
-			// Hashed chunks / assets are GET fetches issued by the loaded
-			// SPA; they must pass the auth layer (router authenticates first)
-			// so the server can serve them.
+		test("static-asset-looking paths are NOT exempt at the auth layer", async () => {
+			// Served from the dashboard manifest before auth when the
+			// dashboard is available; if they reach the auth layer the
+			// dashboard is unavailable and the request must be authenticated.
 			expect(await authService.isPathExempt("/chunk-abc123.js", "GET")).toBe(
-				true,
+				false,
 			);
 			expect(await authService.isPathExempt("/chunk-abc123.css", "GET")).toBe(
-				true,
+				false,
 			);
 			expect(
 				await authService.isPathExempt("/favicon-abc123.svg", "GET"),
-			).toBe(true);
+			).toBe(false);
 			expect(await authService.isPathExempt("/static/logo.png", "GET")).toBe(
-				true,
+				false,
 			);
 			expect(await authService.isPathExempt("/assets/font.woff2", "GET")).toBe(
-				true,
+				false,
 			);
 		});
 
-		test("should require authentication for API/proxy paths and non-GET arbitrary paths", async () => {
+		test("should require authentication for API, proxy, and all arbitrary paths", async () => {
 			expect(await authService.isPathExempt("/api/stats", "GET")).toBe(false);
 			expect(await authService.isPathExempt("/v1/messages", "POST")).toBe(false);
 			expect(await authService.isPathExempt("/api/accounts", "GET")).toBe(false);
 			expect(await authService.isPathExempt("/messages", "POST")).toBe(false);
-			// A body-bearing request to an arbitrary path is a proxy request
-			// and must NOT be exempt — closes the arbitrary-proxy-path bypass
-			// (Codex P1) while keeping GET dashboard navigation working.
+			// Arbitrary paths must NOT be exempt regardless of method — the
+			// shared auth path no longer special-cases dashboard-looking
+			// requests, so the proxy-bypass vector is fully closed (Codex P1).
+			expect(await authService.isPathExempt("/foo", "GET")).toBe(false);
+			expect(await authService.isPathExempt("/foo", "HEAD")).toBe(false);
 			expect(await authService.isPathExempt("/foo", "POST")).toBe(false);
 			expect(await authService.isPathExempt("/foo", "PUT")).toBe(false);
 			expect(await authService.isPathExempt("/bar/baz", "DELETE")).toBe(false);

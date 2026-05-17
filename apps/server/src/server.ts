@@ -892,15 +892,19 @@ export default async function startServer(options?: {
 			async fetch(req: Request) {
 				const url = new URL(req.url);
 
-				// Try API routes first
-				const apiResponse = await apiRouter.handleRequest(url, req);
-				if (apiResponse) {
-					return apiResponse;
-				}
-
-				// Dashboard routes (only if enabled and assets are available)
+				// Serve the dashboard SPA + static assets BEFORE the
+				// authentication-gated API router. The dashboard shell is
+				// public content and the initial browser navigation cannot
+				// carry an API key, so it must be reachable without auth.
+				// Auth-exempting these paths in the SHARED authenticateRequest()
+				// instead reopened a proxy bypass when the dashboard was
+				// disabled/unavailable (GET /foo fell through to the proxy and
+				// providers accept arbitrary paths). Serving here, gated on the
+				// dashboard actually being available, means only genuine
+				// dashboard content skips auth; every other path (API and
+				// proxy) is still authenticated below (Codex P1).
 				if (withDashboard && dashboardManifest) {
-					// Serve dashboard static assets
+					// Serve dashboard static assets (hashed bundles, fonts, …)
 					if (dashboardManifest[url.pathname]) {
 						return serveDashboardFile(
 							url.pathname,
@@ -909,14 +913,28 @@ export default async function startServer(options?: {
 						);
 					}
 
-					// For all non-API routes, serve the dashboard index.html (client-side routing)
-					// This allows React Router to handle all dashboard routes without maintaining a list
+					// Client-side routing: serve index.html for SPA navigations.
+					// Limited to GET/HEAD and to non-API, non-proxy, non-/health
+					// paths so it never shadows an API route, the health
+					// endpoint, or a proxy request (which must stay authenticated).
+					const isApiOrProxyPath =
+						url.pathname.startsWith("/api/") ||
+						url.pathname === "/api" ||
+						url.pathname.startsWith("/v1/") ||
+						url.pathname.startsWith("/messages") ||
+						url.pathname === "/health";
 					if (
-						!url.pathname.startsWith("/api/") &&
-						!url.pathname.startsWith("/v1/")
+						(req.method === "GET" || req.method === "HEAD") &&
+						!isApiOrProxyPath
 					) {
 						return serveDashboardFile("/index.html", "text/html");
 					}
+				}
+
+				// API routes (authenticated inside the router)
+				const apiResponse = await apiRouter.handleRequest(url, req);
+				if (apiResponse) {
+					return apiResponse;
 				}
 
 				// All other paths go to proxy
