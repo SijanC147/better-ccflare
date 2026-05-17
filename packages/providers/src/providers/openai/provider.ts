@@ -21,7 +21,15 @@ const log = new Logger("OpenAICompatibleProvider");
 export class OpenAICompatibleProvider extends BaseProvider {
 	name = "openai-compatible";
 
-	canHandle(_path: string): boolean {
+	canHandle(path: string): boolean {
+		// The provider only translates /v1/messages -> /v1/chat/completions
+		// and the streaming/non-streaming response shapes that come with it.
+		// /v1/messages/count_tokens has no OpenAI-compatible equivalent —
+		// returning true here would forward the path unchanged and the
+		// downstream provider would 404 while the body had already been
+		// rewritten as a chat-completions request (Codex P2). Reject it so
+		// the proxy can fall back / error explicitly.
+		if (path.includes("/v1/messages/count_tokens")) return false;
 		return true;
 	}
 

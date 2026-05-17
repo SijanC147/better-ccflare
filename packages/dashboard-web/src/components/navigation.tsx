@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { api } from "../api";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import { CopyButton } from "./CopyButton";
@@ -249,8 +250,14 @@ export function Navigation({
 
 		setUpdateStatus("checking");
 		try {
+			// Include the stored API key so the hourly update check still
+			// works on auth-enabled installs (Codex P3). The raw fetch bypassed
+			// the api wrapper that injects `x-api-key` automatically.
+			const apiKey = api.getApiKey();
 			const [response, packageInfo] = await Promise.all([
-				fetch("/api/version/check"),
+				fetch("/api/version/check", {
+					headers: apiKey ? { "x-api-key": apiKey } : undefined,
+				}),
 				detectPackageManager(),
 			]);
 
