@@ -19,6 +19,7 @@ packages/proxy/src/inline-worker.ts
 packages/proxy/src/embedded-tiktoken-wasm.ts
 CLAUDE.md
 AGENTS.md
+.omc/
 # Disallow .sh files except in .github/scripts/
 **/*.sh
 !.github/scripts/*.sh
