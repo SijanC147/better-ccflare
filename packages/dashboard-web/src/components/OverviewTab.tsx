@@ -1,3 +1,4 @@
+import { registerUIRefresh } from "@better-ccflare/core";
 import {
 	formatCost,
 	formatNumber,
@@ -5,14 +6,28 @@ import {
 	formatTokensPerSecond,
 } from "@better-ccflare/ui-common";
 import { format } from "date-fns";
-import { Activity, CheckCircle, Clock, DollarSign, Zap } from "lucide-react";
-import React, { useCallback, useMemo, useState } from "react";
+import {
+	Activity,
+	BarChart3,
+	CheckCircle,
+	Clock,
+	DollarSign,
+	Gauge,
+	Zap,
+} from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
+import { computePoolUsage } from "../lib/pool-usage";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
+import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
+import {
+	StorageIntegrityBanner,
+	StorageIntegrityCard,
+} from "./overview/StorageIntegrityCard";
 import { SystemStatus } from "./overview/SystemStatus";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
 
@@ -20,6 +35,7 @@ export const OverviewTab = React.memo(() => {
 	// Fetch all data using React Query hooks
 	const { data: stats, isLoading: statsLoading } = useStats(
 		REFRESH_INTERVALS.default,
+		24,
 	);
 	const [timeRange, setTimeRange] = useState("24h");
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
@@ -28,6 +44,25 @@ export const OverviewTab = React.memo(() => {
 		"normal",
 	);
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
+
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		return registerUIRefresh({
+			id: "pool-metric-card-update",
+			callback: () => setNow(Date.now()),
+			seconds: 30,
+			description: "Combined-quota tile refresh",
+		});
+	}, []);
+
+	const fiveHourPool = useMemo(
+		() => computePoolUsage(accounts ?? [], "five_hour", now),
+		[accounts, now],
+	);
+	const weeklyPool = useMemo(
+		() => computePoolUsage(accounts ?? [], "seven_day", now),
+		[accounts, now],
+	);
 
 	// Memoize percentage change calculation (must be at top level)
 	const pctChange = useCallback(
@@ -159,6 +194,9 @@ export const OverviewTab = React.memo(() => {
 
 	return (
 		<div className="space-y-6">
+			{/* Sticky corruption banner — only renders when /api/storage reports corrupt */}
+			<StorageIntegrityBanner />
+
 			{/* Header with Time Range Selector */}
 			<div className="flex justify-between items-center">
 				<h2 className="text-2xl font-semibold">Overview</h2>
@@ -166,7 +204,7 @@ export const OverviewTab = React.memo(() => {
 			</div>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8 gap-4">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals.requests || 0)}
@@ -235,6 +273,18 @@ export const OverviewTab = React.memo(() => {
 					trendPeriod={trendPeriod}
 					icon={Zap}
 				/>
+				<PoolMetricCard
+					title="5h Pool"
+					icon={Gauge}
+					result={fiveHourPool}
+					window="five_hour"
+				/>
+				<PoolMetricCard
+					title="7d Pool"
+					icon={BarChart3}
+					result={weeklyPool}
+					window="seven_day"
+				/>
 			</div>
 
 			<ChartsSection
@@ -246,7 +296,10 @@ export const OverviewTab = React.memo(() => {
 				loading={loading}
 			/>
 
-			<SystemStatus recentErrors={stats?.recentErrors} />
+			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+				<SystemStatus />
+				<StorageIntegrityCard />
+			</div>
 
 			{accounts && <RateLimitInfo accounts={accounts} />}
 		</div>

@@ -112,8 +112,8 @@ try {
 // signal: if heap stays small while RSS grows, growth is native (JIT/WASM/arena)
 // rather than a JS object leak.
 const MEMORY_MONITOR_INTERVAL_MS = 60 * 1000;
-const MEMORY_GROWTH_WARN_BYTES = 1024 * 1024 * 1024; // 1GB warn
-const MEMORY_GROWTH_ERROR_BYTES = 2 * 1024 * 1024 * 1024; // 2GB error
+const MEMORY_GROWTH_WARN_BYTES = 512 * 1024 * 1024;
+const MEMORY_GROWTH_ERROR_BYTES = 1024 * 1024 * 1024;
 
 // Helper function to resolve dashboard assets with fallback
 function resolveDashboardAsset(assetPath: string): string | null {
@@ -628,12 +628,55 @@ export default async function startServer(options?: {
 	);
 	discoveryScheduler.start();
 
-	// Run integrity check if database was initialized in fast mode (SQLite only)
+	// One-time migration: promote pre-existing DBs from auto_vacuum=NONE to
+	// INCREMENTAL. Fresh DBs created since ensureSchema() started issuing
+	// `PRAGMA auto_vacuum = INCREMENTAL` are already in mode 2 and this is a
+	// fast no-op. Existing DBs upgraded into this build run a full VACUUM
+	// here — minutes on a multi-GB file. Done BEFORE the HTTP listener binds
+	// so the proxy never sees a stalled writer slot.
 	if (dbOps.isSQLite) {
-		dbOps.runIntegrityCheck();
+		const startupLog = new Logger("Startup");
+		try {
+			const result = dbOps.bootstrapAutoVacuum();
+			if (result.migrated) {
+				startupLog.info(
+					`One-time auto_vacuum migration: mode ${result.modeBefore} → ${result.modeAfter} ` +
+						`in ${result.durationMs}ms. Future free-page reclamation runs incrementally via the ` +
+						`hourly worker — no more blocking VACUUM.`,
+				);
+				if (result.modeAfter !== 2) {
+					startupLog.error(
+						`auto_vacuum still ${result.modeAfter} after migration VACUUM — ` +
+							`incremental reclamation will be a no-op. Investigate disk space and DB integrity.`,
+					);
+				}
+			} else if (result.modeBefore === 1) {
+				// Operator set auto_vacuum=FULL on purpose. We don't migrate it to
+				// INCREMENTAL silently because FULL reclaims pages on every COMMIT
+				// while INCREMENTAL only reclaims when our hourly worker runs —
+				// rewriting that policy without notice would surprise the user.
+				// Log so it shows up in startup logs and `journalctl`. (Greptile #230)
+				startupLog.info(
+					`auto_vacuum=FULL (mode 1) detected — left in place. The hourly incremental_vacuum ` +
+						`worker is a no-op under FULL mode; pages are reclaimed on every COMMIT. ` +
+						`Switch to INCREMENTAL manually if you want the worker-driven cadence.`,
+				);
+			}
+		} catch (err) {
+			startupLog.error(
+				`Bootstrap auto_vacuum migration failed: ${err instanceof Error ? err.message : String(err)}. ` +
+					`Free pages will not be reclaimed until this is resolved. ` +
+					`Common causes: disk full (VACUUM needs ~2× DB size free), DB corruption.`,
+			);
+			throw err;
+		}
 	}
 
-	// Start periodic integrity scheduler
+	// Start periodic integrity scheduler. The startup `PRAGMA integrity_check`
+	// is intentionally gone — on multi-GB databases it blocked startup for
+	// tens of seconds. The scheduler runs `quick_check` every few hours and
+	// a full `integrity_check` + `foreign_key_check` daily (in a worker), and
+	// surfaces results via /api/storage and the dashboard.
 	stopIntegritySchedulerJob = startIntegrityScheduler(dbOps);
 
 	const db = dbOps.getAdapter();
@@ -728,9 +771,17 @@ export default async function startServer(options?: {
 				log.info(
 					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads in ${Date.now() - startTime}ms`,
 				);
-				// Reclaim freed SQLite pages without a full blocking VACUUM
-				// Increased from 50000 to 200000 pages (~800 MB) for more aggressive cleanup
-				dbOps.incrementalVacuum(200000);
+				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
+				// per tick, off-thread via the incremental-vacuum worker. Small N
+				// keeps the writer-slot hold sub-100ms on local SSD so concurrent
+				// main-thread writes (rate-limit updates, OAuth refresh, post-
+				// processor inserts) don't pile up on busy_timeout. Pre-fix this
+				// path passed 200000 and silently fell back to a full main-thread
+				// VACUUM when auto_vacuum=NONE — see incrementalVacuum() in
+				// packages/database/src/database-operations.ts.
+				dbOps.incrementalVacuum(8000).catch((err) => {
+					log.error(`Incremental vacuum error: ${err}`);
+				});
 			}
 		} catch (err) {
 			log.error(`Periodic data retention cleanup error: ${err}`);
@@ -1103,11 +1154,6 @@ export default async function startServer(options?: {
 	const baselineRss = process.memoryUsage.rss();
 	const memLog = new Logger("MemoryMonitor");
 	memoryMonitorInterval = setInterval(() => {
-		// Bun.gc(true) forces a synchronous full GC. No-op on non-Bun runtimes.
-		if (typeof Bun !== "undefined" && typeof Bun.gc === "function") {
-			Bun.gc(true);
-		}
-
 		const mem = process.memoryUsage();
 		const rssMb = Math.round(mem.rss / 1024 / 1024);
 		const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
@@ -1116,11 +1162,11 @@ export default async function startServer(options?: {
 
 		if (growthBytes > MEMORY_GROWTH_ERROR_BYTES) {
 			memLog.error(
-				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>2GB growth - investigate)`,
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>1GB growth - investigate)`,
 			);
 		} else if (growthBytes > MEMORY_GROWTH_WARN_BYTES) {
 			memLog.warn(
-				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>1GB growth)`,
+				`RSS: ${rssMb}MB, Heap: ${heapMb}MB, Growth: +${growthMb}MB (>512MB growth)`,
 			);
 		} else {
 			memLog.debug(
@@ -1384,10 +1430,43 @@ Available endpoints:
 	};
 }
 
+// Max wall-clock time between SIGTERM and process exit. Long enough to let
+// most in-flight streaming responses complete; short enough that systemd's
+// default TimeoutStopSec (90s) doesn't have to escalate to SIGKILL.
+const SHUTDOWN_WATCHDOG_MS = 30_000;
+
+// Deduplicates concurrent shutdown invocations (e.g. SIGINT arriving while
+// SIGTERM is still awaiting serverInstance.stop()). Without this, the second
+// invocation races on the same Bun server, worker, and DB writer.
+let isShuttingDown = false;
+
 // Graceful shutdown handler
 async function handleGracefulShutdown(signal: string) {
+	if (isShuttingDown) {
+		console.log(`Ignoring ${signal} — shutdown already in progress`);
+		return;
+	}
+	isShuttingDown = true;
+
 	console.log(`\n👋 Received ${signal}, shutting down gracefully...`);
+
+	// Hard upper bound on shutdown duration. unref'd so it doesn't itself
+	// prevent a clean exit if everything else finishes first. Exits with 0
+	// because the watchdog only fires on an expected SIGTERM that ran long,
+	// not on a failure — code 1 would make systemd Restart=on-failure
+	// auto-restart the unit instead of treating it as a normal stop.
+	const watchdog = setTimeout(() => {
+		console.error(
+			`⚠️ Shutdown watchdog (${SHUTDOWN_WATCHDOG_MS}ms) expired, forcing exit`,
+		);
+		process.exit(0);
+	}, SHUTDOWN_WATCHDOG_MS);
+	watchdog.unref();
+
 	try {
+		// Stop scheduler triggers first so they don't add load while draining.
+		// These calls only stop the recurring trigger; any in-flight task they
+		// already kicked off continues until it finishes naturally.
 		if (stopRetentionJob) {
 			stopRetentionJob();
 			stopRetentionJob = null;
@@ -1449,8 +1528,29 @@ async function handleGracefulShutdown(signal: string) {
 		}
 
 		usageCache.clear(); // Stop all usage polling
+
+		// Stop accepting new connections and wait for in-flight HTTP requests
+		// (including streaming responses) to complete. stop() without args is
+		// Bun's graceful variant; stop(true) would force-close active conns.
+		if (serverInstance) {
+			console.log("Draining in-flight HTTP requests...");
+			try {
+				await serverInstance.stop();
+			} catch (err) {
+				console.warn("⚠️ serverInstance.stop() threw:", err);
+			}
+			serverInstance = null;
+			console.log("HTTP drain complete");
+		}
+
+		// Now that streams have finished, the usage worker has received all
+		// end-of-stream analytics messages. Terminate it so its DB writes
+		// flush into the AsyncDbWriter queue before we dispose that.
 		await terminateUsageWorker();
+
+		// Flush AsyncDbWriter and other Disposables.
 		await shutdown();
+
 		console.log("✅ Shutdown complete");
 		process.exit(0);
 	} catch (error) {

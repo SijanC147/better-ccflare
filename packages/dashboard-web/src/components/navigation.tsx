@@ -71,6 +71,7 @@ export function Navigation({
 		"idle" | "checking" | "available" | "current" | "error"
 	>("idle");
 	const [latestVersion, setLatestVersion] = useState<string>("");
+	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
 	const isMountedRef = useRef(true);
 
@@ -251,6 +252,7 @@ export function Navigation({
 		}
 
 		setUpdateStatus("checking");
+		setUpdateError(null);
 		try {
 			// Include the stored API key so the hourly update check still
 			// works on auth-enabled installs (Codex P3). The raw fetch bypassed
@@ -304,6 +306,7 @@ export function Navigation({
 			if (!isMountedRef.current) return;
 
 			setUpdateStatus("error");
+			setUpdateError(error instanceof Error ? error.message : String(error));
 			console.error("❌ Failed to check for updates:", error);
 		}
 	}, []);
@@ -539,6 +542,11 @@ export function Navigation({
 								{updateStatus === "current" && (
 									<p className="mt-1 text-xs text-muted-foreground text-left">
 										Version {version.replace(/^v/, "")}
+									</p>
+								)}
+								{updateStatus === "error" && updateError && (
+									<p className="mt-1 text-xs text-destructive text-left break-words">
+										{updateError}
 									</p>
 								)}
 							</div>
