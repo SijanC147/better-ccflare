@@ -13,7 +13,7 @@
     },
     "apps/cli": {
       "name": "better-ccflare",
-      "version": "3.7.0",
+      "version": "3.8.0",
       "bin": {
         "better-ccflare": "dist/better-ccflare",
       },
@@ -57,6 +57,14 @@
       "devDependencies": {
         "@types/node": "^22.5.4",
         "typescript": "^6.0.2",
+      },
+    },
+    "packages/claude-code-discovery": {
+      "name": "@better-ccflare/claude-code-discovery",
+      "version": "0.1.0",
+      "dependencies": {
+        "@better-ccflare/logger": "workspace:*",
+        "@better-ccflare/types": "workspace:*",
       },
     },
     "packages/cli-commands": {
@@ -234,6 +242,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@better-ccflare/agents": "workspace:*",
+        "@better-ccflare/claude-code-discovery": "workspace:*",
         "@better-ccflare/config": "workspace:*",
         "@better-ccflare/core": "workspace:*",
         "@better-ccflare/database": "workspace:*",
@@ -351,6 +360,8 @@
     "@aws/lambda-invoke-store": ["@aws/lambda-invoke-store@0.2.3", "", {}, "sha512-oLvsaPMTBejkkmHhjf09xTgk71mOqyr/409NKhRIL08If7AhVfUsJhVsx386uJaqNd42v9kWamQ9lFbkoC2dYw=="],
 
     "@better-ccflare/agents": ["@better-ccflare/agents@workspace:packages/agents"],
+
+    "@better-ccflare/claude-code-discovery": ["@better-ccflare/claude-code-discovery@workspace:packages/claude-code-discovery"],
 
     "@better-ccflare/cli-commands": ["@better-ccflare/cli-commands@workspace:packages/cli-commands"],
 
