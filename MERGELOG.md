@@ -11,7 +11,7 @@ owns it for idempotency.
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
-| 2026-05-19 | main | `5cdabaa8..ab677460` | 125 | 15 files | merge --no-ff | pass (1582 tests, 0 fail) | _pending_ |
+| 2026-05-19 | main | `5cdabaa8..ab677460` | 125 | 15 files | merge --no-ff | pass (1582 tests, 0 fail) | [#32](https://github.com/SijanC147/better-ccflare/pull/32) |
 | 2026-05-17 | main | `3c08c994..5cdabaa8` | 195 | 4 git + 4 semantic | merge --no-ff | pass (1291 tests, 0 fail) | [#27](https://github.com/SijanC147/better-ccflare/pull/27) |
 
 ---
