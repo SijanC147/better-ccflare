@@ -120,7 +120,7 @@ export function encodeAnalyticsState(
 	for (const account of state.filters.accounts)
 		params.append("accounts", account);
 	for (const model of state.filters.models) params.append("models", model);
-	for (const project of state.filters.projects)
+	for (const project of state.filters.projects ?? [])
 		params.append("projects", project);
 	for (const key of state.filters.apiKeys) params.append("keys", key);
 	if (state.filters.status !== "all")

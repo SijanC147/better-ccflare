@@ -69,6 +69,7 @@ describe("decodeAnalyticsState", () => {
 			filters: {
 				accounts: ["acc-1"],
 				models: ["z-ai/glm-4.5-air:free"],
+				projects: [],
 				apiKeys: [],
 				status: "success",
 			},
@@ -124,7 +125,13 @@ describe("normalizeState", () => {
 			timeRange: "7d",
 			selectedMetric: "cost",
 			modelBreakdown: false,
-			filters: { accounts: ["a"], models: [], apiKeys: ["k"], status: "error" },
+			filters: {
+				accounts: ["a"],
+				models: [],
+				projects: [],
+				apiKeys: ["k"],
+				status: "error",
+			},
 		});
 	});
 });
