@@ -74,7 +74,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			billing_type TEXT DEFAULT NULL,
 			refresh_token_issued_at BIGINT,
 			rate_limited_reason TEXT,
-			rate_limited_at BIGINT
+			rate_limited_at BIGINT,
+			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
 		)
 	`);
 
@@ -121,6 +122,31 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 	);
 	await adapter.unsafe(
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
+	);
+
+	// Create alerts table
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS alerts (
+			id TEXT PRIMARY KEY,
+			timestamp BIGINT NOT NULL,
+			type TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			title TEXT NOT NULL,
+			message TEXT NOT NULL,
+			value DOUBLE PRECISION,
+			threshold DOUBLE PRECISION,
+			account TEXT,
+			model TEXT,
+			project TEXT,
+			request_id TEXT,
+			acknowledged INTEGER NOT NULL DEFAULT 0
+		)
+	`);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)`,
+	);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged ON alerts(acknowledged)`,
 	);
 
 	// Create request_payloads table
@@ -250,7 +276,7 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 	// Seed canonical families
 	await adapter.unsafe(`
 		INSERT INTO combo_family_assignments (family, combo_id, enabled)
-		VALUES ('opus', NULL, 0), ('sonnet', NULL, 0), ('haiku', NULL, 0)
+		VALUES ('fable', NULL, 0), ('opus', NULL, 0), ('sonnet', NULL, 0), ('haiku', NULL, 0)
 		ON CONFLICT (family) DO NOTHING
 	`);
 
@@ -366,6 +392,12 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			table: "accounts",
 			column: "rate_limited_at",
 			definition: "ALTER TABLE accounts ADD COLUMN rate_limited_at BIGINT",
+		},
+		{
+			table: "accounts",
+			column: "consecutive_rate_limits",
+			definition:
+				"ALTER TABLE accounts ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0",
 		},
 		{
 			table: "requests",
@@ -506,6 +538,35 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		// Index may already exist
 	}
 
+	// Ensure alerts table exists (for upgrades from pre-alerts installs)
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS alerts (
+			id TEXT PRIMARY KEY,
+			timestamp BIGINT NOT NULL,
+			type TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			title TEXT NOT NULL,
+			message TEXT NOT NULL,
+			value DOUBLE PRECISION,
+			threshold DOUBLE PRECISION,
+			account TEXT,
+			model TEXT,
+			project TEXT,
+			request_id TEXT,
+			acknowledged INTEGER NOT NULL DEFAULT 0
+		)
+	`);
+	try {
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)`,
+		);
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged ON alerts(acknowledged)`,
+		);
+	} catch (_error) {
+		// Index may already exist
+	}
+
 	// Ensure combos tables exist (for upgrades from pre-combos installs)
 	await adapter.unsafe(`
 		CREATE TABLE IF NOT EXISTS combos (
@@ -549,7 +610,7 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 	`);
 	await adapter.unsafe(`
 		INSERT INTO combo_family_assignments (family, combo_id, enabled)
-		VALUES ('opus', NULL, 0), ('sonnet', NULL, 0), ('haiku', NULL, 0)
+		VALUES ('fable', NULL, 0), ('opus', NULL, 0), ('sonnet', NULL, 0), ('haiku', NULL, 0)
 		ON CONFLICT (family) DO NOTHING
 	`);
 

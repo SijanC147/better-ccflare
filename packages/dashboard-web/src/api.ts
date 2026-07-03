@@ -9,10 +9,12 @@ import type {
 	AgentUpdatePayload,
 	AgentWorkspace,
 	AnalyticsResponse,
+	CacheInsightsResponse,
 	Combo,
 	ComboFamilyAssignment,
 	ComboSlot,
 	ComboWithSlots,
+	ContextInsightsResponse,
 	LogEvent,
 	Project,
 	ProjectWithChildren,
@@ -63,6 +65,8 @@ export interface StorageInfoResponse {
 	last_quick_result: "ok" | "corrupt" | null;
 	last_full_check_at: string | null;
 	last_full_result: "ok" | "corrupt" | null;
+	last_quick_skip_reason: string | null;
+	last_full_skip_reason: string | null;
 	orphan_pages: number | null;
 	last_retention_sweep_at: string | null;
 	null_account_rows_24h: number;
@@ -983,6 +987,29 @@ class API extends HttpClient {
 
 			throw error;
 		}
+	}
+
+	async getCacheInsights(
+		range = "24h",
+		threshold?: number,
+	): Promise<CacheInsightsResponse> {
+		const params = new URLSearchParams({ range });
+
+		if (threshold !== undefined) {
+			params.append("threshold", String(threshold));
+		}
+
+		return this.get<CacheInsightsResponse>(
+			`/api/insights/cache?${params.toString()}`,
+		);
+	}
+
+	async getContextInsights(range = "24h"): Promise<ContextInsightsResponse> {
+		const params = new URLSearchParams({ range });
+
+		return this.get<ContextInsightsResponse>(
+			`/api/insights/context?${params.toString()}`,
+		);
 	}
 
 	// Batch analytics requests for improved performance
@@ -2444,6 +2471,25 @@ class API extends HttpClient {
 			});
 			throw error;
 		}
+	}
+
+	async getAlerts(limit = 100): Promise<{
+		alerts: import("@better-ccflare/types").AlertEvent[];
+		unacknowledgedCount: number;
+	}> {
+		const res = await this.get<{
+			alerts: import("@better-ccflare/types").AlertEvent[];
+			unacknowledgedCount: number;
+		}>(`/api/insights/alerts?limit=${Math.min(Math.max(1, limit), 500)}`);
+		return res;
+	}
+
+	async acknowledgeAlert(id: string): Promise<void> {
+		await this.post(`/api/insights/alerts/${encodeURIComponent(id)}`);
+	}
+
+	async acknowledgeAllAlerts(): Promise<void> {
+		await this.post("/api/insights/alerts/acknowledge-all");
 	}
 }
 

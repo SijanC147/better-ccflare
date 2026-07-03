@@ -44,9 +44,6 @@ describe("health runtime payload", () => {
 			() => ({ healthy: true, failureCount: 0, recentDrops: 0, queuedJobs: 2 }),
 			() => ({
 				state: "healthy",
-				pendingAcks: 1,
-				lastError: null,
-				startedAt: 123,
 			}),
 		);
 
@@ -67,9 +64,6 @@ describe("health runtime payload", () => {
 		});
 		expect(body.runtime.usageWorker).toEqual({
 			state: "healthy",
-			pendingAcks: 1,
-			lastError: null,
-			startedAt: 123,
 		});
 	});
 
@@ -98,9 +92,6 @@ describe("AsyncDbWriter.getHealth", () => {
 		const writer = new AsyncDbWriter();
 		const health = writer.getHealth();
 
-		// Upstream split the single queue into metadata + payload queues with
-		// retention/byte bounds, expanding the health shape. Assert the core
-		// healthy-at-rest invariant against the expanded fields.
 		expect(health).toEqual({
 			healthy: true,
 			failureCount: 0,
@@ -108,12 +99,12 @@ describe("AsyncDbWriter.getHealth", () => {
 			queuedJobs: 0,
 			metadataQueuedJobs: 0,
 			payloadQueuedJobs: 0,
-			metadataDropped: 0,
-			payloadDropped: 0,
-			payloadDroppedBytes: 0,
 			payloadBytesPending: 0,
 			oldestMetadataAgeMs: 0,
 			oldestPayloadAgeMs: 0,
+			metadataDropped: 0,
+			payloadDropped: 0,
+			payloadDroppedBytes: 0,
 		});
 
 		await writer.dispose();

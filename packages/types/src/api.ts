@@ -20,6 +20,8 @@ export interface RequestMeta {
 	comboName?: string | null;
 	/** Combo slot index being attempted (set per-iteration in proxy loop) */
 	comboSlotIndex?: number | null;
+	/** Per-client session id (from request body metadata.user_id) for session-affinity routing. */
+	clientSessionId?: string | null;
 }
 
 export interface AgentUpdatePayload {

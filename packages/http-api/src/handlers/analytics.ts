@@ -6,54 +6,22 @@ import {
 import { Logger } from "@better-ccflare/logger";
 import { NO_ACCOUNT_ID } from "@better-ccflare/types";
 import type { AnalyticsResponse, APIContext } from "../types";
+import { buildRequestFilters, getRangeConfig } from "../utils/query-filters";
 
 const log = new Logger("AnalyticsHandler");
 
-interface BucketConfig {
-	bucketMs: number;
-	displayName: string;
-}
-
-function getRangeConfig(range: string): {
-	startMs: number;
-	bucket: BucketConfig;
-} {
-	const now = Date.now();
-	const hour = 60 * 60 * 1000;
-	const day = 24 * hour;
-
-	switch (range) {
-		case "1h":
-			return {
-				startMs: now - hour,
-				bucket: { bucketMs: 60 * 1000, displayName: "1m" },
-			};
-		case "6h":
-			return {
-				startMs: now - 6 * hour,
-				bucket: { bucketMs: 5 * 60 * 1000, displayName: "5m" },
-			};
-		case "24h":
-			return {
-				startMs: now - day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-		case "7d":
-			return {
-				startMs: now - 7 * day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-		case "30d":
-			return {
-				startMs: now - 30 * day,
-				bucket: { bucketMs: day, displayName: "1d" },
-			};
-		default:
-			return {
-				startMs: now - day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-	}
+// Exported for unit tests.
+export function effectiveBurnRateDays(
+	firstTs: number | null,
+	windowStartMs: number,
+	windowDays: number,
+	nowMs: number,
+): number {
+	if (firstTs == null) return windowDays;
+	const dayMs = 24 * 60 * 60 * 1000;
+	const start = Math.max(firstTs, windowStartMs);
+	const days = Math.ceil((nowMs - start) / dayMs);
+	return Math.min(windowDays, Math.max(1, days));
 }
 
 export function createAnalyticsHandler(context: APIContext) {
@@ -64,60 +32,12 @@ export function createAnalyticsHandler(context: APIContext) {
 		const mode = params.get("mode") ?? "normal";
 		const isCumulative = mode === "cumulative";
 
-		// Extract filters
-		const accountsFilter =
-			params.get("accounts")?.split(",").filter(Boolean) || [];
-		const modelsFilter = params.get("models")?.split(",").filter(Boolean) || [];
-		const apiKeysFilter =
-			params.get("apiKeys")?.split(",").filter(Boolean) || [];
-		const statusFilter = params.get("status") || "all";
-		const projectsFilter =
-			params.get("projects")?.split(",").filter(Boolean) || [];
-
-		// Build filter conditions
-		const conditions: string[] = ["timestamp > ?"];
-		const queryParams: (string | number)[] = [startMs];
-
-		if (accountsFilter.length > 0) {
-			// Handle account filter - map account names to IDs via join
-			const placeholders = accountsFilter.map(() => "?").join(",");
-			conditions.push(`(
-				r.account_used IN (SELECT id FROM accounts WHERE name IN (${placeholders}))
-				OR (r.account_used = ? AND ? IN (${placeholders}))
-			)`);
-			queryParams.push(
-				...accountsFilter,
-				NO_ACCOUNT_ID,
-				NO_ACCOUNT_ID,
-				...accountsFilter,
-			);
-		}
-
-		if (modelsFilter.length > 0) {
-			const placeholders = modelsFilter.map(() => "?").join(",");
-			conditions.push(`model IN (${placeholders})`);
-			queryParams.push(...modelsFilter);
-		}
-
-		if (apiKeysFilter.length > 0) {
-			const placeholders = apiKeysFilter.map(() => "?").join(",");
-			conditions.push(`api_key_name IN (${placeholders})`);
-			queryParams.push(...apiKeysFilter);
-		}
-
-		if (statusFilter === "success") {
-			conditions.push("success = TRUE");
-		} else if (statusFilter === "error") {
-			conditions.push("success = FALSE");
-		}
-
-		if (projectsFilter.length > 0) {
-			const placeholders = projectsFilter.map(() => "?").join(",");
-			conditions.push(`project IN (${placeholders})`);
-			queryParams.push(...projectsFilter);
-		}
-
-		const whereClause = conditions.join(" AND ");
+		// Build the shared range/filter WHERE clause (timestamp window,
+		// accounts, models, apiKeys, status, projects)
+		const { whereClause, params: queryParams } = buildRequestFilters(
+			params,
+			startMs,
+		);
 
 		try {
 			// Check if we need per-model time series
@@ -161,6 +81,62 @@ export function createAnalyticsHandler(context: APIContext) {
 			`,
 				[...queryParams, NO_ACCOUNT_ID],
 			);
+
+			// Fixed-window burn-rate aggregates. Independent of the user's range
+			// or filters so "Avg / day" and "Avg / week" stay stable when the
+			// dashboard range filter changes. Divisor is clamped to the actual
+			// age of the data so thin history (e.g. the proxy was started 3 days
+			// ago) doesn't get padded with imaginary zero days.
+			const dayMs = 24 * 60 * 60 * 1000;
+			const nowMs = Date.now();
+			const sevenDayStart = nowMs - 7 * dayMs;
+			const thirtyDayStart = nowMs - 30 * dayMs;
+			const burnRateResult = await db.get<{
+				plan_cost_7d: number;
+				api_cost_7d: number;
+				plan_cost_30d: number;
+				api_cost_30d: number;
+				first_plan_ts: number | null;
+				first_api_ts: number | null;
+			}>(
+				`
+				SELECT
+					SUM(CASE WHEN timestamp > ? AND billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_7d,
+					SUM(CASE WHEN timestamp > ? AND billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_7d,
+					SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_30d,
+					SUM(CASE WHEN billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_30d,
+					MIN(CASE WHEN billing_type = 'plan' THEN timestamp ELSE NULL END) as first_plan_ts,
+					MIN(CASE WHEN billing_type != 'plan' THEN timestamp ELSE NULL END) as first_api_ts
+				FROM requests
+				WHERE timestamp > ?
+			`,
+				[sevenDayStart, sevenDayStart, thirtyDayStart],
+			);
+			const planCost7d = Number(burnRateResult?.plan_cost_7d) || 0;
+			const apiCost7d = Number(burnRateResult?.api_cost_7d) || 0;
+			const planCost30d = Number(burnRateResult?.plan_cost_30d) || 0;
+			const apiCost30d = Number(burnRateResult?.api_cost_30d) || 0;
+			const firstPlanTs =
+				burnRateResult?.first_plan_ts != null
+					? Number(burnRateResult.first_plan_ts)
+					: null;
+			const firstApiTs =
+				burnRateResult?.first_api_ts != null
+					? Number(burnRateResult.first_api_ts)
+					: null;
+			const avgDailyPlanCostUsd =
+				planCost7d /
+				effectiveBurnRateDays(firstPlanTs, sevenDayStart, 7, nowMs);
+			const avgDailyApiCostUsd =
+				apiCost7d / effectiveBurnRateDays(firstApiTs, sevenDayStart, 7, nowMs);
+			const avgWeeklyPlanCostUsd =
+				(planCost30d /
+					effectiveBurnRateDays(firstPlanTs, thirtyDayStart, 30, nowMs)) *
+				7;
+			const avgWeeklyApiCostUsd =
+				(apiCost30d /
+					effectiveBurnRateDays(firstApiTs, thirtyDayStart, 30, nowMs)) *
+				7;
 
 			// Get time series data
 			const timeSeries = await db.query<{
@@ -562,6 +538,10 @@ export function createAnalyticsHandler(context: APIContext) {
 						consolidatedResult?.avg_tokens_per_second != null
 							? Number(consolidatedResult.avg_tokens_per_second)
 							: null,
+					avgDailyPlanCostUsd,
+					avgWeeklyPlanCostUsd,
+					avgDailyApiCostUsd,
+					avgWeeklyApiCostUsd,
 				},
 				timeSeries: transformedTimeSeries,
 				tokenBreakdown: {

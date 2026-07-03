@@ -1,0 +1,17 @@
+{
+	"name": "@better-ccflare/openai-responses-adapter",
+	"version": "0.1.0",
+	"type": "module",
+	"main": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"typecheck": "bunx tsc --noEmit"
+	},
+	"dependencies": {
+		"@better-ccflare/core": "workspace:*",
+		"@better-ccflare/logger": "workspace:*",
+		"@better-ccflare/types": "workspace:*"
+	}
+}

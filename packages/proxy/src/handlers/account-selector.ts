@@ -86,13 +86,19 @@ export async function selectAccountsForRequest(
 					// or to probe accounts that are rate-limited (to detect when the window has reset).
 					// For those requests we must allow through an overage-paused or rate-limited account
 					// so the scheduler can hit the real endpoint and trigger the window-reset + auto-resume logic.
-					// We still block accounts that were paused by the failure-threshold guard (those are
-					// paused because their endpoint is broken, not because of overage or rate-limiting).
+					// Only an overage pause qualifies: a manual pause (pause_reason='manual') or a
+					// failure-threshold / peak_hours pause must still win even when the overage feature
+					// flag is enabled, because the auto-resume guard would never un-pause those accounts.
+					// This mirrors the scheduler eligibility query and the sendDummyMessage resume guard
+					// (auto_pause_on_overage_enabled=1 AND pause_reason IN (NULL,'overage')).
 					const isAutoRefreshBypass =
 						meta.headers.get("x-better-ccflare-bypass-session") === "true";
 					const available = isAccountAvailable(forcedAccount);
 					const isOveragePaused =
-						forcedAccount.paused && forcedAccount.auto_pause_on_overage_enabled;
+						forcedAccount.paused &&
+						forcedAccount.auto_pause_on_overage_enabled &&
+						(!forcedAccount.pause_reason ||
+							forcedAccount.pause_reason === "overage");
 					const isRateLimited =
 						!available &&
 						!forcedAccount.paused &&
@@ -127,11 +133,48 @@ export async function selectAccountsForRequest(
 		}
 	}
 
+	// Filter out excluded providers (e.g. claude-oauth excluded by the responses adapter)
+	const excludeProviders =
+		meta.headers
+			?.get("x-better-ccflare-exclude-providers")
+			?.split(",")
+			.map((p) => p.trim())
+			.filter(Boolean) ?? [];
+
+	const applyExclusions = (accounts: Account[]): Account[] => {
+		if (excludeProviders.length === 0) return accounts;
+		const filtered = accounts.filter((a) => {
+			for (const ex of excludeProviders) {
+				// "anthropic-oauth" targets only Anthropic OAuth accounts (refresh_token present),
+				// leaving Anthropic API key accounts (console mode) eligible.
+				if (ex === "anthropic-oauth") {
+					if (a.provider === "anthropic" && a.refresh_token != null)
+						return false;
+				} else {
+					if (a.provider === ex) return false;
+				}
+			}
+			return true;
+		});
+		const skipped = accounts.length - filtered.length;
+		if (skipped > 0) {
+			log.warn(
+				`Skipping ${skipped} account(s) excluded for this request type (Codex CLI traffic must not use Anthropic OAuth accounts)`,
+			);
+		}
+		return filtered;
+	};
+
 	// Try combo-aware routing if a model is provided
 	if (model) {
 		const family = getModelFamily(model);
 		if (family) {
-			const validFamilies: readonly string[] = ["opus", "sonnet", "haiku"];
+			const validFamilies: readonly string[] = [
+				"fable",
+				"opus",
+				"sonnet",
+				"haiku",
+			];
 			if (!validFamilies.includes(family)) {
 				log.warn(`Unknown model family "${family}", skipping combo lookup`);
 			} else {
@@ -178,18 +221,20 @@ export async function selectAccountsForRequest(
 						});
 					}
 
-					if (availableAccounts.length > 0) {
-						// Stamp combo metadata only when we will actually combo-route;
-						// otherwise the fallback path would persist comboName on a
-						// request handled by SessionStrategy and a downstream retry
-						// could re-enter the combo branch (Codex round 5 P2).
+					// Apply exclusions first, then stamp combo metadata only when
+					// we will actually combo-route; otherwise the fallback path
+					// would persist comboName on a request handled by
+					// SessionStrategy and a downstream retry could re-enter the
+					// combo branch (Codex round 5 P2).
+					const filteredComboAccounts = applyExclusions(availableAccounts);
+					if (filteredComboAccounts.length > 0) {
 						const slotInfo: ComboSlotInfo = {
 							comboName: combo.name,
 							slots: slotEntries,
 						};
 						setComboSlotInfo(meta, slotInfo);
 						meta.comboName = combo.name;
-						return availableAccounts;
+						return filteredComboAccounts;
 					}
 
 					// All slots unavailable — fall back to normal routing
@@ -201,5 +246,5 @@ export async function selectAccountsForRequest(
 		}
 	}
 
-	return getOrderedAccounts(meta, ctx);
+	return applyExclusions(await getOrderedAccounts(meta, ctx));
 }

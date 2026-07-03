@@ -13,6 +13,7 @@ export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export { DiscoveryScheduler, type ScanResult } from "./discovery-scheduler";
 export {
+	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
 	checkRefreshTokenHealth,
 	clearAccountRefreshCache,
@@ -23,6 +24,8 @@ export {
 	getUsageThrottleUntil,
 	getValidAccessToken,
 	isRefreshTokenLikelyExpired,
+	refreshCodexUsageForAccount,
+	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
 	restartUsagePollingForAccount,
@@ -30,6 +33,7 @@ export {
 	stopGlobalTokenHealthChecks,
 	type TokenHealthReport,
 	type TokenHealthStatus,
+	unregisterCodexUsageRefresher,
 } from "./handlers";
 export {
 	runIntegrityCheckOnDemand,
@@ -37,20 +41,18 @@ export {
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
 export {
-	getUsageWorker,
-	getUsageWorkerHealth,
+	drainUsageCollector,
+	getUsageCollectorHealth,
 	handleProxy,
+	initProxy,
 	type ProxyContext,
-	sendWorkerConfigUpdate,
-	startUsageWorker,
-	terminateUsageWorker,
 } from "./proxy";
 export {
 	forwardToClient,
 	type ResponseHandlerOptions,
 } from "./response-handler";
 export type { ProxyRequest, ProxyResponse } from "./types";
-export type { UsageWorkerHealth } from "./usage-worker-controller";
+export type { UsageCollectorHealth } from "./usage-collector";
 export type {
 	ChunkMessage,
 	ControlMessage,

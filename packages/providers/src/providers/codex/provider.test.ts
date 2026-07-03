@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { fetchCodexUsageOnDemand } from "./on-demand-fetch";
 import { CodexProvider } from "./provider";
 import { parseCodexUsageHeaders } from "./usage";
 
@@ -10,10 +11,11 @@ const eventLine = (name: string, data: unknown) => [
 ];
 
 describe("CodexProvider request conversion", () => {
-	it("handles only /v1/messages path", () => {
+	it("handles messages and synthetic count_tokens paths", () => {
 		const provider = new CodexProvider();
 		expect(provider.canHandle("/v1/messages")).toBeTrue();
-		expect(provider.canHandle("/v1/messages/count_tokens")).toBeFalse();
+		expect(provider.canHandle("/v1/messages/count_tokens")).toBeTrue();
+		expect(provider.canHandle("/v1/complete")).toBeFalse();
 	});
 
 	it("forwards Claude reasoning effort to Codex reasoning.effort", async () => {
@@ -35,6 +37,143 @@ describe("CodexProvider request conversion", () => {
 		expect(body.reasoning).toEqual({ effort: "high" });
 	});
 
+	it("adds a continuation nudge after Skill tool results", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "load /ce-plan" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_skill_1",
+								name: "Skill",
+								input: { skill: "ce-plan" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_skill_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(body.input).toContainEqual({
+			role: "user",
+			content: [
+				{
+					type: "input_text",
+					text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+				},
+			],
+		});
+	});
+
+	it("does not add a continuation nudge after non-Skill tool results", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "search" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_search_1",
+								name: "WebSearch",
+								input: { query: "news" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_search_1",
+								content: [{ type: "text", text: "results" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(JSON.stringify(body.input)).not.toContain(
+			"Continue the user's original request now",
+		);
+	});
+
+	it("does not inject a Skill continuation nudge into replayed mid-history", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "load /ce-plan" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_skill_1",
+								name: "Skill",
+								input: { skill: "ce-plan" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_skill_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+						],
+					},
+					{ role: "assistant", content: "I will apply the plan skill." },
+					{ role: "user", content: "continue" },
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(JSON.stringify(body.input)).not.toContain(
+			"Continue the user's original request now",
+		);
+	});
+
 	it("forwards xhigh reasoning effort to Codex unchanged", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
@@ -52,6 +191,91 @@ describe("CodexProvider request conversion", () => {
 		const body = await transformed.json();
 
 		expect(body.reasoning).toEqual({ effort: "xhigh" });
+	});
+
+	it("uses role-appropriate text block types in Codex input", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 100,
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: "hi" },
+					{ role: "developer", content: "follow policy" },
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input[0]).toEqual({
+			role: "user",
+			content: [{ type: "input_text", text: "hello" }],
+		});
+		expect(body.input[1]).toEqual({
+			role: "assistant",
+			content: [{ type: "output_text", text: "hi" }],
+		});
+		expect(body.input[2]).toEqual({
+			role: "system",
+			content: [{ type: "input_text", text: "follow policy" }],
+		});
+	});
+
+	it("marks replayed tool call items as completed", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 100,
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_1",
+								name: "search",
+								input: { query: "hello" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_1",
+								content: [{ type: "text", text: "result" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input[0]).toMatchObject({
+			type: "function_call",
+			call_id: "call_1",
+			name: "search",
+			arguments: JSON.stringify({ query: "hello" }),
+			status: "completed",
+		});
+		expect(body.input[1]).toMatchObject({
+			type: "function_call_output",
+			call_id: "call_1",
+			output: "result",
+			status: "completed",
+		});
 	});
 
 	it("keeps default Codex reasoning effort when Claude effort is absent", async () => {
@@ -111,6 +335,139 @@ describe("CodexProvider request conversion", () => {
 		const body = await transformed.json();
 		expect(body.reasoning).toEqual({ effort: "medium" });
 	});
+
+	it("omits empty Read.pages when replaying Anthropic history to Codex", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 100,
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_read_1",
+								name: "Read",
+								input: {
+									file_path: "/tmp/full.diff",
+									offset: 0,
+									limit: 2000,
+									pages: "",
+								},
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input[0]).toMatchObject({
+			type: "function_call",
+			call_id: "call_read_1",
+			name: "Read",
+		});
+		expect(JSON.parse(body.input[0].arguments)).toEqual({
+			file_path: "/tmp/full.diff",
+			offset: 0,
+			limit: 2000,
+		});
+	});
+
+	it("normalizes stored WebSearch tool_use input when replaying Anthropic history to Codex", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 100,
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_search_1",
+								name: "WebSearch",
+								input: {
+									query: "latest earnings",
+									allowed_domains: [" investors.example.com ", ""],
+									blocked_domains: ["spam.example.com"],
+								},
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input[0]).toMatchObject({
+			type: "function_call",
+			call_id: "call_search_1",
+			name: "WebSearch",
+		});
+		expect(JSON.parse(body.input[0].arguments)).toEqual({
+			query: "latest earnings",
+			allowed_domains: ["investors.example.com"],
+		});
+	});
+
+	it("preserves falsy non-object tool_use input when replaying Anthropic history to Codex", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 100,
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_generic_1",
+								name: "generic_tool",
+								input: "",
+							},
+							{
+								type: "tool_use",
+								id: "call_generic_2",
+								name: "generic_tool",
+								input: null,
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input[0]).toMatchObject({
+			type: "function_call",
+			call_id: "call_generic_1",
+			name: "generic_tool",
+		});
+		expect(body.input[0].arguments).toBe('""');
+		expect(body.input[1]).toMatchObject({
+			type: "function_call",
+			call_id: "call_generic_2",
+			name: "generic_tool",
+		});
+		expect(body.input[1].arguments).toBe("null");
+	});
 });
 
 describe("CodexProvider.processResponse", () => {
@@ -163,6 +520,96 @@ describe("CodexProvider.processResponse", () => {
 		const stopPos = transformedBody.indexOf("event: content_block_stop");
 		expect(deltaPos).toBeGreaterThanOrEqual(0);
 		expect(stopPos).toBeGreaterThan(deltaPos);
+		expect(transformedBody).toContain('"stop_reason":"tool_use"');
+	});
+
+	it("omits empty Read.pages from streaming tool-call arguments", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.4" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "function_call", call_id: "call_1", name: "Read" },
+				output_index: 0,
+			}),
+			...eventLine("response.function_call_arguments.delta", {
+				delta: '{"file_path":"/tmp/full.diff","offset":0,',
+				output_index: 0,
+			}),
+			...eventLine("response.function_call_arguments.delta", {
+				delta: '"limit":2000,"pages":""}',
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: { type: "function_call", call_id: "call_1", name: "Read" },
+				output_index: 0,
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.4",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+
+		expect(transformedBody).toContain(
+			'"partial_json":"{\\"file_path\\":\\"/tmp/full.diff\\",\\"offset\\":0,\\"limit\\":2000}"',
+		);
+		expect(transformedBody).not.toContain('\\"pages\\"');
+	});
+
+	it("omits invalid WebSearch domain filters from streaming tool-call arguments", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.4" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "function_call", call_id: "call_1", name: "WebSearch" },
+				output_index: 0,
+			}),
+			...eventLine("response.function_call_arguments.delta", {
+				delta: '{"query":"earnings","allowed_domains":[],',
+				output_index: 0,
+			}),
+			...eventLine("response.function_call_arguments.delta", {
+				delta: '"blocked_domains":[""]}',
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: { type: "function_call", call_id: "call_1", name: "WebSearch" },
+				output_index: 0,
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.4",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+
+		expect(transformedBody).toContain(
+			'"partial_json":"{\\"query\\":\\"earnings\\"}"',
+		);
+		expect(transformedBody).not.toContain("allowed_domains");
+		expect(transformedBody).not.toContain("blocked_domains");
 	});
 
 	it("uses the function_call block index rather than the current text block index", async () => {
@@ -540,6 +987,166 @@ describe("CodexProvider.processResponse", () => {
 				input: { query: "hello" },
 			},
 		]);
+		expect(payload.stop_reason).toBe("tool_use");
+	});
+
+	it("omits invalid WebSearch domain filters from non-streaming tool_use input", async () => {
+		const provider = new CodexProvider();
+		const requestId = "req_non_stream_websearch_domains";
+		const originalRequest = new Request("https://example.test/v1/messages", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-better-ccflare-request-id": requestId,
+			},
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5",
+				max_tokens: 16,
+				stream: false,
+				tools: [
+					{
+						name: "WebSearch",
+						description: "search",
+						input_schema: {
+							type: "object",
+							properties: {
+								allowed_domains: { type: "array", items: { type: "string" } },
+								blocked_domains: { type: "array", items: { type: "string" } },
+							},
+						},
+					},
+				],
+				messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+			}),
+		});
+		await provider.transformRequestBody(originalRequest);
+
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_tool", model: "gpt-5.4" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "function_call", call_id: "call_1", name: "WebSearch" },
+				output_index: 0,
+			}),
+			...eventLine("response.function_call_arguments.delta", {
+				delta:
+					'{"query":"earnings","allowed_domains":["reuters.com"],"blocked_domains":["seekingalpha.com"]}',
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: { type: "function_call", call_id: "call_1", name: "WebSearch" },
+				output_index: 0,
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.4",
+					usage: { input_tokens: 9, output_tokens: 4 },
+				},
+			}),
+		]);
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-id": requestId,
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const payload = JSON.parse(await transformed.text()) as Record<
+			string,
+			unknown
+		>;
+		expect(payload.content).toEqual([
+			{
+				type: "tool_use",
+				id: "call_1",
+				name: "WebSearch",
+				input: { query: "earnings", allowed_domains: ["reuters.com"] },
+			},
+		]);
+	});
+
+	it("preserves non-object tool arguments in non-streaming SSE-to-JSON conversion", async () => {
+		const provider = new CodexProvider();
+		const requestId = "req_non_stream_non_object_tool_input";
+		const originalRequest = new Request("https://example.test/v1/messages", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-better-ccflare-request-id": requestId,
+			},
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5",
+				max_tokens: 16,
+				stream: false,
+				tools: [
+					{
+						name: "generic_tool",
+						description: "generic",
+						input_schema: { type: "object" },
+					},
+				],
+				messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+			}),
+		});
+		await provider.transformRequestBody(originalRequest);
+
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_tool", model: "gpt-5.4" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: {
+					type: "function_call",
+					call_id: "call_1",
+					name: "generic_tool",
+				},
+				output_index: 0,
+			}),
+			...eventLine("response.function_call_arguments.delta", {
+				delta: "null",
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: {
+					type: "function_call",
+					call_id: "call_1",
+					name: "generic_tool",
+				},
+				output_index: 0,
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.4",
+					usage: { input_tokens: 9, output_tokens: 4 },
+				},
+			}),
+		]);
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-id": requestId,
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const payload = JSON.parse(await transformed.text()) as Record<
+			string,
+			unknown
+		>;
+		expect(payload.content).toEqual([
+			{
+				type: "tool_use",
+				id: "call_1",
+				name: "generic_tool",
+				input: null,
+			},
+		]);
 	});
 
 	it("maps response.completed usage into Claude-compatible context_window using model metadata", async () => {
@@ -746,6 +1353,282 @@ describe("CodexProvider.processResponse", () => {
 		expect(await transformed.text()).toBe("ok");
 	});
 
+	it("returns Anthropic JSON for non-streaming missing-content-type SSE bodies", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.4" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "message" },
+				output_index: 0,
+			}),
+			...eventLine("response.content_part.added", {
+				part: { type: "output_text" },
+			}),
+			...eventLine("response.output_text.delta", { delta: "hello" }),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.4",
+					usage: { input_tokens: 2, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "x-better-ccflare-request-stream": "false" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		expect(transformed.headers.get("content-type")).toContain(
+			"application/json",
+		);
+		const payload = await transformed.json();
+		expect(payload.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(payload.usage).toEqual({
+			input_tokens: 2,
+			output_tokens: 1,
+			cache_read_input_tokens: 0,
+			cache_creation_input_tokens: 0,
+		});
+	});
+
+	it("surfaces Codex SSE errors instead of fabricating an empty streaming success", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_failed", model: "gpt-5.5" },
+			}),
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						type: "invalid_request_error",
+						code: "context_length_exceeded",
+						message: "Input is too large",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+
+		expect(transformedBody).toContain("event: error");
+		expect(transformedBody).toContain("Input is too large");
+		expect(transformedBody).toContain("context_length_exceeded");
+		expect(transformedBody).not.toContain("event: message_delta");
+		expect(transformedBody).not.toContain("event: message_stop");
+	});
+
+	it("closes an open content block before surfacing a streaming Codex error", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_failed", model: "gpt-5.5" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "message" },
+				output_index: 0,
+			}),
+			...eventLine("response.content_part.added", {
+				part: { type: "output_text" },
+			}),
+			...eventLine("response.output_text.delta", { delta: "partial" }),
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						type: "invalid_request_error",
+						message: "Codex failed after partial output",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+
+		const stopPos = transformedBody.indexOf("event: content_block_stop");
+		const errorPos = transformedBody.indexOf("event: error");
+		expect(stopPos).toBeGreaterThan(-1);
+		expect(errorPos).toBeGreaterThan(stopPos);
+		expect(transformedBody).toContain("Codex failed after partial output");
+	});
+
+	it("surfaces Codex SSE errors as JSON errors for non-streaming clients", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_failed", model: "gpt-5.5" },
+			}),
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						type: "invalid_request_error",
+						message: "Codex failed",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.json();
+
+		expect(transformed.status).toBe(400);
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "Codex failed",
+			},
+		});
+	});
+
+	it("maps non-streaming Codex context-window SSE errors to non-retryable bad requests", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_failed", model: "gpt-5.5" },
+			}),
+			...eventLine("error", {
+				type: "error",
+				code: "context_length_exceeded",
+				message: "Input is too large",
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.json();
+
+		expect(transformed.status).toBe(400);
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "Input is too large",
+				code: "context_length_exceeded",
+			},
+		});
+	});
+
+	it("maps generic Codex error events to a valid Anthropic api_error type", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("error", {
+				type: "error",
+				code: "some_other_code",
+				message: "Generic Codex failure",
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.json();
+
+		expect(transformed.status).toBe(502);
+		expect(body.error.type).toBe("api_error");
+		expect(body.error.code).toBe("some_other_code");
+	});
+
+	it("maps Codex rate-limited status to a non-streaming 429", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.failed", {
+				response: {
+					status: "rate_limited",
+					error: {
+						type: "error",
+						message: "Rate limited by Codex",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.json();
+
+		expect(transformed.status).toBe(429);
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(body.error.status).toBe("rate_limited");
+	});
+
+	it("does not emit terminal events after response.failed when response.completed follows", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_failed", model: "gpt-5.5" },
+			}),
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: { type: "invalid_request_error", message: "Context exceeded" },
+				},
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.5",
+					usage: { input_tokens: 5, output_tokens: 0 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain("event: error");
+		expect(body).not.toContain("event: message_delta");
+		expect(body).not.toContain("event: message_stop");
+	});
+
 	it("passes through non-streaming error responses", async () => {
 		const provider = new CodexProvider();
 		const response = new Response('{"error":"bad_request"}', {
@@ -761,6 +1644,106 @@ describe("CodexProvider.processResponse", () => {
 });
 
 describe("CodexProvider.transformRequestBody", () => {
+	it("returns a synthetic Anthropic count_tokens response", async () => {
+		const provider = new CodexProvider();
+		const url = provider.buildUrl("/v1/messages/count_tokens", "");
+		const request = new Request(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				messages: [{ role: "user", content: "hello world" }],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(transformed.headers.get("content-type")).toContain(
+			"application/json",
+		);
+		expect(transformed.headers.get("x-better-ccflare-synthetic-response")).toBe(
+			"true",
+		);
+		expect(transformed.headers.get("x-better-ccflare-synthetic-status")).toBe(
+			"200",
+		);
+		expect(body.input_tokens).toBeNumber();
+		expect(body.input_tokens).toBeGreaterThan(0);
+		expect(body).not.toHaveProperty("input");
+		expect(body).not.toHaveProperty("stream");
+		expect(body).not.toHaveProperty("store");
+	});
+
+	it("estimates count_tokens from prompt material instead of the full JSON envelope", async () => {
+		const provider = new CodexProvider();
+		const url = provider.buildUrl("/v1/messages/count_tokens", "");
+		const request = new Request(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(body.input_tokens).toBeGreaterThan(0);
+		expect(body.input_tokens).toBeLessThan(10);
+	});
+
+	it("returns a synthetic error for malformed count_tokens requests", async () => {
+		const provider = new CodexProvider();
+		const url = provider.buildUrl("/v1/messages/count_tokens", "");
+		const request = new Request(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: "{not-json",
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(transformed.headers.get("x-better-ccflare-synthetic-response")).toBe(
+			"true",
+		);
+		expect(transformed.headers.get("x-better-ccflare-synthetic-status")).toBe(
+			"400",
+		);
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "Codex count_tokens requires a valid JSON request body.",
+			},
+		});
+	});
+
+	it("returns a synthetic error for non-JSON count_tokens requests", async () => {
+		const provider = new CodexProvider();
+		const url = provider.buildUrl("/v1/messages/count_tokens", "");
+		const request = new Request(url, {
+			method: "POST",
+			headers: { "content-type": "text/plain" },
+			body: "hello",
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(transformed.headers.get("x-better-ccflare-synthetic-response")).toBe(
+			"true",
+		);
+		expect(transformed.headers.get("x-better-ccflare-synthetic-status")).toBe(
+			"400",
+		);
+		expect(body.error.message).toBe(
+			"Codex count_tokens requires an application/json request body.",
+		);
+	});
+
 	it("maps sonnet-family models to the default Codex model", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
@@ -946,5 +1929,136 @@ describe("parseCodexUsageHeaders reset-after handling", () => {
 		expect(usage?.five_hour?.resets_at).toBe(
 			new Date(baseTimeMs + 600_000).toISOString(),
 		);
+	});
+});
+
+describe("fetchCodexUsageOnDemand", () => {
+	let originalFetch: typeof fetch;
+	let recorded: { url: string; init: RequestInit } | null;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		recorded = null;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	const makeMockFetch = (response: Response) => {
+		return async (input: RequestInfo | URL, init?: RequestInit) => {
+			recorded = { url: String(input), init: init ?? {} };
+			return response;
+		};
+	};
+
+	it("sends a minimal codex request and parses usage headers", async () => {
+		globalThis.fetch = makeMockFetch(
+			new Response("event: ignored\n\n", {
+				status: 200,
+				headers: {
+					"x-codex-primary-used-percent": "11",
+					"x-codex-primary-window-minutes": "10080",
+					"x-codex-primary-reset-at": "1775000000",
+					"x-codex-secondary-used-percent": "4",
+					"x-codex-secondary-window-minutes": "300",
+					"x-codex-secondary-reset-at": "1774600000",
+				},
+			}),
+		) as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageOnDemand(
+			"test-token",
+			"https://example.test/codex/responses",
+		);
+
+		expect(recorded).not.toBeNull();
+		expect(recorded?.url).toBe("https://example.test/codex/responses");
+		expect(recorded?.init.method).toBe("POST");
+
+		const body = JSON.parse(recorded?.init.body as string);
+		expect(body.stream).toBe(true);
+		expect(body.store).toBe(false);
+		expect(body.max_output_tokens).toBe(1);
+		expect(body.reasoning?.effort).toBe("minimal");
+		expect(body.input).toHaveLength(1);
+		expect(body.input[0].role).toBe("user");
+
+		const headersInit = recorded?.init.headers as Record<string, string>;
+		const headers = new Headers(headersInit);
+		expect(headers.get("Authorization")).toBe("Bearer test-token");
+		expect(headers.get("Openai-Beta")).toBe("responses=experimental");
+		expect(headers.get("originator")).toBe("codex_cli_rs");
+		expect(headers.get("Content-Type")).toBe("application/json");
+
+		expect(result.data?.five_hour).toEqual({
+			utilization: 4,
+			resets_at: new Date(1774600000 * 1000).toISOString(),
+		});
+		expect(result.data?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+		expect(result.response.status).toBe(200);
+		expect(result.response.headers.get("x-codex-primary-reset-at")).toBe(
+			"1775000000",
+		);
+	});
+
+	it("returns null data when no Codex usage headers are present", async () => {
+		globalThis.fetch = makeMockFetch(
+			new Response("event: ignored\n\n", { status: 200 }),
+		) as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageOnDemand(
+			"test-token",
+			"https://example.test/codex/responses",
+		);
+
+		expect(result.data).toBeNull();
+		expect(result.response.status).toBe(200);
+	});
+
+	it("preserves headers and status on a 429 so callers can persist rate_limit_reset", async () => {
+		globalThis.fetch = makeMockFetch(
+			new Response("rate limited", {
+				status: 429,
+				headers: {
+					"x-codex-primary-used-percent": "100",
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-reset-at": "1775000000",
+					"x-codex-secondary-used-percent": "82",
+					"x-codex-secondary-window-minutes": "10080",
+					"x-codex-secondary-reset-at": "1774700000",
+				},
+			}),
+		) as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageOnDemand(
+			"test-token",
+			"https://example.test/codex/responses",
+		);
+
+		expect(result.response.status).toBe(429);
+		expect(result.data?.five_hour.utilization).toBe(100);
+		expect(result.data?.five_hour.resets_at).toBe(
+			new Date(1775000000 * 1000).toISOString(),
+		);
+		expect(result.response.headers.get("x-codex-primary-reset-at")).toBe(
+			"1775000000",
+		);
+	});
+
+	it("rejects an empty access token before issuing a request", async () => {
+		let called = false;
+		globalThis.fetch = (async () => {
+			called = true;
+			return new Response(null, { status: 200 });
+		}) as unknown as typeof fetch;
+
+		await expect(fetchCodexUsageOnDemand("")).rejects.toThrow(
+			/non-empty access token/,
+		);
+		expect(called).toBe(false);
 	});
 });

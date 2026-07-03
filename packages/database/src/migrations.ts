@@ -121,7 +121,8 @@ export function ensureSchema(db: Database): void {
 			last_used INTEGER,
 			request_count INTEGER DEFAULT 0,
 			total_requests INTEGER DEFAULT 0,
-			priority INTEGER DEFAULT 0
+			priority INTEGER DEFAULT 0,
+			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
 		)
 	`);
 
@@ -169,6 +170,31 @@ export function ensureSchema(db: Database): void {
 	// Composite index for the main requests query (timestamp DESC with account_used for JOIN)
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
+	);
+
+	// Create alerts table for threshold and anomaly alert history
+	db.run(`
+		CREATE TABLE IF NOT EXISTS alerts (
+			id TEXT PRIMARY KEY,
+			timestamp INTEGER NOT NULL,
+			type TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			title TEXT NOT NULL,
+			message TEXT NOT NULL,
+			value REAL,
+			threshold REAL,
+			account TEXT,
+			model TEXT,
+			project TEXT,
+			request_id TEXT,
+			acknowledged INTEGER NOT NULL DEFAULT 0
+		)
+	`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged ON alerts(acknowledged)`,
 	);
 
 	// Create request_payloads table for storing full request/response data
@@ -318,10 +344,12 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
-	// Seed the three canonical families so fresh installs have assignment rows
+	// Seed the canonical families so fresh installs have assignment rows
+	// (INSERT OR IGNORE also backfills new families on existing installs)
 	db.run(`
 		INSERT OR IGNORE INTO combo_family_assignments (family, combo_id, enabled)
-		VALUES ('opus',   NULL, 0),
+		VALUES ('fable',  NULL, 0),
+		       ('opus',   NULL, 0),
 		       ('sonnet', NULL, 0),
 		       ('haiku',  NULL, 0);
 	`);
@@ -703,6 +731,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE accounts ADD COLUMN rate_limited_at INTEGER",
 			).run();
 			log.info("Added rate_limited_at column to accounts table");
+		}
+
+		if (!initialAccountsColumnNames.includes("consecutive_rate_limits")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0",
+			).run();
+			log.info("Added consecutive_rate_limits column to accounts table");
 		}
 
 		// Make refresh_token nullable (was NOT NULL, causing API-key providers to need workarounds)

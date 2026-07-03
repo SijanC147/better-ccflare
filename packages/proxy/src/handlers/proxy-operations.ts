@@ -1,12 +1,18 @@
 import {
 	getModelList,
+	getOverloadRetryConfig,
 	logError,
 	ProviderError,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
+import { withSanitizedProxyHeaders } from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
 import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-formats";
-import { getProvider, usageCache } from "@better-ccflare/providers";
+import {
+	getProvider,
+	isAnthropicOutOfCredits,
+	usageCache,
+} from "@better-ccflare/providers";
 import type {
 	Account,
 	RateLimitReason,
@@ -16,11 +22,16 @@ import { cacheBodyStore } from "../cache-body-store";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
+import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
 import { handleProxyError, processProxyResponse } from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
 
 const log = new Logger("ProxyOperations");
+
+const SYNTHETIC_RESPONSE_HEADER = "x-better-ccflare-synthetic-response";
+const SYNTHETIC_STATUS_HEADER = "x-better-ccflare-synthetic-status";
+const SYNTHETIC_RESPONSE_URL_PREFIX = "https://better-ccflare.local/";
 
 /**
  * Determines the absolute epoch timestamp (ms since epoch) until which an account
@@ -92,23 +103,39 @@ export function extractCooldownUntil(
 }
 
 /**
- * Bedrock provider currently returns a synthetic Request containing the
- * provider response payload (instead of a real URL to fetch).
- * Detect and unwrap that request so we don't try to fetch a fake host.
+ * Some providers return a synthetic Request containing the provider response
+ * payload (instead of a real URL to fetch). Detect and unwrap those requests so
+ * we don't try to fetch fake hosts. Bedrock's historical x-bedrock-response
+ * marker is kept for compatibility; newer providers use the generic marker.
  */
 function isSyntheticProviderResponse(request: Request): boolean {
 	return (
-		request.headers.get("x-bedrock-response") === "true" &&
-		request.url.startsWith("https://bedrock.aws/response")
+		(request.headers.get("x-bedrock-response") === "true" &&
+			request.url.startsWith("https://bedrock.aws/response")) ||
+		(request.headers.get(SYNTHETIC_RESPONSE_HEADER) === "true" &&
+			request.url.startsWith(SYNTHETIC_RESPONSE_URL_PREFIX))
 	);
 }
 
+function parseSyntheticStatus(request: Request): number {
+	const status = Number.parseInt(
+		request.headers.get(SYNTHETIC_STATUS_HEADER) ?? "200",
+		10,
+	);
+	return Number.isInteger(status) && status >= 200 && status <= 599
+		? status
+		: 200;
+}
+
 function materializeSyntheticResponse(request: Request): Response {
-	const headers = new Headers(request.headers);
-	headers.delete("x-bedrock-response");
+	const headers = new Headers();
+	const contentType = request.headers.get("content-type");
+	const cacheControl = request.headers.get("cache-control");
+	if (contentType) headers.set("content-type", contentType);
+	if (cacheControl) headers.set("cache-control", cacheControl);
 
 	return new Response(request.body, {
-		status: 200,
+		status: parseSyntheticStatus(request),
 		headers,
 	});
 }
@@ -327,7 +354,9 @@ async function isCacheControlRejectionError(
  * Covers Anthropic (not_found_error), OpenAI-compat (model_not_found),
  * generic messages, and Bedrock (ResourceNotFoundException).
  */
-async function isModelUnavailableError(response: Response): Promise<boolean> {
+export async function isModelUnavailableError(
+	response: Response,
+): Promise<boolean> {
 	if (
 		response.status !== 404 &&
 		response.status !== 400 &&
@@ -480,6 +509,7 @@ export async function proxyWithAccount(
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
+	returnRateLimitedResponseOnExhaustion = false,
 ): Promise<Response | null> {
 	try {
 		if (
@@ -553,8 +583,14 @@ export async function proxyWithAccount(
 		// Validate that the account-specific provider can handle this path
 		validateProviderPath(provider, url.pathname);
 
-		// Get valid access token
-		const accessToken = await getValidAccessToken(account, ctx);
+		const isSyntheticCodexCountTokens =
+			provider.name === "codex" && url.pathname === "/v1/messages/count_tokens";
+
+		// Synthetic Codex count_tokens never calls upstream, so it should not require
+		// or refresh OAuth credentials just to return an advisory local estimate.
+		const accessToken = isSyntheticCodexCountTokens
+			? ""
+			: await getValidAccessToken(account, ctx);
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
 		if (provider.prepareRequest) {
@@ -567,6 +603,10 @@ export async function proxyWithAccount(
 			accessToken,
 			account.api_key || undefined,
 		);
+		// Synthetic-response markers are internal provider-to-proxy signals. Strip
+		// client-supplied copies before providers transform the outbound request.
+		headers.delete(SYNTHETIC_RESPONSE_HEADER);
+		headers.delete(SYNTHETIC_STATUS_HEADER);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
@@ -615,6 +655,9 @@ export async function proxyWithAccount(
 				`Pre-stripped cache_control for known rejector: account=${account.name} model=${transformedModel}`,
 			);
 		}
+
+		// Capture a clone for in-place 529 retries before the body is consumed.
+		const transformedRequestForRetry = transformedRequest.clone();
 
 		// Make the request (or unwrap a synthetic provider response)
 		let rawResponse = isSyntheticProviderResponse(transformedRequest)
@@ -719,6 +762,47 @@ export async function proxyWithAccount(
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
+			// ── out_of_credits: model/beta-scoped depletion, NOT account-wide (issue #261) ──
+			// Anthropic returns 429 + `overage-disabled-reason: out_of_credits` with no reset
+			// header. This is scoped to a specific model/beta (e.g. context-1m), not the
+			// account — opus/haiku/plain-sonnet still succeed on the same account. So we do
+			// NOT bench the account (no applyRateLimitCooldown, no consecutive increment):
+			// fail over per-request and leave the account in rotation for other models.
+			if (rawResponse.status === 429 && isAnthropicOutOfCredits(rawResponse)) {
+				const isKeepalive =
+					req.headers.get("x-better-ccflare-keepalive") === "true";
+				if (isKeepalive) {
+					return null;
+				}
+				const reason: RateLimitReason = "out_of_credits";
+				log.warn(
+					`Account ${account.name} out_of_credits (429${requestedModel ? `, model=${requestedModel}` : ""}) — ` +
+						`model/beta-scoped, NOT benching account; failing over to next account`,
+				);
+				const responseTime = Date.now() - requestMeta.timestamp;
+				ctx.asyncWriter.enqueue(() =>
+					ctx.dbOps.saveRequest(
+						crypto.randomUUID(),
+						req.method,
+						url.pathname,
+						account.id,
+						429,
+						false,
+						reason,
+						responseTime,
+						failoverAttempts,
+						requestedModel ? { model: requestedModel } : undefined,
+						requestMeta.agentUsed ?? undefined,
+						apiKeyId ?? undefined,
+						apiKeyName ?? undefined,
+						requestMeta.project ?? null,
+						undefined,
+						requestMeta.comboName ?? null,
+					),
+				);
+				return null;
+			}
+
 			if (requestedModel) {
 				const modelList = getModelList(requestedModel, account);
 				if (!modelList || modelList.length <= 1) {
@@ -752,10 +836,11 @@ export async function proxyWithAccount(
 							usageCache.getRateLimitedUntil.bind(usageCache),
 						);
 						const reason: RateLimitReason = "model_fallback_429";
-						log.warn(
-							`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()}`,
+						applyRateLimitCooldown(
+							account,
+							{ resetTime: cooldownUntil, reason },
+							ctx,
 						);
-						account.rate_limited_until = cooldownUntil;
 						const responseTime = Date.now() - requestMeta.timestamp;
 						ctx.asyncWriter.enqueue(() =>
 							ctx.dbOps.saveRequest(
@@ -768,7 +853,7 @@ export async function proxyWithAccount(
 								reason,
 								responseTime,
 								failoverAttempts,
-								undefined,
+								requestedModel ? { model: requestedModel } : undefined,
 								requestMeta.agentUsed ?? undefined,
 								apiKeyId ?? undefined,
 								apiKeyName ?? undefined,
@@ -777,16 +862,14 @@ export async function proxyWithAccount(
 								requestMeta.comboName ?? null,
 							),
 						);
-						ctx.asyncWriter.enqueue(() =>
-							ctx.dbOps.markAccountRateLimited(
-								account.id,
-								cooldownUntil,
-								reason,
-							),
-						);
 						return null;
 					}
-					return rawResponse;
+					// Model-not-found (404/400) is forwarded to the client so it can
+					// surface the real error. Strip content-encoding/content-length
+					// first: Bun's fetch already decompressed the body, so leaving the
+					// upstream `content-encoding: gzip` header makes the client try to
+					// gunzip plaintext → "Decompression error: ZlibError".
+					return withSanitizedProxyHeaders(rawResponse);
 				}
 
 				for (let i = 1; i < modelList.length; i++) {
@@ -889,10 +972,11 @@ export async function proxyWithAccount(
 							usageCache.getRateLimitedUntil.bind(usageCache),
 						);
 						const reason: RateLimitReason = "all_models_exhausted_429";
-						log.warn(
-							`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()}`,
+						applyRateLimitCooldown(
+							account,
+							{ resetTime: cooldownUntil, reason },
+							ctx,
 						);
-						account.rate_limited_until = cooldownUntil;
 						const responseTime = Date.now() - requestMeta.timestamp;
 						ctx.asyncWriter.enqueue(() =>
 							ctx.dbOps.saveRequest(
@@ -905,20 +989,13 @@ export async function proxyWithAccount(
 								reason,
 								responseTime,
 								failoverAttempts,
-								undefined,
+								requestedModel ? { model: requestedModel } : undefined,
 								requestMeta.agentUsed ?? undefined,
 								apiKeyId ?? undefined,
 								apiKeyName ?? undefined,
 								requestMeta.project ?? null,
 								undefined,
 								requestMeta.comboName ?? null,
-							),
-						);
-						ctx.asyncWriter.enqueue(() =>
-							ctx.dbOps.markAccountRateLimited(
-								account.id,
-								cooldownUntil,
-								reason,
 							),
 						);
 					}
@@ -947,7 +1024,7 @@ export async function proxyWithAccount(
 		});
 
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
-		const response = await provider.processResponse(
+		let response = await provider.processResponse(
 			taggedRawResponse,
 			account,
 			req.headers,
@@ -961,9 +1038,98 @@ export async function proxyWithAccount(
 			return null;
 		}
 
+		// In-place retry for reset-less 529 (overloaded_error) — bounded attempts with
+		// full-jitter exponential backoff before applying account cooldown. This prevents
+		// all accounts cooling simultaneously under concurrency spikes. Skipped for
+		// synthetic (keepalive / auto-refresh) requests to avoid loop amplification.
+		if (response.status === 529 && !isSyntheticInternal) {
+			const rlInfo = provider.parseRateLimit(response.clone());
+			if (rlInfo.isRateLimited && !rlInfo.resetTime) {
+				const retryCfg = getOverloadRetryConfig();
+				if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
+					for (let attempt = 1; attempt < retryCfg.maxAttempts; attempt++) {
+						// Full-jitter backoff: sleep in [0, min(base * 2^attempt, max)]
+						const cap = Math.min(
+							retryCfg.baseMs * 2 ** attempt,
+							retryCfg.maxMs,
+						);
+						const delayMs = Math.random() * cap;
+						await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+
+						log.info(
+							`Account ${account.name}: in-place retry ${attempt}/${retryCfg.maxAttempts - 1} after ${Math.round(delayMs)}ms for 529 overloaded_error`,
+						);
+
+						const retryRaw = isSyntheticProviderResponse(
+							transformedRequestForRetry,
+						)
+							? materializeSyntheticResponse(transformedRequestForRetry.clone())
+							: await makeProxyRequest(transformedRequestForRetry.clone());
+
+						const retryTaggedHeaders = new Headers(retryRaw.headers);
+						retryTaggedHeaders.set(
+							"x-better-ccflare-request-id",
+							requestMeta.id,
+						);
+						const retryTaggedRaw = new Response(retryRaw.body, {
+							status: retryRaw.status,
+							statusText: retryRaw.statusText,
+							headers: retryTaggedHeaders,
+						});
+						const retryResponse = await provider.processResponse(
+							retryTaggedRaw,
+							account,
+							req.headers,
+						);
+
+						response = retryResponse;
+
+						// If credentials expired mid-retry, break out and let the 401
+						// failover guard below handle it (return null → try next account).
+						if (retryResponse.status === 401) {
+							break;
+						}
+
+						if (retryResponse.status !== 529) {
+							log.info(
+								`Account ${account.name}: 529 resolved on retry ${attempt} (status ${retryResponse.status})`,
+							);
+							break;
+						}
+
+						const retryRlInfo = provider.parseRateLimit(retryResponse.clone());
+						if (!retryRlInfo.isRateLimited || retryRlInfo.resetTime) {
+							// Got a reset hint on retry — stop; let processProxyResponse apply cooldown
+							break;
+						}
+					}
+					if (response.status === 529) {
+						log.warn(
+							`Account ${account.name}: all ${retryCfg.maxAttempts - 1} in-place 529 retries exhausted, applying cooldown and failing over`,
+						);
+					}
+				}
+			}
+		}
+
+		// Re-check 401 after in-place retry — credentials might have been revoked
+		// between the initial 529 and a retry response. The guard above only covered
+		// the initial response; a retry 401 would have updated `response` and broken
+		// out of the loop, so we need to catch it here before forwarding to the client.
+		if (response.status === 401) {
+			log.warn(
+				`Authentication failed (401) on 529 retry for account ${account.name}, failing over to next account`,
+			);
+			return null;
+		}
+
 		// Check for rate limit using account-specific provider
+		const responseForRateLimitCheck =
+			returnRateLimitedResponseOnExhaustion && response.status === 529
+				? response.clone()
+				: response;
 		const isRateLimited = await processProxyResponse(
-			response,
+			responseForRateLimitCheck,
 			account,
 			{
 				...ctx,
@@ -973,6 +1139,31 @@ export async function proxyWithAccount(
 			requestMeta,
 		);
 		if (isRateLimited) {
+			if (returnRateLimitedResponseOnExhaustion && response.status === 529) {
+				log.warn(
+					`Account ${account.name} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
+				);
+				return forwardToClient(
+					{
+						requestId: requestMeta.id,
+						method: req.method,
+						path: url.pathname,
+						account,
+						requestHeaders: req.headers,
+						requestBody: effectiveBodyBuffer,
+						project: requestMeta.project,
+						response,
+						timestamp: requestMeta.timestamp,
+						retryAttempt: 0,
+						failoverAttempts,
+						agentUsed: requestMeta.agentUsed,
+						comboName: requestMeta.comboName,
+						apiKeyId,
+						apiKeyName,
+					},
+					{ ...ctx, provider },
+				);
+			}
 			return null; // Signal to try next account
 		}
 

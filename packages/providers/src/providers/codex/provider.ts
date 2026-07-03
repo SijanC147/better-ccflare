@@ -27,9 +27,13 @@ function sanitizeResponseHeaders(headers: Headers): Headers {
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
-const CODEX_VERSION = "0.131.0";
-const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
+export const CODEX_DEFAULT_ENDPOINT =
+	"https://chatgpt.com/backend-api/codex/responses";
+export const CODEX_VERSION = "0.142.5";
+export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
+export const CODEX_PING_MODEL = "gpt-5-codex";
+const CODEX_SYNTHETIC_COUNT_TOKENS_URL =
+	"https://better-ccflare.local/codex/count_tokens";
 
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
@@ -80,12 +84,14 @@ interface CodexFunctionCallItem {
 	call_id: string;
 	name: string;
 	arguments: string;
+	status?: "in_progress" | "completed" | "incomplete";
 }
 
 interface CodexFunctionCallOutputItem {
 	type: "function_call_output";
 	call_id: string;
 	output: string;
+	status?: "in_progress" | "completed" | "incomplete";
 }
 
 type CodexContentItem =
@@ -95,7 +101,7 @@ type CodexContentItem =
 	| CodexFunctionCallOutputItem;
 
 interface CodexMessage {
-	role: "user" | "assistant";
+	role: "user" | "assistant" | "system";
 	content: CodexContentItem[];
 }
 
@@ -167,6 +173,7 @@ interface AnthropicRequest {
 
 interface FunctionCallBuffer {
 	contentBlockIndex: number;
+	name: string;
 	arguments: string[];
 }
 
@@ -193,9 +200,17 @@ interface StreamState {
 	outputTokens: number;
 	cacheReadInputTokens: number;
 	cacheCreationInputTokens: number;
+	// Anthropic clients expect stop_reason=tool_use when the assistant emitted a tool call.
+	sawToolUse: boolean;
 	contextWindow: ContextWindow | null;
 	// Track function_call items: output_index → buffered arguments and block index
 	functionCallBlocks: Map<number, FunctionCallBuffer>;
+	upstreamError?: {
+		type: string;
+		message: string;
+		code?: string;
+		status?: string;
+	};
 }
 
 export class CodexProvider extends BaseProvider {
@@ -219,7 +234,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	canHandle(path: string): boolean {
-		return path === "/v1/messages";
+		return path === "/v1/messages" || path === "/v1/messages/count_tokens";
 	}
 
 	async refreshToken(
@@ -290,6 +305,10 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	buildUrl(_path: string, _query: string, account?: Account): string {
+		if (_path === "/v1/messages/count_tokens") {
+			return CODEX_SYNTHETIC_COUNT_TOKENS_URL;
+		}
+
 		if (account?.custom_endpoint) {
 			try {
 				return validateEndpointUrl(account.custom_endpoint, "custom_endpoint");
@@ -300,7 +319,7 @@ export class CodexProvider extends BaseProvider {
 				);
 			}
 		}
-		return DEFAULT_ENDPOINT;
+		return CODEX_DEFAULT_ENDPOINT;
 	}
 
 	prepareHeaders(headers: Headers, accessToken?: string): Headers {
@@ -330,14 +349,28 @@ export class CodexProvider extends BaseProvider {
 		request: Request,
 		account?: Account,
 	): Promise<Request> {
+		const isSyntheticCountTokens = this.isSyntheticCountTokensRequest(
+			request.url,
+		);
 		const contentType = request.headers.get("content-type");
 		if (!contentType?.includes("application/json")) {
-			return request;
+			return isSyntheticCountTokens
+				? this.createSyntheticErrorResponse(
+						request,
+						400,
+						"invalid_request_error",
+						"Codex count_tokens requires an application/json request body.",
+					)
+				: request;
 		}
 
 		try {
 			this.sweepRequestStreamById();
 			const body = (await request.json()) as AnthropicRequest;
+			if (isSyntheticCountTokens) {
+				return this.createSyntheticCountTokensResponse(request, body);
+			}
+
 			const requestId = request.headers.get("x-better-ccflare-request-id");
 			if (requestId) {
 				this.requestStreamById.set(requestId, {
@@ -367,6 +400,14 @@ export class CodexProvider extends BaseProvider {
 		} catch (error) {
 			if (error instanceof ValidationError) {
 				throw error;
+			}
+			if (isSyntheticCountTokens) {
+				return this.createSyntheticErrorResponse(
+					request,
+					400,
+					"invalid_request_error",
+					"Codex count_tokens requires a valid JSON request body.",
+				);
 			}
 			log.error("Failed to transform request body to Codex format:", error);
 			return request;
@@ -513,10 +554,14 @@ export class CodexProvider extends BaseProvider {
 			| CodexFunctionCallOutputItem
 		)[] = [];
 
+		// Codex API only accepts user/assistant/system roles.
+		// Map developer (Codex CLI system instructions sent as a message role) to system.
+		const role = (msg.role as string) === "developer" ? "system" : msg.role;
+
 		if (typeof msg.content === "string") {
-			const contentType = msg.role === "user" ? "input_text" : "output_text";
+			const contentType = role === "assistant" ? "output_text" : "input_text";
 			items.push({
-				role: msg.role,
+				role,
 				content: [{ type: contentType, text: msg.content } as CodexContentItem],
 			} as CodexMessage);
 			return items;
@@ -529,7 +574,7 @@ export class CodexProvider extends BaseProvider {
 
 		for (const block of msg.content) {
 			if (block.type === "text") {
-				const contentType = msg.role === "user" ? "input_text" : "output_text";
+				const contentType = role === "assistant" ? "output_text" : "input_text";
 				textBlocks.push({
 					type: contentType,
 					text: block.text,
@@ -539,7 +584,9 @@ export class CodexProvider extends BaseProvider {
 					type: "function_call",
 					call_id: block.id,
 					name: block.name,
-					arguments: JSON.stringify(block.input || {}),
+					arguments: JSON.stringify(
+						this.sanitizeToolUseInput(block.name, block.input),
+					),
 				});
 			} else if (block.type === "tool_result") {
 				const outputText =
@@ -555,22 +602,86 @@ export class CodexProvider extends BaseProvider {
 					type: "function_call_output",
 					call_id: block.tool_use_id,
 					output: outputText,
+					status: "completed",
 				});
 			}
 		}
 
 		// Text content goes in a message wrapper; function_call* are top-level items
 		if (textBlocks.length > 0) {
-			items.push({ role: msg.role, content: textBlocks } as CodexMessage);
+			items.push({ role, content: textBlocks } as CodexMessage);
 		}
 		for (const fc of functionCalls) {
-			items.push(fc);
+			items.push({ ...fc, status: "completed" });
 		}
 		for (const fco of functionCallOutputs) {
 			items.push(fco);
 		}
 
 		return items;
+	}
+
+	private sanitizeToolUseInput(name: string, input: unknown): unknown {
+		if (input === undefined) return {};
+		if (input === null || typeof input !== "object" || Array.isArray(input)) {
+			return input;
+		}
+
+		const sanitized: Record<string, unknown> = {
+			...(input as Record<string, unknown>),
+		};
+
+		if (name === "Read") {
+			const pages = sanitized.pages;
+			if (
+				pages === "" ||
+				pages === null ||
+				pages === undefined ||
+				(Array.isArray(pages) && pages.length === 0)
+			) {
+				delete sanitized.pages;
+			}
+		}
+
+		if (name === "WebSearch") {
+			const allowedDomains = this.cleanWebSearchDomains(
+				sanitized.allowed_domains,
+			);
+			if (allowedDomains.length > 0) {
+				sanitized.allowed_domains = allowedDomains;
+			} else {
+				delete sanitized.allowed_domains;
+			}
+			// Claude Code's WebSearch tool only accepts an allow-list at this
+			// Anthropic-compatibility boundary. Drop block-lists intentionally rather
+			// than forwarding a field the local tool schema rejects.
+			delete sanitized.blocked_domains;
+		}
+
+		return sanitized;
+	}
+
+	private cleanWebSearchDomains(value: unknown): string[] {
+		if (!Array.isArray(value)) return [];
+		return value
+			.filter((domain): domain is string => typeof domain === "string")
+			.map((domain) => domain.trim())
+			.filter((domain) => domain.length > 0);
+	}
+
+	private sanitizeToolUsePartialJson(
+		name: string,
+		partialJson: string,
+	): string {
+		try {
+			const input = JSON.parse(partialJson) as unknown;
+			if (typeof input !== "object" || input === null || Array.isArray(input)) {
+				return partialJson;
+			}
+			return JSON.stringify(this.sanitizeToolUseInput(name, input));
+		} catch {
+			return partialJson;
+		}
 	}
 
 	private extractContextWindow(
@@ -616,6 +727,127 @@ export class CodexProvider extends BaseProvider {
 		};
 	}
 
+	private isSyntheticCountTokensRequest(url: string): boolean {
+		return url === CODEX_SYNTHETIC_COUNT_TOKENS_URL;
+	}
+
+	private createSyntheticJsonResponse(
+		request: Request,
+		status: number,
+		body: unknown,
+	): Request {
+		const headers = new Headers({
+			"content-type": "application/json",
+			"x-better-ccflare-synthetic-response": "true",
+			"x-better-ccflare-synthetic-status": String(status),
+		});
+		return new Request(request.url, {
+			method: request.method,
+			headers,
+			body: JSON.stringify(body),
+		});
+	}
+
+	private createSyntheticCountTokensResponse(
+		request: Request,
+		body: unknown,
+	): Request {
+		return this.createSyntheticJsonResponse(request, 200, {
+			input_tokens: this.estimateCountTokensInput(body),
+		});
+	}
+
+	private createSyntheticErrorResponse(
+		request: Request,
+		status: number,
+		type: string,
+		message: string,
+	): Request {
+		return this.createSyntheticJsonResponse(request, status, {
+			type: "error",
+			error: { type, message },
+		});
+	}
+
+	private estimateCountTokensInput(body: unknown): number {
+		const material = this.extractCountTokensMaterial(body);
+		let serialized = material.join("\n");
+		if (serialized.length === 0) {
+			try {
+				serialized = JSON.stringify(body) ?? "";
+			} catch {
+				serialized = String(body ?? "");
+			}
+		}
+
+		// Anthropic's count_tokens endpoint is advisory for client-side budgeting.
+		// Codex has no equivalent endpoint, so return a conservative local estimate
+		// instead of failing flows that ask for a token count between real messages.
+		// Estimate over prompt material rather than the entire request envelope so
+		// short prompts are not dominated by JSON field names and punctuation.
+		// Roughly 3 UTF-16 chars/token overestimates English text and gives clients a
+		// safe context-budget signal.
+		return Math.max(1, Math.ceil(serialized.length / 3));
+	}
+
+	private extractCountTokensMaterial(body: unknown): string[] {
+		if (!body || typeof body !== "object") return [];
+		const request = body as Record<string, unknown>;
+		const chunks: string[] = [];
+		this.appendCountTokensContent(chunks, request.system);
+		const messages = request.messages;
+		if (Array.isArray(messages)) {
+			for (const message of messages) {
+				if (!message || typeof message !== "object") continue;
+				const msg = message as Record<string, unknown>;
+				if (typeof msg.role === "string") chunks.push(msg.role);
+				this.appendCountTokensContent(chunks, msg.content);
+			}
+		}
+		const tools = request.tools;
+		if (Array.isArray(tools)) {
+			for (const tool of tools) {
+				this.appendCountTokensContent(chunks, tool);
+			}
+		}
+		return chunks;
+	}
+
+	private appendCountTokensContent(chunks: string[], value: unknown): void {
+		if (typeof value === "string") {
+			chunks.push(value);
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				this.appendCountTokensContent(chunks, item);
+			}
+			return;
+		}
+		if (!value || typeof value !== "object") return;
+		const record = value as Record<string, unknown>;
+		const before = chunks.length;
+		if (typeof record.text === "string") chunks.push(record.text);
+		if (typeof record.name === "string") chunks.push(record.name);
+		if (typeof record.description === "string") chunks.push(record.description);
+		if ("input" in record) this.appendCountTokensContent(chunks, record.input);
+		if ("content" in record)
+			this.appendCountTokensContent(chunks, record.content);
+		if ("input_schema" in record) {
+			this.appendCountTokensContent(chunks, record.input_schema);
+		}
+		if ("parameters" in record) {
+			this.appendCountTokensContent(chunks, record.parameters);
+		}
+		if (Object.keys(record).length > 0 && chunks.length === before) {
+			try {
+				chunks.push(JSON.stringify(record));
+			} catch {
+				// Ignore non-serializable objects; the caller has a request-level fallback.
+			}
+		}
+	}
+
 	private convertToCodexFormat(
 		body: AnthropicRequest,
 		account?: Account,
@@ -631,10 +863,37 @@ export class CodexProvider extends BaseProvider {
 
 		// Convert messages
 		const input: CodexRequest["input"] = [];
-		for (const msg of body.messages) {
+		const skillCallIds = new Set<string>();
+		for (const [msgIndex, msg] of body.messages.entries()) {
 			const items = this.convertMessage(msg);
-			for (const item of items) {
+			for (const [itemIndex, item] of items.entries()) {
 				input.push(item);
+				if ("type" in item && item.type === "function_call") {
+					if (item.name === "Skill") {
+						skillCallIds.add(item.call_id);
+					}
+				} else if (
+					"type" in item &&
+					item.type === "function_call_output" &&
+					skillCallIds.has(item.call_id)
+				) {
+					skillCallIds.delete(item.call_id);
+					if (
+						msgIndex !== body.messages.length - 1 ||
+						itemIndex !== items.length - 1
+					) {
+						continue;
+					}
+					input.push({
+						role: "user",
+						content: [
+							{
+								type: "input_text",
+								text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+							},
+						],
+					});
+				}
 			}
 		}
 
@@ -690,6 +949,7 @@ export class CodexProvider extends BaseProvider {
 			.getReader();
 		let messageStartPayload: Record<string, unknown> | null = null;
 		let messageDeltaPayload: Record<string, unknown> | null = null;
+		let errorPayload: Record<string, unknown> | null = null;
 		const content: Array<Record<string, unknown>> = [];
 		const textByIndex = new Map<number, string>();
 		const toolByIndex = new Map<
@@ -710,6 +970,10 @@ export class CodexProvider extends BaseProvider {
 				try {
 					data = JSON.parse(line.slice("data:".length).trim());
 				} catch {
+					return;
+				}
+				if (eventName === "error") {
+					errorPayload = data;
 					return;
 				}
 				if (eventName === "message_start") {
@@ -778,6 +1042,18 @@ export class CodexProvider extends BaseProvider {
 			}
 		}
 
+		if (errorPayload) {
+			const headers = sanitizeResponseHeaders(response.headers);
+			headers.set("content-type", "application/json");
+			const { status, statusText } =
+				this.httpStatusForAnthropicErrorPayload(errorPayload);
+			return new Response(JSON.stringify(errorPayload), {
+				status,
+				statusText,
+				headers,
+			});
+		}
+
 		const allIndices = new Set([...textByIndex.keys(), ...toolByIndex.keys()]);
 		for (const index of [...allIndices].sort((a, b) => a - b)) {
 			const text = textByIndex.get(index);
@@ -798,7 +1074,7 @@ export class CodexProvider extends BaseProvider {
 					type: "tool_use",
 					id: tool.id || `call_${index}`,
 					name: tool.name,
-					input,
+					input: this.sanitizeToolUseInput(tool.name, input),
 				});
 			}
 		}
@@ -835,6 +1111,9 @@ export class CodexProvider extends BaseProvider {
 				`[codex:model-debug] request_id=${requestId} transformSseResponseToJson used fallback model=gpt-5.4 (startMessage.model missing)`,
 			);
 		}
+		const stopReason = content.some((block) => block.type === "tool_use")
+			? "tool_use"
+			: "end_turn";
 		const jsonPayload = {
 			id:
 				typeof startMessage.id === "string"
@@ -844,7 +1123,7 @@ export class CodexProvider extends BaseProvider {
 			role: "assistant",
 			model: resolvedModel,
 			content: content.length > 0 ? content : [{ type: "text", text: "" }],
-			stop_reason: "end_turn",
+			stop_reason: stopReason,
 			stop_sequence: null,
 			usage,
 		};
@@ -879,6 +1158,7 @@ export class CodexProvider extends BaseProvider {
 			cacheCreationInputTokens: 0,
 			contextWindow: null,
 			functionCallBlocks: new Map(),
+			sawToolUse: false,
 		};
 
 		const headers = sanitizeResponseHeaders(response.headers);
@@ -1014,6 +1294,10 @@ export class CodexProvider extends BaseProvider {
 					}
 				}
 
+				if (state.upstreamError) {
+					return;
+				}
+
 				// Flush any remaining
 				await ensureMessageStart();
 
@@ -1029,7 +1313,10 @@ export class CodexProvider extends BaseProvider {
 				if (!state.hasSentTerminalEvents) {
 					await writeSSE("message_delta", {
 						type: "message_delta",
-						delta: { stop_reason: "end_turn", stop_sequence: null },
+						delta: {
+							stop_reason: state.sawToolUse ? "tool_use" : "end_turn",
+							stop_sequence: null,
+						},
 						usage: { output_tokens: state.outputTokens },
 					});
 					await writeSSE("message_stop", { type: "message_stop" });
@@ -1048,6 +1335,116 @@ export class CodexProvider extends BaseProvider {
 			statusText: response.statusText,
 			headers,
 		});
+	}
+
+	private normalizeCodexStreamError(
+		_eventName: string,
+		data: Record<string, unknown>,
+	): StreamState["upstreamError"] {
+		const response =
+			data.response && typeof data.response === "object"
+				? (data.response as Record<string, unknown>)
+				: undefined;
+		const responseError =
+			response?.error && typeof response.error === "object"
+				? (response.error as Record<string, unknown>)
+				: undefined;
+		const directError =
+			data.error && typeof data.error === "object"
+				? (data.error as Record<string, unknown>)
+				: undefined;
+		const error = responseError ?? directError ?? data;
+		const messageCandidate = error.message ?? data.message ?? response?.status;
+		const rawType = typeof error.type === "string" ? error.type : "";
+		const rawCode = typeof error.code === "string" ? error.code : "";
+		const typeCandidate = rawType && rawType !== "error" ? rawType : rawCode;
+		const codeCandidate = error.code ?? data.code;
+		const statusCandidate = response?.status ?? data.status;
+
+		return {
+			type: typeCandidate || "api_error",
+			message:
+				typeof messageCandidate === "string" && messageCandidate.length > 0
+					? messageCandidate
+					: "Codex upstream failed while generating a response.",
+			...(typeof codeCandidate === "string" ? { code: codeCandidate } : {}),
+			...(typeof statusCandidate === "string"
+				? { status: statusCandidate }
+				: {}),
+		};
+	}
+
+	private toAnthropicErrorPayload(error: StreamState["upstreamError"]): {
+		type: "error";
+		error: { type: string; message: string; code?: string; status?: string };
+	} {
+		const code = error?.code;
+		const status = error?.status === "rate_limited" ? error.status : undefined;
+		const rawType = error?.type;
+		let type = "api_error";
+		if (code === "context_length_exceeded") {
+			type = "invalid_request_error";
+		} else if (code === "rate_limit_exceeded" || status === "rate_limited") {
+			type = "rate_limit_error";
+		} else if (
+			rawType === "invalid_request_error" ||
+			rawType === "authentication_error" ||
+			rawType === "permission_error" ||
+			rawType === "not_found_error" ||
+			rawType === "rate_limit_error" ||
+			rawType === "overloaded_error" ||
+			rawType === "api_error"
+		) {
+			type = rawType;
+		}
+		return {
+			type: "error",
+			error: {
+				type,
+				message: error?.message || "Codex upstream failed.",
+				...(code ? { code } : {}),
+				...(status ? { status } : {}),
+			},
+		};
+	}
+
+	private httpStatusForAnthropicErrorPayload(
+		payload: Record<string, unknown>,
+	): {
+		status: number;
+		statusText: string;
+	} {
+		const error =
+			payload.error && typeof payload.error === "object"
+				? (payload.error as Record<string, unknown>)
+				: {};
+		const type = typeof error.type === "string" ? error.type : "";
+		const code = typeof error.code === "string" ? error.code : "";
+		const status = typeof error.status === "string" ? error.status : "";
+
+		if (code === "context_length_exceeded") {
+			return { status: 400, statusText: "Bad Request" };
+		}
+		if (type === "invalid_request_error") {
+			return { status: 400, statusText: "Bad Request" };
+		}
+		if (type === "authentication_error") {
+			return { status: 401, statusText: "Unauthorized" };
+		}
+		if (type === "permission_error") {
+			return { status: 403, statusText: "Forbidden" };
+		}
+		if (
+			type === "rate_limit_error" ||
+			code === "rate_limit_exceeded" ||
+			status === "rate_limited"
+		) {
+			return { status: 429, statusText: "Too Many Requests" };
+		}
+		if (type === "overloaded_error") {
+			return { status: 529, statusText: "Overloaded" };
+		}
+		return { status: 502, statusText: "Bad Gateway" };
 	}
 
 	private async handleCodexEvent(
@@ -1082,6 +1479,7 @@ export class CodexProvider extends BaseProvider {
 				} else if (itemType === "function_call") {
 					const callId = item?.call_id as string;
 					const name = item?.name as string;
+					state.sawToolUse = true;
 
 					if (state.hasSentContentBlockStart) {
 						await writeSSE("content_block_stop", {
@@ -1103,6 +1501,7 @@ export class CodexProvider extends BaseProvider {
 					if (outputIndex !== undefined) {
 						state.functionCallBlocks.set(outputIndex, {
 							contentBlockIndex: blockIdx,
+							name,
 							arguments: [],
 						});
 					}
@@ -1184,7 +1583,10 @@ export class CodexProvider extends BaseProvider {
 							index: buffer.contentBlockIndex,
 							delta: {
 								type: "input_json_delta",
-								partial_json: buffer.arguments.join(""),
+								partial_json: this.sanitizeToolUsePartialJson(
+									buffer.name,
+									buffer.arguments.join(""),
+								),
 							},
 						});
 						await writeSSE("content_block_stop", {
@@ -1216,7 +1618,29 @@ export class CodexProvider extends BaseProvider {
 				break;
 			}
 
+			case "error":
+			case "response.failed": {
+				state.upstreamError = this.normalizeCodexStreamError(eventName, data);
+				if (!state.hasSentTerminalEvents) {
+					if (state.hasSentContentBlockStart) {
+						await writeSSE("content_block_stop", {
+							type: "content_block_stop",
+							index: state.contentBlockIndex,
+						});
+						state.contentBlockIndex++;
+						state.hasSentContentBlockStart = false;
+					}
+					await writeSSE(
+						"error",
+						this.toAnthropicErrorPayload(state.upstreamError),
+					);
+					state.hasSentTerminalEvents = true;
+				}
+				break;
+			}
+
 			case "response.completed": {
+				if (state.upstreamError || state.hasSentTerminalEvents) break;
 				const resp = data.response as Record<string, unknown> | undefined;
 				const usage = resp?.usage as
 					| {
@@ -1258,7 +1682,7 @@ export class CodexProvider extends BaseProvider {
 
 				const messageDelta: {
 					type: "message_delta";
-					delta: { stop_reason: "end_turn"; stop_sequence: null };
+					delta: { stop_reason: "end_turn" | "tool_use"; stop_sequence: null };
 					usage: {
 						input_tokens: number;
 						output_tokens: number;
@@ -1268,7 +1692,10 @@ export class CodexProvider extends BaseProvider {
 					context_window?: ContextWindow;
 				} = {
 					type: "message_delta",
-					delta: { stop_reason: "end_turn", stop_sequence: null },
+					delta: {
+						stop_reason: state.sawToolUse ? "tool_use" : "end_turn",
+						stop_sequence: null,
+					},
 					usage: {
 						input_tokens: state.inputTokens,
 						output_tokens: state.outputTokens,

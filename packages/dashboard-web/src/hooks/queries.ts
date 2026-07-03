@@ -217,6 +217,30 @@ export const useAnalytics = (
 	});
 };
 
+export const useCacheInsights = (timeRange: string, threshold?: number) => {
+	return useQuery({
+		queryKey: queryKeys.insightsCache(timeRange, threshold),
+		queryFn: () => api.getCacheInsights(timeRange, threshold),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 15 * 60 * 1000,
+		enabled: !!timeRange,
+	});
+};
+
+export const useContextInsights = (timeRange: string) => {
+	return useQuery({
+		queryKey: queryKeys.insightsContext(timeRange),
+		queryFn: () => api.getContextInsights(timeRange),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 15 * 60 * 1000,
+		enabled: !!timeRange,
+	});
+};
+
 export const useRequests = (limit: number, _refetchInterval?: number) => {
 	return useQuery({
 		queryKey: queryKeys.requests(limit),
@@ -656,6 +680,29 @@ export const useDiscoverProjects = () => {
 	});
 };
 
+export const useAlerts = () => {
+	return useQuery({
+		queryKey: queryKeys.insightsAlerts(),
+		queryFn: async () => {
+			const res = await api.getAlerts(200);
+			return res;
+		},
+		staleTime: 15_000,
+		refetchInterval: 30_000,
+		refetchIntervalInBackground: false,
+	});
+};
+
+export const useAcknowledgeAlert = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (id: string) => api.acknowledgeAlert(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.insightsAlerts() });
+		},
+	});
+};
+
 export const useUpdateProject = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
@@ -744,6 +791,16 @@ export const useDeleteWorktreeRule = () => {
 		mutationFn: (id: string) => api.deleteWorktreeRule(id),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });
+		},
+	});
+};
+
+export const useAcknowledgeAllAlerts = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: () => api.acknowledgeAllAlerts(),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.insightsAlerts() });
 		},
 	});
 };
