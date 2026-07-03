@@ -44,4 +44,33 @@ describe("getErrorMeta", () => {
 		expect(meta.title).toBe("Provider rate limit");
 		expect(meta.severity).toBe("warning");
 	});
+
+	test("upstream_529_overloaded_with_reset returns provider overload warning", () => {
+		const meta = getErrorMeta("upstream_529_overloaded_with_reset");
+		expect(meta.title).toBe("Provider overload");
+		expect(meta.severity).toBe("warning");
+		expect(meta.description).toContain("529");
+		// Reason is also used for mid-stream overloaded_error detections where
+		// no Retry-After header is parsed; the description must acknowledge that
+		// path so a dashboard reader doesn't assume the cooldown always came
+		// from an HTTP header.
+		expect(meta.description).toContain("mid-stream");
+		expect(meta.suggestion).toContain("automatically");
+	});
+
+	test("upstream_529_overloaded_no_reset returns provider overload (no Retry-After) warning", () => {
+		const meta = getErrorMeta("upstream_529_overloaded_no_reset");
+		expect(meta.title).toBe("Provider overload (no Retry-After)");
+		expect(meta.severity).toBe("warning");
+		expect(meta.description).toContain("529");
+		expect(meta.suggestion).toContain("CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS");
+	});
+
+	test("out_of_credits surfaces model-scoped credit depletion as an error", () => {
+		const meta = getErrorMeta("out_of_credits");
+		expect(meta.title).toBe("Account out of credits");
+		expect(meta.severity).toBe("error");
+		expect(meta.description).toContain("out_of_credits");
+		expect(meta.suggestion).toContain("credits");
+	});
 });

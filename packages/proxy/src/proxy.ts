@@ -3,6 +3,7 @@ import {
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@better-ccflare/core";
+import { DatabaseFactory } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
@@ -25,9 +26,12 @@ import {
 	selectAccountsForRequest,
 	validateProviderPath,
 } from "./handlers";
-import { safePostMessage } from "./response-handler";
-import { UsageWorkerController } from "./usage-worker-controller";
-import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
+import {
+	getUsageCollector,
+	initUsageCollector,
+	tryGetUsageCollector,
+	type UsageCollectorHealth,
+} from "./usage-collector";
 
 export type { ProxyContext } from "./handlers";
 
@@ -69,11 +73,22 @@ function extractSystemPrompt(body: RequestJsonBody | null): string | null {
 	return null;
 }
 
+/**
+ * Extract a project name from a Claude API request.
+ *
+ * Resolution order:
+ *  1. `x-ccflare-project` / `X-CCFlare-Project` header (fork-specific project
+ *     tracking header — `Headers.get()` is already case-insensitive)
+ *  2. `x-project` header (upstream's header name)
+ *  3. Workspace path embedded in the system prompt
+ *  4. First Markdown H1 heading in the system prompt (if reasonable)
+ */
 function extractProjectFromRequest(
 	headers: Headers,
 	body: RequestJsonBody | null,
 ): string | null {
-	const headerProject = headers.get("x-project");
+	const headerProject =
+		headers.get("x-ccflare-project") ?? headers.get("x-project");
 	const sanitizedHeader = sanitizeProjectName(headerProject);
 	if (sanitizedHeader) return sanitizedHeader;
 
@@ -97,68 +112,39 @@ function extractProjectFromRequest(
 	return null;
 }
 
-// ===== WORKER MANAGEMENT =====
+// ===== USAGE COLLECTOR MANAGEMENT =====
 
-interface PendingConfigUpdate {
-	storePayloads: boolean;
-	headersOnly: boolean;
+/**
+ * Initialize the main-thread usage collector.
+ *
+ * `getHeadersOnly` mirrors the fork's old `headersOnly` config-update field
+ * (see `PendingConfigUpdate`/`ConfigUpdateMessage` on the now-removed
+ * `UsageWorkerController`): when true, stored request/response payloads are
+ * persisted with bodies nulled out, headers only. It is threaded into
+ * `UsageCollector` (consulted in `_handleEndInternal()` where it builds
+ * `payloadJson.request.body`/`response.body`), the same place the old
+ * `post-processor.worker.ts` consulted its `headersOnlyStorage` flag.
+ */
+export async function initProxy(
+	getStorePayloads: () => boolean,
+	getHeadersOnly: () => boolean = () => false,
+): Promise<void> {
+	await initUsageCollector(
+		getStorePayloads,
+		(summary) => {
+			requestEvents.emit("event", { type: "summary", payload: summary });
+		},
+		DatabaseFactory.getInstance(),
+		getHeadersOnly,
+	);
 }
 
-let pendingConfigUpdate: PendingConfigUpdate | null = null;
-
-const usageWorkerController = new UsageWorkerController(
-	(msg: SummaryMessage) => {
-		cacheBodyStore.onSummary(
-			msg.summary.id,
-			msg.summary.cacheCreationInputTokens,
-		);
-		requestEvents.emit("event", { type: "summary", payload: msg.summary });
-	},
-	() => {
-		// Apply deferred config update once worker is ready
-		if (pendingConfigUpdate !== null) {
-			const msg: ConfigUpdateMessage = {
-				type: "config-update",
-				storePayloads: pendingConfigUpdate.storePayloads,
-				headersOnly: pendingConfigUpdate.headersOnly,
-			};
-			usageWorkerController.postMessage(msg);
-			pendingConfigUpdate = null;
-		}
-	},
-);
-
-export function getUsageWorker(): UsageWorkerController {
-	return usageWorkerController;
+export async function drainUsageCollector(): Promise<void> {
+	return tryGetUsageCollector()?.drain() ?? Promise.resolve();
 }
 
-export function startUsageWorker(): void {
-	usageWorkerController.start();
-}
-
-export function sendWorkerConfigUpdate(
-	storePayloads: boolean,
-	headersOnly: boolean,
-): void {
-	if (!usageWorkerController.isReady()) {
-		// Defer until worker is ready
-		pendingConfigUpdate = { storePayloads, headersOnly };
-		return;
-	}
-	const msg: ConfigUpdateMessage = {
-		type: "config-update",
-		storePayloads,
-		headersOnly,
-	};
-	usageWorkerController.postMessage(msg);
-}
-
-export function terminateUsageWorker(): Promise<void> {
-	return usageWorkerController.terminate();
-}
-
-export function getUsageWorkerHealth() {
-	return usageWorkerController.getHealth();
+export function getUsageCollectorHealth(): UsageCollectorHealth {
+	return tryGetUsageCollector()?.getHealth() ?? { state: "ready" };
 }
 
 // ===== MAIN HANDLER =====
@@ -260,7 +246,7 @@ export async function handleProxy(
 
 	// 4. Intercept and modify request for agent model preferences
 	const { modifiedBody, agentUsed, originalModel, appliedModel } =
-		await interceptAndModifyRequest(requestBodyContext, ctx.dbOps);
+		await interceptAndModifyRequest(requestBodyContext, ctx.dbOps, req.headers);
 
 	// Use modified body if available
 	const finalBodyBuffer = modifiedBody || requestBodyContext.getBuffer();
@@ -279,6 +265,7 @@ export async function handleProxy(
 	const requestMeta = createRequestMetadata(req, url);
 	requestMeta.agentUsed = agentUsed;
 	requestMeta.project = project;
+	requestMeta.clientSessionId = requestBodyContext.getClientId();
 
 	// 6. Select accounts — use the post-intercept model so combo selection
 	// reflects any agent-driven rewrite of the request body (Codex P2). If
@@ -371,11 +358,8 @@ export async function handleProxy(
 		const isAutoRefreshProbe =
 			req.headers.get("x-better-ccflare-auto-refresh") === "true";
 		if (!isAutoRefreshProbe) {
-			// Send error message to usage worker for request history logging.
-			// Use safePostMessage so a worker still in `starting` or restart state
-			// cannot throw and break the prepared 503 response to the client
-			// (Codex round 2 P2).
-			safePostMessage(ctx.usageWorker, {
+			// Log to request history via usage collector
+			getUsageCollector().handleStart({
 				type: "start",
 				messageId: crypto.randomUUID(),
 				requestId: requestMeta.id,
@@ -406,15 +390,19 @@ export async function handleProxy(
 				failoverAttempts: 0,
 			});
 
-			// Match the safePostMessage treatment of the paired `start` above
-			// so a worker still in `starting`/restart state cannot throw the
-			// 503 response away (Codex round 3 P2).
-			safePostMessage(ctx.usageWorker, {
-				type: "end",
-				requestId: requestMeta.id,
-				success: false,
-				error: "pool_exhausted",
-			});
+			getUsageCollector()
+				.handleEnd({
+					type: "end",
+					requestId: requestMeta.id,
+					success: false,
+					error: "pool_exhausted",
+				})
+				.catch((err: unknown) => {
+					log.error(
+						`handleEnd failed for pool_exhausted request ${requestMeta.id}`,
+						err,
+					);
+				});
 		}
 
 		return poolExhaustedResponse;
@@ -476,6 +464,7 @@ export async function handleProxy(
 			apiKeyId,
 			apiKeyName,
 			requestBodyContext,
+			!filteredComboInfo?.comboName && i === accounts.length - 1,
 		);
 
 		if (response) {
@@ -536,6 +525,7 @@ export async function handleProxy(
 					apiKeyId,
 					apiKeyName,
 					requestBodyContext,
+					i === fallbackAccounts.length - 1,
 				);
 
 				if (response) {
@@ -543,6 +533,7 @@ export async function handleProxy(
 				}
 			}
 		} else if (throttledFallbackAccounts.length > 0) {
+			cacheBodyStore.discardStaged(requestMeta.id);
 			return createUsageThrottledResponse(throttledFallbackAccounts);
 		}
 	}
@@ -564,12 +555,14 @@ export async function handleProxy(
 					`bun run cli --reauthenticate "${acc.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
 			)
 			.join("\n  ");
+		cacheBodyStore.discardStaged(requestMeta.id);
 		throw new ServiceUnavailableError(
 			`All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${needsReauth.map((acc) => acc.name).join(", ")}.\n\nPlease re-authenticate:\n  ${reauthCommands}`,
 			ctx.provider.name,
 		);
 	}
 
+	cacheBodyStore.discardStaged(requestMeta.id);
 	throw new ServiceUnavailableError(
 		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`,
 		ctx.provider.name,

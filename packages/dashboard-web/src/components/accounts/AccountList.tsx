@@ -76,33 +76,16 @@ export function AccountList({
 		return <p className="text-muted-foreground">No accounts configured</p>;
 	}
 
-	// Find the most recently used account
-	const mostRecentAccountId = accounts.reduce(
-		(mostRecent, account) => {
-			if (!account.lastUsed) return mostRecent;
-			if (!mostRecent) return account.id;
-
-			const mostRecentAccount = accounts.find((a) => a.id === mostRecent);
-			if (!mostRecentAccount?.lastUsed) return account.id;
-
-			const mostRecentLastUsed = new Date(mostRecentAccount.lastUsed).getTime();
-			const currentLastUsed = new Date(account.lastUsed).getTime();
-
-			return currentLastUsed > mostRecentLastUsed ? account.id : mostRecent;
-		},
-		null as string | null,
-	);
-
 	// Apply filter: hide paused accounts when toggle is on
 	let displayed = hidePaused
 		? accounts.filter((a) => !a.paused)
 		: [...accounts];
 
-	// Apply sort: bring the active (most recently used) account to the top
-	if (activeFirst && mostRecentAccountId) {
+	// Apply sort: bring the primary (load-balancer chosen) account(s) to the top
+	if (activeFirst) {
 		displayed = [
-			...displayed.filter((a) => a.id === mostRecentAccountId),
-			...displayed.filter((a) => a.id !== mostRecentAccountId),
+			...displayed.filter((a) => a.isPrimary),
+			...displayed.filter((a) => !a.isPrimary),
 		];
 	}
 
@@ -188,7 +171,7 @@ export function AccountList({
 						<AccountListItem
 							key={account.name}
 							account={account}
-							isActive={account.id === mostRecentAccountId}
+							isPrimary={account.isPrimary}
 							compact={compact}
 							onPauseToggle={onPauseToggle}
 							onForceResetRateLimit={onForceResetRateLimit}

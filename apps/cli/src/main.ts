@@ -102,6 +102,7 @@ interface ParsedArgs {
 		| "codex"
 		| "qwen"
 		| "openrouter"
+		| "xai"
 		| "ollama"
 		| "ollama-cloud"
 		| null;
@@ -565,6 +566,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
+					| "xai"
 					| "ollama"
 					| "max";
 
@@ -591,6 +593,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "codex"
 					| "qwen"
 					| "openrouter"
+					| "xai"
 					| "ollama"
 					| "ollama-cloud";
 				const validModes: Array<
@@ -608,6 +611,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "codex"
 					| "qwen"
 					| "openrouter"
+					| "xai"
 					| "ollama"
 					| "ollama-cloud"
 				> = [
@@ -625,6 +629,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					"codex",
 					"qwen",
 					"openrouter",
+					"xai",
 					"ollama",
 					"ollama-cloud",
 				];
@@ -877,7 +882,7 @@ Options:
   --ssl-cert <path>    Path to SSL certificate file (enables HTTPS)
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
-    --mode <claude-oauth|console|zai|minimax|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex>  Account mode (default: claude-oauth)
+    --mode <claude-oauth|console|zai|minimax|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|xai>  Account mode (default: claude-oauth)
       claude-oauth: Claude CLI account (OAuth)
       console: Claude API account (OAuth)
       zai: z.ai account (API key)
@@ -891,6 +896,7 @@ Options:
       kilo: Kilo Gateway provider (API key)
       alibaba-coding-plan: Alibaba Coding Plan International provider (API key)
       codex: Codex (OpenAI OAuth) provider
+      xai: xAI/Grok provider (imports local Grok CLI OAuth credentials)
     --priority <number>   Account priority (default: 0)
   --list               List all accounts
   --remove <name>      Remove an account
@@ -961,6 +967,7 @@ Examples:
 				"opus-4.1": CLAUDE_MODEL_IDS.OPUS_4_1,
 				"sonnet-4.5": CLAUDE_MODEL_IDS.SONNET_4_5,
 				"sonnet-4.6": CLAUDE_MODEL_IDS.SONNET_4_6,
+				"sonnet-5": CLAUDE_MODEL_IDS.SONNET_5,
 			};
 
 			const fullModel = modelMap[parsed.setModel];
@@ -1062,6 +1069,9 @@ Examples:
 			console.error(
 				"  --mode codex               Codex (OpenAI OAuth) provider",
 			);
+			console.error(
+				"  --mode xai                 xAI/Grok (Grok CLI OAuth) provider",
+			);
 			console.error("\nExample:");
 			console.error(
 				"  better-ccflare --add-account work --mode claude-oauth --priority 0",
@@ -1109,6 +1119,20 @@ Examples:
 							_prompt: string,
 							_options: Array<{ label: string; value: T }>,
 						) => (_options[0]?.value as T) || ("yes" as T),
+						input: async (_prompt: string) => "",
+						confirm: async (_prompt: string) => true,
+					},
+				});
+			} else if (mode === "xai") {
+				await addAccount(dbOps, new Config(), {
+					name: parsed.addAccount,
+					mode: "xai",
+					priority,
+					adapter: {
+						select: async <T extends string | number>(
+							_prompt: string,
+							_options: Array<{ label: string; value: T }>,
+						) => (_options[0]?.value as T) || ("no" as T),
 						input: async (_prompt: string) => "",
 						confirm: async (_prompt: string) => true,
 					},

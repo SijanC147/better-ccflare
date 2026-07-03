@@ -21,13 +21,17 @@ import {
 	DatabaseFactory,
 	initPayloadEncryption,
 } from "@better-ccflare/database";
-import { APIRouter, AuthService } from "@better-ccflare/http-api";
+import { AlertService, APIRouter, AuthService } from "@better-ccflare/http-api";
 import {
 	LeastUsedStrategy,
+	SessionAffinityStrategy,
 	SessionStrategy,
 } from "@better-ccflare/load-balancer";
 import { Logger } from "@better-ccflare/logger";
+import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter";
 import {
+	CODEX_DEFAULT_ENDPOINT,
+	fetchCodexUsageOnDemand,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
 	usageCache,
@@ -41,19 +45,19 @@ import {
 	AutoRefreshScheduler,
 	CacheKeepaliveScheduler,
 	DiscoveryScheduler,
-	getUsageWorker,
-	getUsageWorkerHealth,
+	drainUsageCollector,
+	getUsageCollectorHealth,
 	getValidAccessToken,
 	handleProxy,
+	initProxy,
 	type ProxyContext,
+	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
-	sendWorkerConfigUpdate,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
-	startUsageWorker,
 	stopGlobalTokenHealthChecks,
-	terminateUsageWorker,
+	unregisterCodexUsageRefresher,
 } from "@better-ccflare/proxy";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
@@ -75,6 +79,8 @@ function buildStrategy(
 	switch (name) {
 		case StrategyName.LeastUsed:
 			return new LeastUsedStrategy();
+		case StrategyName.SessionAffinity:
+			return new SessionAffinityStrategy(sessionDurationMs);
 		default:
 			return new SessionStrategy(sessionDurationMs);
 	}
@@ -114,6 +120,12 @@ try {
 const MEMORY_MONITOR_INTERVAL_MS = 60 * 1000;
 const MEMORY_GROWTH_WARN_BYTES = 512 * 1024 * 1024;
 const MEMORY_GROWTH_ERROR_BYTES = 1024 * 1024 * 1024;
+
+export function supportsRefreshBackedUsagePolling(
+	provider: string | null | undefined,
+): boolean {
+	return provider === "anthropic" || provider === "xai";
+}
 
 // Helper function to resolve dashboard assets with fallback
 function resolveDashboardAsset(assetPath: string): string | null {
@@ -207,6 +219,7 @@ function serveDashboardFile(
 
 // Module-level server instance
 let serverInstance: ReturnType<typeof serve> | null = null;
+let registeredServerId: string | null = null;
 let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
@@ -593,9 +606,6 @@ export default async function startServer(options?: {
 
 	// Initialize payload encryption (no-op if PAYLOAD_ENCRYPTION_KEY is unset).
 	// This must run before any database operations that read/write payloads.
-	// NOTE: this only initializes the main thread; the post-processor worker
-	// runs `initPayloadEncryption()` itself at module load — Bun workers have
-	// isolated module scopes.
 	await initPayloadEncryption();
 
 	// Initialize components
@@ -693,17 +703,27 @@ export default async function startServer(options?: {
 	container.registerInstance(SERVICE_KEYS.PricingLogger, pricingLogger);
 	setPricingLogger(pricingLogger);
 
+	const alertService = new AlertService(db, config);
+	alertService.start();
+	registerDisposable({ dispose: () => alertService.stop() });
+
+	// Strategy is constructed below after RuntimeConfig is built. The router
+	// accepts a getter so it can read the live (post-hot-reload) instance.
+	let currentStrategy: LoadBalancingStrategy | null = null;
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
 		dbOps,
+		alertService,
 		runtime: {
 			port,
 			tlsEnabled,
 		},
 		getAsyncWriterHealth: () => asyncWriter.getHealth(),
-		getUsageWorkerHealth: () => getUsageWorkerHealth(),
+		getUsageWorkerHealth: () => getUsageCollectorHealth(),
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
+		getStrategy: () => currentStrategy,
 	});
 
 	// Initialize AuthService for proxy authentication
@@ -771,17 +791,30 @@ export default async function startServer(options?: {
 				log.info(
 					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads in ${Date.now() - startTime}ms`,
 				);
-				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
-				// per tick, off-thread via the incremental-vacuum worker. Small N
-				// keeps the writer-slot hold sub-100ms on local SSD so concurrent
-				// main-thread writes (rate-limit updates, OAuth refresh, post-
-				// processor inserts) don't pile up on busy_timeout. Pre-fix this
-				// path passed 200000 and silently fell back to a full main-thread
-				// VACUUM when auto_vacuum=NONE — see incrementalVacuum() in
-				// packages/database/src/database-operations.ts.
-				dbOps.incrementalVacuum(8000).catch((err) => {
-					log.error(`Incremental vacuum error: ${err}`);
-				});
+				// Reclaim freed pages adaptively. incrementalVacuumAdaptive()
+				// scales reclaim with the current freelist: in steady state it
+				// returns a small chunk (or no-ops on an empty freelist), but
+				// after a retention *drop* — which dumps a large surplus of free
+				// pages onto the freelist — it drains that surplus over a handful
+				// of hourly ticks instead of weeks. Each underlying worker call is
+				// bounded (~64 MiB) and the per-tick total is capped (~1 GiB), with
+				// yields between chunks, so the single writer slot is never held
+				// long and concurrent main-thread writes (rate-limit updates, OAuth
+				// refresh, post-processor inserts) aren't starved. Off-thread via
+				// the incremental-vacuum worker. Fire-and-forget so the cleanup
+				// callback isn't blocked on it.
+				dbOps
+					.incrementalVacuumAdaptive()
+					.then((r) => {
+						if (r.reclaimedPages > 0) {
+							log.info(
+								`Adaptive incremental vacuum reclaimed ${r.reclaimedPages} pages in ${r.chunks} chunk(s)`,
+							);
+						}
+					})
+					.catch((err) => {
+						log.error(`Incremental vacuum error: ${err}`);
+					});
 			}
 		} catch (err) {
 			log.error(`Periodic data retention cleanup error: ${err}`);
@@ -858,16 +891,14 @@ export default async function startServer(options?: {
 	});
 
 	strategy.initialize?.(strategyStore);
+	currentStrategy = strategy;
 
-	// Start usage worker eagerly (before first request)
-	startUsageWorker();
+	await initProxy(
+		() => config.getStorePayloads(),
+		() => config.getRequestStorageHeadersOnly(),
+	);
 
 	// Proxy context
-	const usageWorker = getUsageWorker();
-	sendWorkerConfigUpdate(
-		config.getStorePayloads(),
-		config.getRequestStorageHeadersOnly(),
-	);
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
@@ -876,11 +907,12 @@ export default async function startServer(options?: {
 		provider,
 		refreshInFlight: new Map(),
 		asyncWriter,
-		usageWorker,
 	};
 
 	// Register this server's refresh clearing capability
 	const serverId = `server-${runtime.port}`;
+	// Track at module scope so handleGracefulShutdown can unregister cleanly.
+	registeredServerId = serverId;
 	registerRefreshClearer(serverId, (accountId: string) => {
 		// Clear refresh cache for this account in this server's context
 		proxyContext.refreshInFlight.delete(accountId);
@@ -896,9 +928,9 @@ export default async function startServer(options?: {
 			);
 			return false;
 		}
-		if (account.provider !== "anthropic") {
+		if (!supportsRefreshBackedUsagePolling(account.provider)) {
 			log.warn(
-				`Cannot restart usage polling: account ${account.name} is not an Anthropic OAuth account`,
+				`Cannot restart usage polling: account ${account.name} does not support refresh-backed usage polling`,
 			);
 			return false;
 		}
@@ -919,6 +951,115 @@ export default async function startServer(options?: {
 			config.getUsagePollIntervalMs(),
 		);
 		return true;
+	});
+
+	// Register this server's codex on-demand usage refresher. Codex does not
+	// expose a free usage endpoint (unlike Anthropic's /api/oauth/usage), so
+	// each call sends a tiny upstream request and parses the x-codex-* headers
+	// from the response. Cost is bounded by `max_output_tokens: 1` plus the
+	// abort-after-headers cancel inside fetchCodexUsageOnDemand.
+	registerCodexUsageRefresher(serverId, async (accountId: string) => {
+		const account = await dbOps.getAccount(accountId);
+		if (!account) {
+			return {
+				success: false,
+				message: `Account ${accountId} not found`,
+			};
+		}
+		if (account.provider !== "codex") {
+			return {
+				success: false,
+				message: `Account '${account.name}' is not a Codex account`,
+			};
+		}
+		if (!account.access_token && !account.refresh_token) {
+			return {
+				success: false,
+				message: `Account '${account.name}' has no tokens — please re-authenticate`,
+			};
+		}
+
+		let accessToken: string;
+		try {
+			accessToken = await getValidAccessToken(account, proxyContext);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			log.warn(
+				`Codex usage refresh: failed to get access token for ${account.name}: ${message}`,
+			);
+			return {
+				success: false,
+				message: `Could not refresh access token for '${account.name}': ${message}`,
+			};
+		}
+
+		const endpoint = account.custom_endpoint ?? CODEX_DEFAULT_ENDPOINT;
+
+		let fetchResult: Awaited<ReturnType<typeof fetchCodexUsageOnDemand>>;
+		try {
+			fetchResult = await fetchCodexUsageOnDemand(accessToken, endpoint);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			log.error(
+				`Codex usage refresh: upstream fetch failed for ${account.name}:`,
+				message,
+			);
+			return {
+				success: false,
+				message: `Codex request failed for '${account.name}': ${message}`,
+			};
+		}
+
+		// Persist rate-limit reset even on non-2xx so the dashboard sees the
+		// most accurate reset time when the account is currently limited.
+		const codexProvider = getProvider("codex");
+		if (codexProvider) {
+			const rl = codexProvider.parseRateLimit(fetchResult.response);
+			if (rl.resetTime != null) {
+				try {
+					await db.run(
+						"UPDATE accounts SET rate_limit_reset = ? WHERE id = ?",
+						[rl.resetTime, account.id],
+					);
+				} catch (error) {
+					log.warn(
+						`Codex usage refresh: failed to update rate_limit_reset for ${account.name}:`,
+						error,
+					);
+				}
+			}
+		}
+
+		if (!fetchResult.data) {
+			return {
+				success: false,
+				message: `Codex returned no usage headers (status ${fetchResult.response.status}) for '${account.name}'`,
+			};
+		}
+
+		usageCache.set(accountId, fetchResult.data);
+
+		const fiveHour = fetchResult.data.five_hour?.utilization ?? 0;
+		const sevenDay = fetchResult.data.seven_day?.utilization ?? 0;
+		const isRateLimited = fetchResult.response.status === 429;
+		log.info(
+			`Codex usage refreshed for '${account.name}': 5h=${fiveHour}%, 7d=${sevenDay}%${
+				isRateLimited ? " (rate-limited)" : ""
+			}`,
+		);
+
+		// 429 still produces a successful header refresh (the usage payload is
+		// what we wanted), but the dashboard message must not celebrate it —
+		// otherwise the operator sees "refreshed successfully" while the
+		// account is fully exhausted. See tombii's PR #219 review note.
+		const message = isRateLimited
+			? `Usage refreshed for '${account.name}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
+			: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
+
+		return {
+			success: true,
+			message,
+		};
 	});
 
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
@@ -943,13 +1084,9 @@ export default async function startServer(options?: {
 			);
 			strategy.initialize?.(strategyStore);
 			proxyContext.strategy = strategy;
+			currentStrategy = strategy;
 		}
-		if (key === "store_payloads" || key === "request_storage_headers_only") {
-			sendWorkerConfigUpdate(
-				config.getStorePayloads(),
-				config.getRequestStorageHeadersOnly(),
-			);
-		}
+		// store_payloads changes are picked up automatically via the getStorePayloads getter
 	});
 
 	// Main server
@@ -1066,6 +1203,44 @@ export default async function startServer(options?: {
 					}
 
 					try {
+						// Codex CLI first tries WebSocket transport for /v1/responses.
+						// We only support HTTP — reject the upgrade cleanly so Codex
+						// falls back to HTTPS without hitting the proxy with an empty body.
+						if (
+							req.headers.get("upgrade")?.toLowerCase() === "websocket" &&
+							(url.pathname === "/v1/responses" ||
+								url.pathname === "/v1/responses/compact")
+						) {
+							return new Response(
+								JSON.stringify({
+									type: "error",
+									error: {
+										type: "not_supported_error",
+										message:
+											"WebSocket transport is not supported. Codex will retry over HTTPS automatically.",
+									},
+								}),
+								{
+									status: 503,
+									headers: { "Content-Type": "application/json" },
+								},
+							);
+						}
+
+						if (
+							req.method === "POST" &&
+							(url.pathname === "/v1/responses" ||
+								url.pathname === "/v1/responses/compact")
+						) {
+							return await handleResponsesRequest(
+								req,
+								url,
+								handleProxy as Parameters<typeof handleResponsesRequest>[2],
+								proxyContext,
+								authResult.apiKeyId,
+								authResult.apiKeyName,
+							);
+						}
 						return await handleProxy(
 							req,
 							url,
@@ -1228,15 +1403,21 @@ Available endpoints:
 		);
 	}
 
-	// Start usage polling for Anthropic accounts with token refresh (regardless of paused status)
-	const anthropicAccounts = accounts.filter((a) => a.provider === "anthropic");
-	if (anthropicAccounts.length > 0) {
+	// Start usage polling for refresh-backed providers (regardless of paused status).
+	// Anthropic polls Claude quota windows; xAI polls Grok Build credits via
+	// grok.com gRPC-web and may need to refresh an expired imported Grok CLI token
+	// before the first usage fetch.
+	const refreshBackedUsageAccounts = accounts.filter((a) =>
+		supportsRefreshBackedUsagePolling(a.provider),
+	);
+	if (refreshBackedUsageAccounts.length > 0) {
 		log.info(
-			`Found ${anthropicAccounts.length} Anthropic accounts, starting usage polling...`,
+			`Found ${refreshBackedUsageAccounts.length} refresh-backed usage account(s), starting usage polling...`,
 		);
-		for (const [index, account] of anthropicAccounts.entries()) {
-			log.debug(`Processing account: ${account.name}`, {
+		for (const [index, account] of refreshBackedUsageAccounts.entries()) {
+			log.debug(`Processing usage account: ${account.name}`, {
 				accountId: account.id,
+				provider: account.provider,
 				hasAccessToken: !!account.access_token,
 				hasRefreshToken: !!account.refresh_token,
 				paused: account.paused,
@@ -1246,9 +1427,9 @@ Available endpoints:
 			});
 
 			if (account.access_token || account.refresh_token) {
-				// Start usage polling with token refresh capability
-				// Usage data fetching should work independently of account paused status
-				// Stagger startup by 5s per account to avoid simultaneous 429s on boot
+				// Start usage polling with token refresh capability.
+				// Usage data fetching should work independently of account paused status.
+				// Stagger startup by 5s per account to avoid simultaneous rate-limit bursts.
 				const startupDelayMs = index * 5000;
 				startUsagePollingWithRefresh(
 					account,
@@ -1257,7 +1438,7 @@ Available endpoints:
 					config.getUsagePollIntervalMs(),
 				);
 				log.info(
-					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
+					`Started usage polling for ${account.provider} account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
 				);
 			} else {
 				log.warn(
@@ -1266,7 +1447,9 @@ Available endpoints:
 			}
 		}
 	} else {
-		log.info(`No Anthropic accounts found, usage polling will not start`);
+		log.info(
+			`No refresh-backed usage accounts found, usage polling will not start`,
+		);
 	}
 
 	// Start usage polling for NanoGPT accounts (PayG with optional subscription tracking)
@@ -1430,7 +1613,6 @@ Available endpoints:
 	};
 }
 
-// Max wall-clock time between SIGTERM and process exit. Long enough to let
 // most in-flight streaming responses complete; short enough that systemd's
 // default TimeoutStopSec (90s) doesn't have to escalate to SIGKILL.
 const SHUTDOWN_WATCHDOG_MS = 30_000;
@@ -1513,6 +1695,14 @@ async function handleGracefulShutdown(signal: string) {
 		// Stop token health monitoring
 		stopGlobalTokenHealthChecks();
 
+		// Unregister this server's Codex on-demand usage refresher so the
+		// module-level registry doesn't keep a stale callback after restart.
+		// Mirrors the cleanup pattern used by the schedulers above.
+		if (registeredServerId) {
+			unregisterCodexUsageRefresher(registeredServerId);
+			registeredServerId = null;
+		}
+
 		// Clear all pending usage polling retry timeouts
 		if (usagePollingRetryTimeouts.size > 0) {
 			console.log(
@@ -1543,14 +1733,11 @@ async function handleGracefulShutdown(signal: string) {
 			console.log("HTTP drain complete");
 		}
 
-		// Now that streams have finished, the usage worker has received all
-		// end-of-stream analytics messages. Terminate it so its DB writes
-		// flush into the AsyncDbWriter queue before we dispose that.
-		await terminateUsageWorker();
-
-		// Flush AsyncDbWriter and other Disposables.
+		// Now that streams have finished, the usage collector has received all
+		// end-of-stream analytics messages. Drain it so its DB writes flush
+		// into the AsyncDbWriter queue before we dispose that.
+		await drainUsageCollector();
 		await shutdown();
-
 		console.log("✅ Shutdown complete");
 		process.exit(0);
 	} catch (error) {

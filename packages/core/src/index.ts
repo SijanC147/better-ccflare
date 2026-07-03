@@ -2,6 +2,9 @@
 export {
 	BUFFER_SIZES,
 	CACHE,
+	computeRateLimitBackoffMs,
+	getOverloadRetryConfig,
+	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
 	LIMITS,
 	NETWORK,
@@ -27,6 +30,7 @@ export type ModelMappingData = {
 	modelMappings?: ModelMapping;
 };
 export type ModelFallback = { [modelFamily: string]: string };
+export * from "./alert-events";
 export {
 	type IntervalConfig,
 	intervalManager,
@@ -58,6 +62,7 @@ export {
 	getModelDisplayName,
 	getModelShortName,
 	isValidModelId,
+	LATEST_FABLE_MODEL,
 	LATEST_HAIKU_MODEL,
 	LATEST_OPUS_MODEL,
 	LATEST_SONNET_MODEL,
@@ -66,7 +71,9 @@ export {
 } from "./models";
 export {
 	estimateCostUSD,
+	getModelRates,
 	initializeNanoGPTPricingIfAccountsExist,
+	type ModelRates,
 	resetNanoGPTPricingCacheForTest,
 	setPricingLogger,
 	type TokenBreakdown,

@@ -7,6 +7,7 @@ import {
 	GitBranch,
 	Key,
 	LayoutDashboard,
+	Lightbulb,
 	LogOut,
 	Menu,
 	PanelLeftClose,
@@ -21,6 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
+import { useAlerts } from "../hooks/queries";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import { CopyButton } from "./CopyButton";
@@ -44,6 +46,7 @@ interface NavItem {
 const _navItems: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
+	{ label: "Insights", icon: Lightbulb, path: "/insights" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
 	// { label: "Combos", icon: Zap, path: "/combos" },
@@ -72,6 +75,8 @@ export function Navigation({
 	>("idle");
 	const [latestVersion, setLatestVersion] = useState<string>("");
 	const [updateError, setUpdateError] = useState<string | null>(null);
+	const { data: alertData } = useAlerts();
+	const unacknowledgedCount = alertData?.unacknowledgedCount ?? 0;
 	const location = useLocation();
 	const isMountedRef = useRef(true);
 
@@ -80,6 +85,13 @@ export function Navigation({
 		const baseItems: NavItem[] = [
 			{ label: "Overview", icon: LayoutDashboard, path: "/" },
 			{ label: "Analytics", icon: BarChart3, path: "/analytics" },
+			{
+				label: "Insights",
+				icon: Lightbulb,
+				path: "/insights",
+				badge:
+					unacknowledgedCount > 0 ? String(unacknowledgedCount) : undefined,
+			},
 			{ label: "Requests", icon: Activity, path: "/requests" },
 			{ label: "Accounts", icon: Users, path: "/accounts" },
 			{ label: "Projects", icon: FolderOpen, path: "/projects" },
@@ -99,7 +111,7 @@ export function Navigation({
 		);
 
 		return baseItems;
-	}, [showCombos]);
+	}, [showCombos, unacknowledgedCount]);
 
 	// Cleanup on unmount to prevent memory leaks
 	useEffect(() => {

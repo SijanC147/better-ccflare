@@ -25,16 +25,6 @@ export const TIME_CONSTANTS = {
 	STREAM_READ_TIMEOUT_MS: 60000, // 60 seconds - overall timeout for stream reads
 	STREAM_OPERATION_TIMEOUT_MS: 30000, // 30 seconds - timeout per read operation
 
-	// Streaming forwarder timeouts (response-handler.ts).
-	// Agentic workloads (e.g. recursive claude-code-sdk sessions) can have long
-	// quiet periods between chunks while sub-calls run. These defaults are set
-	// conservatively high so nested calls don't trigger a false timeout and cause
-	// the outer request to appear failed/missing in the UI (issue #84).
-	// Both can be overridden at runtime via env vars:
-	//   CF_STREAM_TOTAL_TIMEOUT_MS  — max total stream duration
-	//   CF_STREAM_CHUNK_TIMEOUT_MS  — max silence between consecutive chunks
-	STREAM_FORWARD_TOTAL_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes
-	STREAM_FORWARD_CHUNK_TIMEOUT_MS: 5 * 60 * 1000, // 5 minutes
 	OAUTH_STATE_TTL: 10, // 10 minutes (stored separately as minutes)
 	RETRY_DELAY_DEFAULT: 1000, // 1 second
 	PROXY_REQUEST_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes — covers long agent calls
@@ -56,7 +46,71 @@ export const TIME_CONSTANTS = {
 	// are unaffected by this default.
 	// Override at runtime via CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS.
 	DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS: 60 * 1000, // 60s
+
+	// Adaptive rate-limit cooldown with exponential backoff.
+	// Cooldown for streak of n consecutive 429s = BASE * 2^(n-1), capped at MAX.
+	// Override at runtime via CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS /
+	// CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS / CCFLARE_RATE_LIMIT_RESET_STABILITY_MS.
+	RATE_LIMIT_BACKOFF_BASE_MS: 30 * 1000, // 30s: cooldown for the 1st 429 in a streak
+	RATE_LIMIT_BACKOFF_MAX_MS: 5 * 60 * 1000, // 5min: ceiling for the exponential ramp
+	RATE_LIMIT_RESET_STABILITY_MS: 5 * 60 * 1000, // 5min: healthy operation needed to reset the streak counter
 } as const;
+
+/**
+ * Compute exponential-backoff cooldown (ms) for a given streak depth.
+ *   backoff = BASE * 2^(consecutiveCount - 1), capped at MAX.
+ * Reads BASE/MAX from env (CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS /
+ * CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS), falling back to TIME_CONSTANTS.
+ * Uses || (not ??) so 0/NaN env values fall through to the default.
+ */
+export function computeRateLimitBackoffMs(consecutiveCount: number): number {
+	const count = Math.max(1, consecutiveCount);
+	const baseEnv = Number(process.env.CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS);
+	const maxEnv = Number(process.env.CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS);
+	const base = baseEnv || TIME_CONSTANTS.RATE_LIMIT_BACKOFF_BASE_MS;
+	const max = maxEnv || TIME_CONSTANTS.RATE_LIMIT_BACKOFF_MAX_MS;
+	// Guard against overflow: 2^53 is JS safe-integer limit.
+	const exponent = Math.min(count - 1, 52);
+	return Math.min(base * 2 ** exponent, max);
+}
+
+/**
+ * Read the stability-reset window (ms) for the consecutive_rate_limits counter.
+ * Reads CCFLARE_RATE_LIMIT_RESET_STABILITY_MS from env.
+ * Uses || (not ??) so 0/NaN env values fall through to the default.
+ */
+export function getRateLimitResetStabilityMs(): number {
+	const raw = Number(process.env.CCFLARE_RATE_LIMIT_RESET_STABILITY_MS);
+	return raw || TIME_CONSTANTS.RATE_LIMIT_RESET_STABILITY_MS;
+}
+
+/**
+ * Configuration for in-place retry of reset-less 529 (overloaded_error) responses.
+ * Used by proxyWithAccount before applying account cooldown.
+ *
+ * Env knobs:
+ *   CCFLARE_OVERLOAD_RETRY_ENABLED      — set to "false" to disable (default: true)
+ *   CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS — max in-place attempts (default: 2)
+ *   CCFLARE_OVERLOAD_RETRY_BASE_MS      — jitter backoff base delay ms (default: 750)
+ *   CCFLARE_OVERLOAD_RETRY_MAX_MS       — jitter backoff ceiling ms (default: 3000)
+ */
+export function getOverloadRetryConfig(): {
+	enabled: boolean;
+	maxAttempts: number;
+	baseMs: number;
+	maxMs: number;
+} {
+	const enabled = process.env.CCFLARE_OVERLOAD_RETRY_ENABLED !== "false";
+	// maxAttempts: 0 is not useful (use ENABLED=false to disable), so || is correct.
+	const maxAttempts =
+		Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS) || 2;
+	// baseMs/maxMs: 0 is valid (zero delay for tests), so use explicit finite check.
+	const rawBase = Number(process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS);
+	const rawMax = Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS);
+	const baseMs = Number.isFinite(rawBase) && rawBase >= 0 ? rawBase : 750;
+	const maxMs = Number.isFinite(rawMax) && rawMax >= 0 ? rawMax : 3000;
+	return { enabled, maxAttempts, baseMs, maxMs };
+}
 
 // Buffer sizes (in bytes unless specified)
 export const BUFFER_SIZES = {

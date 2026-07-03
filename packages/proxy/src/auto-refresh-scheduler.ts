@@ -39,6 +39,12 @@ export class AutoRefreshScheduler {
 	private consecutiveFailures: Map<string, number> = new Map();
 	// Threshold for marking an account as needing re-authentication
 	private readonly FAILURE_THRESHOLD = 5;
+	// Timestamp (ms) of the last probe sent to a failure_threshold-paused account.
+	// Re-probing is throttled to once per FAILURE_PROBE_COOLDOWN_MS so a genuinely
+	// dead endpoint isn't hit every 60s (#199), while still letting the account
+	// self-recover automatically instead of getting stuck in API ERROR (#262).
+	private lastFailureProbeAt: Map<string, number> = new Map();
+	private readonly FAILURE_PROBE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 
 	constructor(db: BunSqlAdapter, proxyContext: ProxyContext) {
 		this.db = db;
@@ -78,6 +84,7 @@ export class AutoRefreshScheduler {
 		// Clear the tracking maps to free memory
 		this.lastRefreshResetTime.clear();
 		this.consecutiveFailures.clear();
+		this.lastFailureProbeAt.clear();
 	}
 
 	/**
@@ -151,16 +158,21 @@ export class AutoRefreshScheduler {
 					AND (
 						rate_limited_until IS NULL OR rate_limited_until <= ?
 					)
-					-- Exclude accounts that are paused for reasons other than overage (e.g. manually
-					-- paused zai/codex accounts, or accounts paused by the failure-threshold guard).
-					-- auto_pause_on_overage_enabled defaults to 0 for zai/codex, so a manually-paused
-					-- account of those types is correctly excluded — there is no point refreshing a
-					-- broken/manually-paused endpoint.  Overage-paused accounts (paused=1 AND
-					-- auto_pause_on_overage_enabled=1) are intentionally included so the scheduler can
-					-- probe them and auto-resume after the usage window resets.
-					AND NOT (
-						COALESCE(paused, 0) = 1
-						AND COALESCE(auto_pause_on_overage_enabled, 0) = 0
+					-- Probe a paused account only if it can be auto-resumed. Overage pauses
+					-- (auto_pause_on_overage_enabled=1) resume on window reset. failure_threshold
+					-- pauses (set by this scheduler after FAILURE_THRESHOLD consecutive refresh
+					-- failures) MUST be re-probed on a cooldown so they can self-recover —
+					-- otherwise they're stuck in API ERROR until a human clicks Force Refresh
+					-- (issue #262). The per-account re-probe cooldown is enforced in
+					-- shouldRefreshAccount. Manual and peak_hours pauses are left alone.
+					-- These criteria MUST stay in sync with the resume guard in sendDummyMessage.
+					AND (
+						COALESCE(paused, 0) = 0
+						OR (
+							COALESCE(auto_pause_on_overage_enabled, 0) = 1
+							AND (pause_reason IS NULL OR pause_reason = 'overage')
+						)
+						OR pause_reason = 'failure_threshold'
 					)
 			`,
 				[now, now, now],
@@ -199,12 +211,16 @@ export class AutoRefreshScheduler {
 				}
 			}
 
-			// Qwen + Codex proactive OAuth refresh must run regardless of usage-
-			// window probe candidates — otherwise installs with only Qwen
-			// accounts, or with Codex tokens near expiry but no anthropic/zai
-			// windows currently due, would never refresh their access tokens
-			// even though the proactive-refresh code is present (Codex P2).
-			await this.checkAndRefreshQwenTokens();
+			// Proactive OAuth refresh must run regardless of usage-window probe
+			// candidates — otherwise installs with only qwen/xai accounts, or
+			// with Codex tokens near expiry but no anthropic/zai windows
+			// currently due, would never refresh their access tokens even though
+			// the proactive-refresh code is present (Codex P2). Qwen is covered
+			// by the OpenAI-compatible refresh below (provider IN ('qwen','xai')),
+			// which generalized the fork's original qwen-only refresh.
+			await this.checkAndRefreshOpenAICompatibleOAuthTokens();
+
+			// Proactively refresh Codex OAuth tokens expiring within the safety window
 			await this.checkAndRefreshCodexTokens();
 		} catch (error) {
 			if (error instanceof Error) {
@@ -250,6 +266,13 @@ export class AutoRefreshScheduler {
 	}): Promise<boolean> {
 		try {
 			log.info(`Sending auto-refresh message to account: ${accountRow.name}`);
+
+			// Record the probe timestamp for failure_threshold accounts so the
+			// cooldown in shouldRefreshAccount suppresses re-probes for the next
+			// FAILURE_PROBE_COOLDOWN_MS (#262).
+			if (accountRow.pause_reason === "failure_threshold") {
+				this.lastFailureProbeAt.set(accountRow.id, Date.now());
+			}
 
 			const provider = getProvider(accountRow.provider);
 			if (!provider) {
@@ -304,6 +327,7 @@ export class AutoRefreshScheduler {
 				billing_type: null,
 				pause_reason: null,
 				refresh_token_issued_at: null,
+				consecutive_rate_limits: 0,
 			};
 
 			// Emit request start event for analytics
@@ -416,6 +440,7 @@ export class AutoRefreshScheduler {
 						method: "POST",
 						headers,
 						body: JSON.stringify(requestBody),
+						signal: AbortSignal.timeout(30000),
 					});
 
 					log.debug(
@@ -553,9 +578,24 @@ export class AutoRefreshScheduler {
 					);
 				}
 
-				// Auto-resume on window reset: if account was auto-paused due to overage, resume it now.
-				// Never auto-resume accounts paused manually or due to failure threshold.
+				// Auto-resume on a successful probe. failure_threshold-paused accounts
+				// (set by this scheduler after repeated refresh failures) resume as soon
+				// as a probe succeeds — the endpoint works again (#262). Overage-paused
+				// accounts resume when the window resets. Manual and peak_hours pauses are
+				// never auto-resumed.
 				if (
+					accountRow.paused === 1 &&
+					accountRow.pause_reason === "failure_threshold"
+				) {
+					log.info(
+						`Auto-resuming account '${accountRow.name}' — failure_threshold cleared after successful probe`,
+					);
+					await this.db.run(
+						"UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ?",
+						[accountRow.id],
+					);
+					this.lastFailureProbeAt.delete(accountRow.id);
+				} else if (
 					accountRow.auto_pause_on_overage_enabled === 1 &&
 					accountRow.paused === 1 &&
 					(!accountRow.pause_reason || accountRow.pause_reason === "overage")
@@ -692,11 +732,11 @@ export class AutoRefreshScheduler {
 	}
 
 	/**
-	 * Proactively refresh Qwen OAuth access tokens that are expiring within the safety window.
+	 * Proactively refresh OpenAI-compatible OAuth access tokens that are expiring within the safety window.
 	 * Unlike Anthropic accounts (which use dummy messages to reset rate-limit windows),
-	 * Qwen only needs the OAuth token refreshed — no dummy message required.
+	 * these providers only need the OAuth token refreshed — no dummy message required.
 	 */
-	private async checkAndRefreshQwenTokens(): Promise<void> {
+	private async checkAndRefreshOpenAICompatibleOAuthTokens(): Promise<void> {
 		if (!this.db) return;
 
 		const now = Date.now();
@@ -715,7 +755,7 @@ export class AutoRefreshScheduler {
 			SELECT id, name, provider, refresh_token, access_token, expires_at, custom_endpoint
 			FROM accounts
 			WHERE
-				provider = 'qwen'
+				provider IN ('qwen', 'xai')
 				AND refresh_token IS NOT NULL
 				AND (
 					access_token IS NULL
@@ -729,24 +769,26 @@ export class AutoRefreshScheduler {
 		if (accounts.length === 0) return;
 
 		log.info(
-			`Proactive Qwen token refresh: ${accounts.length} account(s) need refresh`,
+			`Proactive OpenAI-compatible OAuth token refresh: ${accounts.length} account(s) need refresh`,
 		);
 
 		for (const row of accounts) {
 			// Skip if a refresh is already in-flight for this account (deduplication)
 			if (this.proxyContext.refreshInFlight.has(row.id)) {
 				log.debug(
-					`Skipping proactive Qwen refresh for ${row.name} — refresh already in-flight`,
+					`Skipping proactive ${row.provider} refresh for ${row.name} — refresh already in-flight`,
 				);
 				continue;
 			}
 
 			try {
-				log.info(`Refreshing Qwen token for account: ${row.name}`);
+				log.info(`Refreshing ${row.provider} token for account: ${row.name}`);
 
 				const provider = getProvider(row.provider);
 				if (!provider) {
-					log.error(`No provider found for qwen (account: ${row.name})`);
+					log.error(
+						`No provider found for ${row.provider} (account: ${row.name})`,
+					);
 					continue;
 				}
 
@@ -783,6 +825,7 @@ export class AutoRefreshScheduler {
 					billing_type: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
+					consecutive_rate_limits: 0,
 				};
 
 				// Use refreshAccessTokenSafe to get deduplication and backoff handling
@@ -801,7 +844,7 @@ export class AutoRefreshScheduler {
 							],
 						);
 						log.info(
-							`Qwen token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
+							`${row.provider} token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
 						);
 						return result.accessToken;
 					})
@@ -813,7 +856,7 @@ export class AutoRefreshScheduler {
 				await refreshPromise;
 			} catch (error) {
 				log.error(
-					`Failed to proactively refresh Qwen token for ${row.name}:`,
+					`Failed to proactively refresh ${row.provider} token for ${row.name}:`,
 					error,
 				);
 			}
@@ -911,6 +954,7 @@ export class AutoRefreshScheduler {
 					billing_type: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
+					consecutive_rate_limits: 0,
 				};
 
 				// Register in refreshInFlight so concurrent request-triggered refreshes join this one
@@ -984,6 +1028,16 @@ export class AutoRefreshScheduler {
 					this.consecutiveFailures.delete(accountId);
 					log.debug(
 						`Removed consecutive failure tracking for account ${accountId} (no longer exists or auto-refresh disabled)`,
+					);
+				}
+			}
+
+			// Clean up failure-probe cooldown timestamps for non-active accounts
+			for (const accountId of this.lastFailureProbeAt.keys()) {
+				if (!activeAccountIdSet.has(accountId)) {
+					this.lastFailureProbeAt.delete(accountId);
+					log.debug(
+						`Removed failure-probe cooldown tracking for account ${accountId} (no longer exists or auto-refresh disabled)`,
 					);
 				}
 			}
@@ -1067,9 +1121,29 @@ export class AutoRefreshScheduler {
 			expires_at: number | null;
 			rate_limit_reset: number | null;
 			custom_endpoint: string | null;
+			paused: number;
+			pause_reason: string | null;
 		},
 		now: number,
 	): boolean {
+		// Throttle re-probes of failure_threshold-paused accounts to once per
+		// cooldown — avoids burning quota on a dead endpoint every 60s (#199)
+		// while still letting it recover automatically (#262).
+		if (account.pause_reason === "failure_threshold") {
+			const lastProbe = this.lastFailureProbeAt.get(account.id);
+			if (lastProbe && now - lastProbe < this.FAILURE_PROBE_COOLDOWN_MS) {
+				log.debug(
+					`Skipping failure_threshold probe for account ${account.name} — last probe ${Math.round((now - lastProbe) / 1000)}s ago, cooldown ${this.FAILURE_PROBE_COOLDOWN_MS / 1000}s`,
+				);
+				return false;
+			}
+			// Cooldown elapsed (or no prior probe) — probe immediately. We're
+			// checking endpoint liveness, not whether a new usage window opened,
+			// so bypass the normal rate_limit_reset window logic (which would
+			// suppress re-probes while a prior window is still active).
+			return true;
+		}
+
 		const lastResetTime = this.lastRefreshResetTime.get(account.id);
 
 		// If we've never refreshed this account before, refresh it

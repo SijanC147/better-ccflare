@@ -3,17 +3,24 @@ import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
 } from "@better-ccflare/http-common";
-import { ANALYTICS_STREAM_SYMBOL } from "@better-ccflare/http-common/symbols";
-import type { Account } from "@better-ccflare/types";
+import { Logger } from "@better-ccflare/logger";
+import type { Account, RateLimitReason } from "@better-ccflare/types";
 import type { ProxyContext } from "./handlers";
-import { handleRateLimitResponse } from "./handlers/response-processor";
+import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
-import type { UsageWorkerController } from "./usage-worker-controller";
-import type { ChunkMessage, EndMessage, StartMessage } from "./worker-messages";
+import { combineChunks, teeStream } from "./stream-tee";
+import { getUsageCollector } from "./usage-collector";
+import type { EndMessage, StartMessage } from "./worker-messages";
 
-type ResponseWithAnalyticsStream = Response & {
-	[ANALYTICS_STREAM_SYMBOL]?: ReadableStream<Uint8Array>;
-};
+const log = new Logger("ResponseHandler");
+
+function fireAndForgetEnd(msg: EndMessage): void {
+	getUsageCollector()
+		.handleEnd(msg)
+		.catch((err: unknown) => {
+			log.error(`handleEnd failed for request ${msg.requestId}`, err);
+		});
+}
 
 // Default cooldown for rate-limit errors detected mid-stream. SSE error
 // frames don't carry reset headers (HTTP headers were sent before the
@@ -31,28 +38,10 @@ function getMidStreamRateLimitCooldownMs(): number {
 	);
 }
 
-// Must match MAX_REQUEST_BODY_BYTES in post-processor.worker.ts.
-// Cap applied before postMessage to avoid multi-MB structured clones.
+// Must match MAX_REQUEST_BODY_BYTES in usage-collector.ts.
+// Cap applied before passing to collector to avoid multi-MB copies.
 // 4MB so afterburn can see full conversation history for friction analysis.
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
-
-/**
- * Best-effort post to the usage worker. Swallows errors when the worker is
- * in `starting`/restart state (postMessage throws unless `ready`). Exported
- * so the pool-exhausted logging path in proxy.ts can share the same safety
- * (Codex round 2 P2 — without this, a startup-window no-accounts request
- * could throw before returning its prepared 503).
- */
-export function safePostMessage(
-	worker: UsageWorkerController,
-	message: StartMessage | ChunkMessage | EndMessage,
-): void {
-	try {
-		worker.postMessage(message);
-	} catch (_error) {
-		// Worker not ready or terminated — silently ignore
-	}
-}
 
 /**
  * Check if a response should be considered successful/expected
@@ -129,19 +118,19 @@ export async function forwardToClient(
 	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
 
 	// Filter out:
-	//   - count_tokens requests on OpenAI-compatible providers (existing
-	//     filter — these aren't billable user traffic).
+	//   - count_tokens requests on providers that synthesize or proxy advisory
+	//     token counts; these aren't billable user traffic.
 	//   - synthetic auto-refresh probes (issue #199, bug 2). Logging these
 	//     pollutes the user-visible 503/200 metrics on the dashboard with
 	//     internal scheduler activity. Header set by AutoRefreshScheduler
 	//     mirrors the existing keepalive pattern.
 	const isAutoRefreshProbe =
 		requestHeaders.get("x-better-ccflare-auto-refresh") === "true";
-	const shouldProcessRequest =
-		!(
-			ctx.provider.name === "openai-compatible" &&
-			path === "/v1/messages/count_tokens"
-		) && !isAutoRefreshProbe;
+	const isSyntheticCountTokens =
+		path === "/v1/messages/count_tokens" &&
+		(ctx.provider.name === "openai-compatible" ||
+			ctx.provider.name === "codex");
+	const shouldProcessRequest = !isSyntheticCountTokens && !isAutoRefreshProbe;
 
 	// Resolve project attribution using the live ResolverManager snapshot
 	// maintained by the DiscoveryScheduler. This honors the configured
@@ -203,7 +192,7 @@ export async function forwardToClient(
 			retryAttempt,
 			failoverAttempts,
 		};
-		safePostMessage(ctx.usageWorker, startMessage);
+		getUsageCollector().handleStart(startMessage);
 	}
 
 	// Emit request start event for real-time dashboard
@@ -221,161 +210,77 @@ export async function forwardToClient(
 	}
 
 	/*********************************************************************
-	 *  STREAMING RESPONSES — tee the body and send analytics chunks
+	 *  STREAMING RESPONSES — wrap body with teeStream for inline analytics
 	 *********************************************************************/
 	if (isStream && response.body) {
-		let clientResponse = response;
+		// Mid-stream rate-limit detection for issue #114 Fix 1.2. Only
+		// create a sniffer when we know which account to mark — anonymous
+		// or unauthenticated requests can't be failed over.
+		const rateLimitSniffer = account
+			? createSseRateLimitSniffer({ provider: account.provider })
+			: null;
 
-		// For OpenAI providers, use pre-teed analytics stream if available.
-		// Otherwise tee the sanitized response body to avoid Response.clone().
-		const preTeedStream = (response as ResponseWithAnalyticsStream)[
-			ANALYTICS_STREAM_SYMBOL
-		];
-		let analyticsStream: ReadableStream<Uint8Array>;
-		if (preTeedStream && preTeedStream instanceof ReadableStream) {
-			analyticsStream = preTeedStream;
-		} else {
-			const [clientStream, analyticsBranch] = response.body.tee();
-			clientResponse = new Response(clientStream, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: response.headers,
-			});
-			analyticsStream = analyticsBranch;
-		}
-		const analyticsResponse = new Response(analyticsStream, {
+		const onChunk = (value: Uint8Array): void => {
+			if (shouldProcessRequest) {
+				getUsageCollector().handleChunk(requestId, value);
+			}
+
+			// Mid-stream rate-limit detection. The sniffer
+			// fires exactly once; after that feed() is a no-op.
+			if (account && rateLimitSniffer?.feed(value)) {
+				// Map firedReason to the correct RateLimitReason:
+				//   "overloaded_error" → upstream_529_overloaded_with_reset
+				//   "rate_limit_error" → upstream_429_with_reset
+				const midStreamReason: RateLimitReason =
+					rateLimitSniffer.firedReason === "overloaded_error"
+						? "upstream_529_overloaded_with_reset"
+						: "upstream_429_with_reset";
+				applyRateLimitCooldown(
+					account,
+					{
+						resetTime: Date.now() + getMidStreamRateLimitCooldownMs(),
+						reason: midStreamReason,
+					},
+					ctx,
+				);
+			}
+		};
+
+		const onClose = (_buffered: Uint8Array[]): void => {
+			if (shouldProcessRequest) {
+				const endMsg: EndMessage = {
+					type: "end",
+					requestId,
+					success: isExpectedResponse(path, response),
+				};
+				// Fire-and-forget: handleEnd is async for DB writes but we don't block streaming
+				fireAndForgetEnd(endMsg);
+			}
+		};
+
+		const onError = (err: Error): void => {
+			if (shouldProcessRequest) {
+				const endMsg: EndMessage = {
+					type: "end",
+					requestId,
+					success: false,
+					error: err.message,
+				};
+				fireAndForgetEnd(endMsg);
+			}
+		};
+
+		const passthroughBody = teeStream(response.body, {
+			onChunk,
+			onClose,
+			onError,
+		});
+
+		return new Response(passthroughBody, {
 			status: response.status,
 			statusText: response.statusText,
 			headers: response.headers,
 		});
-
-		// Mid-stream rate-limit detection for issue #114 Fix 1.2. Only
-		// create a sniffer when we know which account to mark — anonymous
-		// or unauthenticated requests can't be failed over.
-		const rateLimitSniffer = account ? createSseRateLimitSniffer() : null;
-
-		(async () => {
-			// Configurable via env vars to support long agentic workloads where
-			// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave
-			// the outer stream silent for extended periods (issue #84).
-			const STREAM_TIMEOUT_MS = Number(
-				process.env.CF_STREAM_TOTAL_TIMEOUT_MS ??
-					TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS,
-			);
-			const CHUNK_TIMEOUT_MS = Number(
-				process.env.CF_STREAM_CHUNK_TIMEOUT_MS ??
-					TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS,
-			);
-
-			try {
-				const reader = analyticsResponse.body?.getReader();
-				if (!reader) return; // Safety check
-
-				const startTime = Date.now();
-				let lastChunkTime = Date.now();
-
-				// eslint-disable-next-line no-constant-condition
-				while (true) {
-					// Check for overall stream timeout
-					if (Date.now() - startTime > STREAM_TIMEOUT_MS) {
-						await reader.cancel();
-						throw new Error(
-							`Stream timeout: exceeded ${STREAM_TIMEOUT_MS}ms total duration`,
-						);
-					}
-
-					// Check for chunk timeout (no data received)
-					if (Date.now() - lastChunkTime > CHUNK_TIMEOUT_MS) {
-						await reader.cancel();
-						throw new Error(
-							`Stream timeout: no data received for ${CHUNK_TIMEOUT_MS}ms`,
-						);
-					}
-
-					// Read with a timeout wrapper that properly cleans up
-					const readPromise = reader.read();
-					let timeoutId: Timer | null = null;
-					const timeoutPromise = new Promise<{
-						value?: Uint8Array;
-						done: boolean;
-					}>((_, reject) => {
-						timeoutId = setTimeout(
-							() => reject(new Error("Read operation timeout")),
-							CHUNK_TIMEOUT_MS,
-						);
-					});
-
-					try {
-						const { value, done } = await Promise.race([
-							readPromise,
-							timeoutPromise,
-						]);
-
-						// Clear timeout if race completed successfully
-						if (timeoutId) {
-							clearTimeout(timeoutId);
-							timeoutId = null;
-						}
-
-						if (done) break;
-
-						if (value) {
-							lastChunkTime = Date.now();
-							if (shouldProcessRequest) {
-								const chunkMsg: ChunkMessage = {
-									type: "chunk",
-									requestId,
-									data: value,
-								};
-								safePostMessage(ctx.usageWorker, chunkMsg);
-							}
-
-							// Mid-stream rate-limit detection. The sniffer
-							// fires exactly once; after that feed() is a no-op.
-							if (account && rateLimitSniffer?.feed(value)) {
-								handleRateLimitResponse(
-									account,
-									{
-										isRateLimited: true,
-										resetTime: Date.now() + getMidStreamRateLimitCooldownMs(),
-									},
-									ctx,
-								);
-							}
-						}
-					} catch (error) {
-						// Ensure timeout is cleared on error
-						if (timeoutId) {
-							clearTimeout(timeoutId);
-							timeoutId = null;
-						}
-						throw error;
-					}
-				}
-				// Finished without errors
-				if (shouldProcessRequest) {
-					const endMsg: EndMessage = {
-						type: "end",
-						requestId,
-						success: isExpectedResponse(path, analyticsResponse),
-					};
-					safePostMessage(ctx.usageWorker, endMsg);
-				}
-			} catch (err) {
-				if (shouldProcessRequest) {
-					const endMsg: EndMessage = {
-						type: "end",
-						requestId,
-						success: false,
-						error: (err as Error).message,
-					};
-					safePostMessage(ctx.usageWorker, endMsg);
-				}
-			}
-		})();
-
-		// Return the sanitized response backed by the client stream branch.
-		return clientResponse;
 	}
 
 	/*********************************************************************
@@ -383,94 +288,46 @@ export async function forwardToClient(
 	 *********************************************************************/
 	if (!response.body) {
 		if (shouldProcessRequest) {
-			const endMsg: EndMessage = {
+			fireAndForgetEnd({
 				type: "end",
 				requestId,
 				responseBody: null,
 				success: isExpectedResponse(path, response),
-			};
-			safePostMessage(ctx.usageWorker, endMsg);
+			});
 		}
 
 		return response;
 	}
 
-	const [clientStream, analyticsStream] = response.body.tee();
-	const clientResponse = new Response(clientStream, {
+	const MAX_NON_STREAM_BODY_BYTES = 256 * 1024; // 256KB cap for stored body
+
+	const passthroughBody = teeStream(response.body, {
+		maxBytes: MAX_NON_STREAM_BODY_BYTES,
+		onClose(buffered) {
+			if (!shouldProcessRequest) return;
+			const cappedBuf = combineChunks(buffered);
+			fireAndForgetEnd({
+				type: "end",
+				requestId,
+				responseBody:
+					cappedBuf.byteLength > 0 ? cappedBuf.toString("base64") : null,
+				success: isExpectedResponse(path, response),
+			});
+		},
+		onError(err) {
+			if (!shouldProcessRequest) return;
+			fireAndForgetEnd({
+				type: "end",
+				requestId,
+				success: false,
+				error: err.message,
+			});
+		},
+	});
+
+	return new Response(passthroughBody, {
 		status: response.status,
 		statusText: response.statusText,
 		headers: response.headers,
 	});
-	const analyticsResponse = new Response(analyticsStream, {
-		status: response.status,
-		statusText: response.statusText,
-		headers: response.headers,
-	});
-
-	(async () => {
-		const MAX_NON_STREAM_BODY_BYTES = 256 * 1024; // 256KB cap for stored body
-		try {
-			// Read body via stream, stopping once the cap is reached to avoid
-			// loading an unbounded response into memory before truncation.
-			const reader = analyticsResponse.body?.getReader();
-			let cappedBuf: Buffer;
-			if (!reader) {
-				cappedBuf = Buffer.alloc(0);
-			} else {
-				const chunks: Uint8Array[] = [];
-				let bytesRead = 0;
-				let streamDone = false;
-				while (bytesRead < MAX_NON_STREAM_BODY_BYTES) {
-					const { value, done } = await reader.read();
-					if (done) {
-						streamDone = true;
-						break;
-					}
-					const remaining = MAX_NON_STREAM_BODY_BYTES - bytesRead;
-					if (value.length <= remaining) {
-						chunks.push(value);
-						bytesRead += value.length;
-					} else {
-						chunks.push(value.slice(0, remaining));
-						bytesRead += remaining;
-						await reader.cancel();
-						streamDone = true;
-						break;
-					}
-				}
-				// Codex round 4 P2: if the while condition exited because bytesRead
-				// reached the cap exactly via the `<=remaining` branch, the loop
-				// terminates without cancel() and the analytics tee branch keeps
-				// the unread remainder buffered. Explicitly cancel here to release
-				// the source.
-				if (!streamDone) {
-					await reader.cancel();
-				}
-				cappedBuf = Buffer.concat(chunks);
-			}
-			if (shouldProcessRequest) {
-				const endMsg: EndMessage = {
-					type: "end",
-					requestId,
-					responseBody:
-						cappedBuf.byteLength > 0 ? cappedBuf.toString("base64") : null,
-					success: isExpectedResponse(path, analyticsResponse),
-				};
-				safePostMessage(ctx.usageWorker, endMsg);
-			}
-		} catch (err) {
-			if (shouldProcessRequest) {
-				const endMsg: EndMessage = {
-					type: "end",
-					requestId,
-					success: false,
-					error: (err as Error).message,
-				};
-				safePostMessage(ctx.usageWorker, endMsg);
-			}
-		}
-	})();
-
-	// Return the sanitized response
-	return clientResponse;
 }

@@ -9,12 +9,15 @@ export const CLAUDE_MODEL_IDS = {
 	SONNET_4: "claude-sonnet-4-20250514",
 	SONNET_4_5: "claude-sonnet-4-5-20250929",
 	SONNET_4_6: "claude-sonnet-4-6",
+	SONNET_5: "claude-sonnet-5",
 	HAIKU_4_5: "claude-haiku-4-5-20251001",
 	OPUS_4: "claude-opus-4-20250514",
 	OPUS_4_1: "claude-opus-4-1-20250805",
 	OPUS_4_5: "claude-opus-4-5-20251101",
 	OPUS_4_6: "claude-opus-4-6",
 	OPUS_4_7: "claude-opus-4-7",
+	OPUS_4_8: "claude-opus-4-8",
+	FABLE_5: "claude-fable-5",
 } as const;
 
 // Model display names
@@ -22,12 +25,15 @@ export const MODEL_DISPLAY_NAMES: Record<string, string> = {
 	[CLAUDE_MODEL_IDS.SONNET_4]: "Claude Sonnet 4",
 	[CLAUDE_MODEL_IDS.SONNET_4_5]: "Claude Sonnet 4.5",
 	[CLAUDE_MODEL_IDS.SONNET_4_6]: "Claude Sonnet 4.6",
+	[CLAUDE_MODEL_IDS.SONNET_5]: "Claude Sonnet 5",
 	[CLAUDE_MODEL_IDS.HAIKU_4_5]: "Claude Haiku 4.5",
 	[CLAUDE_MODEL_IDS.OPUS_4]: "Claude Opus 4",
 	[CLAUDE_MODEL_IDS.OPUS_4_1]: "Claude Opus 4.1",
 	[CLAUDE_MODEL_IDS.OPUS_4_5]: "Claude Opus 4.5",
 	[CLAUDE_MODEL_IDS.OPUS_4_6]: "Claude Opus 4.6",
 	[CLAUDE_MODEL_IDS.OPUS_4_7]: "Claude Opus 4.7",
+	[CLAUDE_MODEL_IDS.OPUS_4_8]: "Claude Opus 4.8",
+	[CLAUDE_MODEL_IDS.FABLE_5]: "Claude Fable 5",
 };
 
 // Short model names used in UI (for color mapping, etc.)
@@ -35,23 +41,27 @@ export const MODEL_SHORT_NAMES: Record<string, string> = {
 	[CLAUDE_MODEL_IDS.SONNET_4]: "claude-sonnet-4",
 	[CLAUDE_MODEL_IDS.SONNET_4_5]: "claude-sonnet-4.5",
 	[CLAUDE_MODEL_IDS.SONNET_4_6]: "claude-sonnet-4.6",
+	[CLAUDE_MODEL_IDS.SONNET_5]: "claude-sonnet-5",
 	[CLAUDE_MODEL_IDS.HAIKU_4_5]: "claude-haiku-4.5",
 	[CLAUDE_MODEL_IDS.OPUS_4]: "claude-opus-4",
 	[CLAUDE_MODEL_IDS.OPUS_4_1]: "claude-opus-4.1",
 	[CLAUDE_MODEL_IDS.OPUS_4_5]: "claude-opus-4.5",
 	[CLAUDE_MODEL_IDS.OPUS_4_6]: "claude-opus-4.6",
 	[CLAUDE_MODEL_IDS.OPUS_4_7]: "claude-opus-4.7",
+	[CLAUDE_MODEL_IDS.OPUS_4_8]: "claude-opus-4.8",
+	[CLAUDE_MODEL_IDS.FABLE_5]: "claude-fable-5",
 };
 
 // Latest model aliases — update these when Anthropic releases new models.
 // Check https://docs.anthropic.com/en/docs/about-claude/models for the current list.
-export const LATEST_OPUS_MODEL = CLAUDE_MODEL_IDS.OPUS_4_7;
-export const LATEST_SONNET_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;
+export const LATEST_FABLE_MODEL = CLAUDE_MODEL_IDS.FABLE_5;
+export const LATEST_OPUS_MODEL = CLAUDE_MODEL_IDS.OPUS_4_8;
+export const LATEST_SONNET_MODEL = CLAUDE_MODEL_IDS.SONNET_5;
 export const LATEST_HAIKU_MODEL = CLAUDE_MODEL_IDS.HAIKU_4_5;
 
 // Default model for various contexts
-export const DEFAULT_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;
-export const DEFAULT_AGENT_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;
+export const DEFAULT_MODEL = CLAUDE_MODEL_IDS.SONNET_5;
+export const DEFAULT_AGENT_MODEL = CLAUDE_MODEL_IDS.SONNET_5;
 
 // Type for all valid model IDs
 export type ClaudeModelId =

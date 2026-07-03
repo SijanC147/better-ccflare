@@ -7,7 +7,15 @@ export type RateLimitReason =
 	| "upstream_429_no_reset_default_5h"
 	| "upstream_429_no_reset_probe_cooldown"
 	| "model_fallback_429"
-	| "all_models_exhausted_429";
+	| "all_models_exhausted_429"
+	/** Anthropic 529 overloaded_error with a Retry-After reset time. */
+	| "upstream_529_overloaded_with_reset"
+	/** Anthropic 529 overloaded_error with no Retry-After header; probe cooldown applied. */
+	| "upstream_529_overloaded_no_reset"
+	/** Anthropic 429 with `overage-disabled-reason: out_of_credits` — credits/overage
+	 *  depleted for a specific model/beta (e.g. context-1m); account is NOT benched,
+	 *  request fails over. */
+	| "out_of_credits";
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
@@ -82,13 +90,24 @@ export interface AlibabaCodingPlanUsageData {
 	remainingDays: number | null;
 }
 
+// Usage data types for xAI/Grok accounts
+export interface XaiUsageWindow {
+	utilization: number; // 0-100 Grok Build credits utilization
+	resets_at: string | null; // ISO timestamp when available
+}
+
+export interface XaiUsageData {
+	credits: XaiUsageWindow;
+}
+
 // Combined usage data type that supports all providers
 export type FullUsageData =
 	| AnthropicUsageData
 	| NanoGPTUsageData
 	| ZaiUsageData
 	| KiloUsageData
-	| AlibabaCodingPlanUsageData;
+	| AlibabaCodingPlanUsageData
+	| XaiUsageData;
 
 // Database row types that match the actual database schema
 export interface AccountRow {
@@ -124,6 +143,7 @@ export interface AccountRow {
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	consecutive_rate_limits?: number | null;
 }
 
 // Domain model - used throughout the application
@@ -160,6 +180,7 @@ export interface Account {
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	consecutive_rate_limits: number;
 }
 
 // Session statistics for 5-hour token window
@@ -210,6 +231,7 @@ export interface AccountResponse {
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
 	sessionStats: SessionStats | null;
+	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
 
 // UI display type - used in CLI and web dashboard
@@ -266,6 +288,7 @@ export interface AccountListItem {
 		| "alibaba-coding-plan"
 		| "codex"
 		| "qwen"
+		| "xai"
 		| "ollama"
 		| "ollama-cloud";
 	priority: number;
@@ -286,7 +309,8 @@ export interface AddAccountOptions {
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "bedrock"
-		| "openrouter";
+		| "openrouter"
+		| "xai";
 	priority?: number;
 	customEndpoint?: string;
 }
@@ -339,6 +363,7 @@ export function toAccount(row: AccountRow): Account {
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
+		consecutive_rate_limits: toNum(row.consecutive_rate_limits),
 	};
 }
 
@@ -432,6 +457,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		modelFallbacks,
 		billingType: account.billing_type,
 		sessionStats: null,
+		isPrimary: false,
 	};
 }
 

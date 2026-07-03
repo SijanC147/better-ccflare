@@ -76,6 +76,16 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 3.75,
 				},
 			},
+			[CLAUDE_MODEL_IDS.SONNET_5]: {
+				id: CLAUDE_MODEL_IDS.SONNET_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_5],
+				cost: {
+					input: 3,
+					output: 15,
+					cache_read: 0.3,
+					cache_write: 3.75,
+				},
+			},
 			[CLAUDE_MODEL_IDS.OPUS_4]: {
 				id: CLAUDE_MODEL_IDS.OPUS_4,
 				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_4],
@@ -114,6 +124,36 @@ const BUNDLED_PRICING: ApiResponse = {
 					output: 25,
 					cache_read: 0.5,
 					cache_write: 6.25,
+				},
+			},
+			[CLAUDE_MODEL_IDS.OPUS_4_7]: {
+				id: CLAUDE_MODEL_IDS.OPUS_4_7,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_4_7],
+				cost: {
+					input: 5,
+					output: 25,
+					cache_read: 0.5,
+					cache_write: 6.25,
+				},
+			},
+			[CLAUDE_MODEL_IDS.OPUS_4_8]: {
+				id: CLAUDE_MODEL_IDS.OPUS_4_8,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_4_8],
+				cost: {
+					input: 5,
+					output: 25,
+					cache_read: 0.5,
+					cache_write: 6.25,
+				},
+			},
+			[CLAUDE_MODEL_IDS.FABLE_5]: {
+				id: CLAUDE_MODEL_IDS.FABLE_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.FABLE_5],
+				cost: {
+					input: 10,
+					output: 50,
+					cache_read: 1,
+					cache_write: 12.5,
 				},
 			},
 		},
@@ -219,6 +259,7 @@ class PriceCatalogue {
 	private priceData: ApiResponse | null = null;
 	private lastFetch = 0;
 	private warnedModels = new Set<string>();
+	private warnedRatesUnknownModels = new Set<string>();
 	private logger: Logger | null = null;
 
 	private constructor() {}
@@ -510,6 +551,54 @@ class PriceCatalogue {
 			}
 		}
 	}
+
+	/**
+	 * Warn once that a model has no usable rates. Unlike warnOnce, the message
+	 * reflects that cache savings are reported as unknown rather than 0.
+	 */
+	private warnRatesUnknownOnce(modelId: string): void {
+		if (this.warnedRatesUnknownModels.has(modelId)) return;
+		this.warnedRatesUnknownModels.add(modelId);
+		this.logger?.warn(
+			"Price for model %s not found - cache savings reported as unknown",
+			modelId,
+		);
+	}
+
+	/**
+	 * Get the per-model pricing rates in dollars per 1M tokens.
+	 * @returns Rates for the model, or null if the model is unknown
+	 */
+	async getModelRates(modelId: string): Promise<ModelRates | null> {
+		const model = await findModel(modelId);
+		const cost = model?.cost;
+		if (
+			!cost ||
+			typeof cost.input !== "number" ||
+			!Number.isFinite(cost.input) ||
+			typeof cost.output !== "number" ||
+			!Number.isFinite(cost.output)
+		) {
+			// Missing or malformed catalogue data (remote catalogues are not
+			// validated) - treat as unknown pricing rather than emitting NaN.
+			this.warnRatesUnknownOnce(modelId);
+			return null;
+		}
+
+		return {
+			input: cost.input,
+			output: cost.output,
+			cacheRead:
+				typeof cost.cache_read === "number" && Number.isFinite(cost.cache_read)
+					? cost.cache_read
+					: null,
+			cacheWrite:
+				typeof cost.cache_write === "number" &&
+				Number.isFinite(cost.cache_write)
+					? cost.cache_write
+					: null,
+		};
+	}
 }
 
 /**
@@ -724,6 +813,22 @@ export function setPricingLogger(logger: Logger): void {
 }
 
 /**
+ * Find a model definition in the pricing catalogue across all providers
+ */
+async function findModel(modelId: string): Promise<ModelDef | null> {
+	const pricing = await PriceCatalogue.get().getPricing();
+
+	// Search all providers for the model
+	for (const provider of Object.values(pricing)) {
+		if (provider.models?.[modelId]) {
+			return provider.models[modelId];
+		}
+	}
+
+	return null;
+}
+
+/**
  * Get the cost rate for a specific model and token type
  * @returns Cost in dollars per token (NOT per million)
  * @throws If model or cost type is unknown
@@ -732,35 +837,39 @@ async function getCostRate(
 	modelId: string,
 	kind: "input" | "output" | "cache_read" | "cache_write",
 ): Promise<number> {
-	const catalogue = PriceCatalogue.get();
-	const pricing = await catalogue.getPricing();
-
-	// Search all providers for the model
-	for (const provider of Object.values(pricing)) {
-		if (provider.models?.[modelId]) {
-			const model = provider.models[modelId];
-			if (!model.cost) {
-				throw new Error(`Model ${modelId} has no cost information`);
-			}
-
-			const costKey =
-				kind === "cache_read" || kind === "cache_write"
-					? kind
-					: kind === "input"
-						? "input"
-						: "output";
-			const costPerMillion = model.cost[costKey];
-
-			if (costPerMillion === undefined) {
-				throw new Error(`Model ${modelId} has no ${kind} cost`);
-			}
-
-			// Convert from per-million to per-token
-			return costPerMillion / 1_000_000;
-		}
+	const model = await findModel(modelId);
+	if (!model) {
+		throw new Error(`Model ${modelId} not found in pricing catalogue`);
+	}
+	if (!model.cost) {
+		throw new Error(`Model ${modelId} has no cost information`);
 	}
 
-	throw new Error(`Model ${modelId} not found in pricing catalogue`);
+	const costPerMillion = model.cost[kind];
+
+	if (costPerMillion === undefined) {
+		throw new Error(`Model ${modelId} has no ${kind} cost`);
+	}
+
+	// Convert from per-million to per-token
+	return costPerMillion / 1_000_000;
+}
+
+export interface ModelRates {
+	input: number; // $ per 1M tokens
+	output: number; // $ per 1M tokens
+	cacheRead: number | null;
+	cacheWrite: number | null;
+}
+
+/**
+ * Get the per-model pricing rates in dollars per 1M tokens
+ * @returns Rates for the model, or null if the model is unknown
+ */
+export async function getModelRates(
+	modelId: string,
+): Promise<ModelRates | null> {
+	return PriceCatalogue.get().getModelRates(modelId);
 }
 
 /**

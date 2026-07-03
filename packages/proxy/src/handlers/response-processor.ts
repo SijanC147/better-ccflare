@@ -1,4 +1,4 @@
-import { logError, RateLimitError, TIME_CONSTANTS } from "@better-ccflare/core";
+import { getRateLimitResetStabilityMs, logError } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
 	type Provider,
@@ -7,38 +7,48 @@ import {
 } from "@better-ccflare/providers";
 import type { Account, RateLimitReason } from "@better-ccflare/types";
 import type { ProxyContext } from "./proxy-types";
+import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 
 const log = new Logger("ResponseProcessor");
+
+function isSyntheticCountTokensRequest(
+	ctx: ProxyContext,
+	requestMeta?: { path?: string },
+): boolean {
+	return (
+		requestMeta?.path === "/v1/messages/count_tokens" &&
+		(ctx.provider.name === "openai-compatible" || ctx.provider.name === "codex")
+	);
+}
 
 /**
  * Handles rate limit response for an account
  * @param account - The rate-limited account
  * @param rateLimitInfo - Parsed rate limit information
  * @param ctx - The proxy context
+ * @param status - HTTP status code of the triggering response (429 or 529). Defaults to 429.
  */
 export function handleRateLimitResponse(
 	account: Account,
 	rateLimitInfo: ReturnType<Provider["parseRateLimit"]>,
 	ctx: ProxyContext,
+	status = 429,
 ): void {
 	if (!rateLimitInfo.resetTime) return;
 
-	const resetTime = rateLimitInfo.resetTime;
-	const reason: RateLimitReason = "upstream_429_with_reset";
-	account.rate_limited_until = resetTime;
-	ctx.asyncWriter.enqueue(() => {
-		log.warn(
-			`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(resetTime).toISOString()}`,
-		);
-		return ctx.dbOps.markAccountRateLimited(account.id, resetTime, reason);
-	});
-
-	const rateLimitError = new RateLimitError(
-		account.id,
-		rateLimitInfo.resetTime,
-		rateLimitInfo.remaining,
+	const reason: RateLimitReason =
+		status === 529
+			? "upstream_529_overloaded_with_reset"
+			: "upstream_429_with_reset";
+	applyRateLimitCooldown(
+		account,
+		{
+			resetTime: rateLimitInfo.resetTime,
+			remaining: rateLimitInfo.remaining,
+			reason,
+		},
+		ctx,
 	);
-	logError(rateLimitError, log);
 }
 
 /**
@@ -220,7 +230,7 @@ export async function processProxyResponse(
 	account: Account,
 	ctx: ProxyContext,
 	requestId?: string,
-	requestMeta?: { headers?: Headers },
+	requestMeta?: { headers?: Headers; path?: string },
 ): Promise<boolean> {
 	let rateLimitInfo = ctx.provider.parseRateLimit(response);
 
@@ -280,36 +290,19 @@ export async function processProxyResponse(
 			requestMeta?.headers?.get("x-better-ccflare-keepalive") === "true";
 		if (isKeepalive) {
 			log.warn(
-				`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
+				`Keepalive replay for ${account.name} got ${response.status} — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
 			);
 		} else if (rateLimitInfo.resetTime) {
-			handleRateLimitResponse(account, rateLimitInfo, ctx);
+			handleRateLimitResponse(account, rateLimitInfo, ctx, response.status);
 		} else {
-			// Mark as rate-limited even without reset time. Use a short
-			// probe-friendly cooldown (default 60s, override via
-			// CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) instead of the previous
-			// 5h hard-ban: a reset-less 429 is more likely a transient than
-			// a real rate-limit window, and a 5h ban on every transient
-			// error chains pool exhaustion under burst load.
-			const cooldownMs =
-				Number(process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) ||
-				TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS;
-			log.warn(
-				`Account ${account.name} rate-limited but no reset time available — applying ${cooldownMs}ms probe cooldown`,
-			);
-			const cooldownUntil = Date.now() + cooldownMs;
-			account.rate_limited_until = cooldownUntil;
-			ctx.asyncWriter.enqueue(() => {
-				const reason: RateLimitReason = "upstream_429_no_reset_probe_cooldown";
-				log.warn(
-					`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()}`,
-				);
-				return ctx.dbOps.markAccountRateLimited(
-					account.id,
-					cooldownUntil,
-					reason,
-				);
-			});
+			// Mark as rate-limited even without reset time. Route through
+			// applyRateLimitCooldown so the consecutive counter ramps correctly
+			// even for reset-less 429s.
+			const reason: RateLimitReason =
+				response.status === 529
+					? "upstream_529_overloaded_no_reset"
+					: "upstream_429_no_reset_probe_cooldown";
+			applyRateLimitCooldown(account, { reason }, ctx);
 		}
 		// Also update metadata for rate-limited responses
 		const bypassSession =
@@ -318,28 +311,47 @@ export async function processProxyResponse(
 		return true; // Signal rate limit
 	}
 
-	// Update account metadata in background
-	const bypassSession =
-		requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
-	updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+	const skipAccountMetadata = isSyntheticCountTokensRequest(ctx, requestMeta);
+	if (!skipAccountMetadata) {
+		// Update account metadata in background
+		const bypassSession =
+			requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
+		updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+	}
 
-	// Clear rate_limited_until on any successful upstream response. We clear unconditionally
-	// (even if the timestamp is still in the future) because a successful response proves the
-	// account is usable — e.g. after a seat reassignment that resets usage mid-window before
-	// the stored expiry fires. Only enqueue the DB write when the in-memory account object
-	// already carries a rate_limited_until value to avoid overhead on every normal request.
-	if (!rateLimitInfo.isRateLimited && account.rate_limited_until) {
-		account.rate_limited_until = null;
-		ctx.asyncWriter.enqueue(async () => {
-			const db = ctx.dbOps.getAdapter();
-			await db.run(
-				"UPDATE accounts SET rate_limited_until = NULL WHERE id = ? AND rate_limited_until IS NOT NULL",
-				[account.id],
+	if (!rateLimitInfo.isRateLimited && !skipAccountMetadata) {
+		// (a) Stability reset — gated only on rate_limited_at.
+		// clearExpiredRateLimits nulls rate_limited_until without touching rate_limited_at,
+		// so we must not gate on rate_limited_until or we'd miss accounts already cleared
+		// by that job.
+		if (
+			account.rate_limited_at &&
+			Date.now() - account.rate_limited_at > getRateLimitResetStabilityMs()
+		) {
+			account.consecutive_rate_limits = 0;
+			account.rate_limited_at = null;
+			ctx.asyncWriter.enqueue(() =>
+				ctx.dbOps.resetConsecutiveRateLimits(account.id),
 			);
-			log.debug(
-				`Cleared rate_limited_until for account ${account.name} on successful response`,
-			);
-		});
+		}
+
+		// (b) Clear rate_limited_until on any successful upstream response. We clear
+		// unconditionally (even if the timestamp is still in the future) because a
+		// successful response proves the account is usable — e.g. after a seat
+		// reassignment that resets usage mid-window before the stored expiry fires.
+		if (account.rate_limited_until) {
+			account.rate_limited_until = null;
+			ctx.asyncWriter.enqueue(async () => {
+				const db = ctx.dbOps.getAdapter();
+				await db.run(
+					"UPDATE accounts SET rate_limited_until = NULL WHERE id = ? AND rate_limited_until IS NOT NULL",
+					[account.id],
+				);
+				log.debug(
+					`Cleared rate_limited_until for account ${account.name} on successful response`,
+				);
+			});
+		}
 	}
 
 	return false;
