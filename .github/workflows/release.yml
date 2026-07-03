@@ -126,7 +126,7 @@ jobs:
           ### 🍺 Install via Homebrew (macOS)
 
           \`\`\`bash
-          brew tap seanbugeja/hextap
+          brew tap sean/hextap https://github.com/SijanC147/homebrew-hextap
           brew install better-ccflare
           \`\`\`
 
@@ -381,7 +381,6 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           GH_PAT: op://CICD/GH_PAT/credential
-          GITEA_TOKEN: op://CICD/Gitea/access_token
 
       - name: Prepare version
         id: version
@@ -498,12 +497,14 @@ jobs:
           echo "Generated formula:"
           cat /tmp/better-ccflare.rb
 
-      - name: Push to Gitea tap
+      - name: Push to GitHub tap
         run: |
-          # Clone the tap repo
+          # Clone the tap repo (private GitHub mirror; the former Gitea host at
+          # git.seanbugeja.me was decommissioned). GH_PAT is loaded from 1Password
+          # above and needs `repo` scope on SijanC147/homebrew-hextap.
           WORK_DIR=$(mktemp -d)
           git clone --depth 1 --branch main \
-            "https://oauth2:${GITEA_TOKEN}@git.seanbugeja.me/Sean/homebrew-hextap.git" \
+            "https://x-access-token:${GH_PAT}@github.com/SijanC147/homebrew-hextap.git" \
             "$WORK_DIR/tap"
 
           cd "$WORK_DIR/tap"
@@ -526,7 +527,7 @@ jobs:
           else
             git commit -m "Update better-ccflare to ${{ steps.version.outputs.version }}"
             git push origin main
-            echo "✅ Pushed formula to Gitea tap"
+            echo "✅ Pushed formula to GitHub tap"
           fi
 
           # Cleanup
@@ -540,7 +541,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Users can now install with:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "brew tap seanbugeja/hextap" >> $GITHUB_STEP_SUMMARY
+          echo "brew tap sean/hextap https://github.com/SijanC147/homebrew-hextap" >> $GITHUB_STEP_SUMMARY
           echo "brew install better-ccflare" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
