@@ -2,7 +2,10 @@ export const queryKeys = {
 	all: ["better-ccflare"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
 	agents: () => [...queryKeys.all, "agents"] as const,
-	stats: () => [...queryKeys.all, "stats"] as const,
+	stats: (errorsSinceHours?: number) =>
+		errorsSinceHours !== undefined
+			? ([...queryKeys.all, "stats", { errorsSinceHours }] as const)
+			: ([...queryKeys.all, "stats"] as const),
 	analytics: (
 		timeRange?: string,
 		filters?: unknown,
@@ -25,4 +28,6 @@ export const queryKeys = {
 	worktreeRules: () => [...queryKeys.all, "worktree-rules"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,
 	families: () => [...queryKeys.all, "families"] as const,
+	apiKeys: () => [...queryKeys.all, "api-keys"] as const,
+	storage: () => [...queryKeys.all, "storage"] as const,
 } as const;

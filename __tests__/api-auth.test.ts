@@ -219,6 +219,38 @@ describe("API Authentication", () => {
 			).toBe(false);
 		});
 
+		test("should exempt /api/version/check from authentication", async () => {
+			// Version check returns only the latest npm-published version (public data).
+			// The sidebar tile fires this on dashboard load with no API key in headers,
+			// so it must be reachable even when auth is enabled.
+			expect(authService.isStaticPathExempt("/api/version/check")).toBe(true);
+			expect(await authService.isPathExempt("/api/version/check", "GET")).toBe(true);
+		});
+
+		test("should allow /api/version/check without API key when auth is enabled", async () => {
+			// Reproduces the user-visible bug: with at least one API key configured,
+			// fetch("/api/version/check") from the dashboard returned 401 because the
+			// path was treated as a normal /api/* route requiring auth.
+			await generateApiKey(dbOps, "version-check-test-key", "admin");
+			expect(await authService.isAuthenticationEnabled()).toBe(true);
+
+			const request = new Request("http://localhost:8080/api/version/check");
+			const result = await authService.authenticateRequest(
+				request,
+				"/api/version/check",
+				"GET",
+			);
+
+			expect(result.isAuthenticated).toBe(true);
+			expect(result.error).toBeUndefined();
+		});
+
+		// NOTE: upstream's "should exempt static assets from authentication"
+		// test was intentionally NOT adopted — it asserts the blanket non-/api
+		// static exemption the fork removed for Codex P1. The fork serves static
+		// assets at the server layer *before* auth; if they reach isPathExempt
+		// the dashboard is unavailable and they must be authenticated. The
+		// fork's contradicting test below is authoritative.
 		test("static-asset-looking paths are NOT exempt at the auth layer", async () => {
 			// Served from the dashboard manifest before auth when the
 			// dashboard is available; if they reach the auth layer the

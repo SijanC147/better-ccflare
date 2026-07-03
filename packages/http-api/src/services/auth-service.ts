@@ -135,6 +135,17 @@ export class AuthService {
 		// allowed any unauthenticated caller to overwrite stored account
 		// tokens when dashboard auth was configured (Codex P1).
 
+		// Version check returns only the latest npm-published version. The
+		// dashboard's sidebar tile fires this on load with no API key in
+		// headers, so it must be reachable whether or not auth is enabled.
+		// (Adopted from upstream — read-only public data, no secrets; does
+		// NOT weaken the Codex P1 token-mutating-endpoint gating above. The
+		// upstream blanket /api/oauth + non-/api fallthrough exemptions were
+		// deliberately rejected — they reintroduce the Codex P1 vuln.)
+		if (path === "/api/version/check") {
+			return true;
+		}
+
 		// IMPORTANT: do NOT blanket-exempt "any non-/api, non-/v1 path".
 		// The dashboard SPA and its static assets are served by the server
 		// (apps/server/src/server.ts) *before* authentication is consulted —
