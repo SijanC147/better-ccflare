@@ -19,6 +19,7 @@ packages/proxy/src/embedded-tiktoken-wasm.ts
 packages/database/src/inline-vacuum-worker.ts
 packages/database/src/inline-incremental-vacuum-worker.ts
 CLAUDE.md
+CLAUDE.original.md
 AGENTS.md
 .omc/
 # Disallow .sh files except in .github/scripts/

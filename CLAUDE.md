@@ -1,14 +1,14 @@
 # better-ccflare
 
-Load balancer proxy for Claude Code distributing requests across multiple account providers for optimal rate limit management.
+Load balancer proxy for Claude Code. Spreads requests across many account providers → optimal rate limit management.
 
 ## CRITICAL: Account & File Safety
 
-**Testing Endpoint**: Always use non-Anthropic accounts (ollama, litellm, omniroute, etc.) for automated/scripted testing. Real Anthropic accounts get banned for automated usage. The `claude` account is reserved for real Claude Code usage only. Force-route testing via `x-better-ccflare-account-id` header.
+**Testing Endpoint**: Automated/scripted testing → use non-Anthropic accounts (ollama, litellm, omniroute, etc.). Real Anthropic accounts get banned for automated usage. The `claude` account is reserved for real Claude Code usage only. Force-route testing via `x-better-ccflare-account-id` header.
 
 **Protected Files**:
-- `inline-worker.ts` is auto-generated — always exclude from all reads, edits, searches, and commits. Recovery: `git checkout -- packages/proxy/src/inline-worker.ts`
-- Always modify only `./README.md` (root). Keep `apps/cli/README.md` untouched.
+- `inline-worker.ts` auto-generated — always exclude from all reads, edits, searches, commits. Recovery: `git checkout -- packages/proxy/src/inline-worker.ts`
+- Modify only `./README.md` (root). Keep `apps/cli/README.md` untouched.
 
 ## Quick Start
 
@@ -21,12 +21,12 @@ bun run lint && bun run typecheck && bun run format
 
 **Git safety**:
 - `git status` before any changes — track pre-existing uncommitted files
-- Feature branches only (`git checkout -b feature/name`); never change main directly
-- This repo has both a `main` branch and a `main` tag. **Always use `refs/heads/main`** (not bare `main`) for git log/diff/checkout/merge-base to avoid ambiguous-refspec errors
+- Feature branches only (`git checkout -b feature/name`); never touch main directly
+- Repo has both a `main` branch and a `main` tag. **Always use `refs/heads/main`** (not bare `main`) for git log/diff/checkout/merge-base → avoid ambiguous-refspec errors
 - Push branch: `git push origin refs/heads/main:refs/heads/main` (branch/tag collision workaround)
 - Commit: `git add <specific-files>` only (preserves inline-worker.ts)
 
-**Version** — Release system handles version bumps. Update `package.json`, `apps/cli/package.json`, and `packages/core/src/version.ts` only if explicitly instructed.
+**Version** — Release system handles version bumps. Update `package.json`, `apps/cli/package.json`, `packages/core/src/version.ts` only if explicitly instructed.
 
 ## ⚠️ Database Migrations — Port to PostgreSQL
 
@@ -43,11 +43,9 @@ New tables go in `ensureSchemaPg()` AND `runMigrationsPg()` (`CREATE TABLE IF NO
 
 **New functionality** — Write tests first, then implement, then run tests.
 
-**Multi-task sessions** — Spawn subagents for independent work (code changes, research, testing, exploration). Sequential execution wastes context.
+**Multi-task sessions & plans** — Spawn subagents for independent work (code, research, testing, exploration); fresh subagent per task. Sequential execution wastes context.
 
-**Implementation plans** — Use subagent-driven development, dispatch fresh subagents per task.
-
-**External-contributor PRs** — Merge with `git merge --no-ff <branch>` (preserve contributor history), then add them to README Acknowledgements.
+**External-contributor PRs** — Merge with `git merge --no-ff <branch>` (preserve contributor history), then add to README Acknowledgements.
 
 **Issue management** — Never close issues automatically; wait for reporter confirmation. Before implementing an issue, run `git log refs/heads/main --since='<issue-open-date>' --oneline --no-merges -- <paths>` and confirm it still applies given recent changes (rate-limit/health/proxy code changes often).
 
@@ -56,7 +54,7 @@ New tables go in `ensureSchemaPg()` AND `runMigrationsPg()` (`CREATE TABLE IF NO
 **Server**:
 - First run: `bun run build`
 - Dev: `bun start --serve --port 8081` (test on 8081, not production 8082)
-- Startup takes ~15s; wait before testing
+- Startup ~15s; wait before testing
 
 **Account management**:
 ```bash
@@ -68,7 +66,7 @@ bun run cli --set-priority <name> <priority>
 bun run cli --reset-stats
 ```
 
-**Testing OpenRouter**: Use model `z-ai/glm-4.5-air:free`
+**Testing OpenRouter**: Model `z-ai/glm-4.5-air:free`
 ```bash
 curl -X POST http://localhost:8081/v1/messages \
   -H "Content-Type: application/json" \
@@ -78,10 +76,10 @@ curl -X POST http://localhost:8081/v1/messages \
 
 ## More Details
 
-- **Releases & publishing**: See `.claude/docs/release.md`
-- **CLI & account setup**: See `.claude/docs/cli-commands.md`
-- **Database configuration**: See `.claude/docs/database.md`
-- **GitNexus code intelligence**: See `.claude/docs/gitnexus.md`
+- **Releases & publishing**: `.claude/docs/release.md`
+- **CLI & account setup**: `.claude/docs/cli-commands.md`
+- **Database configuration**: `.claude/docs/database.md`
+- **GitNexus code intelligence**: `.claude/docs/gitnexus.md`
 
 ## Linear (canonical task tracking)
 
