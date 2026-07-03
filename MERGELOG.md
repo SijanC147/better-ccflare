@@ -5,18 +5,123 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: ab677460330802078167f1ca4b5c0e84f545420b -->
+<!-- last-sync-sha: 412e63266475dd5b8ec485a8d8f5778586172bfd -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-07-03 | main | `ab677460..412e6326` | 206 | 23 files | merge --no-ff | pass (1960 tests, 0 fail) | _pending_ |
 | 2026-05-19 | main | `5cdabaa8..ab677460` | 125 | 15 files | merge --no-ff | pass (1582 tests, 0 fail) | [#32](https://github.com/SijanC147/better-ccflare/pull/32) |
 | 2026-05-17 | main | `3c08c994..5cdabaa8` | 195 | 4 git + 4 semantic | merge --no-ff | pass (1291 tests, 0 fail) | [#27](https://github.com/SijanC147/better-ccflare/pull/27) |
 
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-07-03 — upstream/main sync
+
+- **Upstream**: https://github.com/tombii/better-ccflare branch `main`
+- **SHA range**: `ab677460330802078167f1ca4b5c0e84f545420b..412e63266475dd5b8ec485a8d8f5778586172bfd`
+- **Commits integrated**: 206 across 8 parallel analysis buckets
+- **Local-only commits preserved**: 72 (fork-specific work, none dropped)
+- **Strategy**: merge --no-ff
+- **Verification**: build ✅ · typecheck ✅ (0 errors) · biome ✅ (27 errors — all pre-existing fork-file debt SB23-313; net −1 vs baseline 28, zero new) · tests ✅ (1960 pass, 0 fail; non-zero exit only from pre-existing SB23-314 teardown unhandled rejections)
+
+### Central architectural change
+
+Adopted upstream's **worker → main-thread `UsageCollector`** migration wholesale
+(fixes a real Bun memory leak, oven-sh/bun#5709 — structured-clone `postMessage`
+buffers never reclaimed, ~0.85 MB RSS growth/request). Public proxy API renamed
+`getUsageWorker*`/`sendWorkerConfigUpdate` → `initProxy`/`drainUsageCollector`/
+`getUsageCollectorHealth`. Deleted `post-processor.worker.ts` +
+`usage-worker-controller.ts`; retired the auto-generated `inline-worker.ts` +
+`embedded-tiktoken-wasm.ts` embedding (apps/cli `build-multi-arch.ts` simplified to match).
+
+**Re-injected fork features into the new collector** (`usage-collector.ts`), which
+upstream's rewrite dropped:
+- dual `x-ccflare-project` / `X-CCFlare-Project` case-insensitive header (upstream's
+  `extractProjectFromRequest` only read `x-project`)
+- `headersOnly` storage mode — threaded `getHeadersOnly` server → proxy → collector,
+  consulted in `_handleEndInternal`; the live per-request getter replaces the old
+  worker config-push, so config hot-reload still works
+- `project_id` / `worktree_path` attribution persisted via `saveRequest`
+  (ResolverManager resolution flows on `StartMessage`)
+
+### Notable features brought in
+
+- **openai-responses-adapter** (new package): Codex CLI `/v1/responses` → Anthropic
+  Messages translation; wired into apps/server with WebSocket-upgrade 503 + decompression
+- **xAI/Grok** OAuth provider (`packages/providers/xai`, CLI `--mode xai`, types/
+  constants); the fork's qwen-only proactive refresh was generalized into upstream's
+  `checkAndRefreshOpenAICompatibleOAuthTokens` (`provider IN ('qwen','xai')`)
+- **Insights + Alerts** subsystem (dashboard `/insights` tab, http-api handlers +
+  services, `alerts` table, SSE stream, nav badge)
+- **Analytics** URL-state persistence + shared `buildRequestFilters`; the fork's
+  **projects filter** preserved by extending the shared builder + URL-state (de)serialization
+- **SessionAffinity** load-balancer strategy + new required `peek()` on the strategy
+  interface; **Anthropic 529/overloaded** cooldown + **out_of_credits** per-request
+  failover; Codex count_tokens/role-mapping/input-sanitization; Sonnet 5 / Opus 4.8 /
+  Fable 5 model support
+- **Accounts** `isPrimary` (via `strategy.peek()`) replacing lastUsed semantics;
+  `consecutive_rate_limits` + `pause_reason` columns (SQLite + PG parity intact)
+
+### Security — recurring Codex-P1 guard held
+
+Upstream did **not** reintroduce blanket auth exemptions in this range; kept the fork's
+`auth-service.ts` hardening (only `/health` + `/api/version/check` statically exempt;
+GET oauth status exempt; token-mutating oauth gated to admin keys). Adopted only
+upstream's safe `prefixLast8` scrypt short-circuit (runs *after* the exemption check, so
+it cannot widen what is unauthenticated). Restored the graceful HTTP-drain shutdown block
+(`SHUTDOWN_WATCHDOG_MS`, `isShuttingDown` guard, `serverInstance.stop()`) that upstream
+commit `cc7be6ae` **accidentally deleted** as an unrelated side effect; sequenced
+HTTP-drain → collector-drain.
+
+### Conflicts (23) — rule applied
+
+| File | Rule | Rationale |
+|------|------|-----------|
+| `CLAUDE.md` | keep-ours | fork-owned (caveman-compressed) config |
+| `package.json`, `apps/cli/package.json` | keep-ours version | fork versions independently (`3.8.0`) |
+| `apps/cli/build-multi-arch.ts` | take-upstream | drops retired tiktoken + post-processor embed |
+| `apps/cli/src/main.ts` | union | fork qwen/openrouter/ollama-cloud + upstream xai modes |
+| `packages/config/src/index.ts` | union | fork PG-config methods + upstream alert-config methods |
+| `packages/proxy/src/proxy.ts` | take-upstream + re-inject | UsageCollector API + dual-header + headersOnly plumbing |
+| `packages/proxy/src/response-handler.ts` | take-upstream | new teeStream pipeline (256KB cap native upstream); project attribution auto-merged |
+| `packages/proxy/src/post-processor.worker.ts` | delete | superseded by `usage-collector.ts` |
+| `packages/proxy/src/handlers/account-selector.ts` | merge | upstream `applyExclusions` + fork combo-stamp guard (Codex P2) |
+| `packages/proxy/src/auto-refresh-scheduler.ts` | merge | fork guarded `sendDummyMessage` + upstream openai-compat refresh; qwen subsumed |
+| `apps/server/src/server.ts` | take-upstream + replay | UsageCollector/responses routing + fork PG-bridge/DiscoveryScheduler/auth-order + restored shutdown drain |
+| `packages/http-api/src/router.ts` | union | fork projects/worktree routes + upstream insights/alerts routes |
+| `packages/http-api/src/handlers/analytics.ts` | take-upstream | shared `buildRequestFilters` (+projects added into it) |
+| `packages/http-api/src/handlers/__tests__/health-runtime.test.ts` | take-upstream | identical fields, reordered |
+| `packages/database/src/database-operations.ts` | union imports | ResolverManager + BunSqlAdapter/PG_CLIENT_QUERY_TIMEOUT_MS |
+| `packages/dashboard-web/src/api.ts`, `hooks/queries.ts` | union | fork PG/projects methods + upstream alerts methods |
+| `.../accounts/AccountList.tsx` | take-upstream + replay | `isPrimary` sort (was `mostRecentAccountId`) + fork toggles |
+| `.../accounts/AccountListItem.tsx` | merge | keep `compact` + `isPrimary`, drop `isActive` |
+| `.../components/navigation.tsx` | union | fork Projects nav + upstream Insights nav (both imports) |
+| `.../components/AnalyticsTab.tsx` | take-upstream + preserve | `useAnalyticsUrlState` + fork projects filter |
+| `bun.lock` | regenerate | `bun install` (adds `openai-responses-adapter` workspace) |
+
+Follow-up commit `46bfe56f` fixed 3 analytics-url-state tests (guarded the optional
+`projects` filter; updated upstream fixtures for the fork's projects dimension).
+
+### Preserved local-only fork commits (72)
+
+Fork history since the merge-base is retained unchanged — projects/worktree discovery
+(#30), UI+backend batch (#29), Codex-P1 auth hardening (#28), the 2026-05-17 and
+2026-05-19 upstream syncs (#27, #32), dashboard customizations (color chips, collapsible
+sidebar, per-project grouping, 24h toggle), PostgreSQL backend, and the CLAUDE.md/Linear
+docs work.
+
+### Follow-ups
+
+- `.github/workflows/**` kept-ours (fork CI intentionally minimal). Optional: cherry-pick
+  upstream's `actions/checkout@v5` / `setup-bun@v2` bumps into the fork's active `release.yml`.
+- `packages/proxy/src/inline-worker.ts` (auto-generated) is now orphaned in the tree — no
+  longer built or imported after the collector migration; harmless. Its CLAUDE.md
+  protected-file note is now historical.
+- Pre-existing tech debt unchanged: SB23-313 (biome), SB23-314 (test teardown unhandled rejections).
 
 ## 2026-05-19 — upstream/main sync
 
