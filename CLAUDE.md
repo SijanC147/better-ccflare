@@ -83,6 +83,17 @@ curl -X POST http://localhost:8081/v1/messages \
 - **Database configuration**: See `.claude/docs/database.md`
 - **GitNexus code intelligence**: See `.claude/docs/gitnexus.md`
 
+## Linear (canonical task tracking)
+
+- `linear_project`: better-ccflare — id `4317856f-1f0f-449a-b311-c211d5fc6528`, team `SB23`
+- URL: https://linear.app/sb23/project/better-ccflare-9139ce4ab6ff
+- `linear_last_sync`: 2026-07-03T11:12Z @ acfd2c0e
+
+## Next Actions
+
+- Backlog: `SB23-313` (28 pre-existing biome lint errors), `SB23-314` (9 bun-test teardown unhandled rejections) — both non-blocking tech debt
+- Upstream sync PR #32 merged to main (SB23-311). Next `/sync-upstream` anchor: `last-sync-sha ab677460` in `MERGELOG.md`
+
 ## Commit Message Categories
 
 Automated release system uses prefixes:
