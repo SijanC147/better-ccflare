@@ -80,6 +80,57 @@ describe("handleResponsesRequest", () => {
 		expect(body.output[0].type).toBe("message");
 	});
 
+	test("surfaces Codex CLI session identity as metadata.user_id", async () => {
+		let forwardedBody: Record<string, unknown> | null = null;
+		const mockHandleProxy: HandleProxyFn = async (req2) => {
+			forwardedBody = (await req2.json()) as Record<string, unknown>;
+			return new Response(ANTHROPIC_MESSAGE_BODY, {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const makeReq = (extra: Record<string, unknown>) =>
+			new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "claude-haiku-4-5",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+					stream: false,
+					...extra,
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+
+		// prompt_cache_key is Codex CLI's stable conversation identity; without
+		// surfacing it, /v1/responses traffic is anonymous to the session
+		// governor and load-balancer session affinity.
+		const req = makeReq({ prompt_cache_key: "conv-abc123" });
+		await handleResponsesRequest(req, new URL(req.url), mockHandleProxy, {});
+		expect(
+			(forwardedBody as unknown as { metadata?: { user_id?: string } })
+				?.metadata?.user_id,
+		).toBe("codex-responses-conv-abc123");
+
+		// Without any identity the body stays metadata-free (anonymous).
+		const anonReq = makeReq({});
+		await handleResponsesRequest(
+			anonReq,
+			new URL(anonReq.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(
+			(forwardedBody as unknown as { metadata?: unknown })?.metadata,
+		).toBeUndefined();
+	});
+
 	test("Test 3: error passthrough → if handleProxy returns 429, handler returns 429", async () => {
 		const mockHandleProxy: HandleProxyFn = async () =>
 			new Response("rate limited", { status: 429 });
@@ -190,5 +241,119 @@ describe("handleResponsesRequest", () => {
 		const rawBody = await resp.text();
 		expect(rawBody).toContain("response.created");
 		expect(rawBody).toContain("response.completed");
+	});
+
+	test("streaming custom-tool-call response passes native Responses SSE through unchanged", async () => {
+		const nativeSseBody =
+			"event: response.custom_tool_call\ndata: " +
+			JSON.stringify({
+				type: "response.custom_tool_call",
+				call_id: "call_1",
+				name: "shell",
+			}) +
+			"\n\n" +
+			"event: response.completed\ndata: " +
+			JSON.stringify({
+				type: "response.completed",
+				response: { id: "resp_native", model: "gpt-5.6-sol", output: [] },
+			}) +
+			"\n\n";
+
+		const mockHandleProxy: HandleProxyFn = async () =>
+			new Response(nativeSseBody, {
+				status: 200,
+				headers: {
+					"Content-Type": "text/event-stream",
+					"x-better-ccflare-codex-response-format": "responses-api",
+				},
+			});
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "gpt-5.6-sol",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+				stream: true,
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+
+		expect(resp.headers.get("content-type")).toContain("text/event-stream");
+		expect(
+			resp.headers.get("x-better-ccflare-codex-response-format"),
+		).toBeNull();
+		const rawBody = await resp.text();
+		expect(rawBody).toBe(nativeSseBody);
+	});
+
+	test("non-streaming custom-tool-call response returns the native Responses JSON instead of a 502", async () => {
+		const nativeSseBody =
+			"event: response.custom_tool_call\ndata: " +
+			JSON.stringify({
+				type: "response.custom_tool_call",
+				call_id: "call_1",
+				name: "shell",
+			}) +
+			"\n\n" +
+			"event: response.completed\ndata: " +
+			JSON.stringify({
+				type: "response.completed",
+				response: { id: "resp_native", model: "gpt-5.6-sol", output: [] },
+			}) +
+			"\n\n";
+
+		const mockHandleProxy: HandleProxyFn = async () =>
+			new Response(nativeSseBody, {
+				status: 200,
+				headers: {
+					"Content-Type": "text/event-stream",
+					"x-better-ccflare-codex-response-format": "responses-api",
+				},
+			});
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "gpt-5.6-sol",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+				stream: false,
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+
+		expect(resp.status).toBe(200);
+		expect(resp.headers.get("content-type")).toContain("application/json");
+		const body = await resp.json();
+		expect(body).toEqual({
+			id: "resp_native",
+			model: "gpt-5.6-sol",
+			output: [],
+		});
 	});
 });

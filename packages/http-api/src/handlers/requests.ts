@@ -3,6 +3,14 @@ import type {
 	DatabaseOperations,
 } from "@better-ccflare/database";
 import { jsonResponse } from "@better-ccflare/http-common";
+// Subpath, not the package barrel: these are RUNTIME imports, and evaluating
+// the barrel first trips the documented types↔core cycle (see the header of
+// packages/types/src/request.ts). `types/request` imports nothing.
+import {
+	toAgentAttributionSource,
+	toProjectAttributionSource,
+	toStreamTerminalState,
+} from "@better-ccflare/types/request";
 import type { RequestResponse } from "../types";
 
 const MAX_BODY_PREVIEW_BYTES = 256 * 1024; // 256KB - match response body cap to preserve full conversation history
@@ -63,6 +71,12 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			api_key_name: string | null;
 			billing_type: string | null;
 			combo_name: string | null;
+			original_model: string | null;
+			applied_model: string | null;
+			project_attribution_source: string | null;
+			agent_attribution_source: string | null;
+			client_session_id: string | null;
+			stream_terminal_state: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name
@@ -102,6 +116,24 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			apiKeyName: request.api_key_name || undefined,
 			billingType: request.billing_type || undefined,
 			comboName: request.combo_name || undefined,
+			originalModel: request.original_model || undefined,
+			appliedModel: request.applied_model || undefined,
+			// All three provenance columns are unconstrained TEXT, so each is
+			// narrowed rather than cast — a value the database happens to hold
+			// must not reach consumers under a type claiming it cannot exist.
+			projectAttributionSource: toProjectAttributionSource(
+				request.project_attribution_source,
+			),
+			agentAttributionSource: toAgentAttributionSource(
+				request.agent_attribution_source,
+			),
+			// The real SSE outcome. A truncated or client-cancelled stream still
+			// carries statusCode 200, so this is the only field that tells an
+			// operator the response never actually completed — which is why an
+			// unrecognized value surfaces as "unknown" here instead of vanishing
+			// into the same `undefined` a non-streaming request produces.
+			streamTerminalState: toStreamTerminalState(request.stream_terminal_state),
+			clientSessionId: request.client_session_id || undefined,
 			rateLimited: request.status_code === 429,
 		}));
 
@@ -192,10 +224,23 @@ export function createRequestPayloadHandler(dbOps: DatabaseOperations) {
 		const payload = await dbOps.getRequestPayload(requestId);
 
 		if (!payload) {
-			return new Response(JSON.stringify({ error: "Request not found" }), {
-				status: 404,
-				headers: { "Content-Type": "application/json" },
-			});
+			// A missing payload does not mean the request is unknown. Capture is
+			// optional, and payloads of requests still active after
+			// REQUEST_PAYLOAD_RETENTION_MS are deliberately released to bound
+			// memory — so long-running requests routinely have none while their
+			// row exists. "Request not found" sends people hunting for a request
+			// that is right there.
+			return new Response(
+				JSON.stringify({
+					error: "No payload stored for this request",
+					detail:
+						"The request itself may exist. Payload capture can be disabled, and payloads of long-running requests are released while the request is still active to bound memory.",
+				}),
+				{
+					status: 404,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		}
 
 		return jsonResponse(payload);

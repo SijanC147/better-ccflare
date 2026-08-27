@@ -9,6 +9,7 @@ import type {
 	AgentUpdatePayload,
 	AgentWorkspace,
 	AnalyticsResponse,
+	AnomalyInsightsResponse,
 	CacheInsightsResponse,
 	Combo,
 	ComboFamilyAssignment,
@@ -16,11 +17,13 @@ import type {
 	ComboWithSlots,
 	ContextInsightsResponse,
 	LogEvent,
+	ModelCatalogRefreshResponse,
+	ModelCatalogResponse,
 	Project,
-	ProjectWithChildren,
 	RequestPayload,
 	RequestResponse,
 	StatsWithAccounts,
+	UsageHistoryResponse,
 	WorktreeRule,
 } from "@better-ccflare/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
@@ -70,6 +73,29 @@ export interface StorageInfoResponse {
 	orphan_pages: number | null;
 	last_retention_sweep_at: string | null;
 	null_account_rows_24h: number;
+}
+
+/** One account in a routing observation's order. */
+export interface RoutingObservationAccount {
+	id: string;
+	name: string;
+}
+
+/**
+ * The proxy's last-observed account order for one model family -- display-only
+ * telemetry recorded from the real request path (see
+ * packages/proxy/src/handlers/routing-observations.ts), never a simulation.
+ */
+export interface RoutingObservation {
+	family: string;
+	order: RoutingObservationAccount[];
+	model: string;
+	observedAtMs: number;
+}
+
+/** Response from `GET /api/routing/observations`. */
+export interface RoutingObservationsResponse {
+	observations: Record<string, RoutingObservation>;
 }
 
 /**
@@ -163,18 +189,6 @@ class API extends HttpClient {
 	 */
 	clearApiKey(): void {
 		localStorage.removeItem(API.API_KEY_STORAGE_KEY);
-	}
-
-	/**
-	 * Append the stored API key as a query param to an SSE URL.
-	 * EventSource has no header API, so the dashboard authenticates
-	 * streams via `?api_key=`. Returns the URL unchanged when no key.
-	 */
-	appendApiKeyToUrl(url: string): string {
-		const key = this.getApiKey();
-		if (!key) return url;
-		const sep = url.includes("?") ? "&" : "?";
-		return `${url}${sep}api_key=${encodeURIComponent(key)}`;
 	}
 
 	/**
@@ -272,6 +286,7 @@ class API extends HttpClient {
 			| "console"
 			| "zai"
 			| "minimax"
+			| "deepseek"
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
@@ -561,6 +576,38 @@ class API extends HttpClient {
 		}
 	}
 
+	async addDeepseekAccount(data: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}): Promise<{ message: string; account: Account }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/deepseek";
+
+		this.logger.debug(`→ POST ${url}`, { data });
+
+		try {
+			const response = await this.post<{ message: string; account: Account }>(
+				url,
+				data,
+			);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async addVertexAIAccount(data: {
 		name: string;
 		projectId: string;
@@ -684,6 +731,39 @@ class API extends HttpClient {
 		}
 	}
 
+	async addMetaAccount(data: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		customEndpoint?: string;
+		modelMappings?: { [key: string]: string };
+	}): Promise<{ message: string; account: Account }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/meta";
+
+		this.logger.debug(`→ POST ${url}`, { data });
+
+		try {
+			const response = await this.post<{ message: string; account: Account }>(
+				url,
+				data,
+			);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async addOllamaAccount(data: {
 		name: string;
 		priority: number;
@@ -748,9 +828,13 @@ class API extends HttpClient {
 		}
 	}
 
-	async removeAccount(name: string, confirm: string): Promise<void> {
+	async removeAccount(
+		id: string,
+		_name: string,
+		confirm: string,
+	): Promise<void> {
 		const startTime = Date.now();
-		const url = `/api/accounts/${name}`;
+		const url = `/api/accounts/${id}`;
 
 		this.logger.debug(`→ DELETE ${url}`, { confirm });
 
@@ -815,10 +899,38 @@ class API extends HttpClient {
 	}
 
 	// SSE streaming requires special handling, keep as-is
-	streamLogs(onLog: (log: LogEntry) => void): EventSource {
-		const eventSource = new EventSource(
-			this.appendApiKeyToUrl(`/api/logs/stream`),
+	/**
+	 * Build an authenticated SSE URL by minting a short-lived, single-use
+	 * stream token. EventSource cannot send headers, and the durable API key
+	 * must not travel in a query string (issue #379 — it leaks via browser
+	 * history, Referer, and reverse-proxy access logs). Returns the path
+	 * unchanged when no API key is configured, matching the unauthenticated
+	 * local-use case.
+	 */
+	async streamUrl(path: string): Promise<string> {
+		if (!this.getApiKey()) return path;
+		const { token } = await this.post<{ token: string }>(
+			"/api/logs/stream/token",
 		);
+		return `${path}?stream_token=${encodeURIComponent(token)}`;
+	}
+
+	async streamLogs(onLog: (log: LogEntry) => void): Promise<EventSource> {
+		// The native EventSource API cannot set custom headers, so instead of
+		// passing the durable API key via query string (which risks leaking
+		// it via browser history, Referer headers, or access logs), a
+		// short-lived single-use token is minted first via a normally
+		// authenticated POST request, then passed in the EventSource URL
+		// (#216, #379).
+		const apiKey = this.getApiKey();
+		let url = "/api/logs/stream";
+		if (apiKey) {
+			const { token } = await this.post<{ token: string }>(
+				"/api/logs/stream/token",
+			);
+			url = `/api/logs/stream?stream_token=${encodeURIComponent(token)}`;
+		}
+		const eventSource = new EventSource(url);
 		eventSource.addEventListener("message", (event) => {
 			try {
 				const data = JSON.parse(event.data);
@@ -1001,6 +1113,38 @@ class API extends HttpClient {
 
 		return this.get<CacheInsightsResponse>(
 			`/api/insights/cache?${params.toString()}`,
+		);
+	}
+
+	async getAnomalyInsights(
+		range = "24h",
+		options?: {
+			zScoreThreshold?: number;
+			maxEventsPerDetector?: number;
+		},
+	): Promise<AnomalyInsightsResponse> {
+		const params = new URLSearchParams({ range });
+		if (options?.zScoreThreshold !== undefined) {
+			params.append("zScoreThreshold", String(options.zScoreThreshold));
+		}
+		if (options?.maxEventsPerDetector !== undefined) {
+			params.append(
+				"maxEventsPerDetector",
+				String(options.maxEventsPerDetector),
+			);
+		}
+		return this.get<AnomalyInsightsResponse>(
+			`/api/insights/anomalies?${params.toString()}`,
+		);
+	}
+
+	async getUsageHistory(
+		account: string,
+		range = "24h",
+	): Promise<UsageHistoryResponse> {
+		const params = new URLSearchParams({ account, range });
+		return this.get<UsageHistoryResponse>(
+			`/api/usage-history?${params.toString()}`,
 		);
 	}
 
@@ -1405,17 +1549,23 @@ class API extends HttpClient {
 		}
 	}
 
-	async getStrategy(): Promise<string> {
+	async getStrategy(): Promise<{
+		strategy: string;
+		strategySource: "env" | "file" | "default";
+	}> {
 		const startTime = Date.now();
 		const url = "/api/config/strategy";
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const data = await this.get<{ strategy: string }>(url);
+			const data = await this.get<{
+				strategy: string;
+				strategySource: "env" | "file" | "default";
+			}>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return data.strategy;
+			return data;
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
@@ -1514,6 +1664,34 @@ class API extends HttpClient {
 		}
 	}
 
+	/**
+	 * Removes an agent's explicit model preference so it reverts to its
+	 * frontmatter model or inherit — the POST endpoint requires a concrete
+	 * model and cannot express "no override".
+	 */
+	async clearAgentPreference(agentId: string): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/agents/${agentId}/preference`;
+
+		this.logger.debug(`→ DELETE ${url}`, { agentId });
+
+		try {
+			await this.delete(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← DELETE ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ DELETE ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async updateAgent(
 		agentId: string,
 		payload: AgentUpdatePayload,
@@ -1575,6 +1753,51 @@ class API extends HttpClient {
 			await this.post(url, { model });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async getModels(): Promise<ModelCatalogResponse> {
+		const startTime = Date.now();
+		const url = "/api/models";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const data = await this.get<ModelCatalogResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return data;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async refreshModels(): Promise<ModelCatalogRefreshResponse> {
+		const startTime = Date.now();
+		const url = "/api/models/refresh";
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const data = await this.post<ModelCatalogRefreshResponse>(url, {});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return data;
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
@@ -1835,6 +2058,53 @@ class API extends HttpClient {
 
 		try {
 			await this.post(url, settings);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async getModelCapacityRouting(): Promise<{
+		mode: "off" | "exhausted";
+		source: "env" | "file" | "default";
+	}> {
+		const startTime = Date.now();
+		const url = "/api/config/model-capacity-routing";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{
+				mode: "off" | "exhausted";
+				source: "env" | "file" | "default";
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async setModelCapacityRouting(mode: "off" | "exhausted"): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/config/model-capacity-routing";
+
+		this.logger.debug(`→ POST ${url}`, { mode });
+
+		try {
+			await this.post(url, { mode });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
 		} catch (error) {
@@ -2268,7 +2538,11 @@ class API extends HttpClient {
 
 	/** Full project list with metadata. */
 	async getProjectsAll(): Promise<Project[]> {
-		const response = await this.get<{ success: boolean; data: Project[]; count: number }>("/api/projects");
+		const response = await this.get<{
+			success: boolean;
+			data: Project[];
+			count: number;
+		}>("/api/projects");
 		return response.data;
 	}
 
@@ -2278,7 +2552,10 @@ class API extends HttpClient {
 		parent_project_id?: string | null;
 		enabled?: boolean;
 	}): Promise<Project> {
-		const response = await this.post<{ success: boolean; data: Project }>("/api/projects", body);
+		const response = await this.post<{ success: boolean; data: Project }>(
+			"/api/projects",
+			body,
+		);
 		return response.data;
 	}
 
@@ -2290,7 +2567,10 @@ class API extends HttpClient {
 			parent_project_id: string | null;
 		}>,
 	): Promise<Project> {
-		const response = await this.patch<{ success: boolean; data: Project }>(`/api/projects/${id}`, body);
+		const response = await this.patch<{ success: boolean; data: Project }>(
+			`/api/projects/${id}`,
+			body,
+		);
 		return response.data;
 	}
 
@@ -2298,13 +2578,30 @@ class API extends HttpClient {
 		await this.delete(`/api/projects/${id}`);
 	}
 
-	async discoverProjects(): Promise<{ added: number; updated: number; unchanged: number; total: number } | null> {
-		const response = await this.post<{ success: boolean; data: unknown }>("/api/projects/discover", {});
-		return response.data as { added: number; updated: number; unchanged: number; total: number } | null;
+	async discoverProjects(): Promise<{
+		added: number;
+		updated: number;
+		unchanged: number;
+		total: number;
+	} | null> {
+		const response = await this.post<{ success: boolean; data: unknown }>(
+			"/api/projects/discover",
+			{},
+		);
+		return response.data as {
+			added: number;
+			updated: number;
+			unchanged: number;
+			total: number;
+		} | null;
 	}
 
 	async getWorktreeRules(): Promise<WorktreeRule[]> {
-		const response = await this.get<{ success: boolean; data: WorktreeRule[]; count: number }>("/api/worktree-rules");
+		const response = await this.get<{
+			success: boolean;
+			data: WorktreeRule[];
+			count: number;
+		}>("/api/worktree-rules");
 		return response.data;
 	}
 
@@ -2314,7 +2611,10 @@ class API extends HttpClient {
 		parent_project_id?: string | null;
 		priority?: number;
 	}): Promise<WorktreeRule> {
-		const response = await this.post<{ success: boolean; data: WorktreeRule }>("/api/worktree-rules", body);
+		const response = await this.post<{ success: boolean; data: WorktreeRule }>(
+			"/api/worktree-rules",
+			body,
+		);
 		return response.data;
 	}
 
@@ -2328,7 +2628,10 @@ class API extends HttpClient {
 			enabled: boolean;
 		}>,
 	): Promise<WorktreeRule> {
-		const response = await this.patch<{ success: boolean; data: WorktreeRule }>(`/api/worktree-rules/${id}`, body);
+		const response = await this.patch<{ success: boolean; data: WorktreeRule }>(
+			`/api/worktree-rules/${id}`,
+			body,
+		);
 		return response.data;
 	}
 
@@ -2340,8 +2643,28 @@ class API extends HttpClient {
 		kind: string;
 		pattern: string;
 		samplePaths: string[];
-	}): Promise<{ matches: Array<{ path: string; matched: boolean; error?: string }> }> {
+	}): Promise<{
+		matches: Array<{ path: string; matched: boolean; error?: string }>;
+	}> {
 		return this.post("/api/worktree-rules/test", body);
+	}
+
+	async getRoutingObservations(): Promise<RoutingObservationsResponse> {
+		const startTime = Date.now();
+		const url = "/api/routing/observations";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<RoutingObservationsResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
 	}
 
 	async triggerIntegrityCheck(
@@ -2364,29 +2687,6 @@ class API extends HttpClient {
 		}
 	}
 
-	async getFeatures(): Promise<{ showCombos: boolean }> {
-		const startTime = Date.now();
-		const url = "/api/features";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<{
-				success: boolean;
-				data: { showCombos: boolean };
-			}>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response.data;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
 	// PostgreSQL configuration
 	async getPostgresConfig(): Promise<{
 		enabled: boolean;
@@ -2472,7 +2772,6 @@ class API extends HttpClient {
 			throw error;
 		}
 	}
-
 	async getAlerts(limit = 100): Promise<{
 		alerts: import("@better-ccflare/types").AlertEvent[];
 		unacknowledgedCount: number;

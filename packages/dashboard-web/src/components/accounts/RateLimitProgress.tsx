@@ -1,6 +1,7 @@
 import { computeWindowStartMs, registerUIRefresh } from "@better-ccflare/core";
-import type { FullUsageData } from "@better-ccflare/types";
+import type { AnthropicUsageData, FullUsageData } from "@better-ccflare/types";
 import { useEffect, useState } from "react";
+import { formatRelativeReset } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import {
 	isAnthropicPeakHour,
@@ -9,6 +10,13 @@ import {
 	providerShowsWeeklyUsage,
 } from "../../utils/provider-utils";
 import { Progress } from "../ui/progress";
+import {
+	collectAnthropicUsageRows,
+	formatWindowName,
+	isWeeklyWindow,
+	severityColor,
+	type UsageDisplay,
+} from "./rate-limit-helpers";
 
 interface RateLimitProgressProps {
 	resetIso: string | null;
@@ -88,6 +96,17 @@ function formatThrottledUntil(throttledUntilMs: number, now: number): string {
 	});
 }
 
+// Map an Anthropic severity (or a >=100% fallback) to a Progress indicator class.
+function severityIndicatorClass(
+	severity: string | undefined,
+	utilization: number | null,
+): string | undefined {
+	const c = severityColor(severity, utilization);
+	if (c === "critical") return "bg-red-500 dark:bg-red-400";
+	if (c === "warning") return "bg-amber-500 dark:bg-amber-400";
+	return undefined;
+}
+
 function computeProjectedMessage(
 	resetTime: string | null,
 	window: string | null,
@@ -108,41 +127,6 @@ function computeProjectedMessage(
 		return `Runs out ${formatDuration(remaining - timeToExhaustMs)} before reset`;
 	}
 	return `Resets ${formatDuration(timeToExhaustMs - remaining)} before exhaustion`;
-}
-
-// Format window name for display
-function formatWindowName(window: string | null): string {
-	if (!window) return "window";
-	switch (window) {
-		case "five_hour":
-			return "5-hour";
-		case "seven_day":
-			return "Weekly";
-		case "seven_day_opus":
-			return "Opus (Weekly)";
-		case "seven_day_sonnet":
-			return "Sonnet (Weekly)";
-		case "daily":
-			return "Daily";
-		case "weekly":
-			return "Weekly";
-		case "monthly":
-			return "Monthly";
-		case "time_limit":
-			return "Time Quota";
-		case "tokens_limit":
-			return "5-hour";
-		case "credits":
-			return "Grok credits";
-		default:
-			return window.replace("_", " ");
-	}
-}
-
-interface UsageDisplay {
-	utilization: number | null;
-	window: string | null;
-	resetTime: string | null;
 }
 
 export function RateLimitProgress({
@@ -169,9 +153,16 @@ export function RateLimitProgress({
 		return unregisterInterval;
 	}, []);
 
+	// Codex has no usage-polling endpoint, so gaps in its data are routine (the
+	// weekly percentage arrives only piggybacked on real traffic). The weekly bar
+	// is its only quota bar and must stay on screen through those gaps, saying
+	// "Data unavailable" instead of vanishing — a missing bar reads as "no limit".
+	const isCodex = provider === "codex";
+
 	// Allow null resetIso for providers that show usage data (like NanoGPT in PayG mode)
 	// but still render null if there's no resetIso and no usage data to show
-	if (!resetIso && !usageData && !usageRateLimitedUntil) return null;
+	if (!isCodex && !resetIso && !usageData && !usageRateLimitedUntil)
+		return null;
 
 	// Show explicit rate-limited state when the Anthropic usage API returned 429
 	// and we have no cached data to show.
@@ -251,12 +242,44 @@ export function RateLimitProgress({
 	const isAlibabaData =
 		usageData && "five_hour" in usageData && "weekly" in usageData;
 
+	// Check if this is MiniMax Token Plan usage data. The fetcher normalizes
+	// MiniMax's native `weekly_*` fields into a canonical `seven_day` window
+	// (see minimax-usage-fetcher.ts) with camelCase `resetAt` (epoch ms) on the
+	// inner object — distinct from Anthropic-style snake_case `resets_at`
+	// (ISO string). We disambiguate by inspecting the inner shape, not the
+	// provider name, so this also tolerates any future fetcher that adopts the
+	// same canonical convention. Without this guard a MiniMax payload falls
+	// into the Anthropic render branch below, `isUsageWindow` rejects both
+	// inner windows (no `resets_at`), and the 7d row collapses to "N/A".
+	const isMinimaxData = (() => {
+		if (!usageData || typeof usageData !== "object") return false;
+		if (!("five_hour" in usageData) && !("seven_day" in usageData)) {
+			return false;
+		}
+		// Anthropic-style: snake_case `resets_at` (string). MiniMax: camelCase
+		// `resetAt` (number, epoch ms). Require every present inner window
+		// to match the MiniMax shape — rejects payloads where one window
+		// looks like MiniMax and another looks like Anthropic, and rejects
+		// empty-object inner windows that would otherwise render "undefined%".
+		for (const key of ["five_hour", "seven_day"] as const) {
+			const obj = (usageData as Record<string, unknown>)[key];
+			if (obj === undefined || obj === null) continue;
+			if (typeof obj !== "object") return false;
+			const o = obj as Record<string, unknown>;
+			if (!("resetAt" in o) || "resets_at" in o) return false;
+		}
+		return true;
+	})();
+
 	// Anthropic-style quota data is shared by Anthropic and Codex; detect by shape, not provider name.
 	const hasAnthropicStyleData =
-		usageData &&
-		"five_hour" in usageData &&
-		"seven_day" in usageData &&
+		usageData != null &&
+		// Legacy flat windows OR the new generic limits[] array. Never NanoGPT's
+		// object-shaped `limits` — disambiguated with Array.isArray.
+		(("five_hour" in usageData && "seven_day" in usageData) ||
+			Array.isArray((usageData as { limits?: unknown }).limits)) &&
 		!isAlibabaData &&
+		!isMinimaxData &&
 		!isZaiData &&
 		!isNanoGPTData;
 
@@ -287,6 +310,46 @@ export function RateLimitProgress({
 				? new Date(alibabaData.monthly.resetAt).toISOString()
 				: null,
 		});
+	} else if (isMinimaxData && showWeekly) {
+		// MiniMax Token Plan usage data — show 5-hour and 7-day windows from
+		// each window's own `utilization` and `resetAt` (camelCase, epoch ms).
+		// Do NOT collapse to a single `usageUtilization` row: that fallback
+		// takes the most-restrictive window across all accounts and hides
+		// the second window entirely.
+		const minimaxData = usageData as {
+			five_hour?: {
+				utilization: number | null;
+				resetAt: number | null;
+			} | null;
+			seven_day?: {
+				utilization: number | null;
+				resetAt: number | null;
+			} | null;
+		};
+		const fiveHourUtil = minimaxData.five_hour?.utilization;
+		if (typeof fiveHourUtil === "number") {
+			usages.push({
+				utilization: fiveHourUtil,
+				window: "five_hour",
+				resetTime:
+					minimaxData.five_hour &&
+					typeof minimaxData.five_hour.resetAt === "number"
+						? new Date(minimaxData.five_hour.resetAt).toISOString()
+						: null,
+			});
+		}
+		const sevenDayUtil = minimaxData.seven_day?.utilization;
+		if (typeof sevenDayUtil === "number") {
+			usages.push({
+				utilization: sevenDayUtil,
+				window: "seven_day",
+				resetTime:
+					minimaxData.seven_day &&
+					typeof minimaxData.seven_day.resetAt === "number"
+						? new Date(minimaxData.seven_day.resetAt).toISOString()
+						: null,
+			});
+		}
 	} else if (isXaiData && showWeekly) {
 		// xAI/Grok usage data - show Grok Build credits utilization.
 		const xaiData = usageData as {
@@ -363,86 +426,29 @@ export function RateLimitProgress({
 			});
 		}
 	} else if (hasAnthropicStyleData && showWeekly) {
-		// Anthropic usage data - show 5-hour and weekly usage
-		const anthropicData = usageData as {
-			five_hour?: { utilization: number | null; resets_at: string | null };
-			seven_day?: { utilization: number | null; resets_at: string | null };
-			seven_day_opus?: { utilization: number | null; resets_at: string | null };
-			seven_day_sonnet?: {
-				utilization: number | null;
-				resets_at: string | null;
-			};
-		};
-		if (anthropicData?.five_hour) {
-			usages.push({
-				utilization: anthropicData.five_hour.utilization,
-				window: "five_hour",
-				resetTime: anthropicData.five_hour.resets_at,
-			});
-		} else {
-			// Fallback: use the most restrictive window data for 5-hour display
-			usages.push({
+		// Anthropic usage data - show 5-hour, weekly, and any per-model weekly
+		// tier (opus, sonnet, and future tiers such as Fable) generically.
+		const rows = collectAnthropicUsageRows(
+			usageData as unknown as AnthropicUsageData,
+			{
 				utilization: usageUtilization ?? null,
-				window: "five_hour",
 				resetTime: resetIso,
-			});
-		}
-
-		// Check if seven_day data exists and has valid utilization
-		if (
-			anthropicData &&
-			anthropicData.seven_day &&
-			anthropicData.seven_day.utilization !== null &&
-			anthropicData.seven_day.utilization !== undefined
-		) {
-			usages.push({
-				utilization: anthropicData.seven_day.utilization,
-				window: "seven_day",
-				resetTime: anthropicData.seven_day.resets_at,
-			});
-		} else {
-			// Add weekly usage as placeholder if data is not available
-			usages.push({
-				utilization: null,
-				window: "seven_day",
-				resetTime: null,
-			});
-		}
-
-		// Check if seven_day_opus data exists, has valid utilization, and resets_at is not null
-		if (
-			anthropicData &&
-			anthropicData.seven_day_opus &&
-			anthropicData.seven_day_opus.utilization !== null &&
-			anthropicData.seven_day_opus.utilization !== undefined &&
-			anthropicData.seven_day_opus.resets_at !== null
-		) {
-			usages.push({
-				utilization: anthropicData.seven_day_opus.utilization,
-				window: "seven_day_opus",
-				resetTime: anthropicData.seven_day_opus.resets_at,
-			});
-		}
-
-		// Check if seven_day_sonnet data exists, has valid utilization, and resets_at is not null
-		if (
-			anthropicData &&
-			anthropicData.seven_day_sonnet &&
-			anthropicData.seven_day_sonnet.utilization !== null &&
-			anthropicData.seven_day_sonnet.utilization !== undefined &&
-			anthropicData.seven_day_sonnet.resets_at !== null
-		) {
-			usages.push({
-				utilization: anthropicData.seven_day_sonnet.utilization,
-				window: "seven_day_sonnet",
-				resetTime: anthropicData.seven_day_sonnet.resets_at,
-			});
-		}
+			},
+		);
+		// Codex: drop the 5-hour row entirely. Its percentage is either absent or
+		// borrowed from the time-elapsed fallback, so the bar showed how much of
+		// the window had passed as if it were consumption. The weekly window is
+		// what actually limits a Codex account, and it is the only bar kept here.
+		usages.push(
+			...(isCodex ? rows.filter((row) => row.window !== "five_hour") : rows),
+		);
 	} else if (
 		providerShowsWeeklyUsage(provider) &&
 		usageUtilization !== null &&
 		usageUtilization !== undefined &&
-		usageWindow
+		usageWindow &&
+		// Never let the 5-hour window back in for Codex through this fallback.
+		!(isCodex && usageWindow === "five_hour")
 	) {
 		// Fallback: show only the most restrictive window
 		usages.push({
@@ -450,6 +456,13 @@ export function RateLimitProgress({
 			window: usageWindow,
 			resetTime: resetIso,
 		});
+	} else if (isCodex) {
+		// Back door closed: the time-based bar below is hardcoded to a 5-hour
+		// window, so without this branch removing the Codex 5h row above would just
+		// bring it back through here whenever data is missing. Show the weekly
+		// window as unavailable instead — the render path already prints "N/A" and
+		// "Data unavailable" for a null utilization.
+		usages.push({ utilization: null, window: "seven_day", resetTime: null });
 	} else {
 		// Use time-based percentage for non-Anthropic or when no usage data is available
 		const percentage = Math.min(
@@ -466,6 +479,23 @@ export function RateLimitProgress({
 	const isZaiPeak = provider === "zai" && isZaiPeakHour(now);
 	const isAnthropicPeak = provider === "anthropic" && isAnthropicPeakHour(now);
 	const throttledWindowSet = new Set(usageThrottledWindows);
+
+	// The throttle notice normally rides along inside the throttled window's row.
+	// Codex no longer renders a 5-hour row, and throttling on that window still
+	// delays real requests — so surface any throttled window that has no row of
+	// its own as a standalone line. Without this, dropping the bar would also
+	// silently drop the warning.
+	const renderedWindows = new Set(
+		usages
+			.map((usage) => usage.window)
+			.filter((window): window is string => window != null),
+	);
+	// Scoped to Codex on purpose: it is the only provider here that deliberately
+	// suppresses a window's row, so it is the only one that can orphan a notice.
+	const hasOrphanThrottledWindow =
+		isCodex &&
+		usageThrottledUntil != null &&
+		usageThrottledWindows.some((window) => !renderedWindows.has(window));
 
 	return (
 		<div className={cn("space-y-3", className)}>
@@ -503,9 +533,32 @@ export function RateLimitProgress({
 					</span>
 				</div>
 			)}
+			{hasOrphanThrottledWindow && usageThrottledUntil != null && (
+				<div className="flex items-center justify-between">
+					<span className="text-xs text-amber-600 dark:text-amber-400">
+						Usage throttling enabled; requests are being delayed
+					</span>
+					<span className="text-xs text-amber-600 dark:text-amber-400">
+						{(() => {
+							const throttledLabel = formatThrottledUntil(
+								usageThrottledUntil,
+								now,
+							);
+							return throttledLabel.startsWith("Less than")
+								? throttledLabel
+								: `Until ${throttledLabel}`;
+						})()}
+					</span>
+				</div>
+			)}
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
+
+				// Group header shown before the first row of each group (limits[] rows).
+				const showGroupHeader =
+					usage.group != null && usage.group !== usages[_index - 1]?.group;
+				const groupTitle = usage.group === "session" ? "Session" : "Weekly";
 
 				// Calculate time remaining for this specific window
 				let windowTimeText = "";
@@ -523,14 +576,9 @@ export function RateLimitProgress({
 					} else {
 						windowTimeText = `${windowRemainingMinutes}m`;
 					}
-				} else if (usage.window === "seven_day") {
-					// Special handling for weekly data when reset time is not available
-					windowTimeText = "Data unavailable";
-				} else if (
-					usage.window === "seven_day_opus" ||
-					usage.window === "seven_day_sonnet"
-				) {
-					// Special handling for weekly opus/sonnet data when reset time is not available
+				} else if (usage.window && isWeeklyWindow(usage.window)) {
+					// Weekly account/tier windows (seven_day, seven_day_opus,
+					// seven_day_sonnet, seven_day_fable, …) when reset time is unavailable.
 					windowTimeText = "Data unavailable";
 				} else if (usage.window === "daily" || usage.window === "monthly") {
 					// Special handling for NanoGPT when no subscription is active (PayG mode)
@@ -543,7 +591,10 @@ export function RateLimitProgress({
 					!usage.resetTime
 				) {
 					return (
-						<div key={usage.window || "default"} className="space-y-2">
+						<div
+							key={`${usage.window ?? "row"}:${usage.label ?? "default"}`}
+							className="space-y-2"
+						>
 							<div className="flex items-center justify-between">
 								<span className="text-xs text-muted-foreground">
 									No subscription (PayG mode)
@@ -554,7 +605,15 @@ export function RateLimitProgress({
 				}
 
 				return (
-					<div key={usage.window || "default"} className="space-y-2">
+					<div
+						key={`${usage.window ?? "row"}:${usage.label ?? "default"}`}
+						className="space-y-2"
+					>
+						{showGroupHeader && (
+							<div className="pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+								{groupTitle}
+							</div>
+						)}
 						{(() => {
 							const expectedPct = computeExpectedPct(
 								usage.resetTime,
@@ -577,7 +636,7 @@ export function RateLimitProgress({
 							const throttleDisplayUntil =
 								windowThrottleUntil ?? usageThrottledUntil;
 							const windowLabel = usage.window
-								? formatWindowName(usage.window)
+								? (usage.label ?? formatWindowName(usage.window))
 								: "Rate limit";
 							const projectedMessage = computeProjectedMessage(
 								usage.resetTime,
@@ -590,7 +649,8 @@ export function RateLimitProgress({
 									<div className="flex items-center justify-between">
 										<span className="text-xs text-muted-foreground">
 											{usage.window
-												? `Usage (${formatWindowName(usage.window)})`
+												? (usage.label ??
+													`Usage (${formatWindowName(usage.window)})`)
 												: "Rate limit window"}
 										</span>
 										<span
@@ -601,6 +661,11 @@ export function RateLimitProgress({
 											)}
 										>
 											{isAvailable ? `${percentage?.toFixed(0)}%` : "N/A"}
+											{usage.isActive && (
+												<span className="ml-1.5 text-[10px] font-normal uppercase tracking-wide text-red-500 dark:text-red-400">
+													binding
+												</span>
+											)}
 										</span>
 									</div>
 									<div className="group relative">
@@ -631,7 +696,14 @@ export function RateLimitProgress({
 											indicatorClassName={
 												isWindowThrottled
 													? "bg-amber-500 dark:bg-amber-400"
-													: undefined
+													: severityIndicatorClass(
+															usage.severity,
+															// Time-based fallback row (window == null) uses elapsed
+															// time as its bar %, not usage -- never color it by that.
+															usage.window == null
+																? null
+																: (percentage ?? null),
+														)
 											}
 										/>
 										{expectedPct !== null && (
@@ -678,9 +750,7 @@ export function RateLimitProgress({
 										: `${windowTimeText} until refresh`}
 								</span>
 								<span className="text-xs text-muted-foreground">
-									{usage.window === "seven_day" ||
-									usage.window === "seven_day_opus" ||
-									usage.window === "seven_day_sonnet" ||
+									{(usage.window && isWeeklyWindow(usage.window)) ||
 									usage.window === "weekly" ||
 									usage.window === "monthly" ||
 									usage.window === "time_limit" ||
@@ -701,13 +771,18 @@ export function RateLimitProgress({
 													minute: "2-digit",
 												},
 											)} (local)`}
+									{(() => {
+										const relativeReset = formatRelativeReset(
+											new Date(usage.resetTime).getTime(),
+											now,
+										);
+										return relativeReset != null ? ` · ${relativeReset}` : "";
+									})()}
 								</span>
 							</div>
 						)}
 						{!usage.resetTime &&
-							(usage.window === "seven_day" ||
-								usage.window === "seven_day_opus" ||
-								usage.window === "seven_day_sonnet" ||
+							((usage.window && isWeeklyWindow(usage.window)) ||
 								usage.window === "daily" ||
 								usage.window === "monthly") && (
 								<div className="flex items-center justify-between">
@@ -724,6 +799,54 @@ export function RateLimitProgress({
 					</div>
 				);
 			})}
+			{hasAnthropicStyleData &&
+				(() => {
+					const spend = (
+						usageData as {
+							spend?: {
+								enabled?: boolean;
+								percent?: number | null;
+								used?: {
+									amount_minor: number;
+									currency: string;
+									exponent?: number;
+								} | null;
+								currency?: string | null;
+							};
+						}
+					).spend;
+					if (!spend?.enabled) return null;
+					const used = spend.used;
+					const exponent = used?.exponent ?? 2;
+					const rawAmount =
+						used != null ? used.amount_minor / 10 ** exponent : null;
+					const amount =
+						rawAmount != null && Number.isFinite(rawAmount) ? rawAmount : null;
+					const cur = used?.currency ?? spend.currency ?? "USD";
+					const pct = spend.percent ?? null;
+					return (
+						<div className="space-y-2">
+							<div className="flex items-center justify-between">
+								<span className="text-xs text-muted-foreground">
+									Overage credits
+								</span>
+								<span className="text-xs font-medium text-muted-foreground">
+									{amount != null
+										? `${cur} ${amount.toFixed(2)}`
+										: pct != null
+											? `${pct.toFixed(0)}%`
+											: "—"}
+								</span>
+							</div>
+							{pct != null && (
+								<Progress
+									value={Math.min(100, Math.max(0, pct))}
+									className="h-2"
+								/>
+							)}
+						</div>
+					);
+				})()}
 		</div>
 	);
 }

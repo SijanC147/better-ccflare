@@ -22,6 +22,10 @@
 - **Z.ai** - Claude proxy service with API key authentication:
   - Lite, Pro, and Max plans with higher rate limits than direct Claude API
   - Uses API key authentication (no OAuth support)
+- **DeepSeek** - Native Anthropic-compatible API via `api.deepseek.com`:
+  - Default model: `deepseek-v4-flash`
+  - Uses API key authentication (`x-api-key` header, no OAuth support)
+  - Built on the same `BaseAnthropicCompatibleProvider` base as Minimax
 - **Anthropic-Compatible** - Generic provider for Anthropic-compatible APIs:
   - Supports custom endpoints
   - API key authentication only
@@ -40,22 +44,41 @@
   - Bearer token authentication via API key
   - Converts Anthropic-format requests to Ollama native `/api/chat` format
   - Converts NDJSON streaming responses back to Anthropic SSE
+- **xAI** - Grok models via `api.x.ai`, built on the OpenAI-compatible base:
+  - OAuth authentication (device-style refresh-token flow against `auth.x.ai`), not just API keys
+  - All Claude model families (opus/sonnet/haiku/fable) map to `grok-4.3` by default, editable via the provider model defaults override (`CCFLARE_MODEL_DEFAULTS_PROVIDERS`, see `docs/configuration.md`)
+  - Optional opt-in cache-native conversation affinity (`CCFLARE_XAI_CACHE_NATIVE`) — see `docs/configuration.md` for the env var
+- **Codex** - OpenAI's ChatGPT/Codex Responses API, a bespoke `BaseProvider` (not OpenAI-chat-compatible):
+  - OAuth authentication against `auth.openai.com`, rotating refresh tokens
+  - Converts Anthropic `/v1/messages` requests to the Responses API's `input`/`function_call` shape and back, including a synthetic `count_tokens` endpoint (Codex has none natively)
+  - Default model map is derived live per-account from `chatgpt.com/backend-api/codex/models` rather than compiled, so it never guesses a model the account's plan can't call — see `docs/configuration.md`
+- **Qwen** - Alibaba's Qwen/DashScope coder model via device-code OAuth, built on the OpenAI-compatible base:
+  - All Claude model families map to `coder-model`
+  - Rewrites the Claude Code system prompt to a Qwen Code identity and strips Claude-specific instructions before forwarding
+  - Sends a fixed set of Stainless-SDK and DashScope headers so `portal.qwen.ai` treats requests as coming from the official client
 
 ### Key Points
 - Anthropic requests route to `https://api.anthropic.com`
 - OpenAI-compatible requests route to custom endpoints (default: `https://api.openai.com`)
-- OAuth is the preferred authentication method with PKCE security (Anthropic only)
-- API key authentication for Z.ai, OpenAI-compatible, and Ollama Cloud providers
+- xAI and Qwen build on the OpenAI-compatible base but support OAuth (unlike generic OpenAI-compatible accounts, which are API-key only)
+- Codex talks to OpenAI's Responses API, a different shape from OpenAI's Chat Completions API used by the other OpenAI-compatible providers
+- OAuth is available for Anthropic, Vertex AI (Google Cloud credentials), xAI, Codex, and Qwen; all other providers are API-key only
+- API key authentication for Z.ai, OpenAI-compatible, NanoGPT, Minimax, DeepSeek, and Ollama Cloud providers
 - Ollama Cloud requires model mapping to translate Claude model names to Ollama models
-- Recent updates include enhanced streaming response capture for analytics
 - Provider system supports format conversion between different API standards
-- Default OAuth client ID: `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (configurable via environment or config file)
+- Default OAuth client ID: `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (configurable via environment or config file) — this applies to the Anthropic provider; other OAuth providers (xAI, Codex, Qwen) use their own fixed client IDs
 
 ## Table of Contents
 - [Overview](#overview)
 - [Provider Registry Pattern](#provider-registry-pattern)
 - [OAuth Authentication Flow](#oauth-authentication-flow)
 - [AnthropicProvider Implementation](#anthropicprovider-implementation)
+- [ZaiProvider Implementation](#zaiprovider-implementation)
+- [VertexAIProvider Implementation](#vertexaiprovider-implementation)
+- [OpenAI-Compatible Provider Implementation](#openai-compatible-provider-implementation)
+- [XaiProvider Implementation](#xaiprovider-implementation)
+- [CodexProvider Implementation](#codexprovider-implementation)
+- [QwenProvider Implementation](#qwenprovider-implementation)
 - [Provider Interface](#provider-interface)
 - [Account Priority System](#account-priority-system)
 - [Rate Limit Handling](#rate-limit-handling)
@@ -95,46 +118,72 @@ The better-ccflare providers system is a modular architecture designed to suppor
    - API key authentication
    - Automatic format conversion
 
-5. **Z.ai Provider** - Provides access to:
+5. **DeepSeek Provider** - Provides access to:
+   - **DeepSeek API** - Native Anthropic-compatible API via `api.deepseek.com`
+   - Default model: `deepseek-v4-flash`
+   - API key authentication (`x-api-key` header, no OAuth support)
+   - Same `BaseAnthropicCompatibleProvider` pattern as Minimax
+
+6. **Z.ai Provider** - Provides access to:
    - **Z.ai API** - Claude proxy service with enhanced rate limits
    - Uses API key authentication instead of OAuth
    - Supports Lite, Pro, and Max plans with ~3× the usage quota of equivalent Claude plans
 
-6. **Anthropic-Compatible Provider** - Provides access to:
+7. **Anthropic-Compatible Provider** - Provides access to:
    - **Any Anthropic-compatible API** - Custom endpoints, self-hosted models, etc.
    - Uses API key authentication
    - Supports custom endpoints for maximum flexibility
 
-7. **OpenAI-Compatible Provider** - Provides access to:
+8. **OpenAI-Compatible Provider** - Provides access to:
    - **Any OpenAI-compatible API** - OpenRouter, Together AI, local models, etc.
    - Uses API key authentication
    - Automatic format conversion between Anthropic and OpenAI API formats
    - Supports custom endpoints for maximum flexibility
 
-8. **Ollama Provider** - Provides access to:
+9. **Ollama Provider** - Provides access to:
    - **Ollama Anthropic API (v0.14.0+)** - Native `/v1/messages` compatibility
    - Default endpoint: `http://localhost:11434`
    - Optional custom endpoint for remote/self-hosted Ollama
    - No real API key required for authentication
 
-9. **Ollama Cloud Provider** - Provides access to:
-   - **Ollama Cloud hosted API** at ollama.com
-   - Converts Anthropic-format requests to Ollama native `/api/chat` format
-   - NDJSON streaming responses converted back to Anthropic SSE
-   - Bearer token authentication via API key
-   - Model mapping required (configured via `model_mappings` on account)
+10. **Ollama Cloud Provider** - Provides access to:
+    - **Ollama Cloud hosted API** at ollama.com
+    - Converts Anthropic-format requests to Ollama native `/api/chat` format
+    - NDJSON streaming responses converted back to Anthropic SSE
+    - Bearer token authentication via API key
+    - Model mapping required (configured via `model_mappings` on account)
+
+11. **xAI Provider** - Provides access to:
+    - **Grok models** via `api.x.ai`, built on top of the OpenAI-Compatible provider
+    - OAuth authentication (refresh-token grant against `auth.x.ai`)
+    - Default model map (opus/sonnet/haiku/fable → `grok-4.3`) editable via the provider model defaults override
+    - Optional opt-in cache-native conversation affinity for xAI's own prompt cache (see [XaiProvider Implementation](#xaiprovider-implementation))
+
+12. **Codex Provider** - Provides access to:
+    - **OpenAI's ChatGPT/Codex Responses API** (`chatgpt.com/backend-api/codex/responses`)
+    - OAuth authentication against `auth.openai.com` with rotating refresh tokens
+    - Full bidirectional format conversion between Anthropic `/v1/messages` and OpenAI's Responses API shape (not the Chat Completions shape the other OpenAI-compatible providers use)
+    - Default model map derived live from the account's own model listing rather than compiled in
+
+13. **Qwen Provider** - Provides access to:
+    - **Alibaba's Qwen/DashScope coder model**, built on top of the OpenAI-Compatible provider
+    - Device-code OAuth flow against `chat.qwen.ai`
+    - Rewrites the Claude Code system prompt into a Qwen Code identity before forwarding
+    - All Claude model families map to a single `coder-model`
+
+Other providers registered in `packages/providers/src/index.ts` but not covered in depth here (Alibaba Coding Plan, AWS Bedrock, Kilo, OpenRouter) are thin wrappers around the `AnthropicCompatibleProvider`/`OpenAICompatibleProvider`/`BaseProvider` bases described below, following the same patterns as Z.ai, Minimax, and OpenAI-Compatible respectively.
 
 The providers system handles:
-- OAuth authentication flows with PKCE security (Anthropic)
+- OAuth authentication flows with PKCE security (Anthropic, and refresh-token/device-code variants for xAI, Codex, Qwen)
 - Google Cloud authentication (Vertex AI)
-- API key authentication (Z.ai, OpenAI-Compatible, NanoGPT, Minimax)
+- API key authentication (Z.ai, OpenAI-Compatible, NanoGPT, Minimax, DeepSeek, Ollama Cloud)
 - Token lifecycle management (refresh, expiration)
 - Provider-specific request routing and header management
 - Rate limit detection and handling
 - Usage tracking
 - Response processing and transformation
 - Streaming response capture for analytics
-- Format conversion between different API standards (Anthropic ↔ OpenAI)
+- Format conversion between different API standards (Anthropic ↔ OpenAI, Anthropic ↔ OpenAI Responses API)
 
 ## Provider Registry Pattern
 
@@ -159,14 +208,17 @@ class ProviderRegistry {
 
 ### Auto-Registration
 
-Providers are automatically registered when the package is imported:
+Providers are automatically registered when the package is imported. `packages/providers/src/index.ts` registers every provider (18 as of this writing: Alibaba Coding Plan, Anthropic, Codex, Bedrock, Kilo, OpenRouter, Qwen, Minimax, DeepSeek, NanoGPT, Z.ai, Vertex AI, xAI, OpenAI-Compatible, Ollama, Ollama Cloud, Anthropic-Compatible, Meta) in one place:
 
 ```typescript
 // In packages/providers/src/index.ts
 import { registry } from "./registry";
-import { AnthropicProvider } from "./providers/anthropic/provider";
+import { AnthropicProvider } from "./providers/anthropic/index";
+import { XaiProvider } from "./providers/xai/index";
 
 registry.registerProvider(new AnthropicProvider());
+registry.registerProvider(new XaiProvider());
+// ...and the rest of the registered providers
 ```
 
 ### OAuth Detection
@@ -491,6 +543,62 @@ curl -X POST http://localhost:8081/v1/messages \
 - Custom endpoints (OpenRouter JSON)
 
 **Limitations:** Advanced vision/tools may need endpoint-specific tweaks.
+
+## XaiProvider Implementation
+
+The `XaiProvider` (registered as `"xai"`) extends `OpenAICompatibleProvider`, reusing its Anthropic ↔ OpenAI format conversion and streaming transform, and adds xAI-specific auth, routing, and model defaults.
+
+- **Core file**: `packages/providers/src/providers/xai/provider.ts`
+- **Cache-native affinity**: `packages/providers/src/providers/xai/cache-native.ts`
+
+### Key Features
+
+1. **OAuth Authentication**: Unlike most OpenAI-compatible accounts (API-key only), xAI supports OAuth via a refresh-token grant against `auth.x.ai/oauth2/token`. `refreshToken()` posts `grant_type=refresh_token` with the account's stored refresh token and a fixed client ID (`XAI_DEFAULT_CLIENT_ID`), and preserves the OAuth server's machine-readable error code (e.g. `invalid_grant`) ahead of the human description so the token manager can detect a dead refresh token and prompt re-auth.
+2. **Request Routing**: `buildUrl()` targets `https://api.x.ai/v1` by default (`XAI_DEFAULT_ENDPOINT`), or a validated `account.custom_endpoint`. It converts `/v1/messages` to `/v1/chat/completions` the same way the base OpenAI-compatible provider does.
+3. **Default Model Mapping**: All four Claude families (opus, sonnet, haiku, fable) map to `grok-4.3` by default (`XAI_MODEL_MAPPINGS`). This map is registered as a live-editable "provider model default" factory (`registerProviderModelDefaultFactory("xai", ...)`), so it can be overridden globally via the config-driven override layer — gated behind `CCFLARE_MODEL_DEFAULTS_PROVIDERS` (see `docs/configuration.md`). `beforeConvert()` injects the resolved mapping onto the account only when the account has no explicit `model_mappings`.
+4. **Streaming Usage Chunk**: `afterConvert()` sets `stream_options.include_usage = true` on streamed requests so xAI returns a final usage chunk, improving token accounting.
+5. **Cache-Native Conversation Affinity (opt-in)**: When `CCFLARE_XAI_CACHE_NATIVE=1`, the proxy derives a privacy-safe conversation id from the client's Claude session id (one-way SHA-256 hash, raw session id never leaves the process) and attaches it as the `x-grok-conv-id` header on requests to `api.x.ai`, with sticky account affinity so a conversation keeps landing on the account that owns its upstream cache partition. This is fully documented in `docs/configuration.md` (env var) and `docs/api-http.md` (header/routing behavior); the implementation lives in `packages/providers/src/providers/xai/cache-native.ts` and is wired into `packages/proxy/src/handlers/account-selector.ts` and `packages/proxy/src/proxy.ts`. The feature is a strict no-op (never sends the header, never influences routing) unless explicitly enabled, and only applies when the account targets xAI's official `api.x.ai` host — custom/proxy xAI endpoints are excluded since conv-id partitioning is only meaningful against xAI's own cache.
+6. **Context window advertisement**: Grok 4.5 and Grok 4.6 have a 500,000-token xAI window. For official `api.x.ai` accounts, the OpenAI→Anthropic stream transform attaches Codex-shaped `message_delta.context_window` (`context_window_size: 500000`) so Claude Code autocompacts before that hard stop. Custom xAI-compatible endpoints do not inherit this limit, and original `grok-4` is not treated as 500k. Resolution logic lives in `packages/core/src/xai.ts` (`resolveXaiContextWindow`), threaded through `transformStreamingResponse`'s `contextWindowForModel` option via `OpenAICompatibleProvider.resolveStreamContextWindow()`.
+
+## CodexProvider Implementation
+
+The `CodexProvider` (registered as `"codex"`) extends `BaseProvider` directly rather than `OpenAICompatibleProvider` — OpenAI's Responses API (`chatgpt.com/backend-api/codex/responses`) has a materially different request/response shape from the Chat Completions API the other OpenAI-compatible providers target, so Codex implements its own conversion end to end.
+
+- **Core file**: `packages/providers/src/providers/codex/provider.ts`
+- **OAuth**: `packages/providers/src/providers/codex/oauth.ts`
+- **Live model catalog**: `packages/proxy/src/codex-model-catalog.ts`
+
+### Key Features
+
+1. **OAuth Authentication**: OAuth against `auth.openai.com/oauth/token` with a fixed client ID (`app_EMoamEEZ73f0CkXaXp7hrann`). OpenAI rotates the refresh token on every refresh, so `refreshToken()` always returns the new one. A `refresh_token_reused` error is preserved verbatim in the thrown message so the token manager's re-auth detection fires reliably.
+2. **Request Format Conversion**: `transformRequestBody()` converts Anthropic `/v1/messages` request bodies into the Responses API's `input` array of `CodexMessage` / `function_call` / `function_call_output` items — a structurally different shape from Anthropic's `messages` array (tool calls and their results are top-level input items rather than nested content blocks). System/developer roles collapse to `system`, and structured (non-text) tool-result blocks larger than 8,192 characters are replaced with a size marker to avoid bloating context and destroying prompt-cache reuse.
+3. **Response Format Conversion**: `processResponse()` converts the Responses API's SSE event stream back into Anthropic-shaped SSE (`transformStreamingResponse`) or, for clients that requested a non-streaming response, buffers and converts it into a single Anthropic JSON message (`transformSseResponseToJson`) — Codex always streams upstream regardless of what the client asked for.
+4. **Synthetic `count_tokens` Endpoint**: Codex has no native token-counting endpoint. Requests to `/v1/messages/count_tokens` are intercepted and answered locally with a conservative character-based estimate (`CODEX_SYNTHETIC_COUNT_TOKENS_URL`), rather than being forwarded upstream.
+5. **Default Model Mapping Derived Live, Not Compiled**: `mapModel()` resolves each Claude family (opus/sonnet/haiku/fable) through `resolveProviderModelDefault("codex", family, accountId)`. Unlike other providers, Codex's factory default map is largely superseded at runtime: `packages/proxy/src/codex-model-catalog.ts` fetches the account's own model listing from `chatgpt.com/backend-api/codex/models` and derives a per-account family → model map from it (`deriveFamilyDefaults`), because the compiled guess (`gpt-5.3-codex` for opus/sonnet) 400s on ChatGPT-subscription accounts that don't support that model. See `docs/configuration.md` for the full precedence chain and the `CCFLARE_MODEL_DEFAULTS_PROVIDERS` override layer.
+6. **Reasoning Effort & Prompt Caching**: Requests carry a `reasoning.effort` resolved via `resolveReasoningEffort()`, and — enabled by default, opt-out via `CCFLARE_CODEX_PROMPT_CACHE_KEY=0` — a derived `prompt_cache_key` (session + instructions + first input item, hashed) attached only when the account resolves to OpenAI's own `chatgpt.com`/`api.openai.com` hosts. See `docs/configuration.md` for both env vars.
+7. **Rate Limit Detection**: `parseRateLimit()` reads Codex's `x-codex-primary-reset-at` / `x-codex-secondary-reset-at` (and legacy `x-codex-5h-reset-at` / `x-codex-7d-reset-at`) headers, using the soonest reset time; only HTTP 429 is treated as a hard rate limit.
+8. **On-Demand Usage Probe (the dashboard refresh button)**: Codex has no free usage endpoint — `supportsUsageTracking` is `false` and there is no polling, so the card's quota bars normally only update when real traffic happens to carry the `x-codex-*` headers. `POST /api/accounts/:id/refresh-usage` fills that gap by sending one deliberately minimal `/responses` request (a single `.`, `instructions: "ping"`, `stream: true`, `store: false`) and cancelling the body as soon as the headers are read (`packages/providers/src/providers/codex/on-demand-fetch.ts`). Three choices in that request are non-obvious and each fixed a real failure:
+   - **The model comes from the account's own listing, not from a constant.** An unknown model name is rejected *before* quota accounting, so a stale name returns a 400 with **no** `x-codex-*` headers at all and the refresh has nothing to report — which is exactly how a hardcoded `gpt-5-codex` broke it on ChatGPT-subscription accounts. `lowestTierCodexModel()` reads the same listing that feeds the family mapping. `CODEX_PING_MODEL` remains only as the blind fallback for an account whose listing has never been readable.
+   - **It pings the weakest listed model, not the frontier one.** The headers report the *subscription's* windows, not the model's, so the frontier model buys nothing here and costs the most per ping. `normalize()` sorts by OpenAI's own `priority`, so position is the tier: the last entry is the weakest, and nothing needs maintenance when OpenAI reshuffles the list. A one-model plan still gets that model.
+   - **`reasoning.effort` is pinned to `"low"`.** A body-level parameter the model dislikes is rejected *after* accounting, so the usage headers still arrive — the opposite of the model-name case. `"low"` is the cheapest effort every measured model accepts.
+
+   This probe spends quota, and the button's tooltip says so. It fires only on an explicit click; the periodic probe is a separate mechanism with different rules (see `docs/auto-refresh.md`).
+
+## QwenProvider Implementation
+
+The `QwenProvider` (registered as `"qwen"`) extends `OpenAICompatibleProvider`, targeting Alibaba's DashScope-hosted Qwen coder model.
+
+- **Core file**: `packages/providers/src/providers/qwen/provider.ts`
+- **Device OAuth flow**: `packages/providers/src/providers/qwen/device-oauth.ts`
+
+### Key Features
+
+1. **Device-Code OAuth Authentication**: Qwen uses an RFC 8628 OAuth 2.0 Device Authorization Grant with PKCE against `chat.qwen.ai` (`initiateDeviceFlow()` / `pollForToken()` / `refreshQwenTokens()` in `device-oauth.ts`) rather than the redirect-based PKCE flow Anthropic uses.
+2. **Fixed Header Set**: `prepareHeaders()` builds a clean header set from scratch (not extending the incoming client headers) — DashScope is sensitive to unexpected headers and can 429 on them. It sets Qwen/DashScope-specific headers (`X-DashScope-CacheControl`, `X-DashScope-AuthType: qwen-oauth`, etc.) plus a fixed set of Stainless-SDK headers (`X-Stainless-Lang`, `X-Stainless-Runtime`, etc.) that `portal.qwen.ai` validates to confirm the request looks like it came from the official OpenAI Node SDK.
+3. **Default Model Mapping**: All four Claude families map to a single `coder-model` (`QWEN_MODEL_MAPPINGS`), registered as a live-editable provider model default factory the same way as xAI, gated behind `CCFLARE_MODEL_DEFAULTS_PROVIDERS`.
+4. **System Prompt Sanitization for Qwen Code Identity**: `afterConvert()` rewrites the converted system message: it swaps the Claude Code identity line for a Qwen Code one, replaces `CLAUDE.md` references with `QWEN.md`, redirects the feedback/help lines to Qwen Code's own commands, and drops lines that reference Claude-specific model names or CLI availability (`sanitizeForQwen()`). It also strips Anthropic billing-header text blocks and enables `vl_high_resolution_images` for vision support.
+5. **Rate Limits Handled Upstream**: `parseRateLimit()` always reports `isRateLimited: false` — Qwen enforces its own quota via inline 403 responses rather than the OpenAI-style rate-limit headers other providers parse.
+6. **Streaming Tool-Call Buffering**: Per this repo's Qwen conventions (mirrored from the `qwen-code` reference implementation), DashScope sends incremental (not cumulative) tool-call argument chunks; the shared OpenAI-compatible streaming transform buffers these and emits complete JSON at stream end rather than assuming cumulative deltas.
 
 ## Format Conversion Details
 
@@ -855,7 +963,7 @@ interface Account {
 }
 ```
 
-**Note**: The current implementation prioritizes OAuth authentication for Anthropic. Z.ai uses API key authentication exclusively as it does not support OAuth.
+**Note**: OAuth is available for Anthropic, Vertex AI, xAI, Codex, and Qwen. Z.ai, OpenAI-Compatible, NanoGPT, Minimax, DeepSeek, and Ollama Cloud use API key authentication exclusively as they do not support OAuth.
 
 ### Token Refresh Strategy
 
@@ -926,7 +1034,7 @@ export class NewProviderOAuth implements OAuthProvider {
 
 ```typescript
 // In packages/providers/src/index.ts
-import { NewProvider } from "./providers/newprovider/provider";
+import { NewProvider } from "./providers/newprovider/index";
 registry.registerProvider(new NewProvider());
 ```
 
@@ -961,21 +1069,19 @@ registry.registerProvider(new NewProvider());
 
 ## Recent Updates
 
-- **Streaming Response Capture**: Added initial capture of streaming responses for analytics (commit 55446bf)
-  - Captures up to 64KB of streaming data to extract usage information
-  - Extracts model and token usage from `message_start` event
-  - Prevents hanging by properly canceling stream readers
-- **Enhanced Analytics**: Improved usage tracking and cost estimation for both streaming and non-streaming responses
-  - Includes cache token breakdown (cache read vs cache creation)
-  - Extracts billing cost from response headers
-- **Header Sanitization**: Added `sanitizeProxyHeaders` utility for proper proxy header handling (commit f0f179e)
+This section intentionally does not track individual commits — provider code changes frequently and a commit-hash changelog goes stale fast. For actual recent history, run:
+
+```bash
+git log --oneline -30 -- packages/providers/
+```
+
+At a high level, the provider set has grown well beyond the original Anthropic/Vertex/Z.ai/OpenAI-Compatible lineup: xAI, Codex (OpenAI's ChatGPT/Codex Responses API), Qwen, Alibaba Coding Plan, AWS Bedrock, Kilo, and OpenRouter are all now registered (`packages/providers/src/index.ts`). Several providers (xAI, Codex, Qwen) also gained OAuth support and a live-editable default-model-mapping override layer (`CCFLARE_MODEL_DEFAULTS_PROVIDERS`, see `docs/configuration.md`), and Codex's default model map is now derived from the account's own live model listing rather than compiled in.
 
 ## Future Enhancements
 
-1. **Multi-Provider Support**: Add support for OpenAI, Google Gemini, and other AI providers
-2. **Provider Health Checks**: Monitor provider availability and performance
-3. **Dynamic Provider Loading**: Load providers from external packages
-4. **Provider Metrics**: Track success rates, latency, and costs per provider
-5. **Fallback Strategies**: Automatic fallback to alternative providers on failure
-6. **Provider-Specific Features**: Expose unique capabilities of each provider (e.g., vision, tools, etc.)
-7. **Path-Based Routing**: Route specific API paths to different providers based on capabilities
+1. **Provider Health Checks**: Monitor provider availability and performance
+2. **Dynamic Provider Loading**: Load providers from external packages
+3. **Provider Metrics**: Track success rates, latency, and costs per provider
+4. **Fallback Strategies**: Automatic fallback to alternative providers on failure
+5. **Provider-Specific Features**: Expose unique capabilities of each provider (e.g., vision, tools, etc.)
+6. **Path-Based Routing**: Route specific API paths to different providers based on capabilities

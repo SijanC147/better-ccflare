@@ -4,6 +4,10 @@ import { repairTruncatedToolJson } from "./utils";
 
 const log = new Logger("openai-formats");
 
+export interface TransformStreamingResponseOptions {
+	contextWindowForModel?: (model: string) => number | undefined;
+}
+
 /**
  * Sanitize headers by removing provider-specific headers
  */
@@ -78,6 +82,7 @@ function emitToolCallJson(
 function emitStreamEnd(
 	controller: TransformStreamDefaultController,
 	encoder: TextEncoder,
+	contextWindowSize: number | undefined,
 	stopReason: "tool_use" | "end_turn",
 	promptTokens: number,
 	completionTokens: number,
@@ -122,6 +127,14 @@ function emitStreamEnd(
 	}
 
 	// Send message_delta with appropriate stop_reason
+	const advertisedContextWindow =
+		Number.isFinite(promptTokens) &&
+		promptTokens >= 0 &&
+		typeof contextWindowSize === "number" &&
+		Number.isFinite(contextWindowSize) &&
+		contextWindowSize > 0
+			? contextWindowSize
+			: undefined;
 	const messageDelta = {
 		type: "message_delta",
 		delta: {
@@ -134,6 +147,28 @@ function emitStreamEnd(
 			cache_read_input_tokens: cacheReadInputTokens,
 			cache_creation_input_tokens: cacheCreationInputTokens,
 		},
+		...(advertisedContextWindow
+			? {
+					context_window: {
+						// promptTokens is the upstream cache-inclusive total (OpenAI/xAI
+						// semantics); Anthropic's context_window.current_usage.input_tokens
+						// is additive and must exclude the cached subset, matching the
+						// normalization CodexProvider applies via normalizeCodexInputUsage.
+						current_usage: {
+							input_tokens: Math.max(
+								0,
+								promptTokens - Math.min(cacheReadInputTokens, promptTokens),
+							),
+							cache_read_input_tokens: Math.min(
+								cacheReadInputTokens,
+								promptTokens,
+							),
+							cache_creation_input_tokens: cacheCreationInputTokens,
+						},
+						context_window_size: advertisedContextWindow,
+					},
+				}
+			: {}),
 	};
 	controller.enqueue(encoder.encode(`event: message_delta\n`));
 	controller.enqueue(
@@ -157,7 +192,10 @@ function emitStreamEnd(
  * ALL argument chunks are buffered (appended), no deltas are emitted during streaming.
  * The complete accumulated JSON is emitted as a single input_json_delta at [DONE] or flush.
  */
-export function transformStreamingResponse(response: Response): Response {
+export function transformStreamingResponse(
+	response: Response,
+	options: TransformStreamingResponseOptions = {},
+): Response {
 	if (!response.body) {
 		return response;
 	}
@@ -165,15 +203,20 @@ export function transformStreamingResponse(response: Response): Response {
 	const encoder = new TextEncoder();
 	const decoder = new TextDecoder();
 
-	// Use pipeThrough to transform the stream while preserving clonability
+	// Use pipeThrough to transform the stream while preserving clonability.
+	// Streaming state lives in this closure variable (rather than `this` on the
+	// handler object) so it can be fully typed without `any` — the DOM lib's
+	// Transformer callbacks don't allow attaching arbitrary properties to `this`.
+	let streamContext: TransformStreamContext | null = null;
 	const transformedBody = response.body.pipeThrough(
 		new TransformStream<Uint8Array, Uint8Array>({
 			start(_controller) {
 				// Initialize context object for streaming state
-				(this as any).context = {
+				streamContext = {
 					buffer: "",
 					hasStarted: false,
 					extractedModel: "unknown",
+					contextWindowSize: undefined,
 					hasSentStart: false,
 					hasSentContentBlockStart: false,
 					hasSentThinkingBlockStart: false,
@@ -191,15 +234,20 @@ export function transformStreamingResponse(response: Response): Response {
 					toolCallBlockIndices: {},
 					maxToolCallLength: 1_000_000,
 					maxToolCallIndex: 100,
-				} as TransformStreamContext;
+				};
 			},
 			transform(chunk, controller) {
 				try {
-					const context = (this as any).context as TransformStreamContext;
-					if (!context) {
+					if (!streamContext) {
 						log.error("TransformStream context not initialized");
 						return;
 					}
+					// Bind to a non-null local so TypeScript's null-narrowing holds for
+					// the rest of this call. The outer `streamContext` is itself
+					// reassigned later in this same function (on [DONE]) and in
+					// `flush`, which would otherwise widen it back to `T | null` at
+					// every use below.
+					const context = streamContext;
 					// Decode the chunk and add to buffer
 					context.buffer += decoder.decode(chunk, { stream: true });
 					const lines = context.buffer.split("\n");
@@ -233,6 +281,7 @@ export function transformStreamingResponse(response: Response): Response {
 								emitStreamEnd(
 									controller,
 									encoder,
+									context.contextWindowSize,
 									"tool_use",
 									context.promptTokens,
 									context.completionTokens,
@@ -249,6 +298,7 @@ export function transformStreamingResponse(response: Response): Response {
 								emitStreamEnd(
 									controller,
 									encoder,
+									context.contextWindowSize,
 									"end_turn",
 									context.promptTokens,
 									context.completionTokens,
@@ -262,6 +312,7 @@ export function transformStreamingResponse(response: Response): Response {
 								emitStreamEnd(
 									controller,
 									encoder,
+									context.contextWindowSize,
 									"end_turn",
 									context.promptTokens,
 									context.completionTokens,
@@ -273,7 +324,7 @@ export function transformStreamingResponse(response: Response): Response {
 							}
 
 							// Cleanup entire context after stream completion
-							(this as any).context = null;
+							streamContext = null;
 							continue;
 						}
 
@@ -284,6 +335,9 @@ export function transformStreamingResponse(response: Response): Response {
 							// Extract model from first chunk
 							if (!context.hasStarted && data.model) {
 								context.extractedModel = data.model;
+								context.contextWindowSize = options.contextWindowForModel?.(
+									data.model,
+								);
 								context.hasStarted = true;
 							}
 
@@ -579,8 +633,10 @@ export function transformStreamingResponse(response: Response): Response {
 				}
 			},
 			flush(controller) {
-				const context = (this as any).context as TransformStreamContext;
-				if (!context) return;
+				if (!streamContext) return;
+				// Bind to a non-null local so TypeScript's null-narrowing holds for
+				// the rest of this call (see `transform` above for why).
+				const context = streamContext;
 
 				// Stream ended without [DONE] (e.g. timeout/truncation).
 				// Emit buffered JSON + stop events so the client gets a valid response.
@@ -601,6 +657,7 @@ export function transformStreamingResponse(response: Response): Response {
 					emitStreamEnd(
 						controller,
 						encoder,
+						context.contextWindowSize,
 						"tool_use",
 						context.promptTokens,
 						context.completionTokens,
@@ -621,6 +678,7 @@ export function transformStreamingResponse(response: Response): Response {
 					emitStreamEnd(
 						controller,
 						encoder,
+						context.contextWindowSize,
 						"end_turn",
 						context.promptTokens,
 						context.completionTokens,
@@ -637,6 +695,7 @@ export function transformStreamingResponse(response: Response): Response {
 					emitStreamEnd(
 						controller,
 						encoder,
+						context.contextWindowSize,
 						"end_turn",
 						context.promptTokens,
 						context.completionTokens,
@@ -647,7 +706,7 @@ export function transformStreamingResponse(response: Response): Response {
 					);
 				}
 
-				(this as any).context = null;
+				streamContext = null;
 			},
 		}),
 	);

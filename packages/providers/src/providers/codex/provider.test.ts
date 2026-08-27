@@ -1,7 +1,56 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { Account } from "@better-ccflare/types";
+import {
+	clearDerivedProviderModelDefaults,
+	setDerivedProviderModelDefaults,
+} from "../../provider-model-defaults";
 import { fetchCodexUsageOnDemand } from "./on-demand-fetch";
-import { CodexProvider } from "./provider";
-import { parseCodexUsageHeaders } from "./usage";
+import {
+	CODEX_CACHE_KEY_MODE_ENV,
+	CODEX_DEFAULT_ENDPOINT,
+	CODEX_PING_MODEL,
+	CODEX_PROMPT_CACHE_KEY_ENV,
+	CODEX_VERSION,
+	CodexProvider,
+} from "./provider";
+import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
+
+const codexAccount = (overrides: Partial<Account> = {}): Account => ({
+	id: "codex-1",
+	name: "codex-test",
+	provider: "codex",
+	api_key: null,
+	refresh_token: "refresh-token",
+	access_token: "access-token",
+	expires_at: Date.now() + 60_000,
+	request_count: 0,
+	total_requests: 0,
+	last_used: null,
+	created_at: Date.now(),
+	rate_limited_until: null,
+	rate_limited_reason: null,
+	rate_limited_at: null,
+	session_start: null,
+	session_request_count: 0,
+	paused: false,
+	rate_limit_reset: null,
+	rate_limit_status: null,
+	rate_limit_remaining: null,
+	priority: 50,
+	auto_fallback_enabled: true,
+	auto_refresh_enabled: true,
+	auto_pause_on_overage_enabled: false,
+	peak_hours_pause_enabled: false,
+	custom_endpoint: null,
+	model_mappings: null,
+	cross_region_mode: null,
+	model_fallbacks: null,
+	billing_type: null,
+	pause_reason: null,
+	refresh_token_issued_at: null,
+	consecutive_rate_limits: 0,
+	...overrides,
+});
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
 const eventLine = (name: string, data: unknown) => [
@@ -9,6 +58,211 @@ const eventLine = (name: string, data: unknown) => [
 	`data: ${typeof data === "string" ? data : JSON.stringify(data)}`,
 	"",
 ];
+
+// The upstream drain (cancelUpstreamOnce -> drainUpstream) now runs detached
+// from writer.close() (fire-and-forget, matching the Anthropic
+// terminal-recovery pattern): the client-visible stream can reach EOF before
+// the background drain has hit its deadline and aborted drainAbort. Poll
+// instead of asserting immediately after stream completion.
+async function waitForAbort(
+	signal: AbortSignal,
+	timeoutMs: number,
+): Promise<void> {
+	const start = Date.now();
+	while (!signal.aborted) {
+		if (Date.now() - start > timeoutMs) {
+			throw new Error("drainAbort did not abort within expected time");
+		}
+		await Bun.sleep(5);
+	}
+}
+
+describe("CodexProvider stream liveness", () => {
+	it("keeps a silent SSE stream alive until response.completed arrives", async () => {
+		const provider = new CodexProvider({
+			streamHeartbeatIntervalMs: 20,
+			streamRawSilenceTimeoutMs: 200,
+			streamDrainDeadlineMs: 300,
+		});
+		let upstreamController: ReadableStreamDefaultController<Uint8Array>;
+		// After response.completed, cancelUpstreamOnce no longer calls
+		// reader.cancel() — it drains the reader via reader.read() instead
+		// (issue #382: Bun's reader.cancel() is a documented RSS-leaking
+		// no-op). A read() that never resolves is the equivalent
+		// never-blocks-finalization hazard under the new drain design: prove
+		// it is bounded by streamDrainDeadlineMs and the stream still
+		// finalizes.
+		const upstream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				upstreamController = controller;
+				controller.enqueue(
+					new TextEncoder().encode(
+						sseBody(
+							eventLine("response.in_progress", {
+								type: "response.in_progress",
+								response: { id: "resp_silent", model: "gpt-5.6-sol" },
+							}),
+						),
+					),
+				);
+			},
+		});
+		const drainAbort = new AbortController();
+		const transformed = await provider.processResponse(
+			new Response(upstream, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+			null,
+			undefined,
+			drainAbort,
+		);
+		const reader = transformed.body?.getReader();
+		if (!reader) throw new Error("transformed response has no body");
+		const decoder = new TextDecoder();
+
+		const first = await reader.read();
+		expect(decoder.decode(first.value)).toBe(
+			'event: ping\ndata: {"type":"ping"}\n\n',
+		);
+		const second = await Promise.race([
+			reader.read(),
+			Bun.sleep(100).then(() => {
+				throw new Error("Codex heartbeat did not arrive");
+			}),
+		]);
+		expect(decoder.decode(second.value)).toBe(
+			'event: ping\ndata: {"type":"ping"}\n\n',
+		);
+
+		upstreamController.enqueue(
+			new TextEncoder().encode(
+				sseBody(
+					eventLine("response.completed", {
+						type: "response.completed",
+						response: {
+							id: "resp_silent",
+							model: "gpt-5.6-sol",
+							usage: { input_tokens: 1, output_tokens: 0 },
+						},
+					}),
+				),
+			),
+		);
+		// Never resolve the upstream stream after this point: the drain loop's
+		// reader.read() calls will hang until streamDrainDeadlineMs fires.
+
+		let terminalBody = "";
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			terminalBody += decoder.decode(value, { stream: true });
+		}
+		expect(terminalBody).toContain("event: message_stop");
+		expect(terminalBody).not.toContain("event: ping");
+		// The drain runs detached from writer.close() now, so it may not have
+		// hit its deadline yet at stream EOF; wait for it to abort.
+		await waitForAbort(drainAbort.signal, 1000);
+	});
+
+	it("terminates raw upstream silence after synthetic heartbeats", async () => {
+		const provider = new CodexProvider({
+			streamHeartbeatIntervalMs: 15,
+			streamRawSilenceTimeoutMs: 70,
+			streamDrainDeadlineMs: 150,
+		});
+		// No data is ever enqueued, and read() never resolves — the drain loop
+		// started by the raw_silence_timeout's cancelUpstreamOnce() call must
+		// still be bounded by streamDrainDeadlineMs rather than hanging forever.
+		const upstream = new ReadableStream<Uint8Array>({
+			pull() {
+				return new Promise<void>(() => {});
+			},
+		});
+		const drainAbort = new AbortController();
+		const transformed = await provider.processResponse(
+			new Response(upstream, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+			null,
+			undefined,
+			drainAbort,
+		);
+
+		const body = await Promise.race([
+			transformed.text(),
+			Bun.sleep(500).then(() => {
+				throw new Error("timed-out Codex stream did not terminate");
+			}),
+		]);
+		expect(body).toContain("event: error");
+		expect(body).toContain(
+			"Codex upstream timed out while waiting for response data.",
+		);
+		expect(body).not.toContain("rawSilenceTimeoutMs");
+		// The drain runs detached from writer.close() now, so it may not have
+		// hit its deadline yet at stream EOF; wait for it to abort.
+		await waitForAbort(drainAbort.signal, 1000);
+	});
+
+	it("does not await a hanging upstream drain after a terminal event", async () => {
+		const provider = new CodexProvider({
+			streamHeartbeatIntervalMs: 100,
+			streamRawSilenceTimeoutMs: 500,
+			streamDrainDeadlineMs: 150,
+		});
+		let readCalls = 0;
+		const upstream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(
+					new TextEncoder().encode(
+						sseBody(
+							eventLine("response.completed", {
+								type: "response.completed",
+								response: {
+									id: "resp_terminal_cancel",
+									model: "gpt-5.6-sol",
+									usage: { input_tokens: 1, output_tokens: 0 },
+								},
+							}),
+						),
+					),
+				);
+			},
+			// Once the terminal event is processed, cancelUpstreamOnce's
+			// drainUpstream() takes over the reader and calls read() in a loop
+			// looking for `done`. Simulate a stuck-but-open upstream: the first
+			// read() (which delivers the terminal SSE bytes) resolves normally,
+			// but any subsequent read() the drain loop issues never resolves.
+			pull(_controller) {
+				readCalls++;
+				if (readCalls === 1) return;
+				return new Promise<void>(() => {});
+			},
+		});
+		const drainAbort = new AbortController();
+		const transformed = await provider.processResponse(
+			new Response(upstream, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+			null,
+			undefined,
+			drainAbort,
+		);
+		const body = await Promise.race([
+			transformed.text(),
+			Bun.sleep(500).then(() => {
+				throw new Error("terminal Codex stream did not reach EOF");
+			}),
+		]);
+		expect(body).toContain("event: message_stop");
+		// The drain runs detached from writer.close() now, so it may not have
+		// hit its deadline yet at stream EOF; wait for it to abort.
+		await waitForAbort(drainAbort.signal, 1000);
+	});
+});
 
 describe("CodexProvider request conversion", () => {
 	it("handles messages and synthetic count_tokens paths", () => {
@@ -34,7 +288,7 @@ describe("CodexProvider request conversion", () => {
 		const transformed = await provider.transformRequestBody(request);
 		const body = await transformed.json();
 
-		expect(body.reasoning).toEqual({ effort: "high" });
+		expect(body.reasoning).toEqual({ effort: "high", context: "all_turns" });
 	});
 
 	it("adds a continuation nudge after Skill tool results", async () => {
@@ -190,7 +444,7 @@ describe("CodexProvider request conversion", () => {
 		const transformed = await provider.transformRequestBody(request);
 		const body = await transformed.json();
 
-		expect(body.reasoning).toEqual({ effort: "xhigh" });
+		expect(body.reasoning).toEqual({ effort: "xhigh", context: "all_turns" });
 	});
 
 	it("uses role-appropriate text block types in Codex input", async () => {
@@ -293,7 +547,7 @@ describe("CodexProvider request conversion", () => {
 		const transformed = await provider.transformRequestBody(request);
 		const body = await transformed.json();
 
-		expect(body.reasoning).toEqual({ effort: "medium" });
+		expect(body.reasoning).toEqual({ effort: "medium", context: "all_turns" });
 	});
 
 	it("rejects unsupported reasoning effort values", async () => {
@@ -333,7 +587,7 @@ describe("CodexProvider request conversion", () => {
 
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
-		expect(body.reasoning).toEqual({ effort: "medium" });
+		expect(body.reasoning).toEqual({ effort: "medium", context: "all_turns" });
 	});
 
 	it("omits empty Read.pages when replaying Anthropic history to Codex", async () => {
@@ -784,8 +1038,50 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).not.toContain('"context_window"');
 		expect(messageDeltaLine).toContain('"usage":{');
 		expect(messageDeltaLine).toContain('"output_tokens":3');
-		expect(messageDeltaLine).toContain('"input_tokens":12');
+		// Codex's input_tokens (12) is cache-inclusive; Anthropic's input_tokens
+		// is additive and excludes the 4 cached tokens, which are reported
+		// separately as cache_read_input_tokens.
+		expect(messageDeltaLine).toContain('"input_tokens":8');
 		expect(messageDeltaLine).toContain('"cache_read_input_tokens":4');
+	});
+
+	it("translates cached input usage additively so input_tokens excludes cache reads", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.3-codex" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.3-codex",
+					usage: {
+						input_tokens: 100,
+						output_tokens: 20,
+						input_tokens_details: { cached_tokens: 60 },
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+		const messageDeltaLine = transformedBody
+			.split("\n")
+			.find((line) => line.includes('"type":"message_delta"')) as string;
+		const payload = JSON.parse(messageDeltaLine.slice("data: ".length));
+
+		expect(payload.usage.cache_read_input_tokens).toBe(60);
+		expect(payload.usage.input_tokens).toBe(40);
+		// The additive input_tokens plus the cache read must reconstruct the
+		// original cache-inclusive total Codex reported.
+		expect(
+			payload.usage.input_tokens + payload.usage.cache_read_input_tokens,
+		).toBe(100);
 	});
 
 	it("normalizes message_delta usage and delta defaults when missing", async () => {
@@ -1187,6 +1483,62 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).toContain('"context_window_size":272000');
 	});
 
+	it("reports the 372k context_window for GPT-5.6 models", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.6-sol" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.6-sol",
+					usage: { input_tokens: 100, output_tokens: 50 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+		const messageDeltaLine = transformedBody
+			.split("\n")
+			.find((line) => line.includes('"type":"message_delta"'));
+
+		expect(messageDeltaLine).toContain('"context_window_size":372000');
+	});
+
+	it("resolves dated model variants to their family context window", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.6-sol-2026-05-13" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.6-sol-2026-05-13",
+					usage: { input_tokens: 100, output_tokens: 50 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+		const messageDeltaLine = transformedBody
+			.split("\n")
+			.find((line) => line.includes('"type":"message_delta"'));
+
+		expect(messageDeltaLine).toContain('"context_window_size":372000');
+	});
+
 	it("omits context_window when model metadata is unavailable", async () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([
@@ -1534,7 +1886,7 @@ describe("CodexProvider.processResponse", () => {
 			type: "error",
 			error: {
 				type: "invalid_request_error",
-				message: "Input is too large",
+				message: "Prompt is too long. Codex reported: Input is too large",
 				code: "context_length_exceeded",
 			},
 		});
@@ -1641,6 +1993,254 @@ describe("CodexProvider.processResponse", () => {
 		expect(processed.status).toBe(400);
 		expect(await processed.text()).toBe('{"error":"bad_request"}');
 	});
+
+	it("maps response.incomplete with a content_filter reason to a refusal stop_reason", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "content_filter" },
+					usage: { input_tokens: 3, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"refusal"');
+		expect(body).toContain("event: message_delta");
+		expect(body).toContain("event: message_stop");
+	});
+
+	it("maps response.incomplete with a non-content_filter reason to max_tokens", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+					usage: { input_tokens: 3, output_tokens: 512 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("treats a response.completed event carrying status incomplete the same as response.incomplete", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "unknown_future_reason" },
+					usage: { input_tokens: 3, output_tokens: 10 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("never resolves an incomplete response with a pending tool call to a success stop_reason", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "function_call", call_id: "call_1", name: "search" },
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: { type: "function_call", call_id: "call_1", name: "search" },
+				output_index: 0,
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+					usage: { input_tokens: 3, output_tokens: 50 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).not.toContain('"stop_reason":"tool_use"');
+		expect(body).not.toContain('"stop_reason":"end_turn"');
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("normalizes the subscription endpoint context-window message for streaming clients", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						type: "invalid_request_error",
+						message:
+							"Your input exceeds the context window of this model. Please adjust your input and try again.",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain(
+			"Prompt is too long. Codex reported: Your input exceeds the context window of this model. Please adjust your input and try again.",
+		);
+	});
+
+	it("normalizes the subscription endpoint context-window message for non-streaming clients", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						type: "invalid_request_error",
+						message:
+							"Your input exceeds the context window of this model. Please adjust your input and try again.",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.json();
+
+		expect(transformed.status).toBe(400);
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message:
+					"Prompt is too long. Codex reported: Your input exceeds the context window of this model. Please adjust your input and try again.",
+			},
+		});
+	});
+});
+
+describe("CodexProvider upstream error code classification", () => {
+	const errorForCode = async (code: string) => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("error", {
+				type: "error",
+				code,
+				message: `Codex reported ${code}`,
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-better-ccflare-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = (await transformed.json()) as {
+			error: { type: string; code?: string };
+		};
+		return { status: transformed.status, body };
+	};
+
+	it("maps insufficient_quota to rate_limit_error", async () => {
+		const { status, body } = await errorForCode("insufficient_quota");
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(status).toBe(429);
+	});
+
+	it("maps server_is_overloaded to overloaded_error", async () => {
+		const { status, body } = await errorForCode("server_is_overloaded");
+		expect(body.error.type).toBe("overloaded_error");
+		expect(status).toBe(529);
+	});
+
+	it("maps slow_down to overloaded_error", async () => {
+		const { status, body } = await errorForCode("slow_down");
+		expect(body.error.type).toBe("overloaded_error");
+		expect(status).toBe(529);
+	});
+
+	it("maps cyber_policy to invalid_request_error", async () => {
+		const { status, body } = await errorForCode("cyber_policy");
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(status).toBe(400);
+	});
+
+	it("maps usage_not_included to permission_error", async () => {
+		const { status, body } = await errorForCode("usage_not_included");
+		expect(body.error.type).toBe("permission_error");
+		expect(status).toBe(403);
+	});
+
+	it("maps server_error to api_error", async () => {
+		const { status, body } = await errorForCode("server_error");
+		expect(body.error.type).toBe("api_error");
+		expect(status).toBe(502);
+	});
 });
 
 describe("CodexProvider.transformRequestBody", () => {
@@ -1744,7 +2344,151 @@ describe("CodexProvider.transformRequestBody", () => {
 		);
 	});
 
-	it("maps sonnet-family models to the default Codex model", async () => {
+	it("maps max_tokens according to the resolved Codex endpoint contract", async () => {
+		const cases = [
+			{
+				name: "custom endpoint",
+				endpoint: "https://codex.example.com/v1/responses",
+				expectedMaxOutputTokens: 4096,
+			},
+			{
+				name: "canonical subscription endpoint",
+				endpoint: "https://chatgpt.com/backend-api/codex/responses",
+				expectedMaxOutputTokens: undefined,
+			},
+			{
+				name: "canonical subscription endpoint with trailing slash",
+				endpoint: "https://chatgpt.com/backend-api/codex/responses/",
+				expectedMaxOutputTokens: undefined,
+			},
+			{
+				name: "canonical subscription endpoint with query",
+				endpoint:
+					"https://chatgpt.com/backend-api/codex/responses?feature=request-contract",
+				expectedMaxOutputTokens: undefined,
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const provider = new CodexProvider();
+			const account = codexAccount({ custom_endpoint: testCase.endpoint });
+			const request = new Request(testCase.endpoint, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: "claude-3-7-sonnet",
+					max_tokens: 4096,
+					messages: [{ role: "user", content: "hello" }],
+				}),
+			});
+
+			const transformed = await provider.transformRequestBody(request, account);
+			const body = await transformed.json();
+
+			expect(body.max_output_tokens, testCase.name).toBe(
+				testCase.expectedMaxOutputTokens,
+			);
+		}
+	});
+
+	it("preserves custom endpoint max_tokens: 0 as max_output_tokens: 1", async () => {
+		const provider = new CodexProvider();
+		const endpoint = "https://codex.example.com/v1/responses";
+		const request = new Request(endpoint, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 0,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(
+			request,
+			codexAccount({ custom_endpoint: endpoint }),
+		);
+		const body = await transformed.json();
+
+		expect(body.max_output_tokens).toBe(1);
+	});
+
+	it("rejects max_tokens: 0 locally for the canonical subscription endpoint", async () => {
+		const provider = new CodexProvider();
+		const endpoint = "https://chatgpt.com/backend-api/codex/responses";
+		const request = new Request(endpoint, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 0,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(
+			request,
+			codexAccount({ custom_endpoint: endpoint }),
+		);
+		const body = await transformed.json();
+
+		expect(transformed.headers.get("x-better-ccflare-synthetic-response")).toBe(
+			"true",
+		);
+		expect(transformed.headers.get("x-better-ccflare-synthetic-status")).toBe(
+			"400",
+		);
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "Codex subscription endpoint does not support max_tokens: 0.",
+			},
+		});
+	});
+
+	it("rejects negative max_tokens locally for the canonical subscription endpoint", async () => {
+		const provider = new CodexProvider();
+		const endpoint = "https://chatgpt.com/backend-api/codex/responses";
+		const request = new Request(endpoint, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: -1,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(
+			request,
+			codexAccount({ custom_endpoint: endpoint }),
+		);
+		const body = await transformed.json();
+
+		expect(transformed.headers.get("x-better-ccflare-synthetic-response")).toBe(
+			"true",
+		);
+		expect(transformed.headers.get("x-better-ccflare-synthetic-status")).toBe(
+			"400",
+		);
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "Codex subscription endpoint does not support max_tokens: -1.",
+			},
+		});
+	});
+
+	// The compiled default map is gone: it could not know what a subscription
+	// is entitled to, and pointing sonnet at a model the plan refuses is how a
+	// routine request came back 400. With no account — hence no listing — the
+	// family is left alone rather than guessed at.
+	it("leaves a sonnet-family model alone when nothing knows better", async () => {
+		// The derived map is process-wide: without this, a case that seeded it
+		// earlier would make this one pass or fail for the wrong reason.
+		clearDerivedProviderModelDefaults();
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -1759,7 +2503,40 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.3-codex");
+		expect(body.model).toBe("claude-3-7-sonnet");
+	});
+
+	// Regression: mapModel translates by substring and had no branch for
+	// `fable`, so the family was not resolvable at all. It is resolvable now —
+	// what it resolves TO comes from the account, not from a constant.
+	it("resolves a fable-family model from the account listing", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-fable-5",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+
+		// What the account's own listing implied, recorded when it was read.
+		setDerivedProviderModelDefaults("codex", "acc-1", {
+			fable: "gpt-5.6-sol",
+			opus: "gpt-5.6-sol",
+			sonnet: "gpt-5.6-terra",
+			haiku: "gpt-5.6-luna",
+		});
+		const account = {
+			id: "acc-1",
+			provider: "codex",
+		} as Parameters<typeof provider.transformRequestBody>[1];
+
+		const transformed = await provider.transformRequestBody(request, account);
+		const body = await transformed.json();
+
+		expect(body.model).toBe("gpt-5.6-sol");
 	});
 
 	it("uses account sonnet mapping for sonnet-family models", async () => {
@@ -1806,9 +2583,21 @@ describe("CodexProvider.transformRequestBody", () => {
 		expect(body.model).toBe("gpt-5.3-codex");
 	});
 
-	it("uses default Codex mapping for families missing from account mappings", async () => {
+	// Before, this asserted the compiled fallback. Now the fallback IS the
+	// account's listing, so the test says which model that listing implied.
+	it("fills families missing from the account mappings from its listing", async () => {
+		setDerivedProviderModelDefaults("codex", "acc-1", {
+			fable: "gpt-5.6-sol",
+			opus: "gpt-5.6-sol",
+			sonnet: "gpt-5.6-terra",
+			haiku: "gpt-5.6-luna",
+		});
 		const provider = new CodexProvider();
 		const account = {
+			// The derived map is keyed by account: two accounts of the same
+			// provider can be on different plans, so there is nothing to look up
+			// without an id.
+			id: "acc-1",
 			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
 		} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
@@ -1824,7 +2613,9 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.4-mini");
+		// The account maps some families explicitly; the ones it does not are
+		// filled from its own listing, never from a constant.
+		expect(body.model).toBe("gpt-5.6-luna");
 	});
 
 	it("passes through unknown model names unchanged", async () => {
@@ -1843,6 +2634,477 @@ describe("CodexProvider.transformRequestBody", () => {
 		const body = await transformed.json();
 
 		expect(body.model).toBe("gpt-5.4-mini");
+	});
+
+	it("prefers an explicit account model mapping over the raw passthrough model", async () => {
+		const provider = new CodexProvider();
+		const account = {
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
+		} as Parameters<typeof provider.transformRequestBody>[1];
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+				__better_ccflare_codex_passthrough: { model: "gpt-5.4-mini" },
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, account);
+		const body = await transformed.json();
+
+		expect(body.model).toBe("gpt-5.3-codex");
+	});
+
+	it("restores the raw passthrough model over a family-tier default", async () => {
+		setDerivedProviderModelDefaults("codex", "acc-1", {
+			fable: "gpt-5.6-sol",
+			opus: "gpt-5.6-sol",
+			sonnet: "gpt-5.6-terra",
+			haiku: "gpt-5.6-luna",
+		});
+		const provider = new CodexProvider();
+		const account = {
+			id: "acc-1",
+		} as Parameters<typeof provider.transformRequestBody>[1];
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+				__better_ccflare_codex_passthrough: { model: "gpt-5.4-mini" },
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, account);
+		const body = await transformed.json();
+
+		expect(body.model).toBe("gpt-5.4-mini");
+	});
+
+	it("resolves reasoning effort against the model actually sent", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+				reasoning: { effort: "high" },
+				__better_ccflare_codex_passthrough: { model: "gpt-5.4-mini" },
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		// "claude-3-7-sonnet" supports "high"; "gpt-5.4-mini" — the model that
+		// actually ships — only supports up to "medium".
+		expect(body.model).toBe("gpt-5.4-mini");
+		expect(body.reasoning.effort).toBe("medium");
+	});
+
+	it("flags custom tools declared only via a Responses Lite additional_tools input item", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "gpt-5.4-mini",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+				__better_ccflare_codex_passthrough: {
+					additional_tools: [
+						{
+							type: "additional_tools",
+							tools: [{ type: "custom", name: "shell" }],
+						},
+					],
+				},
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+
+		expect(transformed.headers.get("x-better-ccflare-codex-custom-tools")).toBe(
+			"true",
+		);
+	});
+
+	it("forces StructuredOutput tool_choice when the Claude Code schema tool is present", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-haiku-4-5-20251001",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "return structured output" }],
+				tools: [
+					{
+						name: "StructuredOutput",
+						description: "Return the validated payload.",
+						input_schema: {
+							type: "object",
+							additionalProperties: false,
+							properties: { ok: { type: "boolean" } },
+							required: ["ok"],
+						},
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(body.tools.map((t: { name: string }) => t.name)).toContain(
+			"StructuredOutput",
+		);
+		expect(body.tool_choice).toEqual({
+			type: "function",
+			name: "StructuredOutput",
+		});
+	});
+
+	it("does not force tool_choice for ordinary tool-enabled requests", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-haiku-4-5-20251001",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "read a file" }],
+				tools: [
+					{
+						name: "Read",
+						description: "Read a file.",
+						input_schema: {
+							type: "object",
+							properties: { file_path: { type: "string" } },
+							required: ["file_path"],
+						},
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(body.tool_choice).toBeUndefined();
+	});
+
+	it.each([
+		[{ type: "auto" }, "auto"],
+		[{ type: "any" }, "required"],
+		[{ type: "none" }, "none"],
+		[
+			{ type: "tool", name: "Read" },
+			{ type: "function", name: "Read" },
+		],
+	] as const)("maps Anthropic tool_choice %j to Codex", async (toolChoice, expected) => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "read a file" }],
+				tools: [
+					{
+						name: "Read",
+						description: "Read a file.",
+						input_schema: { type: "object" },
+					},
+				],
+				tool_choice: toolChoice,
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+		expect(body.tool_choice).toEqual(expected);
+	});
+
+	it("preserves explicit tool_choice precedence over StructuredOutput fallback", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "return text" }],
+				tools: [
+					{
+						name: "StructuredOutput",
+						description: "Return structured output.",
+						input_schema: { type: "object" },
+					},
+				],
+				tool_choice: { type: "none" },
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+		expect(body.tool_choice).toBe("none");
+	});
+
+	it("sanitizes tool input_schema: strips lookaround pattern and $schema", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "send an email" }],
+				tools: [
+					{
+						name: "send_email",
+						description: "Send an email.",
+						input_schema: {
+							$schema: "http://json-schema.org/draft-07/schema#",
+							type: "object",
+							properties: {
+								to: {
+									type: "array",
+									items: {
+										type: "string",
+										pattern:
+											"^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+									},
+								},
+							},
+							required: ["to"],
+						},
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+		const params = body.tools[0].parameters;
+		expect(params).not.toHaveProperty("$schema");
+		expect(params.type).toBe("object");
+		expect(params.required).toEqual(["to"]);
+		const items = params.properties.to.items;
+		expect(items).not.toHaveProperty("pattern");
+		expect(items.type).toBe("string");
+	});
+
+	it("rejects a named tool_choice that is absent from tools", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "search" }],
+				tools: [
+					{
+						name: "Read",
+						description: "Read a file.",
+						input_schema: { type: "object" },
+					},
+				],
+				tool_choice: { type: "tool", name: "WebSearch" },
+			}),
+		});
+
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			"tool_choice references unknown tool: WebSearch",
+		);
+	});
+});
+
+describe("CodexProvider prompt_cache_key derivation", () => {
+	afterEach(() => {
+		delete process.env[CODEX_PROMPT_CACHE_KEY_ENV];
+		delete process.env[CODEX_CACHE_KEY_MODE_ENV];
+	});
+
+	const transform = async (
+		payload: Record<string, unknown>,
+		account?: Account,
+	) => {
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 10,
+				metadata: {
+					user_id: JSON.stringify({
+						session_id: "11111111-1111-4111-8111-111111111111",
+					}),
+				},
+				messages: [{ role: "user", content: "hello" }],
+				...payload,
+			}),
+		});
+		return new CodexProvider()
+			.transformRequestBody(request, account)
+			.then((r) => r.json());
+	};
+
+	it("attaches prompt_cache_key by default", async () => {
+		const body = await transform({});
+		expect(body.prompt_cache_key).toMatch(/^ccflare-convo-[0-9a-f]{48}$/);
+	});
+
+	it("omits prompt_cache_key when explicitly disabled via =0", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "0";
+		const body = await transform({});
+		expect(body.prompt_cache_key).toBeUndefined();
+	});
+
+	it("attaches prompt_cache_key when the account targets OpenAI's real endpoint", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "1";
+		const noAccount = await transform({});
+		const openaiAccount = await transform(
+			{},
+			codexAccount({ custom_endpoint: "https://api.openai.com/v1" }),
+		);
+		expect(noAccount.prompt_cache_key).toMatch(/^ccflare-convo-[0-9a-f]{48}$/);
+		expect(openaiAccount.prompt_cache_key).toMatch(
+			/^ccflare-convo-[0-9a-f]{48}$/,
+		);
+	});
+
+	it("omits prompt_cache_key for custom/self-hosted OpenAI-compatible endpoints even when enabled", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "1";
+		const body = await transform(
+			{},
+			codexAccount({
+				custom_endpoint: "https://my-openai-proxy.example.com/v1",
+			}),
+		);
+		expect(body.prompt_cache_key).toBeUndefined();
+	});
+
+	it("conversation keys are stable across turns and distinct across conversations", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "1";
+		const turn1 = await transform({
+			system: "main loop system prompt",
+			messages: [{ role: "user", content: "task A" }],
+		});
+		// Same conversation one turn later: identical first message, longer tail.
+		const turn2 = await transform({
+			system: "main loop system prompt",
+			messages: [
+				{ role: "user", content: "task A" },
+				{ role: "assistant", content: "working on it" },
+				{ role: "user", content: "continue" },
+			],
+		});
+		// Sibling subagent: same session and system, different first message.
+		const sibling = await transform({
+			system: "main loop system prompt",
+			messages: [{ role: "user", content: "task B" }],
+		});
+		// Different agent type: same first message, different system prompt.
+		const otherAgent = await transform({
+			system: "subagent system prompt",
+			messages: [{ role: "user", content: "task A" }],
+		});
+
+		expect(turn1.prompt_cache_key).toMatch(/^ccflare-convo-[0-9a-f]{48}$/);
+		expect((turn1.prompt_cache_key as string).length).toBeLessThanOrEqual(64);
+		expect(turn1.prompt_cache_key).not.toContain("11111111");
+		expect(turn2.prompt_cache_key).toBe(turn1.prompt_cache_key);
+		expect(sibling.prompt_cache_key).not.toBe(turn1.prompt_cache_key);
+		expect(otherAgent.prompt_cache_key).not.toBe(turn1.prompt_cache_key);
+	});
+
+	it("session mode keys the whole session identically", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "1";
+		process.env[CODEX_CACHE_KEY_MODE_ENV] = "session";
+		const first = await transform({
+			messages: [{ role: "user", content: "task A" }],
+		});
+		const other = await transform({
+			messages: [{ role: "user", content: "completely different task" }],
+		});
+		expect(first.prompt_cache_key).toMatch(/^ccflare-session-[0-9a-f]{48}$/);
+		expect(other.prompt_cache_key).toBe(first.prompt_cache_key);
+	});
+
+	it("differing session ids produce differing keys, case-insensitively", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "1";
+		const withSession = (sessionId: string) =>
+			transform({
+				metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+			});
+		const lower = await withSession("11111111-1111-4111-8111-111111111111");
+		const upper = await withSession(
+			"11111111-1111-4111-8111-111111111111".toUpperCase(),
+		);
+		const different = await withSession("22222222-2222-4222-8222-222222222222");
+		expect(upper.prompt_cache_key).toBe(lower.prompt_cache_key);
+		expect(different.prompt_cache_key).not.toBe(lower.prompt_cache_key);
+	});
+
+	it("omits prompt_cache_key for malformed session metadata", async () => {
+		process.env[CODEX_PROMPT_CACHE_KEY_ENV] = "1";
+		const noMeta = await transform({ metadata: { user_id: "not-json" } });
+		expect(noMeta.prompt_cache_key).toBeUndefined();
+		const badUuid = await transform({
+			metadata: { user_id: JSON.stringify({ session_id: "not-a-uuid" }) },
+		});
+		expect(badUuid.prompt_cache_key).toBeUndefined();
+	});
+});
+
+describe("normalizeCodexInputUsage", () => {
+	it("subtracts cached tokens from the cache-inclusive total", () => {
+		const result = normalizeCodexInputUsage(100, 60);
+		expect(result.totalInputTokens).toBe(100);
+		expect(result.inputTokens).toBe(40);
+		expect(result.cacheReadInputTokens).toBe(60);
+	});
+
+	it("treats a missing or non-numeric total as zero", () => {
+		expect(normalizeCodexInputUsage(undefined, 5)).toEqual({
+			totalInputTokens: 0,
+			inputTokens: 0,
+			cacheReadInputTokens: 0,
+		});
+		expect(normalizeCodexInputUsage(Number.NaN, 5)).toEqual({
+			totalInputTokens: 0,
+			inputTokens: 0,
+			cacheReadInputTokens: 0,
+		});
+	});
+
+	it("treats a missing or negative cached count as zero", () => {
+		expect(normalizeCodexInputUsage(10, undefined)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+		});
+		expect(normalizeCodexInputUsage(10, -5)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+		});
+	});
+
+	it("clamps a cached count larger than the total instead of going negative", () => {
+		const result = normalizeCodexInputUsage(10, 25);
+		expect(result.inputTokens).toBe(0);
+		expect(result.cacheReadInputTokens).toBe(10);
 	});
 });
 
@@ -1934,15 +3196,21 @@ describe("parseCodexUsageHeaders reset-after handling", () => {
 
 describe("fetchCodexUsageOnDemand", () => {
 	let originalFetch: typeof fetch;
+	let originalSetTimeout: typeof setTimeout;
+	let originalClearTimeout: typeof clearTimeout;
 	let recorded: { url: string; init: RequestInit } | null;
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
+		originalSetTimeout = globalThis.setTimeout;
+		originalClearTimeout = globalThis.clearTimeout;
 		recorded = null;
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		globalThis.setTimeout = originalSetTimeout;
+		globalThis.clearTimeout = originalClearTimeout;
 	});
 
 	const makeMockFetch = (response: Response) => {
@@ -1952,7 +3220,7 @@ describe("fetchCodexUsageOnDemand", () => {
 		};
 	};
 
-	it("sends a minimal codex request and parses usage headers", async () => {
+	it("retains max_output_tokens: 1 for a valid non-default custom endpoint", async () => {
 		globalThis.fetch = makeMockFetch(
 			new Response("event: ignored\n\n", {
 				status: 200,
@@ -1980,14 +3248,16 @@ describe("fetchCodexUsageOnDemand", () => {
 		expect(body.stream).toBe(true);
 		expect(body.store).toBe(false);
 		expect(body.max_output_tokens).toBe(1);
-		expect(body.reasoning?.effort).toBe("minimal");
+		expect(body.reasoning?.effort).toBe("low");
 		expect(body.input).toHaveLength(1);
 		expect(body.input[0].role).toBe("user");
 
 		const headersInit = recorded?.init.headers as Record<string, string>;
 		const headers = new Headers(headersInit);
 		expect(headers.get("Authorization")).toBe("Bearer test-token");
+		expect(headers.get("Version")).toBe(CODEX_VERSION);
 		expect(headers.get("Openai-Beta")).toBe("responses=experimental");
+		expect(headers.get("User-Agent")).toContain(`codex-cli/${CODEX_VERSION}`);
 		expect(headers.get("originator")).toBe("codex_cli_rs");
 		expect(headers.get("Content-Type")).toBe("application/json");
 
@@ -2003,6 +3273,165 @@ describe("fetchCodexUsageOnDemand", () => {
 		expect(result.response.headers.get("x-codex-primary-reset-at")).toBe(
 			"1775000000",
 		);
+	});
+
+	it("pings with a model and effort the subscription endpoint still accepts", async () => {
+		// A stale ping model is fatal in a way a stale effort is not: the
+		// subscription endpoint rejects an unknown model *before* quota
+		// accounting, so its 400 carries no `x-codex-*` headers at all and the
+		// manual refresh fails with nothing to show. An unsupported reasoning
+		// effort is rejected after accounting, so the headers still arrive.
+		globalThis.fetch = makeMockFetch(
+			new Response("event: ignored\n\n", { status: 200 }),
+		) as unknown as typeof fetch;
+
+		await fetchCodexUsageOnDemand("test-token", CODEX_DEFAULT_ENDPOINT);
+
+		const body = JSON.parse(recorded?.init.body as string);
+		expect(body.model).toBe(CODEX_PING_MODEL);
+		// Rejected by the subscription endpoint for ChatGPT accounts.
+		expect(CODEX_PING_MODEL).not.toBe("gpt-5-codex");
+		// Rejected by the current model family.
+		expect(body.reasoning?.effort).not.toBe("minimal");
+	});
+
+	// The refresher asks the account which models it actually has and pings the
+	// cheapest of them, so the compiled-in name cannot silently outlive the plan
+	// and the probe does not spend frontier quota on a request it throws away.
+	it("pings the model the caller resolved from the account's own listing", async () => {
+		globalThis.fetch = makeMockFetch(
+			new Response("event: ignored\n\n", { status: 200 }),
+		) as unknown as typeof fetch;
+
+		await fetchCodexUsageOnDemand(
+			"test-token",
+			CODEX_DEFAULT_ENDPOINT,
+			"gpt-9-nano",
+		);
+
+		const body = JSON.parse(recorded?.init.body as string);
+		expect(body.model).toBe("gpt-9-nano");
+		// Pinned regardless of the model: the cheapest effort every model accepts,
+		// and one a model dislikes still returns the usage headers anyway.
+		expect(body.reasoning?.effort).toBe("low");
+	});
+
+	// A blank model reaches the endpoint as a missing one — the same
+	// 400-without-headers dead end the whole fix is about.
+	it("falls back to the compiled-in model when handed a blank one", async () => {
+		for (const blank of ["", "   "]) {
+			globalThis.fetch = makeMockFetch(
+				new Response("event: ignored\n\n", { status: 200 }),
+			) as unknown as typeof fetch;
+
+			await fetchCodexUsageOnDemand(
+				"test-token",
+				CODEX_DEFAULT_ENDPOINT,
+				blank,
+			);
+
+			const body = JSON.parse(recorded?.init.body as string);
+			expect(body.model).toBe(CODEX_PING_MODEL);
+		}
+	});
+
+	it("omits max_output_tokens for default subscription endpoint variants", async () => {
+		const endpoints = [
+			CODEX_DEFAULT_ENDPOINT,
+			`${CODEX_DEFAULT_ENDPOINT}/?source=manual-refresh`,
+		];
+
+		for (const endpoint of endpoints) {
+			globalThis.fetch = makeMockFetch(
+				new Response("event: ignored\n\n", { status: 200 }),
+			) as unknown as typeof fetch;
+
+			await fetchCodexUsageOnDemand("test-token", endpoint);
+
+			// Preserve configured query and fragment components in the fetch URL.
+			expect(recorded?.url).toBe(endpoint);
+			const body = JSON.parse(recorded?.init.body as string);
+			expect(body).not.toHaveProperty("max_output_tokens");
+		}
+	});
+
+	it("falls back from an invalid endpoint and applies subscription rules", async () => {
+		globalThis.fetch = makeMockFetch(
+			new Response("event: ignored\n\n", { status: 200 }),
+		) as unknown as typeof fetch;
+
+		await fetchCodexUsageOnDemand("test-token", "not-a-valid-endpoint");
+
+		expect(recorded?.url).toBe(CODEX_DEFAULT_ENDPOINT);
+		const body = JSON.parse(recorded?.init.body as string);
+		expect(body).not.toHaveProperty("max_output_tokens");
+	});
+
+	it("aborts a pending refresh on timeout and clears the timer", async () => {
+		let timeoutCallback: (() => void) | null = null;
+		let clearTimeoutCalls = 0;
+		let observedSignal: AbortSignal | null = null;
+		globalThis.setTimeout = ((callback: () => void) => {
+			timeoutCallback = callback;
+			return 1 as unknown as ReturnType<typeof setTimeout>;
+		}) as typeof setTimeout;
+		globalThis.clearTimeout = (() => {
+			clearTimeoutCalls++;
+		}) as typeof clearTimeout;
+		globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+			observedSignal = init?.signal ?? null;
+			return new Promise<Response>((_resolve, reject) => {
+				observedSignal?.addEventListener(
+					"abort",
+					() => reject(new DOMException("Aborted", "AbortError")),
+					{ once: true },
+				);
+			});
+		}) as typeof fetch;
+
+		const refresh = fetchCodexUsageOnDemand("test-token");
+		await Promise.resolve();
+		expect(timeoutCallback).not.toBeNull();
+		timeoutCallback?.();
+
+		await expect(refresh).rejects.toThrow("Aborted");
+		expect(observedSignal?.aborted).toBe(true);
+		expect(clearTimeoutCalls).toBe(1);
+	});
+
+	it("aborts before body cancellation and preserves the response when cancel throws", async () => {
+		let cancelCalled = 0;
+		let signalWasAbortedDuringCancel = false;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				cancel() {
+					cancelCalled++;
+					signalWasAbortedDuringCancel =
+						recorded?.init.signal?.aborted ?? false;
+					throw new Error("cancel failed");
+				},
+			}),
+			{
+				status: 429,
+				headers: {
+					"x-codex-primary-used-percent": "42",
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-reset-at": "1775000000",
+				},
+			},
+		);
+		globalThis.fetch = makeMockFetch(response) as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageOnDemand("test-token");
+
+		expect(cancelCalled).toBe(1);
+		expect(signalWasAbortedDuringCancel).toBe(true);
+		expect(recorded?.init.signal?.aborted).toBe(true);
+		expect(result.response.status).toBe(429);
+		expect(result.response.headers.get("x-codex-primary-reset-at")).toBe(
+			"1775000000",
+		);
+		expect(result.data?.five_hour.utilization).toBe(42);
 	});
 
 	it("returns null data when no Codex usage headers are present", async () => {

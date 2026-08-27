@@ -8,12 +8,57 @@ import {
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
+	createCodexDeviceFlowStatusHandler,
 	createCodexReauthHandler,
 	createOAuthInitHandler,
+	createQwenDeviceFlowStatusHandler,
+	createQwenReauthHandler,
 } from "../oauth";
 
 // Test database path
-const TEST_DB_PATH = "/tmp/test-oauth-handler.db";
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-oauth-handler.db`;
+
+// Spy used to assert clearAccountRefreshCache is invoked on successful reauth.
+// mock.module must be called at top-level (before imports resolve). The mock
+// only needs to intercept clearAccountRefreshCache, but mock.module replaces
+// the WHOLE module globally and across file boundaries in Bun (no per-file
+// isolation without --isolate). We capture the real module first, spread its
+// exports so other consumers (e.g. accounts.ts which imports
+// clearAccountRefreshCache, getUsageThrottleStatus, refreshCodexUsageForAccount,
+// restartUsagePollingForAccount) still see the real functions, then restore the
+// real module in afterAll so later test files in this process resolve the real
+// @better-ccflare/proxy exports again.
+const actualProxy = await import("@better-ccflare/proxy");
+const mockClearAccountRefreshCache = mock((_accountId: string) => {});
+
+mock.module("@better-ccflare/proxy", () => ({
+	...actualProxy,
+	clearAccountRefreshCache: mockClearAccountRefreshCache,
+}));
+
+afterAll(() => {
+	mock.module("@better-ccflare/proxy", () => actualProxy);
+	mock.module("@better-ccflare/providers/codex", () => actualCodex);
+	mock.module("@better-ccflare/providers/qwen", () => actualQwen);
+});
+
+/** Poll a device-flow status handler until the session reaches a terminal state. */
+async function waitForSessionComplete(
+	statusHandler: (sessionId: string) => Response,
+	sessionId: string,
+	timeoutMs = 5000,
+): Promise<string> {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const res = statusHandler(sessionId);
+		const data = (await res.json()) as { status: string };
+		if (data.status === "complete" || data.status === "error") {
+			return data.status;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`Timed out waiting for session ${sessionId} to complete`);
+}
 
 describe("OAuth Handler - Backward Compatibility", () => {
 	let dbOps: DatabaseOperations;
@@ -220,7 +265,13 @@ const mockInitiateCodexDeviceFlow = mock(async () => ({
 	interval: 5,
 }));
 
+// Capture the real @better-ccflare/providers/codex module first so other
+// exports stay intact for downstream consumers (mock.module replaces the
+// WHOLE module globally — see the @better-ccflare/proxy mock comment above).
+const actualCodex = await import("@better-ccflare/providers/codex");
+
 mock.module("@better-ccflare/providers/codex", () => ({
+	...actualCodex,
 	initiateCodexDeviceFlow: mockInitiateCodexDeviceFlow,
 	pollCodexForToken: mock(async () => ({
 		access_token: "at",
@@ -229,7 +280,32 @@ mock.module("@better-ccflare/providers/codex", () => ({
 	})),
 }));
 
-const CODEX_REAUTH_DB_PATH = "/tmp/test-codex-reauth-handler.db";
+// Mock initiateQwenDeviceFlow/pollForToken so tests never hit the network.
+const mockInitiateQwenDeviceFlow = mock(async () => ({
+	deviceCode: "test-device-code",
+	userCode: "TEST-CODE",
+	verificationUri: "https://chat.qwen.ai/authorize",
+	verificationUriComplete: "https://chat.qwen.ai/authorize?user_code=TEST-CODE",
+	interval: 5,
+	pkce: { verifier: "test-verifier", challenge: "test-challenge" },
+}));
+
+// Capture the real @better-ccflare/providers/qwen module first so other
+// exports stay intact for downstream consumers (mock.module replaces the
+// WHOLE module globally — see the @better-ccflare/proxy mock comment above).
+const actualQwen = await import("@better-ccflare/providers/qwen");
+
+mock.module("@better-ccflare/providers/qwen", () => ({
+	...actualQwen,
+	initiateDeviceFlow: mockInitiateQwenDeviceFlow,
+	pollForToken: mock(async () => ({
+		access_token: "at",
+		refresh_token: "rt",
+		expires_in: 3600,
+	})),
+}));
+
+const CODEX_REAUTH_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-codex-reauth-handler.db`;
 
 describe("createCodexReauthHandler", () => {
 	let dbOps: DatabaseOperations;
@@ -358,14 +434,128 @@ describe("createCodexReauthHandler", () => {
 		expect(data.verificationUrl).toBe("https://auth.openai.com/codex/device");
 		expect(data.userCode).toBe("TEST-CODE");
 	});
+
+	it("should clear the in-memory refresh cache after a successful reauth", async () => {
+		// Insert a codex account
+		const accountId = "bbbbbbbb-0000-0000-0000-000000000003";
+		const now = Date.now();
+		await dbOps.getAdapter().run(
+			`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority,
+			custom_endpoint, model_mappings, model_fallbacks)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, NULL, NULL)`,
+			[
+				accountId,
+				"codex-account-clear-cache",
+				"codex",
+				null,
+				"old-rt",
+				"old-at",
+				now + 3600000,
+				now,
+			],
+		);
+
+		mockClearAccountRefreshCache.mockClear();
+
+		const req = new Request("http://localhost/api/oauth/reauth/codex", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ accountId }),
+		});
+
+		const res = await handler(req);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+
+		const statusHandler = createCodexDeviceFlowStatusHandler();
+		const status = await waitForSessionComplete(statusHandler, data.sessionId);
+		expect(status).toBe("complete");
+
+		expect(mockClearAccountRefreshCache).toHaveBeenCalledWith(accountId);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Qwen reauth handler
+// ---------------------------------------------------------------------------
+
+const QWEN_REAUTH_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-qwen-reauth-handler.db`;
+
+describe("createQwenReauthHandler", () => {
+	let dbOps: DatabaseOperations;
+	let handler: (req: Request) => Promise<Response>;
+
+	beforeAll(async () => {
+		try {
+			if (existsSync(QWEN_REAUTH_DB_PATH)) {
+				unlinkSync(QWEN_REAUTH_DB_PATH);
+			}
+		} catch {
+			// ignore
+		}
+
+		dbOps = new DirectDbOps(QWEN_REAUTH_DB_PATH);
+		handler = createQwenReauthHandler(dbOps);
+	});
+
+	afterAll(async () => {
+		await dbOps.close();
+		try {
+			if (existsSync(QWEN_REAUTH_DB_PATH)) {
+				unlinkSync(QWEN_REAUTH_DB_PATH);
+			}
+		} catch {
+			// ignore
+		}
+	});
+
+	it("should clear the in-memory refresh cache after a successful reauth", async () => {
+		// Insert a qwen account
+		const accountId = "dddddddd-0000-0000-0000-000000000004";
+		const now = Date.now();
+		await dbOps.getAdapter().run(
+			`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority,
+			custom_endpoint, model_mappings, model_fallbacks)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, NULL, NULL)`,
+			[
+				accountId,
+				"qwen-account-clear-cache",
+				"qwen",
+				null,
+				"old-rt",
+				"old-at",
+				now + 3600000,
+				now,
+			],
+		);
+
+		mockClearAccountRefreshCache.mockClear();
+
+		const req = new Request("http://localhost/api/oauth/reauth/qwen", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ accountId }),
+		});
+
+		const res = await handler(req);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+
+		const statusHandler = createQwenDeviceFlowStatusHandler();
+		const status = await waitForSessionComplete(statusHandler, data.sessionId);
+		expect(status).toBe("complete");
+
+		expect(mockClearAccountRefreshCache).toHaveBeenCalledWith(accountId);
+	});
 });
 
 // ---------------------------------------------------------------------------
 // Anthropic reauth init handler
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_REAUTH_INIT_DB_PATH =
-	"/tmp/test-anthropic-reauth-init-handler.db";
+const ANTHROPIC_REAUTH_INIT_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-anthropic-reauth-init-handler.db`;
 
 describe("createAnthropicReauthInitHandler", () => {
 	let dbOps: DatabaseOperations;
@@ -465,8 +655,7 @@ describe("createAnthropicReauthInitHandler", () => {
 // Anthropic reauth callback handler
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_REAUTH_CALLBACK_DB_PATH =
-	"/tmp/test-anthropic-reauth-callback-handler.db";
+const ANTHROPIC_REAUTH_CALLBACK_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-anthropic-reauth-callback-handler.db`;
 
 describe("createAnthropicReauthCallbackHandler", () => {
 	let dbOps: DatabaseOperations;

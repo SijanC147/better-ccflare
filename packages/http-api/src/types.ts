@@ -17,6 +17,7 @@ export type {
 	RequestStorageSetRequest,
 	RetentionGetResponse,
 	RetentionSetRequest,
+	RetentionStatus,
 	StatsResponse,
 	StrategyUpdateRequest,
 	TimePoint,

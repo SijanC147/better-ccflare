@@ -162,6 +162,26 @@ describe("transformRequestBodyModel", () => {
 		expect(resultBody.messages).toEqual([{ role: "user", content: "test" }]);
 		expect(resultBody.model).toBeUndefined();
 	});
+
+	it("strips the internal Codex passthrough field before forwarding upstream", async () => {
+		const requestBody = {
+			model: "claude-sonnet-4-5-20250929",
+			messages: [{ role: "user", content: "test" }],
+			__better_ccflare_codex_passthrough: { store: true },
+		};
+
+		const request = new Request("http://test.com", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(requestBody),
+		});
+
+		const result = await transformRequestBodyModel(request, undefined);
+		const resultBody = await result.json();
+
+		expect(resultBody).not.toHaveProperty("__better_ccflare_codex_passthrough");
+		expect(resultBody.model).toBe("claude-sonnet-4-5-20250929");
+	});
 });
 
 describe("transformRequestBodyModelForce", () => {
@@ -214,5 +234,64 @@ describe("transformRequestBodyModelForce", () => {
 
 		// Should return original request when JSON parsing fails
 		expect(result).toBe(request);
+	});
+});
+
+describe("model transforms preserve the abort signal", () => {
+	// Both transforms rebuild the Request from `request.url`, and a URL-based
+	// rebuild does not inherit the signal. Losing it would detach a client
+	// disconnect from the upstream fetch for every account with a model mapping.
+	function signalledRequest(controller: AbortController, model = "sonnet") {
+		return new Request("http://test.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model, messages: [] }),
+			signal: controller.signal,
+		});
+	}
+
+	it("keeps the signal when transformRequestBodyModel rewrites the model", async () => {
+		const controller = new AbortController();
+		const request = signalledRequest(controller);
+
+		const result = await transformRequestBodyModel(
+			request,
+			undefined,
+			() => "mapped-model",
+		);
+
+		// A rewrite happened, so this must be a new Request object …
+		expect(result).not.toBe(request);
+		// … that still aborts together with the client.
+		expect(result.signal.aborted).toBe(false);
+		controller.abort();
+		expect(result.signal.aborted).toBe(true);
+	});
+
+	it("keeps the signal when transformRequestBodyModelForce rewrites the model", async () => {
+		const controller = new AbortController();
+		const request = signalledRequest(controller);
+
+		const result = await transformRequestBodyModelForce(request, "MiniMax-M2");
+
+		expect(result).not.toBe(request);
+		expect(result.signal.aborted).toBe(false);
+		controller.abort();
+		expect(result.signal.aborted).toBe(true);
+	});
+
+	it("passes the original request through when no rewrite is needed", async () => {
+		const controller = new AbortController();
+		const request = signalledRequest(controller, "same-model");
+
+		const result = await transformRequestBodyModel(
+			request,
+			undefined,
+			() => "same-model",
+		);
+
+		expect(result).toBe(request);
+		controller.abort();
+		expect(result.signal.aborted).toBe(true);
 	});
 });

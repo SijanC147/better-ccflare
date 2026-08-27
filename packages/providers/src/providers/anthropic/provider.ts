@@ -9,6 +9,7 @@ import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";
+import { drainReader } from "../../utils/stream-drain";
 
 // Hard rate limit statuses that should block account usage
 const HARD_LIMIT_STATUSES = new Set([
@@ -61,6 +62,38 @@ export function isAnthropicOutOfCredits(response: Response): boolean {
 			"anthropic-ratelimit-unified-overage-disabled-reason",
 		) === OUT_OF_CREDITS_REASON
 	);
+}
+
+/**
+ * Anthropic returns this 400 `invalid_request_error` when a Claude OAuth
+ * account's "extra usage" credit balance is depleted for third-party-app
+ * traffic (e.g. OpenCode), as opposed to the plan's included quota. This is
+ * a billing-policy rejection, not a rate limit — callers must NOT bench the
+ * account, since some models/routes may still succeed; this exists purely
+ * for labeling in request history / the dashboard.
+ */
+export const EXTRA_USAGE_EXHAUSTED_REASON = "extra_usage_exhausted";
+
+export async function isAnthropicExtraUsageExhausted(
+	response: Response,
+): Promise<boolean> {
+	if (response.status !== 400) return false;
+	try {
+		// Clone only after the content-type gate. Cloning first teed the body
+		// and then returned early for every non-JSON 400 (gateway error pages,
+		// plain-text upstream errors), leaving that copy unread forever — the
+		// tee then keeps buffering for whoever consumes the original. See #356.
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+		const json = await response.clone().json();
+		return (
+			json?.error?.type === "invalid_request_error" &&
+			typeof json?.error?.message === "string" &&
+			json.error.message.toLowerCase().includes("extra usage")
+		);
+	} catch {
+		return false;
+	}
 }
 
 const log = new Logger("AnthropicProvider");
@@ -157,11 +190,16 @@ export class AnthropicProvider extends BaseProvider {
 					error_description?: string;
 					message?: string;
 				};
+				// Preserve the machine-readable RFC-6749 error code (e.g.
+				// "invalid_grant") ahead of any human-readable description. When only
+				// error_description is surfaced the code is discarded, and the
+				// token-manager's requires_reauth detection — which keys on that code —
+				// silently misses a dead refresh token (the exact 43h-undetected
+				// incident this feature exists for).
 				errorMessage =
-					errorObj.error_description ||
-					errorObj.error ||
-					errorObj.message ||
-					errorMessage;
+					[errorObj.error, errorObj.error_description || errorObj.message]
+						.filter(Boolean)
+						.join(": ") || errorMessage;
 
 				// Log specific OAuth authentication errors
 				if (response.status === 401 && typeof errorMessage === "string") {
@@ -539,8 +577,10 @@ export class AnthropicProvider extends BaseProvider {
 					}
 				}
 			},
-			cancel(reason) {
-				reader.cancel(reason);
+			cancel() {
+				// reader.cancel() is a no-op on Bun and leaks the native buffer;
+				// drain to `done` instead — see drainReader() above (#382).
+				void drainReader(reader);
 			},
 		});
 
@@ -626,9 +666,9 @@ export class AnthropicProvider extends BaseProvider {
 
 				try {
 					while (buffered.length < maxBytes) {
-						// Check for timeout
+						// Check for timeout — the enclosing `finally` drains the
+						// reader on every exit path, including this throw.
 						if (Date.now() - startTime > READ_TIMEOUT_MS) {
-							await reader.cancel();
 							throw new Error(
 								"Stream read timeout while extracting usage info",
 							);
@@ -682,8 +722,8 @@ export class AnthropicProvider extends BaseProvider {
 						}
 					}
 				} finally {
-					// Cancel the reader to prevent hanging
-					reader.cancel().catch(() => {});
+					// Drain the reader to prevent hanging and release the native buffer
+					void drainReader(reader);
 				}
 
 				if (!foundMessageStart) return null;

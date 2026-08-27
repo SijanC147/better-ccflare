@@ -5,8 +5,23 @@
  * intercepted before the scheduler module is imported.  The mock stores the
  * registered callback so individual tests can invoke it directly, which lets
  * us test sendKeepalives() without relying on real timers.
+ *
+ * The mock spreads the real module (imported once beforehand) and overrides
+ * only registerHeartbeat. mock.module replaces the WHOLE module globally and
+ * across file boundaries in Bun — a partial stub here would silently break
+ * unrelated exports (e.g. isOverloadReason, computeRateLimitBackoffMs) for
+ * every other test file that imports @better-ccflare/core later in the same
+ * run.
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from "bun:test";
 import type { Config } from "@better-ccflare/config";
 import type { ProxyContext } from "../proxy";
 
@@ -34,17 +49,19 @@ const mockRegisterHeartbeat = mock((opts: HeartbeatOpts) => {
 	return mockUnregister;
 });
 
+const actualCore = await import("@better-ccflare/core");
+
 mock.module("@better-ccflare/core", () => ({
+	...actualCore,
 	registerHeartbeat: mockRegisterHeartbeat,
-	// Re-export other things that the proxy module tree may need (none required
-	// by the scheduler itself, but avoids any import-time crash).
-	registerCleanup: mock(() => () => {}),
-	registerUIRefresh: mock(() => () => {}),
-	intervalManager: {
-		register: mock(() => () => {}),
-		unregister: mock(() => {}),
-	},
 }));
+
+// Restore the real module once this file's tests finish so later test files
+// in the same process (mock.module has no per-file isolation without
+// --isolate) resolve the real @better-ccflare/core exports again.
+afterAll(() => {
+	mock.module("@better-ccflare/core", () => actualCore);
+});
 
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat.
@@ -434,8 +451,10 @@ describe("CacheKeepaliveScheduler", () => {
 
 			await capturedCallback?.();
 
-			expect(capturedBodyText).not.toBeNull();
-			const decoded = JSON.parse(capturedBodyText!);
+			if (capturedBodyText === null) {
+				throw new Error("expected fetch to be called with a request body");
+			}
+			const decoded = JSON.parse(capturedBodyText);
 			// Scheduler patches max_tokens: 1 to minimise quota on replay
 			expect(decoded.model).toBe("claude-opus-4-5");
 			expect(decoded.messages).toEqual([{ role: "user", content: "hello" }]);

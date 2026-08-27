@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: 412e63266475dd5b8ec485a8d8f5778586172bfd -->
+<!-- last-sync-sha: 4d27cb226f383a39e12aea530e83d2f9896999ce -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-08-27 | main | `412e6326..4d27cb22` | 624 | 37 files / 72 hunks | merge --no-ff | pass (3967 tests, 11 inherited-upstream fail) | [#41](https://github.com/SijanC147/better-ccflare/pull/41) |
 | 2026-07-03 | main | `ab677460..412e6326` | 206 | 23 files | merge --no-ff | pass (1960 tests, 0 fail) | [#33](https://github.com/SijanC147/better-ccflare/pull/33) |
 | 2026-05-19 | main | `5cdabaa8..ab677460` | 125 | 15 files | merge --no-ff | pass (1582 tests, 0 fail) | [#32](https://github.com/SijanC147/better-ccflare/pull/32) |
 | 2026-05-17 | main | `3c08c994..5cdabaa8` | 195 | 4 git + 4 semantic | merge --no-ff | pass (1291 tests, 0 fail) | [#27](https://github.com/SijanC147/better-ccflare/pull/27) |
@@ -18,6 +19,110 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-08-27 — upstream `412e6326..4d27cb22` (624 commits)
+
+**PR:** [#41](https://github.com/SijanC147/better-ccflare/pull/41) · **Strategy:** `merge --no-ff`
+**Scale:** 494 files auto-merged clean · 37 conflicted files / 72 hunks · +84,403 / −3,262
+**Tests:** 1,983 → 3,967 (upstream contributed ~2,000)
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `bun install --frozen-lockfile` | pass |
+| `bun run typecheck` | 0 errors |
+| `bunx biome check .` | 26 errors — **down from 29**, rule categories a strict subset of pre-merge |
+| `bun test` | 3,900 pass / 11 fail — all 11 inherited (see below) |
+| `bun run build:dashboard` | pass |
+| `scripts/test-hextap-build.ts` | adapter determinism + identity pass |
+| `brew hextap validate --project .` | VALIDATED, toolkit `v0.4.2@613f0d37` |
+| Manifest byte-equality | `328f95a7…` both copies |
+| Hextap inviolables | untouched (empty diff) |
+
+### The 11 remaining failures are upstream's, not ours
+
+All three clusters — `issue #273 forwarded bodies`, `AgentRegistry workspace persistence`,
+`makeProxyRequest` — pass in isolation and fail only in a full run: cross-file `mock.module`
+pollution. All three victim files are upstream-only (absent from the fork pre-merge).
+
+Verified by running upstream's own suite standalone at `4d27cb22`: **182 fail / 2,507 pass**,
+including every one of these clusters. Inherited, not introduced. Upstream's entire
+`CLI Integration Tests` and `AutoRefreshScheduler` suites are also red on their own main and
+green here.
+
+### Defects found that produced NO merge conflict
+
+The conflict list was not where the risk was. Five defects auto-merged cleanly:
+
+1. **`signpath-release.yml` — second `v*` release publisher.** Upstream added a workflow with
+   a `v*` tag trigger, `contents: write`, and `gh release upload`, which would write a ninth
+   asset into the release Hextap publishes as immutable with an exact eight-file manifest.
+   **`scripts/hextap-contract.test.ts` passed on it** — the assertion was a substring match for
+   the double-quoted `- "v*"`, and upstream wrote `- 'v*'` with a trailing comment. Disabled via
+   the fork's `.yml.disabled` convention. Contract test hardened with an exact active-workflow
+   filename allowlist (unevadeable by quoting) plus a quote-agnostic regex; mutation-tested
+   both ways. Toolkit-side fix tracked as SB23-680.
+2. **`?api_key=` fallback survived upstream's #379 removal.** Upstream replaced the durable key
+   in a query string with a short-lived single-use stream token; the fork's `extract-api-key.ts`
+   kept the fallback, with a comment acknowledging the key "may appear in server access logs".
+   Adopted upstream's version and extended the token flow to the fork's own
+   `/api/requests/stream` (see below).
+3. **`PathValidator` logged full TLS paths at info**, undoing the fork's own
+   `fix(security): redact missing TLS paths`. Resolved path demoted to debug; description stays
+   at info so upstream's dev ergonomics survive.
+4. **`http-api/handlers/requests.ts` did not compile** — fork and upstream each independently
+   added a `project` field, duplicating both the type member and the object key. The two
+   assignments had *different* semantics (`request.project` vs `request.project || undefined`);
+   kept the null-preserving form, since `RequestResponse.project` is typed `?: string | null`.
+5. **`http-api/handlers/combos.ts` did not compile** — a stale `_comboId` reference survived
+   where the parameter is `comboId`.
+
+### Cross-cluster integration point
+
+`dbOps.saveRequest()`'s positional parameters were reordered so upstream's form a contiguous
+prefix and the fork's `projectId`/`worktreePath` are appended last. Eight call sites pass
+upstream's params positionally with `undefined // comboName` style comments; interleaving the
+fork's ahead would have shifted every binding **with no type error**, since several share a type.
+Verified signature and the single fork call site match.
+
+### Two attribution features now coexist
+
+Upstream independently built project attribution in this window
+(`packages/proxy/src/project-attribution.ts`), colliding with the fork's test file of the same
+name. They are complementary, not duplicates:
+
+| | Fork | Upstream |
+|---|---|---|
+| Input | filesystem path | headers / system prompt / workspace path |
+| Output | registered project **id** + worktree | sanitised project **name** |
+
+Both suites kept; the fork's renamed to `project-resolver-attribution.test.ts`. **Open design
+question:** whether these should stay independent or converge.
+
+### Deliberate changes beyond mechanical resolution
+
+Three, each because leaving it would have shipped something broken or unsafe:
+
+- Removed the `?api_key=` fallback and migrated `/api/requests/stream` to the stream-token flow
+  (`useRequestStream.connect()` is now async; the unmount-before-token-resolves race is handled
+  so a connection cannot be orphaned). **Authorised explicitly.**
+- Demoted `PathValidator`'s resolved-path log to debug.
+- Hardened the Hextap contract test with the active-workflow allowlist, on the coordinator's
+  recommendation to do it in this PR rather than wait for a toolkit release.
+
+### Follow-ups
+
+- **SB23-680** (High) — Hextap toolkit: YAML-semantic tag-trigger exclusivity, reusable-workflow
+  preflight, full-SHA action/runtime audit.
+- **SB23-314** (Medium, re-scoped) — `bun test` exit code is non-deterministic: six runs on one
+  commit, identical counts, five exit 0 and one exit 1. A required check can fail with zero test
+  failures.
+- Upstream's 182-failure baseline is inherited test debt; worth deciding whether to carry or fix.
+- `signpath-release.yml.disabled` may reappear as an active file on a future sync — the new
+  allowlist assertion is what catches that.
+
+---
 
 ## 2026-07-03 — upstream/main sync
 

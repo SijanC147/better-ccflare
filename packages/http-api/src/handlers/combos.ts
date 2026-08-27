@@ -1,3 +1,4 @@
+import { providerAcceptsClientModel } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, NotFound } from "@better-ccflare/errors";
 import type {
@@ -6,6 +7,23 @@ import type {
 	ComboWithSlots,
 } from "@better-ccflare/types";
 import { errorResponse } from "../utils/http-error";
+
+/**
+ * A slot without a model (passthrough) only makes sense on a provider whose
+ * upstream natively accepts Claude model ids: the model the client asked for
+ * arrives intact and is understood on the other side.
+ *
+ * On any other provider, passthrough would hand a Claude name to an upstream
+ * that does not know it, and translation would fall to the embedded default
+ * map — the path that produced `400 gpt-5.3-codex ... ChatGPT account`.
+ *
+ * The list moved to core so that "force account model", which needs the same
+ * answer when deciding whether an account can serve a Claude id untranslated,
+ * cannot drift from it.
+ */
+function allowsClientModel(provider: string | null | undefined): boolean {
+	return providerAcceptsClientModel(provider);
+}
 
 /**
  * GET /api/combos — List all combos with slot counts (lightweight)
@@ -198,11 +216,31 @@ export function createSlotAddHandler(dbOps: DatabaseOperations) {
 				typeof account_id !== "string" ||
 				account_id.trim().length === 0
 			) {
-				return errorResponse(BadRequest("account_id and model are required"));
+				return errorResponse(BadRequest("account_id is required"));
 			}
 
-			if (!model || typeof model !== "string" || model.trim().length === 0) {
-				return errorResponse(BadRequest("account_id and model are required"));
+			// `model` is optional: a slot with no model means passthrough — the
+			// model the client asked for goes upstream untouched. We store an
+			// empty string (not NULL) because combo_slots.model is NOT NULL and the
+			// unique index (combo_id, account_id, model) only blocks duplicates with "".
+			if (model !== undefined && model !== null && typeof model !== "string") {
+				return errorResponse(
+					BadRequest("model must be a string when provided"),
+				);
+			}
+			const slotModel = typeof model === "string" ? model.trim() : "";
+
+			// Passthrough only holds where the upstream speaks the same model
+			// namespace as the client. See PROVIDERS_ACCEPTING_CLIENT_MODEL.
+			if (slotModel.length === 0) {
+				const account = await dbOps.getAccount(account_id);
+				if (account && !allowsClientModel(account.provider)) {
+					return errorResponse(
+						BadRequest(
+							`model is required for provider "${account.provider}": only accounts that serve Claude model ids can forward the client model unchanged`,
+						),
+					);
+				}
 			}
 
 			const existingSlots = await dbOps.getComboSlots(comboId);
@@ -210,7 +248,7 @@ export function createSlotAddHandler(dbOps: DatabaseOperations) {
 			const newSlot = await dbOps.addComboSlot(
 				comboId,
 				account_id,
-				model.trim(),
+				slotModel,
 				nextPriority,
 			);
 
@@ -243,10 +281,35 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 			}> = {};
 
 			if (model !== undefined) {
-				if (typeof model !== "string" || model.trim().length === 0) {
-					return errorResponse(BadRequest("model must be a non-empty string"));
+				// An empty string clears the override and makes the slot passthrough.
+				if (typeof model !== "string") {
+					return errorResponse(BadRequest("model must be a string"));
 				}
 				fields.model = model.trim();
+
+				// Same rule as the POST, now for whoever clears a slot that already
+				// exists: without it, the validation could be bypassed in two steps.
+				if (fields.model.length === 0) {
+					const slots = await dbOps.getComboSlots(comboId);
+					const slot = slots.find((s) => s.id === slotId);
+					// A slot id that this combo does not own must not silently skip
+					// the check: updateComboSlot resolves the slot globally, so a
+					// mismatched combo id in the path would let an incompatible slot
+					// become passthrough.
+					if (!slot) {
+						return errorResponse(NotFound("Combo slot not found"));
+					}
+					{
+						const account = await dbOps.getAccount(slot.account_id);
+						if (account && !allowsClientModel(account.provider)) {
+							return errorResponse(
+								BadRequest(
+									`model is required for provider "${account.provider}": only accounts that serve Claude model ids can forward the client model unchanged`,
+								),
+							);
+						}
+					}
+				}
 			}
 
 			if (enabled !== undefined) {

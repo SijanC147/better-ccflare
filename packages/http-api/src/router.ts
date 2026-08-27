@@ -1,5 +1,5 @@
 import { validateNumber } from "@better-ccflare/core";
-import { Unauthorized } from "@better-ccflare/errors";
+import { BadRequest, Unauthorized } from "@better-ccflare/errors";
 import {
 	createAccountAddHandler,
 	createAccountAutoFallbackHandler,
@@ -23,7 +23,9 @@ import {
 	createAnthropicCompatibleAccountAddHandler,
 	createAwsProfilesListHandler,
 	createBedrockAccountAddHandler,
+	createDeepseekAccountAddHandler,
 	createKiloAccountAddHandler,
+	createMetaAccountAddHandler,
 	createMinimaxAccountAddHandler,
 	createNanoGPTAccountAddHandler,
 	createOllamaAccountAddHandler,
@@ -35,6 +37,7 @@ import {
 } from "./handlers/accounts";
 import { createAdminRestartHandler } from "./handlers/admin-restart";
 import {
+	createAgentPreferenceDeleteHandler,
 	createAgentPreferenceUpdateHandler,
 	createAgentsListHandler,
 	createBulkAgentPreferenceUpdateHandler,
@@ -95,7 +98,6 @@ import {
 	createHeapStatsHandler,
 	createRssHandler,
 } from "./handlers/debug";
-import { createFeaturesHandler } from "./handlers/features";
 import { createHealthHandler } from "./handlers/health";
 import {
 	createAnomalyInsightsHandler,
@@ -105,6 +107,10 @@ import {
 import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
+import {
+	createModelsHandler,
+	createModelsRefreshHandler,
+} from "./handlers/models";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -123,6 +129,8 @@ import {
 	createRequestsSummaryHandler,
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
+import { createRoutingObservationsHandler } from "./handlers/routing-observations";
+import { createSessionAccountHandler } from "./handlers/sessions";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import {
 	createIntegrityCheckHandler,
@@ -134,10 +142,11 @@ import {
 	createReauthNeededHandler,
 	createTokenHealthHandler,
 } from "./handlers/token-health";
+import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createVersionCheckHandler } from "./handlers/version";
 import { AuthService } from "./services/auth-service";
 import type { APIContext } from "./types";
-import { errorResponse } from "./utils/http-error";
+import { errorResponse, jsonResponse } from "./utils/http-error";
 
 /**
  * API Router that handles all API endpoints
@@ -155,7 +164,11 @@ export class APIRouter {
 	constructor(context: APIContext) {
 		this.context = context;
 		this.handlers = new Map();
-		this.authService = new AuthService(context.dbOps);
+		this.authService = new AuthService(
+			context.dbOps,
+			context.internalProbeSecret,
+			context.localControlSecret,
+		);
 		this.qwenStatusHandler = createQwenDeviceFlowStatusHandler();
 		this.codexStatusHandler = createCodexDeviceFlowStatusHandler();
 		this.registerHandlers();
@@ -168,6 +181,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getUsageWorkerHealth,
 			getIntegrityStatus,
+			getRetentionStatus,
 			getStrategy,
 		} = this.context;
 
@@ -178,6 +192,8 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getUsageWorkerHealth,
 			getIntegrityStatus,
+			undefined,
+			getRetentionStatus,
 		);
 		const statsHandler = createStatsHandler(dbOps);
 		const statsResetHandler = createStatsResetHandler(dbOps);
@@ -191,6 +207,7 @@ export class APIRouter {
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
+		const deepseekAccountAddHandler = createDeepseekAccountAddHandler(dbOps);
 		const vertexAIAccountAddHandler = createVertexAIAccountAddHandler(dbOps);
 		const bedrockAccountAddHandler = createBedrockAccountAddHandler(dbOps);
 		const awsProfilesListHandler = createAwsProfilesListHandler();
@@ -209,13 +226,18 @@ export class APIRouter {
 			dbOps.getAdapter(),
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
-		const configHandlers = createConfigHandlers(config, this.context.runtime);
+		const configHandlers = createConfigHandlers(
+			config,
+			this.context.runtime,
+			this.context.modelCatalog,
+		);
 		const postgresConfigHandlers = createPostgresConfigHandlers(config);
 		const adminRestartHandler = createAdminRestartHandler();
 		const requestStorageHandlers = createRequestStorageHandlers(config);
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
+		const usageHistoryHandler = createUsageHistoryHandler(this.context);
 		const cacheInsightsHandler = createCacheInsightsHandler(this.context);
 		const anomalyInsightsHandler = createAnomalyInsightsHandler(this.context);
 		const contextInsightsHandler = createContextInsightsHandler(this.context);
@@ -244,7 +266,6 @@ export class APIRouter {
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
 		const versionCheckHandler = createVersionCheckHandler();
-		const featuresHandler = createFeaturesHandler();
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -271,6 +292,9 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/accounts/minimax", (req) =>
 			minimaxAccountAddHandler(req),
+		);
+		this.handlers.set("POST:/api/accounts/deepseek", (req) =>
+			deepseekAccountAddHandler(req),
 		);
 		this.handlers.set("POST:/api/accounts/vertex-ai", (req) =>
 			vertexAIAccountAddHandler(req),
@@ -305,6 +329,10 @@ export class APIRouter {
 		this.handlers.set("POST:/api/accounts/openai-compatible", (req) =>
 			openaiAccountAddHandler(req),
 		);
+		const metaAccountAddHandler = createMetaAccountAddHandler(dbOps);
+		this.handlers.set("POST:/api/accounts/meta", (req) =>
+			metaAccountAddHandler(req),
+		);
 
 		// Token health handlers
 		const tokenHealthHandler = createTokenHealthHandler(dbOps);
@@ -314,6 +342,13 @@ export class APIRouter {
 		this.handlers.set(
 			"GET:/api/token-health/reauth-needed",
 			reauthNeededHandler,
+		);
+
+		// Last-observed routing order per model family (display-only telemetry
+		// from the proxy's own account selection -- see routing-observations.ts).
+		const routingObservationsHandler = createRoutingObservationsHandler();
+		this.handlers.set("GET:/api/routing/observations", () =>
+			routingObservationsHandler(),
 		);
 
 		this.handlers.set("POST:/api/oauth/init", (req) => oauthInitHandler(req));
@@ -413,18 +448,50 @@ export class APIRouter {
 		this.handlers.set("POST:/api/config/postgres", (req) =>
 			postgresConfigHandlers.setPostgresConfig(req),
 		);
+		this.handlers.set("GET:/api/config/provider-model-defaults", () =>
+			configHandlers.getProviderModelDefaults(),
+		);
+		this.handlers.set("POST:/api/config/provider-model-defaults", (req) =>
+			configHandlers.setProviderModelDefaults(req),
+		);
+		this.handlers.set("GET:/api/config/model-capacity-routing", () =>
+			configHandlers.getModelCapacityRouting(),
+		);
+		this.handlers.set("POST:/api/config/model-capacity-routing", (req) =>
+			configHandlers.setModelCapacityRouting(req),
+		);
+		this.handlers.set("GET:/api/config/combos-enabled", () =>
+			configHandlers.getCombosEnabled(),
+		);
+		this.handlers.set("POST:/api/config/combos-enabled", (req) =>
+			configHandlers.setCombosEnabled(req),
+		);
+		this.handlers.set("GET:/api/config/combo-session-fallback", () =>
+			configHandlers.getComboSessionFallback(),
+		);
+		this.handlers.set("POST:/api/config/combo-session-fallback", (req) =>
+			configHandlers.setComboSessionFallback(req),
+		);
+		this.handlers.set("GET:/api/config/force-account-model", () =>
+			configHandlers.getForceAccountModel(),
+		);
+		this.handlers.set("POST:/api/config/force-account-model", (req) =>
+			configHandlers.setForceAccountModel(req),
+		);
 		this.handlers.set("POST:/api/admin/restart", (req) =>
 			adminRestartHandler(req),
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
-		this.handlers.set("GET:/api/features", () => featuresHandler());
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});
+		this.handlers.set("GET:/api/usage-history", (_req, url) =>
+			usageHistoryHandler(url.searchParams),
+		);
 		this.handlers.set("GET:/api/insights/cache", (_req, url) =>
 			cacheInsightsHandler(url.searchParams),
 		);
@@ -454,6 +521,7 @@ export class APIRouter {
 		this.handlers.set("POST:/api/agents/bulk-preference", (req) => {
 			const bulkHandler = createBulkAgentPreferenceUpdateHandler(
 				this.context.dbOps,
+				this.context.modelCatalog,
 			);
 			return bulkHandler(req);
 		});
@@ -516,6 +584,12 @@ export class APIRouter {
 		this.handlers.set("GET:/api/families", () =>
 			createFamiliesListHandler(dbOps)(),
 		);
+
+		// Model catalog routes
+		const modelsHandler = createModelsHandler(this.context);
+		const modelsRefreshHandler = createModelsRefreshHandler(this.context);
+		this.handlers.set("GET:/api/models", (_req, url) => modelsHandler(url));
+		this.handlers.set("POST:/api/models/refresh", () => modelsRefreshHandler());
 	}
 
 	/**
@@ -565,6 +639,21 @@ export class APIRouter {
 					Unauthorized(authzResult.reason || "Authorization failed"),
 				);
 			}
+		}
+
+		// Logs-stream token minting (#379): needs the authenticated caller's
+		// identity (apiKeyId/role) to bind into the minted token, which the
+		// static handlers map (keyed only by method+path) has no way to pass
+		// through — so it's handled here, after the normal auth/authz checks
+		// above already ran for this path like any other /api/* endpoint.
+		if (path === "/api/logs/stream/token" && method === "POST") {
+			return await this.wrapHandler(() => {
+				const token = this.authService.mintLogsStreamToken(
+					authResult.apiKeyId,
+					authResult.role,
+				);
+				return jsonResponse({ token });
+			})(req, url);
 		}
 
 		// Check for exact match
@@ -754,6 +843,7 @@ export class APIRouter {
 			if (path.endsWith("/preference") && method === "POST") {
 				const preferenceHandler = createAgentPreferenceUpdateHandler(
 					this.context.dbOps,
+					this.context.modelCatalog,
 				);
 				return await this.wrapHandler((req) => preferenceHandler(req, agentId))(
 					req,
@@ -761,9 +851,22 @@ export class APIRouter {
 				);
 			}
 
+			// Agent preference removal (revert to frontmatter/inherit default)
+			if (path.endsWith("/preference") && method === "DELETE") {
+				const preferenceDeleteHandler = createAgentPreferenceDeleteHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					preferenceDeleteHandler(req, agentId),
+				)(req, url);
+			}
+
 			// Agent update (PATCH /api/agents/:id)
 			if (parts.length === 4 && method === "PATCH") {
-				const updateHandler = createAgentUpdateHandler(this.context.dbOps);
+				const updateHandler = createAgentUpdateHandler(
+					this.context.dbOps,
+					this.context.modelCatalog,
+				);
 				return await this.wrapHandler((req) => updateHandler(req, agentId))(
 					req,
 					url,
@@ -963,6 +1066,42 @@ export class APIRouter {
 			const sessionId = parts[5];
 			if (sessionId) {
 				return await this.wrapHandler(() => this.codexStatusHandler(sessionId))(
+					req,
+					url,
+				);
+			}
+		}
+
+		// Session→account lookup for the local status-line badge (#318).
+		// GET /api/sessions/:sessionId/account — always dispatch to the handler
+		// (even on an empty session segment) so it returns a well-formed
+		// 400/unknown rather than falling through to the generic 404.
+		if (
+			path.startsWith("/api/sessions/") &&
+			path.endsWith("/account") &&
+			method === "GET"
+		) {
+			const parts = path.split("/");
+			if (parts.length === 5) {
+				// Guard decode: this route is auth-exempt, so a malformed
+				// percent-encoding (e.g. `/api/sessions/%/account`) must return a
+				// clean 400 rather than throw a URIError outside wrapHandler's catch.
+				let sessionId: string;
+				try {
+					sessionId = decodeURIComponent(parts[3]);
+				} catch {
+					return errorResponse(BadRequest("Invalid session id encoding"));
+				}
+				const accountsListHandler = createAccountsListHandler(
+					this.context.dbOps,
+					this.context.config,
+					this.context.getStrategy,
+				);
+				const sessionAccountHandler = createSessionAccountHandler(
+					this.context.db,
+					accountsListHandler,
+				);
+				return await this.wrapHandler(() => sessionAccountHandler(sessionId))(
 					req,
 					url,
 				);

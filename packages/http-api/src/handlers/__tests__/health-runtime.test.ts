@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { AsyncDbWriter } from "@better-ccflare/database";
+import type { Account, HealthResponse } from "@better-ccflare/types";
 import { createHealthHandler } from "../health";
 
 describe("health runtime payload", () => {
@@ -49,20 +50,20 @@ describe("health runtime payload", () => {
 
 		const url = new URL("http://localhost/health");
 		const response = await handler(url);
-		const body = (await response.json()) as Record<string, any>;
+		const body = (await response.json()) as HealthResponse;
 
 		expect(response.status).toBe(200);
 		expect(body.status).toBe("ok");
 		expect(body.accounts).toBe(3);
 		expect(body.strategy).toBe("session");
 		expect(body.runtime).toBeDefined();
-		expect(body.runtime.asyncWriter).toEqual({
+		expect(body.runtime?.asyncWriter).toEqual({
 			healthy: true,
 			failureCount: 0,
 			recentDrops: 0,
 			queuedJobs: 2,
 		});
-		expect(body.runtime.usageWorker).toEqual({
+		expect(body.runtime?.usageWorker).toEqual({
 			state: "healthy",
 		});
 	});
@@ -84,6 +85,103 @@ describe("health runtime payload", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 
 		expect(body).not.toHaveProperty("runtime");
+	});
+
+	// #384: retention cleanup silently swallowed failures into a log line with
+	// no way to distinguish "healthy" from "dead for weeks". getRetentionStatus
+	// surfaces that via runtime.storage.retention, mirroring how
+	// getIntegrityStatus surfaces runtime.storage.integrity.
+	it("includes runtime.storage.retention with lastSuccessAt when retention succeeded", async () => {
+		const db = {
+			getAllAccounts: async () => [
+				{ name: "acc1", paused: false, rate_limited_until: null },
+			],
+		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+
+		const config = {
+			getStrategy: () => "session",
+		} as unknown as import("@better-ccflare/config").Config;
+
+		const lastSuccessAt = Date.now() - 60_000;
+		const handler = createHealthHandler(
+			db,
+			config,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			() => ({
+				lastSuccessAt,
+				lastError: null,
+				lastErrorAt: null,
+			}),
+		);
+
+		const url = new URL("http://localhost/health");
+		const response = await handler(url);
+		const body = (await response.json()) as HealthResponse;
+
+		expect(body.runtime?.storage?.retention).toEqual({
+			lastSuccessAt: new Date(lastSuccessAt).toISOString(),
+			lastError: null,
+			lastErrorAt: null,
+		});
+	});
+
+	it("includes runtime.storage.retention with lastError when retention failed", async () => {
+		const db = {
+			getAllAccounts: async () => [
+				{ name: "acc1", paused: false, rate_limited_until: null },
+			],
+		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+
+		const config = {
+			getStrategy: () => "session",
+		} as unknown as import("@better-ccflare/config").Config;
+
+		const lastErrorAt = Date.now() - 5_000;
+		const handler = createHealthHandler(
+			db,
+			config,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			() => ({
+				lastSuccessAt: null,
+				lastError: "statement timeout",
+				lastErrorAt,
+			}),
+		);
+
+		const url = new URL("http://localhost/health");
+		const response = await handler(url);
+		const body = (await response.json()) as HealthResponse;
+
+		expect(body.runtime?.storage?.retention).toEqual({
+			lastSuccessAt: null,
+			lastError: "statement timeout",
+			lastErrorAt: new Date(lastErrorAt).toISOString(),
+		});
+	});
+
+	it("omits runtime.storage.retention when getRetentionStatus is not provided", async () => {
+		const db = {
+			getAllAccounts: async () => [
+				{ name: "acc1", paused: false, rate_limited_until: null },
+			],
+		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+
+		const config = {
+			getStrategy: () => "session",
+		} as unknown as import("@better-ccflare/config").Config;
+
+		const handler = createHealthHandler(db, config);
+		const url = new URL("http://localhost/health");
+		const response = await handler(url);
+		const body = (await response.json()) as HealthResponse;
+
+		expect(body.runtime?.storage?.retention).toBeUndefined();
 	});
 });
 
@@ -137,7 +235,7 @@ describe("computePoolStatus", () => {
 				paused: false,
 				rate_limited_until: now + 3600000,
 			},
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, now);
 
@@ -166,7 +264,7 @@ describe("computePoolStatus", () => {
 		const accounts = [
 			{ name: "paused1", paused: true, rate_limited_until: null },
 			{ name: "paused2", paused: true, rate_limited_until: null },
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, Date.now());
 
@@ -191,7 +289,7 @@ describe("computePoolStatus", () => {
 				paused: false,
 				rate_limited_until: now + 3600000,
 			},
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, now);
 
@@ -214,7 +312,7 @@ describe("computePoolStatus", () => {
 				rate_limited_until: now - 1000,
 			},
 			{ name: "available", paused: false, rate_limited_until: null },
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, now);
 
@@ -232,6 +330,7 @@ describe("computeHealthStatus three-state logic", () => {
 			paused: 1,
 			rate_limited: 0,
 			routable: 2,
+			usage_exhausted: 0,
 			next_available_at: null,
 		};
 
@@ -246,6 +345,7 @@ describe("computeHealthStatus three-state logic", () => {
 			paused: 0,
 			rate_limited: 2,
 			routable: 0,
+			usage_exhausted: 0,
 			next_available_at: new Date(Date.now() + 3600000).toISOString(),
 		};
 
@@ -260,6 +360,7 @@ describe("computeHealthStatus three-state logic", () => {
 			paused: 0,
 			rate_limited: 0,
 			routable: 3,
+			usage_exhausted: 0,
 			next_available_at: null,
 		};
 
@@ -274,6 +375,7 @@ describe("computeHealthStatus three-state logic", () => {
 			paused: 0,
 			rate_limited: 0,
 			routable: 0,
+			usage_exhausted: 0,
 			next_available_at: null,
 		};
 
@@ -288,6 +390,7 @@ describe("computeHealthStatus three-state logic", () => {
 			paused: 2,
 			rate_limited: 0,
 			routable: 0,
+			usage_exhausted: 0,
 			next_available_at: null,
 		};
 
@@ -411,11 +514,11 @@ describe("?detail=1 parameter", () => {
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
 		const response = await handler(url);
-		const body = (await response.json()) as Record<string, any>;
+		const body = (await response.json()) as HealthResponse;
 
 		expect(body.accounts_detail).toBeDefined();
 		expect(body.accounts_detail).toHaveLength(3);
-		expect(body.accounts_detail[0]).toEqual({
+		expect(body.accounts_detail?.[0]).toEqual({
 			name: "acc1",
 			status: "available",
 			rate_limited_until: null,
@@ -477,10 +580,10 @@ describe("?detail=1 parameter", () => {
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
 		const response = await handler(url);
-		const body = (await response.json()) as Record<string, any>;
+		const body = (await response.json()) as HealthResponse;
 
-		expect(body.accounts_detail[0].status).toBe("available");
-		expect(body.accounts_detail[0].rate_limited_until).toBeNull();
+		expect(body.accounts_detail?.[0].status).toBe("available");
+		expect(body.accounts_detail?.[0].rate_limited_until).toBeNull();
 	});
 
 	it("returns normal health response without accounts_detail when detail=1 but HEALTH_DETAIL_ENABLED is false", async () => {
@@ -530,9 +633,9 @@ describe("cache isolation between detail and non-detail", () => {
 		const detailResp = await handler(
 			new URL("http://localhost/health?detail=1"),
 		);
-		const detailBody = (await detailResp.json()) as Record<string, any>;
+		const detailBody = (await detailResp.json()) as HealthResponse;
 		expect(detailBody.accounts_detail).toBeDefined();
-		expect(detailBody.accounts_detail[0].name).toBe("acc-1");
+		expect(detailBody.accounts_detail?.[0].name).toBe("acc-1");
 		expect(callCount).toBe(1);
 
 		// Second request without detail — should NOT hit the detail cache
@@ -570,7 +673,7 @@ describe("cache isolation between detail and non-detail", () => {
 		const detailResp = await handler(
 			new URL("http://localhost/health?detail=1"),
 		);
-		const detailBody = (await detailResp.json()) as Record<string, any>;
+		const detailBody = (await detailResp.json()) as HealthResponse;
 		expect(detailBody.accounts_detail).toBeDefined();
 		expect(callCount).toBe(2);
 	});
@@ -594,14 +697,102 @@ describe("cache isolation between detail and non-detail", () => {
 		const handler = createHealthHandler(db, config);
 
 		const resp1 = await handler(new URL("http://localhost/health"));
-		const body1 = (await resp1.json()) as Record<string, any>;
+		const body1 = (await resp1.json()) as Record<string, unknown>;
 		expect(body1.accounts_detail).toBeUndefined();
 		expect(callCount).toBe(1);
 
 		// Repeated non-detail request — should hit cache
 		const resp2 = await handler(new URL("http://localhost/health"));
-		const body2 = (await resp2.json()) as Record<string, any>;
+		const body2 = (await resp2.json()) as Record<string, unknown>;
 		expect(body2.accounts_detail).toBeUndefined();
 		expect(callCount).toBe(1); // no extra DB call
+	});
+});
+
+describe("health build-time provenance", () => {
+	const ENV_KEYS = [
+		"CCFLARE_GIT_SHA",
+		"CCFLARE_GIT_REF",
+		"CCFLARE_BUILD_DATE",
+		"CCFLARE_VERSION",
+		"BETTER_CCFLARE_VERSION",
+		"npm_package_version",
+	] as const;
+
+	function snapshotEnv() {
+		const saved: Record<string, string | undefined> = {};
+		for (const k of ENV_KEYS) saved[k] = process.env[k];
+		return saved;
+	}
+
+	function restoreEnv(saved: Record<string, string | undefined>) {
+		for (const k of ENV_KEYS) {
+			const v = saved[k];
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	}
+
+	function makeConfig() {
+		return {
+			getStrategy: () => "session",
+		} as unknown as import("@better-ccflare/config").Config;
+	}
+
+	function makeDb() {
+		return {
+			getAllAccounts: async () => [
+				{ name: "acc1", paused: false, rate_limited_until: null },
+			],
+		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+	}
+
+	it("reports build-time provenance when env vars are set", async () => {
+		const saved = snapshotEnv();
+		process.env.CCFLARE_GIT_SHA = "abcdef1234567890abcdef1234567890abcdef12";
+		process.env.CCFLARE_GIT_REF = "deploy/test";
+		process.env.CCFLARE_BUILD_DATE = "2026-08-01T00:00:00Z";
+		process.env.CCFLARE_VERSION = "9.9.9-test";
+		delete process.env.BETTER_CCFLARE_VERSION;
+		delete process.env.npm_package_version;
+		try {
+			const handler = createHealthHandler(makeDb(), makeConfig());
+			const response = await handler(new URL("http://localhost/health"));
+			const body = (await response.json()) as {
+				version?: string;
+				git_sha?: string;
+				git_ref?: string;
+				build_date?: string;
+			};
+			expect(response.status).toBe(200);
+			expect(body.version).toBe("9.9.9-test");
+			expect(body.git_sha).toBe("abcdef1234567890abcdef1234567890abcdef12");
+			expect(body.git_ref).toBe("deploy/test");
+			expect(body.build_date).toBe("2026-08-01T00:00:00Z");
+		} finally {
+			restoreEnv(saved);
+		}
+	});
+
+	it("reports 'unknown' for provenance fields when env vars are unset", async () => {
+		const saved = snapshotEnv();
+		for (const k of ENV_KEYS) delete process.env[k];
+		try {
+			const handler = createHealthHandler(makeDb(), makeConfig());
+			const response = await handler(new URL("http://localhost/health"));
+			const body = (await response.json()) as {
+				version?: string;
+				git_sha?: string;
+				git_ref?: string;
+				build_date?: string;
+			};
+			expect(response.status).toBe(200);
+			expect(body.git_sha).toBe("unknown");
+			expect(body.git_ref).toBe("unknown");
+			expect(body.build_date).toBe("unknown");
+			expect(body.version).toBe("unknown");
+		} finally {
+			restoreEnv(saved);
+		}
 	});
 });

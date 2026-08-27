@@ -40,6 +40,7 @@ export interface AddAccountOptionsWithAdapter {
 		| "console"
 		| "zai"
 		| "minimax"
+		| "deepseek"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -52,7 +53,8 @@ export interface AddAccountOptionsWithAdapter {
 		| "qwen"
 		| "xai"
 		| "ollama"
-		| "ollama-cloud";
+		| "ollama-cloud"
+		| "meta";
 	priority?: number;
 	customEndpoint?: string;
 	modelMappings?: { [key: string]: string | string[] };
@@ -73,6 +75,7 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "console"
 		| "zai"
 		| "minimax"
+		| "deepseek"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -85,7 +88,8 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "qwen"
 		| "xai"
 		| "ollama"
-		| "ollama-cloud";
+		| "ollama-cloud"
+		| "meta";
 }
 
 /**
@@ -154,6 +158,39 @@ async function createMinimaxAccount(
 			now,
 			validatedPriority,
 			null, // No custom endpoint for minimax
+		],
+	);
+}
+
+/**
+ * Create a DeepSeek account in the database
+ */
+async function createDeepseekAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	apiKey: string,
+	priority: number,
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+
+	// Validate inputs
+	const validatedApiKey = validateApiKey(apiKey, "DeepSeek API key");
+	const validatedPriority = validatePriority(priority, "priority");
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?)`,
+		[
+			accountId,
+			name,
+			"deepseek",
+			validatedApiKey,
+			now,
+			validatedPriority,
+			null, // No custom endpoint for deepseek
 		],
 	);
 }
@@ -1177,6 +1214,7 @@ export async function addAccount(
 			{ label: "AWS Bedrock (AWS profile credentials)", value: "bedrock" },
 			{ label: "z.ai account (API key)", value: "zai" },
 			{ label: "Minimax account (API key)", value: "minimax" },
+			{ label: "DeepSeek account (API key)", value: "deepseek" },
 			{ label: "Kilo Gateway (API key)", value: "kilo" },
 			{ label: "OpenRouter (API key)", value: "openrouter" },
 			{
@@ -1198,6 +1236,10 @@ export async function addAccount(
 			{
 				label: "Ollama Cloud (ollama.com, API key required)",
 				value: "ollama-cloud",
+			},
+			{
+				label: "Meta Model API (API key)",
+				value: "meta",
 			},
 		]));
 
@@ -1400,6 +1442,13 @@ export async function addAccount(
 		await createMinimaxAccount(dbOps, name, apiKey, providedPriority || 0);
 		console.log(`\nAccount '${name}' added successfully!`);
 		console.log("Type: Minimax (API key)");
+	} else if (mode === "deepseek") {
+		// Handle DeepSeek accounts with API keys
+		const apiKey = await adapter.input("\nEnter your DeepSeek API key: ");
+
+		await createDeepseekAccount(dbOps, name, apiKey, providedPriority || 0);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: DeepSeek (API key)");
 	} else if (mode === "nanogpt") {
 		// Handle NanoGPT accounts with API keys
 		const apiKey = await adapter.input("\nEnter your NanoGPT API key: ");
@@ -1706,6 +1755,47 @@ export async function addAccount(
 		console.log(`\nAccount '${name}' added successfully!`);
 		console.log("Type: Ollama Cloud");
 		console.log(`Endpoint: https://ollama.com/api/chat`);
+	} else if (mode === "meta") {
+		const apiKey = await adapter.input("\nEnter your Meta Model API key: ");
+
+		if (!apiKey) {
+			throw new Error("API key is required for Meta Model API");
+		}
+
+		// Get custom endpoint (optional — defaults to the official Meta API)
+		const endpoint =
+			customEndpoint ||
+			(await adapter.input(
+				"\nEnter API endpoint URL (press Enter for default https://api.meta.ai): ",
+			)) ||
+			undefined;
+
+		const priority =
+			providedPriority ??
+			(await adapter.input(
+				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+			));
+
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+		);
+
+		await createAnthropicCompatibleAccount(
+			dbOps,
+			name,
+			apiKey,
+			typeof priority === "string"
+				? parseInt(priority, 10) || 0
+				: priority || 0,
+			endpoint,
+			finalModelMappings,
+			undefined,
+			"meta",
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: Meta Model API");
+		console.log(`Endpoint: ${endpoint || "https://api.meta.ai"}`);
 	} else {
 		// Handle OAuth accounts (Anthropic)
 		const flowResult = await oauthFlow.begin({
@@ -1801,6 +1891,7 @@ export async function getAccountsList(
 			requestCount: account.request_count,
 			totalRequests: account.total_requests,
 			paused: account.paused,
+			requiresReauth: account.requires_reauth,
 			tokenStatus,
 			rateLimitStatus,
 			sessionInfo,
@@ -1809,11 +1900,13 @@ export async function getAccountsList(
 				if (
 					account.provider === "zai" ||
 					account.provider === "minimax" ||
+					account.provider === "deepseek" ||
 					account.provider === "anthropic-compatible" ||
 					account.provider === "bedrock" ||
 					account.provider === "openrouter" ||
 					account.provider === "codex" ||
-					account.provider === "xai"
+					account.provider === "xai" ||
+					account.provider === "meta"
 				) {
 					return account.provider;
 				}
@@ -1830,47 +1923,121 @@ export async function getAccountsList(
 }
 
 /**
- * Remove an account by name
+ * Remove an account by id.
+ *
+ * This is the genuinely id-scoped delete. Callers that hold a stable
+ * identifier (the HTTP API handler, TUI actions that capture an account
+ * row, etc.) should prefer this over the by-name variant so a shared
+ * name never causes accidental cascade deletion.
+ */
+export async function removeAccountById(
+	dbOps: DatabaseOperations,
+	id: string,
+): Promise<{ success: boolean; message: string; name?: string }> {
+	const adapter = dbOps.getAdapter();
+
+	// Capture the account name first so we can return a useful message and
+	// so the caller can keep using the removed account's display label
+	// for cache cleanup (the cache key is the id, the user-facing label is
+	// the name).
+	const existing = await adapter.get<{ name: string }>(
+		"SELECT name FROM accounts WHERE id = ?",
+		[id],
+	);
+
+	if (!existing) {
+		return {
+			success: false,
+			message: `Account not found`,
+		};
+	}
+
+	const changes = await adapter.runWithChanges(
+		"DELETE FROM accounts WHERE id = ?",
+		[id],
+	);
+
+	if (changes === 0) {
+		return {
+			success: false,
+			message: `Account not found`,
+		};
+	}
+
+	return {
+		success: true,
+		message: `Account '${existing.name}' removed successfully`,
+		name: existing.name,
+	};
+}
+
+/**
+ * Remove an account by name.
+ *
+ * Shared names are valid in the database but cause ambiguous deletes:
+ * a `DELETE FROM accounts WHERE name = ?` would remove every row that
+ * matches. To keep callers safe by default, this resolves the name to
+ * an id and delegates to `removeAccountById`. If more than one account
+ * shares the name, the call is refused so the caller can disambiguate
+ * (typically by switching to an id-keyed call site).
  */
 export async function removeAccount(
 	dbOps: DatabaseOperations,
 	name: string,
 ): Promise<{ success: boolean; message: string }> {
 	const adapter = dbOps.getAdapter();
-	const changes = await adapter.runWithChanges(
-		"DELETE FROM accounts WHERE name = ?",
+	const matches = await adapter.query<{ id: string }>(
+		"SELECT id FROM accounts WHERE name = ?",
 		[name],
 	);
 
-	if (changes === 0) {
+	if (matches.length === 0) {
 		return {
 			success: false,
 			message: `Account '${name}' not found`,
 		};
 	}
 
-	return {
-		success: true,
-		message: `Account '${name}' removed successfully`,
-	};
+	if (matches.length > 1) {
+		return {
+			success: false,
+			message: `Multiple accounts named '${name}' exist; remove by id to avoid deleting the wrong account`,
+		};
+	}
+
+	return removeAccountById(dbOps, matches[0].id);
 }
 
 /**
  * Remove an account by name with confirmation prompt (for CLI)
+ *
+ * Same ambiguity guard as `removeAccount`: refuses to proceed if more
+ * than one row matches the supplied name. The CLI surface cannot
+ * disambiguate with a typed confirmation string when the name is shared,
+ * so we surface a clear error and let the caller re-run by id.
  */
 export async function removeAccountWithConfirmation(
 	dbOps: DatabaseOperations,
 	name: string,
 	force?: boolean,
 ): Promise<{ success: boolean; message: string }> {
-	// Check if account exists first
-	const accounts = await dbOps.getAllAccounts();
-	const exists = accounts.some((a) => a.name === name);
+	const adapter = dbOps.getAdapter();
+	const matches = await adapter.query<{ id: string; name: string }>(
+		"SELECT id, name FROM accounts WHERE name = ?",
+		[name],
+	);
 
-	if (!exists) {
+	if (matches.length === 0) {
 		return {
 			success: false,
 			message: `Account '${name}' not found`,
+		};
+	}
+
+	if (matches.length > 1) {
+		return {
+			success: false,
+			message: `Multiple accounts named '${name}' exist; remove by id to avoid deleting the wrong account`,
 		};
 	}
 
@@ -1885,7 +2052,13 @@ export async function removeAccountWithConfirmation(
 		}
 	}
 
-	return removeAccount(dbOps, name);
+	const result = await removeAccountById(dbOps, matches[0].id);
+	// Hide the id-keyed "not found" race window from confirmation-prompt callers
+	// by remapping to the by-name phrasing they expect.
+	if (!result.success) {
+		return { success: false, message: `Account '${name}' not found` };
+	}
+	return { success: result.success, message: result.message };
 }
 
 /**
@@ -2024,7 +2197,6 @@ export async function forceResetRateLimit(
 
 	const usagePollTriggered = await notifyServersToForceResetRateLimit(
 		account.id,
-		dbOps,
 		config,
 	);
 
@@ -2038,7 +2210,6 @@ export async function forceResetRateLimit(
 
 async function notifyServersToForceResetRateLimit(
 	accountId: string,
-	dbOps: DatabaseOperations,
 	config: Config,
 ): Promise<boolean> {
 	const configuredPort = config.getRuntime().port || 8080;
@@ -2047,16 +2218,11 @@ async function notifyServersToForceResetRateLimit(
 	const ports = [...new Set([configuredPort, defaultPort, testPort])];
 	let usagePollTriggered = false;
 
-	// If API authentication is enabled, skip best-effort local notifications.
-	const activeApiKeys = await dbOps.getActiveApiKeys();
-	const requiresAuth = activeApiKeys.length > 0;
-	if (requiresAuth) {
-		console.warn(
-			"⚠️  API authentication is enabled — skipping server notification.\n" +
-				"   The rate limit state was cleared in the database but no usage poll was triggered.",
-		);
-		return false;
-	}
+	// The local-control-secret (issue #216) lets this notification through
+	// AuthService's HTTP gate even when API-key auth is enabled — the CLI
+	// and the server both resolve it from the same on-disk config file, so
+	// this never involves handling a real API key.
+	const localControlSecret = config.getLocalControlSecret();
 
 	for (const port of ports) {
 		try {
@@ -2064,7 +2230,10 @@ async function notifyServersToForceResetRateLimit(
 				`http://localhost:${port}/api/accounts/${accountId}/force-reset-rate-limit`,
 				{
 					method: "POST",
-					headers: { "Content-Type": "application/json" },
+					headers: {
+						"Content-Type": "application/json",
+						"x-better-ccflare-local-control-secret": localControlSecret,
+					},
 				},
 			);
 
@@ -2090,6 +2259,7 @@ async function notifyServersToForceResetRateLimit(
  */
 async function reauthenticateQwenAccount(
 	dbOps: DatabaseOperations,
+	config: Config,
 	account: {
 		id: string;
 		provider: string;
@@ -2163,13 +2333,16 @@ async function reauthenticateQwenAccount(
 				refresh_token = ?,
 				access_token = ?,
 				expires_at = ?,
-				custom_endpoint = ?
+				custom_endpoint = ?,
+				refresh_token_issued_at = ?,
+				requires_reauth = 0
 			WHERE id = ?`,
 			[
 				tokens.refresh_token,
 				tokens.access_token,
 				Date.now() + tokens.expires_in * 1000,
 				resourceUrl,
+				Date.now(),
 				account.id,
 			],
 		);
@@ -2186,13 +2359,22 @@ async function reauthenticateQwenAccount(
 	);
 	console.log("OAuth tokens have been updated.");
 
-	// Notify running servers to reload tokens (best-effort)
+	// Notify running servers to reload tokens (best-effort). The
+	// local-control-secret (issue #216) lets this through AuthService's HTTP
+	// gate even when API-key auth is enabled.
 	console.log("\nNotifying running servers to reload tokens...");
+	const localControlSecret = config.getLocalControlSecret();
 	for (const port of [8080, 8081]) {
 		try {
 			const response = await fetch(
 				`http://localhost:${port}/api/accounts/${account.id}/reload`,
-				{ method: "POST", headers: { "Content-Type": "application/json" } },
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"x-better-ccflare-local-control-secret": localControlSecret,
+					},
+				},
 			);
 			if (response.ok) {
 				console.log(`✓ Token reload successful on port ${port}`);
@@ -2236,13 +2418,16 @@ async function reauthenticateXaiAccount(
 				refresh_token = ?,
 				access_token = ?,
 				expires_at = ?,
-				custom_endpoint = COALESCE(custom_endpoint, ?)
+				custom_endpoint = COALESCE(custom_endpoint, ?),
+				refresh_token_issued_at = ?,
+				requires_reauth = 0
 			WHERE id = ?`,
 			[
 				auth.refresh_token,
 				auth.key,
 				expiresAt,
 				account.custom_endpoint || XAI_DEFAULT_ENDPOINT,
+				Date.now(),
 				account.id,
 			],
 		);
@@ -2303,7 +2488,7 @@ export async function reauthenticateAccount(
 
 	// Handle Qwen re-authentication via device code flow
 	if (account.provider === "qwen") {
-		return reauthenticateQwenAccount(dbOps, account, name);
+		return reauthenticateQwenAccount(dbOps, config, account, name);
 	}
 
 	if (account.provider === "xai") {
@@ -2419,7 +2604,8 @@ export async function reauthenticateAccount(
 						api_key = ?,
 						refresh_token = ?,
 						access_token = NULL,
-						expires_at = NULL
+						expires_at = NULL,
+						requires_reauth = 0
 					WHERE id = ?`,
 					[apiKey, apiKey, account.id],
 				);
@@ -2448,9 +2634,17 @@ export async function reauthenticateAccount(
 			`UPDATE accounts SET
 				refresh_token = ?,
 				access_token = ?,
-				expires_at = ?
+				expires_at = ?,
+				refresh_token_issued_at = ?,
+				requires_reauth = 0
 			WHERE id = ?`,
-			[tokens.refreshToken, tokens.accessToken, tokens.expiresAt, account.id],
+			[
+				tokens.refreshToken,
+				tokens.accessToken,
+				tokens.expiresAt,
+				Date.now(),
+				account.id,
+			],
 		);
 
 		console.log("OAuth tokens updated.");
@@ -2495,30 +2689,22 @@ export async function reauthenticateAccount(
 		const defaultPort = 8080;
 		const testPort = 8081;
 
-		// Check if API authentication is enabled
-		const activeApiKeys = await dbOps.getActiveApiKeys();
-		const requiresAuth = activeApiKeys.length > 0;
+		// The local-control-secret (issue #216) lets this notification through
+		// AuthService's HTTP gate even when API-key auth is enabled — the CLI
+		// and the server both resolve it from the same on-disk config file, so
+		// this never involves handling a real API key.
+		const localControlSecret = config.getLocalControlSecret();
 
-		if (requiresAuth) {
-			console.log(
-				"⚠️  API authentication is enabled - automatic server reload not supported",
-			);
-			console.log(
-				"   Please restart the server manually to use the new tokens:",
-			);
-			console.log("   - Stop the running server");
-			console.log("   - Start it again with: bun start");
-			return;
-		}
-
-		// If no API authentication, proceed with unauthenticated requests
 		for (const port of [defaultPort, testPort]) {
 			try {
 				const response = await fetch(
 					`http://localhost:${port}/api/accounts/${accountId}/reload`,
 					{
 						method: "POST",
-						headers: { "Content-Type": "application/json" },
+						headers: {
+							"Content-Type": "application/json",
+							"x-better-ccflare-local-control-secret": localControlSecret,
+						},
 					},
 				);
 

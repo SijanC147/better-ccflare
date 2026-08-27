@@ -1,8 +1,10 @@
 import React from "react";
+import { AdvancedSettingsCard } from "./overview/AdvancedSettingsCard";
 import { CacheKeepaliveCard } from "./overview/CacheKeepaliveCard";
 import { DataRetentionCard } from "./overview/DataRetentionCard";
 import { PostgresConfigCard } from "./overview/PostgresConfigCard";
 import { RequestStorageCard } from "./overview/RequestStorageCard";
+import { RoutingCard } from "./overview/RoutingCard";
 import { SystemCacheTtlCard } from "./overview/SystemCacheTtlCard";
 import { UsageThrottlingCard } from "./overview/UsageThrottlingCard";
 
@@ -11,12 +13,14 @@ export const SettingsTab = React.memo(() => {
 		<div className="space-y-6">
 			{/* Configuration Cards Grid */}
 			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+				<RoutingCard />
 				<CacheKeepaliveCard />
 				<SystemCacheTtlCard />
 				<UsageThrottlingCard />
 				<DataRetentionCard />
 				<RequestStorageCard />
 				<PostgresConfigCard />
+				<AdvancedSettingsCard />
 			</div>
 		</div>
 	);

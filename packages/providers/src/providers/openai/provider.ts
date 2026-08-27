@@ -15,6 +15,7 @@ import {
 import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { drainReader } from "../../utils/stream-drain";
 
 const log = new Logger("OpenAICompatibleProvider");
 
@@ -131,9 +132,16 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		};
 	}
 
+	protected resolveStreamContextWindow(
+		_model: string,
+		_account: Account | null,
+	): number | undefined {
+		return undefined;
+	}
+
 	async processResponse(
 		response: Response,
-		_account: Account | null,
+		account: Account | null,
 	): Promise<Response> {
 		// Convert OpenAI response format back to Anthropic format
 		const contentType = response.headers.get("content-type");
@@ -143,6 +151,21 @@ export class OpenAICompatibleProvider extends BaseProvider {
 				const clone = response.clone();
 				const data = await clone.json();
 				const anthropicData = convertOpenAIResponseToAnthropic(data);
+
+				// Success path: callers receive the converted response, so the
+				// original is discarded here. `clone()` teed the body — leaving
+				// the original branch unread keeps the tee buffering for a body
+				// nobody will ever consume, on every JSON response this provider
+				// converts. `reader.cancel()` is a no-op on every released Bun
+				// (oven-sh/bun#35093) and does not release the native buffer;
+				// drain to `done` instead — see drainReader() (#382). The promise
+				// is not awaited because nothing downstream depends on it. Only
+				// the success path may do this: the catch below falls through
+				// and returns the original, which must stay intact. See #356.
+				const discardedBody = response.body;
+				if (discardedBody && !discardedBody.locked) {
+					void drainReader(discardedBody.getReader());
+				}
 
 				return new Response(JSON.stringify(anthropicData), {
 					status: response.status,
@@ -160,7 +183,10 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		// For streaming responses, we need to transform the SSE stream
 		if (contentType?.includes("text/event-stream")) {
-			return transformStreamingResponse(response);
+			return transformStreamingResponse(response, {
+				contextWindowForModel: (model) =>
+					this.resolveStreamContextWindow(model, account),
+			});
 		}
 
 		// For non-JSON responses, return as-is with sanitized headers
@@ -244,17 +270,19 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		outputTokens?: number;
 	} | null> {
 		try {
-			const clone = response.clone();
 			const contentType = response.headers.get("content-type");
 
 			// Handle streaming responses (SSE)
 			if (contentType?.includes("text/event-stream")) {
-				// For streaming, we can only extract usage from the final chunk
-				// This is complex to implement properly, so we'll return null for now
-				// In a full implementation, we'd need to buffer the entire stream
+				// For streaming, we can only extract usage from the final chunk.
+				// This is complex to implement properly, so we return null for
+				// now — deliberately not cloning the body here: an unread clone
+				// leaves its tee branch open, retaining the native buffer for a
+				// body nobody will ever consume (#382).
 				return null;
 			} else {
 				// Handle non-streaming JSON responses
+				const clone = response.clone();
 				const json = (await clone.json()) as {
 					model?: string;
 					usage?: {
@@ -441,7 +469,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					lastPart.type === "text"
 				) {
 					// Inject cache_control (snake_case for OpenAI-compatible API)
-					(lastPart as any).cache_control = { type: "ephemeral" };
+					lastPart.cache_control = { type: "ephemeral" };
 				}
 			} else if (typeof msg.content === "string" && msg.content.length > 0) {
 				// Convert string content to array with cache_control
@@ -481,19 +509,30 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		// Check if model is a reasoning model (has thinking/reasoning capabilities)
 		const modelId = modelParam?.toLowerCase() || "";
+		// The raw Anthropic request body's `thinking` field isn't part of the
+		// shared AnthropicRequest type (it's an upstream-only extension), so
+		// narrow just the property we read here instead of using `any`.
+		const anthropicThinking = anthropicBody as {
+			thinking?: { type?: string };
+		};
 		const isReasoningModel =
 			modelId.includes("qwen") ||
 			modelId.includes("qwq") ||
 			modelId.includes("deepseek-r1") ||
 			// Also check if anthropic request indicates thinking
-			(anthropicBody as any).thinking?.type === "enabled";
+			anthropicThinking.thinking?.type === "enabled";
 
 		// Skip if it's kimi-k2-thinking (returns reasoning_content by default)
 		if (modelId.includes("kimi-k2-thinking")) return;
 
 		// Inject enable_thinking flag
 		if (isReasoningModel) {
-			(openaiBody as any).enable_thinking = true;
+			// `enable_thinking` is a DashScope-specific extension not present
+			// on the shared OpenAIRequest type, so extend it locally here
+			// rather than widening the shared type for one provider quirk.
+			(
+				openaiBody as OpenAIRequest & { enable_thinking?: boolean }
+			).enable_thinking = true;
 			log.debug(
 				`Injected enable_thinking for DashScope reasoning model: ${modelId}`,
 			);

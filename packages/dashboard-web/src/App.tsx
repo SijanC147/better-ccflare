@@ -9,7 +9,6 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
 import { AccountsTab } from "./components/AccountsTab";
-import { ProjectsTab } from "./components/ProjectsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
 import { ApiKeysTab } from "./components/ApiKeysTab";
@@ -18,6 +17,7 @@ import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
 import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
+import { ProjectsTab } from "./components/ProjectsTab";
 import { RequestsTab } from "./components/RequestsTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
@@ -34,6 +34,11 @@ const LazyAnalyticsTab = lazy(() =>
 const LazyInsightsTab = lazy(() =>
 	import("./components/InsightsTab").then((module) => ({
 		default: module.InsightsTab,
+	})),
+);
+const LazyUsageHistoryTab = lazy(() =>
+	import("./components/usage-history/UsageHistoryTab").then((m) => ({
+		default: m.UsageHistoryTab,
 	})),
 );
 const LoadingSkeleton = () => (
@@ -62,12 +67,11 @@ const LoadingSkeleton = () => (
 
 export function App() {
 	const location = useLocation();
-	const [showCombos, setShowCombos] = useState(false);
 	const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
 		localStorage.getItem("ccflare-sidebar-collapsed") === "true",
 	);
 
-	// Build routes array dynamically based on feature flags
+	// Build the dashboard routes once; released features remain reachable.
 	const routes = useMemo(() => {
 		const baseRoutes = [
 			{
@@ -115,6 +119,16 @@ export function App() {
 				subtitle: "Manage discovered and manual Claude Code projects",
 			},
 			{
+				path: "/usage-history",
+				element: (
+					<Suspense fallback={<LoadingSkeleton />}>
+						<LazyUsageHistoryTab />
+					</Suspense>
+				),
+				title: "Usage History",
+				subtitle: "Per-account usage windows over time, with limit prediction",
+			},
+			{
 				path: "/agents",
 				element: <AgentsTab />,
 				title: "Agent Management",
@@ -140,18 +154,15 @@ export function App() {
 			},
 		];
 
-		// Add combos route if feature is enabled (after Accounts, matching the nav)
-		if (showCombos) {
-			baseRoutes.splice(5, 0, {
-				path: "/combos",
-				element: <CombosTab />,
-				title: "Combos Management",
-				subtitle: "Define fallback chains for model families",
-			});
-		}
+		baseRoutes.splice(5, 0, {
+			path: "/combos",
+			element: <CombosTab />,
+			title: "Combos Management",
+			subtitle: "Define fallback chains for model families",
+		});
 
 		return baseRoutes;
-	}, [showCombos]);
+	}, []);
 
 	const currentRoute =
 		routes.find((route) => route.path === location.pathname) || routes[0];
@@ -254,25 +265,6 @@ export function App() {
 		checkAuth();
 	}, []);
 
-	// Fetch feature flags
-	useEffect(() => {
-		const fetchFeatures = async () => {
-			try {
-				const features = await api.getFeatures();
-				setShowCombos(features.showCombos);
-			} catch (error) {
-				// If features endpoint fails, default to hiding combos
-				console.error("Failed to fetch features:", error);
-				setShowCombos(false);
-			}
-		};
-
-		// Only fetch features after auth check completes
-		if (!isCheckingAuth && isAuthenticated) {
-			fetchFeatures();
-		}
-	}, [isCheckingAuth, isAuthenticated]);
-
 	// Listen for 401 errors from API client
 	useEffect(() => {
 		const handleAuthRequired = () => {
@@ -347,7 +339,6 @@ export function App() {
 				<div className="min-h-screen bg-background">
 					<Navigation
 						onLogout={authRequired ? handleLogout : undefined}
-						showCombos={showCombos}
 						isCollapsed={isSidebarCollapsed}
 						onToggleCollapse={handleToggleSidebarCollapse}
 					/>

@@ -58,8 +58,33 @@ function convertPlaceholders(sql: string): string {
  * cancels the query and frees the connection before the client gives up —
  * otherwise the client unblocks while the query (and its pool connection)
  * is still running on the server.
+ *
+ * Configurable via BETTER_CCFLARE_DB_CLIENT_TIMEOUT (default 8000ms) — the
+ * server-side statement_timeout clamp in DatabaseOperations derives its
+ * ceiling from this value. See issue #412.
  */
-export const PG_CLIENT_QUERY_TIMEOUT_MS = 8000;
+const requestedClientTimeout = Number(
+	process.env.BETTER_CCFLARE_DB_CLIENT_TIMEOUT,
+);
+export const PG_CLIENT_QUERY_TIMEOUT_MS =
+	Number.isInteger(requestedClientTimeout) && requestedClientTimeout > 0
+		? requestedClientTimeout
+		: 8000;
+
+/**
+ * Row batch size (per DELETE statement) used by retention cleanup loops.
+ * Configurable via BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE — lower this if rows
+ * are large (e.g. TOASTed payload JSON) and batches are hitting the
+ * statement_timeout before completing. See issue #412.
+ *
+ * Requires an integer: the value is bound directly into a SQL LIMIT and
+ * compared against an integer deleted-row count to detect the last batch, so
+ * a fractional value (e.g. 200.5) would break both.
+ */
+export function getCleanupBatchSize(): number {
+	const requested = Number(process.env.BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE);
+	return Number.isInteger(requested) && requested > 0 ? requested : 200;
+}
 
 /**
  * Unified SQL adapter that abstracts over bun:sqlite (sync) and Bun.SQL/PostgreSQL (async).
@@ -207,8 +232,8 @@ export class BunSqlAdapter {
 	async query<R>(sqlStr: string, params: unknown[] = []): Promise<R[]> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 			return this.withBusyRetry(() =>
+				// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 				db.query<R, any[]>(sqlStr).all(...(params as any[])),
 			);
 		}
@@ -231,8 +256,8 @@ export class BunSqlAdapter {
 	async get<R>(sqlStr: string, params: unknown[] = []): Promise<R | null> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 			const result = await this.withBusyRetry(() =>
+				// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 				db.query<R, any[]>(sqlStr).get(...(params as any[])),
 			);
 			return (result as R) ?? null;
@@ -260,8 +285,8 @@ export class BunSqlAdapter {
 			return;
 		}
 		const pgQuery = this.pgSql(sqlStr);
-		// biome-ignore lint/suspicious/noExplicitAny: Bun.SQL accepts various binding types
 		await this.withPgTimeout(
+			// biome-ignore lint/suspicious/noExplicitAny: Bun.SQL accepts various binding types
 			this.sql?.unsafe(pgQuery, params as any[]) as Promise<unknown>,
 			PG_CLIENT_QUERY_TIMEOUT_MS,
 			sqlStr,
@@ -277,15 +302,15 @@ export class BunSqlAdapter {
 	): Promise<number> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 			const result = await this.withBusyRetry(() =>
+				// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 				db.run(sqlStr, params as any[]),
 			);
 			return result.changes;
 		}
 		const pgQuery = this.pgSql(sqlStr);
-		// biome-ignore lint/suspicious/noExplicitAny: Bun.SQL accepts various binding types
 		const result = await this.withPgTimeout(
+			// biome-ignore lint/suspicious/noExplicitAny: Bun.SQL accepts various binding types
 			this.sql?.unsafe(pgQuery, params as any[]) as Promise<unknown>,
 			PG_CLIENT_QUERY_TIMEOUT_MS,
 			sqlStr,
@@ -338,8 +363,8 @@ export class BunSqlAdapter {
 			return;
 		}
 		const pgQuery = params && params.length > 0 ? this.pgSql(sqlStr) : sqlStr;
-		// biome-ignore lint/suspicious/noExplicitAny: Bun.SQL accepts various binding types
 		return this.withPgTimeout(
+			// biome-ignore lint/suspicious/noExplicitAny: Bun.SQL accepts various binding types
 			this.sql?.unsafe(pgQuery, params as any[]) as Promise<unknown>,
 			PG_CLIENT_QUERY_TIMEOUT_MS,
 			sqlStr,
@@ -351,7 +376,23 @@ export class BunSqlAdapter {
 	 */
 	async close(): Promise<void> {
 		if (this.isSQLite && this.sqliteDb) {
-			this.sqliteDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+			// PRAGMA wal_checkpoint is best-effort cleanup. It can fail with
+			// SQLITE_IOERR_VNODE (errno 6922) when the underlying file or its
+			// -wal/-shm siblings have been unlinked by a concurrent cleanup
+			// path before this close runs (e.g. a test that calls fs.unlinkSync
+			// on /tmp/<test>.db in afterAll before DatabaseFactory.reset()).
+			// close() must not throw — callers like DatabaseFactory.closeAll()
+			// discard the returned promise via `void instance.close()`, so any
+			// rejection here surfaces as an "Unhandled error between tests"
+			// even though every assertion already passed.
+			try {
+				this.sqliteDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+			} catch (error) {
+				console.warn(
+					"PRAGMA wal_checkpoint failed during SQLite close:",
+					error,
+				);
+			}
 			this.sqliteDb.close();
 		} else if (this.sql) {
 			await this.sql.end();

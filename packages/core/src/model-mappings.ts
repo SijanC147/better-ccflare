@@ -1,5 +1,6 @@
 import { Logger } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
+import { isForceAccountModelEnabled } from "./force-account-model";
 import { safeJsonParse, validateModelMappings } from "./validation";
 
 const log = new Logger("ModelMappings");
@@ -27,6 +28,21 @@ export function getModelFamily(
 		}
 	}
 	return null;
+}
+
+/**
+ * Internal window key for a per-model weekly (weekly_scoped) limit, derived from
+ * the model display name. Kept byte-identical between the dashboard usage rows
+ * and the proxy throttle snapshots so the two match (throttle-window match /
+ * amber highlight). Only needs to start with `seven_day_` (so the pace marker
+ * treats it as a 7-day window) and be stable per model.
+ */
+export function weeklyScopedWindowKey(displayName: string): string {
+	const slug = displayName
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "");
+	return `seven_day_${slug}`;
 }
 
 /**
@@ -235,10 +251,36 @@ export function getModelList(
 }
 
 /**
+ * Providers whose upstream natively accepts Claude model ids.
+ *
+ * Two features need the same answer and must not drift: a combo slot may only
+ * be left empty (passthrough) for these providers, and "force account model"
+ * may only route a Claude model id to these. On any other provider the name
+ * would arrive at an upstream that does not know it.
+ */
+const PROVIDERS_ACCEPTING_CLIENT_MODEL = new Set([
+	"anthropic",
+	"claude-console-api",
+]);
+
+/** Whether this provider understands a Claude model id without translation. */
+export function providerAcceptsClientModel(
+	provider: string | null | undefined,
+): boolean {
+	return PROVIDERS_ACCEPTING_CLIENT_MODEL.has(provider ?? "anthropic");
+}
+
+/**
  * Map Anthropic model name to provider-specific model name (first in list).
  * Optimized for known model patterns with direct matching (O(1) vs O(n log n))
  */
 export function mapModelName(anthropicModel: string, account: Account): string {
+	// With "force account model" on, no mapping may rename the request: the
+	// operator asked for this model by name, and an account that cannot serve
+	// it was already excluded during selection. Guarding the single place every
+	// provider funnels through is what makes that promise hold for all of them.
+	if (isForceAccountModelEnabled()) return anthropicModel;
+
 	const list = getModelList(anthropicModel, account);
 	if (!list) return anthropicModel;
 

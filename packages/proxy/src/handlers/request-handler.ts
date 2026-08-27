@@ -3,7 +3,19 @@ import { TIME_CONSTANTS, ValidationError } from "@better-ccflare/core";
 import type { Provider } from "@better-ccflare/providers";
 import type { RequestMeta } from "@better-ccflare/types";
 import { chatGptCloudflareCookieJar } from "../chatgpt-cloudflare-cookies";
-import { ERROR_MESSAGES } from "./proxy-types";
+import { ERROR_MESSAGES, INTERNAL_PROBE_SECRET_HEADER } from "./proxy-types";
+
+/**
+ * Internal proxy control headers that must NEVER be forwarded to the upstream
+ * provider: they gate privileged proxy behaviour (see isInternalProbe), and a
+ * provider or custom endpoint that received them — the probe secret above all —
+ * could replay them with a marker to forge privileged requests.
+ */
+function stripInternalControlHeaders(headers: Headers): void {
+	headers.delete(INTERNAL_PROBE_SECRET_HEADER);
+	headers.delete("x-better-ccflare-auto-refresh");
+	headers.delete("x-better-ccflare-keepalive");
+}
 
 /**
  * Creates request metadata for tracking and analytics
@@ -90,24 +102,34 @@ export async function makeProxyRequest(
 	hasBody?: boolean,
 	signal?: AbortSignal,
 ): Promise<Response> {
-	let timeoutId: ReturnType<typeof setTimeout> | null = null;
-	let internalController: AbortController | null = null;
+	// The caller's abort source: either passed explicitly, or already carried by
+	// a Request target (Request derivation preserves the signal object). It must
+	// survive the header phase — a client that disconnects mid-stream is the
+	// primary reason this exists, and that happens long after the headers.
+	const callerSignal =
+		signal ?? (target instanceof Request ? target.signal : undefined);
 
-	const effectiveSignal =
-		signal ??
-		(() => {
-			internalController = new AbortController();
-			timeoutId = setTimeout(
-				() => internalController?.abort(),
-				TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS,
-			);
-			return internalController.signal;
-		})();
+	// The header-phase timeout is always armed, independent of the caller
+	// signal, and disarmed in `finally` once the headers are in.
+	const timeoutController = new AbortController();
+	const timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(
+		() => timeoutController.abort(),
+		TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS,
+	);
+
+	// Both reasons must be able to abort the same fetch. Combining them keeps
+	// the caller signal live for the whole stream lifetime, whereas replacing
+	// one with the other silently drops a client disconnect (upstream leak) or
+	// the header timeout.
+	const effectiveSignal = callerSignal
+		? AbortSignal.any([callerSignal, timeoutController.signal])
+		: timeoutController.signal;
 
 	try {
 		if (target instanceof Request) {
 			const targetUrl = target.url;
 			const mutableHeaders = new Headers(target.headers);
+			stripInternalControlHeaders(mutableHeaders);
 			chatGptCloudflareCookieJar.applyCookieHeader(targetUrl, mutableHeaders);
 
 			const response = await fetch(
@@ -121,6 +143,7 @@ export async function makeProxyRequest(
 		}
 
 		const mutableHeaders = new Headers(headers);
+		stripInternalControlHeaders(mutableHeaders);
 		chatGptCloudflareCookieJar.applyCookieHeader(target, mutableHeaders);
 
 		const response = await fetch(target, {

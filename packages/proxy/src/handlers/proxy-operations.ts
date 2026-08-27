@@ -1,6 +1,9 @@
 import {
+	type AccountUsageSnapshot,
+	getModelFamily,
 	getModelList,
 	getOverloadRetryConfig,
+	isUsageExhausted,
 	logError,
 	ProviderError,
 	TIME_CONSTANTS,
@@ -9,7 +12,10 @@ import { withSanitizedProxyHeaders } from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
 import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-formats";
 import {
+	type AnyUsageData,
+	applyXaiConvIdHeader,
 	getProvider,
+	isAnthropicExtraUsageExhausted,
 	isAnthropicOutOfCredits,
 	usageCache,
 } from "@better-ccflare/providers";
@@ -19,19 +25,48 @@ import type {
 	RequestMeta,
 } from "@better-ccflare/types";
 import { cacheBodyStore } from "../cache-body-store";
+import { ensureCodexModelDefaults } from "../codex-model-catalog";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
-import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
+import { isModelRewrite } from "../worker-messages";
+import { getXaiConvId } from "./account-selector";
+import { markFamilyExhausted } from "./model-capacity";
+import {
+	ERROR_MESSAGES,
+	isInternalProbe,
+	type ProxyContext,
+} from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
 import { handleProxyError, processProxyResponse } from "./response-processor";
+import { isRetryable429 } from "./retryable-429";
 import { getValidAccessToken } from "./token-manager";
+import { collectWindows } from "./usage-throttling";
 
 const log = new Logger("ProxyOperations");
+
+import { cancelDiscardedResponseBody } from "./discard-body-cancel";
 
 const SYNTHETIC_RESPONSE_HEADER = "x-better-ccflare-synthetic-response";
 const SYNTHETIC_STATUS_HEADER = "x-better-ccflare-synthetic-status";
 const SYNTHETIC_RESPONSE_URL_PREFIX = "https://better-ccflare.local/";
+
+/**
+ * Diagnose-only lookup of the family's current weekly_scoped utilization
+ * percent from cached usage telemetry, used purely to log what the last
+ * poll knew when a reactive out_of_credits mark is recorded — never a gate.
+ */
+function currentScopedPercentForFamily(
+	usageData: AnyUsageData | null,
+	family: string,
+): number | null {
+	for (const window of collectWindows(usageData)) {
+		if (window.scoped && window.modelFamily === family) {
+			return window.utilization;
+		}
+	}
+	return null;
+}
 
 /**
  * Determines the absolute epoch timestamp (ms since epoch) until which an account
@@ -282,12 +317,16 @@ async function isInvalidThinkingSignatureError(
 	if (response.status !== 400) return false;
 
 	try {
-		const clone = response.clone();
 		const contentType = response.headers.get("content-type");
 
 		if (!contentType?.includes("application/json")) return false;
 
-		const json = await clone.json();
+		// Cloned only here, after the content-type gate. Cloning before it teed
+		// the body and then returned early for every non-JSON body, stranding
+		// that copy unread — the tee keeps buffering for whoever consumes the
+		// original. Reachable in normal operation: providers such as Qwen do
+		// return non-JSON error bodies. See issue #356.
+		const json = await response.clone().json();
 
 		// Check for Claude's thinking-related errors
 		if (json.error?.message && typeof json.error.message === "string") {
@@ -332,11 +371,15 @@ async function isCacheControlRejectionError(
 	if (response.status !== 400) return false;
 
 	try {
-		const clone = response.clone();
 		const contentType = response.headers.get("content-type");
 		if (!contentType?.includes("application/json")) return false;
 
-		const json = await clone.json();
+		// Cloned only here, after the content-type gate. Cloning before it teed
+		// the body and then returned early for every non-JSON body, stranding
+		// that copy unread — the tee keeps buffering for whoever consumes the
+		// original. Reachable in normal operation: providers such as Qwen do
+		// return non-JSON error bodies. See issue #356.
+		const json = await response.clone().json();
 		const message: string = json.error?.message ?? json.message ?? "";
 		return (
 			typeof message === "string" &&
@@ -374,11 +417,15 @@ export async function isModelUnavailableError(
 	}
 
 	try {
-		const clone = response.clone();
 		const contentType = response.headers.get("content-type");
 		if (!contentType?.includes("application/json")) return false;
 
-		const json = await clone.json();
+		// Cloned only here, after the content-type gate. Cloning before it teed
+		// the body and then returned early for every non-JSON body, stranding
+		// that copy unread — the tee keeps buffering for whoever consumes the
+		// original. Reachable in normal operation: providers such as Qwen do
+		// return non-JSON error bodies. See issue #356.
+		const json = await response.clone().json();
 
 		// Anthropic native format
 		if (json.error?.type === "not_found_error") return true;
@@ -401,6 +448,20 @@ export async function isModelUnavailableError(
 			json.error?.message &&
 			typeof json.error.message === "string" &&
 			json.error.message.includes("ResourceNotFoundException")
+		) {
+			return true;
+		}
+
+		// Codex/ChatGPT-backend format: message sits on a top-level "detail"
+		// field rather than under "error". See issue #393 — e.g.
+		// {"detail": "The 'gpt-5.3-codex' model is not supported when using
+		// Codex with a ChatGPT account."}
+		if (
+			typeof json.detail === "string" &&
+			json.detail.toLowerCase().includes("model") &&
+			(json.detail.toLowerCase().includes("not supported") ||
+				json.detail.toLowerCase().includes("not found") ||
+				json.detail.toLowerCase().includes("does not exist"))
 		) {
 			return true;
 		}
@@ -442,12 +503,22 @@ export async function proxyUnauthenticated(
 	);
 
 	try {
+		// Dedicated controller so a stuck-upstream drain deadline (see
+		// anthropic-terminal-recovery.ts) can abort this specific fetch's
+		// connection after the fact — a signal not part of `init.signal` at
+		// fetch-creation time cannot retroactively attach to it.
+		const drainAbortController = new AbortController();
 		const response = await makeProxyRequest(
 			targetUrl,
 			req.method,
 			headers,
 			createBodyStream,
 			!!req.body,
+			// Abort upstream when the client disconnects; this path builds no
+			// Request object, so the signal has to be passed explicitly. Merged
+			// with drainAbortController so the terminal-recovery drain deadline
+			// can also abort this same fetch later.
+			AbortSignal.any([req.signal, drainAbortController.signal]),
 		);
 
 		return forwardToClient(
@@ -460,14 +531,21 @@ export async function proxyUnauthenticated(
 				requestBody: requestBodyBuffer,
 				project: requestMeta.project,
 				cwdHint: requestMeta.cwdHint ?? null,
+				clientSessionId: requestMeta.clientSessionId ?? null,
+				query: url.search || null,
+				projectAttributionSource: requestMeta.projectAttributionSource ?? null,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts: 0,
 				agentUsed: requestMeta.agentUsed,
+				originalModel: requestMeta.originalModel,
+				appliedModel: requestMeta.appliedModel,
+				agentAttributionSource: requestMeta.agentAttributionSource ?? null,
 				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
+				drainAbort: drainAbortController,
 			},
 			ctx,
 		);
@@ -512,6 +590,30 @@ export async function proxyWithAccount(
 	returnRateLimitedResponseOnExhaustion = false,
 ): Promise<Response | null> {
 	try {
+		// Dedicated controller so a stuck-upstream drain deadline (see
+		// anthropic-terminal-recovery.ts) can abort this request's fetch
+		// connection after the fact — a signal not part of `init.signal` at
+		// fetch-creation time cannot retroactively attach to it.
+		const drainAbortController = new AbortController();
+
+		// Every upstream call stays tied to the client connection: when the client
+		// disconnects, the upstream fetch must be aborted instead of running on.
+		// The signal is passed explicitly instead of relying on the Request object
+		// to carry it, because provider body transforms rebuild the Request from
+		// its URL and drop the signal (see providers/src/utils/model-mapping.ts and
+		// the openai/codex providers). One guarantee at the call site beats an
+		// invariant that every provider has to remember. Merged with
+		// drainAbortController so the terminal-recovery drain deadline can also
+		// abort this same fetch later.
+		const forwardUpstream = (target: Request) =>
+			makeProxyRequest(
+				target,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				AbortSignal.any([req.signal, drainAbortController.signal]),
+			);
 		if (
 			process.env.DEBUG?.includes("proxy") ||
 			process.env.DEBUG === "true" ||
@@ -561,12 +663,7 @@ export async function proxyWithAccount(
 		//   - auto-refresh probes — same loop-prevention concern, plus these
 		//     hit known-cooled accounts and shouldn't pollute the staged-body cache
 		//     (issue #199, bug 2).
-		// Both checks are truthy (not strict-equality) to preserve the original
-		// keepalive guard's behaviour: any non-empty header value triggers the
-		// skip, matching what `!req.headers.get(...)` returned before.
-		const isSyntheticInternal =
-			!!req.headers.get("x-better-ccflare-keepalive") ||
-			!!req.headers.get("x-better-ccflare-auto-refresh");
+		const isSyntheticInternal = isInternalProbe(req.headers, ctx);
 		if (!isSyntheticInternal) {
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
@@ -607,11 +704,30 @@ export async function proxyWithAccount(
 		// client-supplied copies before providers transform the outbound request.
 		headers.delete(SYNTHETIC_RESPONSE_HEADER);
 		headers.delete(SYNTHETIC_STATUS_HEADER);
+
+		// xAI cache-native conversation identity (issue #319 minimal slice).
+		// Applied here rather than via Provider.prepareHeaders: that hook only
+		// receives (headers, accessToken, apiKey) — no account or RequestMeta —
+		// so the conv id derived in proxy.ts isn't reachable there without
+		// widening the shared Provider interface for one provider's feature.
+		// A no-op for every non-xai request and whenever the feature is
+		// disabled (getXaiConvId returns null — see account-selector.ts).
+		applyXaiConvIdHeader(
+			headers,
+			provider.name,
+			account,
+			getXaiConvId(requestMeta),
+		);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
 			method: req.method,
 			headers,
+			// Tie the upstream fetch to the client connection. When the client goes
+			// away mid-stream (idle-watchdog abort, Ctrl-C, network drop) the
+			// upstream request must be aborted too, instead of streaming on
+			// unattended and holding the connection open.
+			signal: req.signal,
 		};
 		if (effectiveBodyBuffer) {
 			requestInit.body = new Uint8Array(effectiveBodyBuffer);
@@ -620,12 +736,26 @@ export async function proxyWithAccount(
 
 		const providerRequest = new Request(targetUrl, requestInit);
 
+		// The provider is about to translate the Claude family into one of its
+		// own models, and only this account's listing knows which. Loading it
+		// here costs one await on the account's first request in this process;
+		// after that it is memory. Codex only: an openai-compatible account's
+		// derived defaults are never consumed for family mapping (each endpoint
+		// is arbitrary, so guessing sonnet/haiku from list position is not a
+		// call this proxy makes), so warming them here would only add latency.
+		await ensureCodexModelDefaults(account, ctx);
+
 		let transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
 
-		// Pre-strip cache_control for (account, model) pairs known to reject it
+		// Pre-strip cache_control for (account, model) pairs known to reject it.
+		// Also doubles as the buffered body for in-place 529 retries below —
+		// cloning the Request for retries tees the body into a branch nothing
+		// reads on the no-retry path, retaining its native buffer per request
+		// (#382).
 		const transformedBodyText = await transformedRequest.clone().text();
+		let retryBodyText = transformedBodyText;
 		let transformedBodyJson: Record<string, unknown> | null = null;
 		try {
 			transformedBodyJson = JSON.parse(transformedBodyText);
@@ -650,19 +780,19 @@ export async function proxyWithAccount(
 				method: transformedRequest.method,
 				headers: transformedRequest.headers,
 				body: JSON.stringify(transformedBodyJson),
+				// A URL-based rebuild drops the signal — carry it over.
+				signal: req.signal,
 			});
+			retryBodyText = JSON.stringify(transformedBodyJson);
 			log.debug(
 				`Pre-stripped cache_control for known rejector: account=${account.name} model=${transformedModel}`,
 			);
 		}
 
-		// Capture a clone for in-place 529 retries before the body is consumed.
-		const transformedRequestForRetry = transformedRequest.clone();
-
 		// Make the request (or unwrap a synthetic provider response)
 		let rawResponse = isSyntheticProviderResponse(transformedRequest)
 			? materializeSyntheticResponse(transformedRequest)
-			: await makeProxyRequest(transformedRequest);
+			: await forwardUpstream(transformedRequest);
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
 		const isClaudeProvider =
@@ -685,6 +815,7 @@ export async function proxyWithAccount(
 					headers,
 					body: new Uint8Array(filteredBodyBuffer),
 					duplex: "half",
+					signal: req.signal,
 				};
 
 				const retryProviderRequest = new Request(targetUrl, retryRequestInit);
@@ -694,9 +825,10 @@ export async function proxyWithAccount(
 					: retryProviderRequest;
 
 				// Make the retry request (or unwrap a synthetic provider response)
+				cancelDiscardedResponseBody(rawResponse);
 				rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
 					? materializeSyntheticResponse(retryTransformedRequest)
-					: await makeProxyRequest(retryTransformedRequest);
+					: await forwardUpstream(retryTransformedRequest);
 			} else {
 				log.warn(
 					"Failed to filter thinking blocks or no changes made, proceeding with original error response",
@@ -725,13 +857,79 @@ export async function proxyWithAccount(
 					method: transformedRequest.method,
 					headers: transformedRequest.headers,
 					body: JSON.stringify(retryBodyJson),
+					// A URL-based rebuild drops the signal — carry it over.
+					signal: req.signal,
 				});
+				cancelDiscardedResponseBody(rawResponse);
 				rawResponse = isSyntheticProviderResponse(retryRequest)
 					? materializeSyntheticResponse(retryRequest)
-					: await makeProxyRequest(retryRequest);
+					: await forwardUpstream(retryRequest);
 			} catch (err) {
 				log.warn("Failed to retry without cache_control:", err);
 			}
+		}
+
+		// ── extra_usage_exhausted: billing-policy rejection, NOT a rate limit (issue #293) ──
+		// Anthropic returns 400 invalid_request_error when a Claude OAuth account's
+		// "extra usage" credit balance is depleted for third-party-app traffic (e.g.
+		// OpenCode). This is a billing rejection, not account exhaustion — we do NOT
+		// bench the account and we do NOT change what's returned to the client; the
+		// 400 is passed through unchanged. We only log/record it for dashboard visibility.
+		// Checked before isModelUnavailableError since this 400 shape (invalid_request_error
+		// mentioning "extra usage") is not a "model unavailable" condition and would
+		// otherwise never be reached — isModelUnavailableError only matches not_found_error,
+		// model_not_found, "model not found"/"does not exist", or ResourceNotFoundException.
+		// Gated to Anthropic/Claude-OAuth accounts only — the body-shape match
+		// (invalid_request_error + "extra usage") is specific enough for Anthropic's
+		// API but could otherwise coincidentally match an arbitrary OpenAI-compatible
+		// provider's error text and mislabel its billing state.
+		if (
+			isClaudeProvider &&
+			rawResponse.status === 400 &&
+			(await isAnthropicExtraUsageExhausted(rawResponse.clone()))
+		) {
+			let requestedModel: string | null = null;
+			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
+
+			const reason: RateLimitReason = "extra_usage_exhausted";
+			log.warn(
+				`Account ${account.name} extra_usage_exhausted (400${requestedModel ? `, model=${requestedModel}` : ""}) — ` +
+					`Anthropic extra-usage credits depleted for this OAuth account; NOT benching, response passed through to client`,
+			);
+			const responseTime = Date.now() - requestMeta.timestamp;
+			const modelRewrite = isModelRewrite(
+				requestMeta.originalModel,
+				requestMeta.appliedModel,
+			);
+			ctx.asyncWriter.enqueue(() =>
+				ctx.dbOps.saveRequest(
+					crypto.randomUUID(),
+					req.method,
+					url.pathname,
+					account.id,
+					400,
+					false,
+					reason,
+					responseTime,
+					failoverAttempts,
+					requestedModel ? { model: requestedModel } : undefined,
+					requestMeta.agentUsed ?? undefined,
+					apiKeyId ?? undefined,
+					apiKeyName ?? undefined,
+					requestMeta.project ?? null,
+					undefined,
+					requestMeta.comboName ?? null,
+					modelRewrite ? (requestMeta.originalModel ?? null) : null,
+					modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+					requestMeta.projectAttributionSource ?? null,
+					requestMeta.agentAttributionSource ?? null,
+					null,
+					requestMeta.clientSessionId ?? null,
+				),
+			);
+			// Do not bench the account or fail over — pass Anthropic's real error
+			// through to the client unchanged, same as any other 400 today.
+			return withSanitizedProxyHeaders(rawResponse);
 		}
 
 		// On model unavailable / rate-limited: cycle through the model list for
@@ -769,9 +967,43 @@ export async function proxyWithAccount(
 			// NOT bench the account (no applyRateLimitCooldown, no consecutive increment):
 			// fail over per-request and leave the account in rotation for other models.
 			if (rawResponse.status === 429 && isAnthropicOutOfCredits(rawResponse)) {
-				const isKeepalive =
-					req.headers.get("x-better-ccflare-keepalive") === "true";
+				// Feed the model-scoped capacity negative cache (model-capacity.ts):
+				// this account is confirmed exhausted for the requested model's
+				// family right now, even before usageCache's next poll would reflect
+				// it — regardless of whether this is a real client request or a
+				// keepalive probe, the observed 429 is an equally real signal. The
+				// mark always uses the fixed default TTL (no resetAt seeding — see
+				// model-capacity.ts) and is recorded with "recent_upstream_rejection"
+				// provenance since it is never corroborated by telemetry here.
+				if (requestedModel) {
+					const family = getModelFamily(requestedModel);
+					if (family) {
+						// Diagnose-only: log the family's last-known scoped percent from
+						// cached telemetry to correlate this reactive mark against the
+						// most recent poll — purely for attribution, not a gate. Lives
+						// here (not in model-capacity.ts) so that module never depends
+						// on the usageCache singleton.
+						const scopedPercent = currentScopedPercentForFamily(
+							usageCache.get(account.id),
+							family,
+						);
+						log.debug(
+							`Marking ${account.name} exhausted for model family "${family}" via out_of_credits ` +
+								`(last known weekly_scoped percent: ${scopedPercent ?? "unknown"})`,
+						);
+						markFamilyExhausted(
+							account.id,
+							family,
+							undefined,
+							undefined,
+							"recent_upstream_rejection",
+						);
+					}
+				}
+
+				const isKeepalive = isInternalProbe(req.headers, ctx, "keepalive");
 				if (isKeepalive) {
+					cancelDiscardedResponseBody(rawResponse);
 					return null;
 				}
 				const reason: RateLimitReason = "out_of_credits";
@@ -780,6 +1012,10 @@ export async function proxyWithAccount(
 						`model/beta-scoped, NOT benching account; failing over to next account`,
 				);
 				const responseTime = Date.now() - requestMeta.timestamp;
+				const modelRewrite = isModelRewrite(
+					requestMeta.originalModel,
+					requestMeta.appliedModel,
+				);
 				ctx.asyncWriter.enqueue(() =>
 					ctx.dbOps.saveRequest(
 						crypto.randomUUID(),
@@ -798,8 +1034,15 @@ export async function proxyWithAccount(
 						requestMeta.project ?? null,
 						undefined,
 						requestMeta.comboName ?? null,
+						modelRewrite ? (requestMeta.originalModel ?? null) : null,
+						modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+						requestMeta.projectAttributionSource ?? null,
+						requestMeta.agentAttributionSource ?? null,
+						null,
+						requestMeta.clientSessionId ?? null,
 					),
 				);
+				cancelDiscardedResponseBody(rawResponse);
 				return null;
 			}
 
@@ -818,12 +1061,82 @@ export async function proxyWithAccount(
 						// account at the same instant. Applying real cooldowns
 						// here drains the pool to zero routable accounts even
 						// though no real user-facing rate limit was hit.
-						const isKeepalive =
-							req.headers.get("x-better-ccflare-keepalive") === "true";
+						const isKeepalive = isInternalProbe(req.headers, ctx, "keepalive");
 						if (isKeepalive) {
 							log.warn(
 								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
 							);
+							cancelDiscardedResponseBody(rawResponse);
+							return null;
+						}
+
+						// ── windowless 429: request-scoped, NOT account-wide (issue #301) ──
+						// Anthropic 429s some requests with `x-should-retry: true` and no
+						// rate-limit metadata whatsoever — no `retry-after`, not one
+						// `anthropic-ratelimit-*` / `x-ratelimit-*` header. Live measurement
+						// on a production install showed this to be scoped to the REQUEST,
+						// not the account: the same account served 200s two seconds before
+						// and 38 seconds after on the same model, three in-place retries
+						// spanning 11.2s returned three identical bare 429s (never once a
+						// success), and the NEXT account rejected the same client request
+						// the same way. The rejected requests are session-initialising ones
+						// with no project attribution; ordinary conversation turns on the
+						// same account succeed throughout.
+						//
+						// So benching is simply the wrong response: it drains the pool one
+						// account per attempt until the operator has to force-reset every
+						// account before ordinary traffic works again. Treat it exactly like
+						// out_of_credits above (issue #261) — fail over per request with NO
+						// cooldown and NO consecutive-429 increment, leaving the account in
+						// rotation. Placed after the keepalive check so a synthetic probe
+						// still records nothing at all.
+						//
+						// The predicate is `isRetryable429` (header-only, synchronous,
+						// fail-closed: `x-should-retry: true`, no `retry-after`, and no
+						// header under either rate-limit prefix). Its name is now a slight
+						// misnomer — nothing is retried any more — but it is exactly the
+						// right discriminator and its module is reviewed and tested, so it
+						// keeps its name.
+						if (isRetryable429(rawResponse, isClaudeProvider)) {
+							const reason: RateLimitReason = "windowless_429";
+							log.warn(
+								`Account ${account.name} returned a windowless 429 (${
+									requestedModel ? `model=${requestedModel}, ` : ""
+								}x-should-retry with no rate-limit window) — request-scoped, ` +
+									`NOT benching account; failing over to next account`,
+							);
+							const responseTime = Date.now() - requestMeta.timestamp;
+							const modelRewrite = isModelRewrite(
+								requestMeta.originalModel,
+								requestMeta.appliedModel,
+							);
+							ctx.asyncWriter.enqueue(() =>
+								ctx.dbOps.saveRequest(
+									crypto.randomUUID(),
+									req.method,
+									url.pathname,
+									account.id,
+									429,
+									false,
+									reason,
+									responseTime,
+									failoverAttempts,
+									requestedModel ? { model: requestedModel } : undefined,
+									requestMeta.agentUsed ?? undefined,
+									apiKeyId ?? undefined,
+									apiKeyName ?? undefined,
+									requestMeta.project ?? null,
+									undefined,
+									requestMeta.comboName ?? null,
+									modelRewrite ? (requestMeta.originalModel ?? null) : null,
+									modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+									requestMeta.projectAttributionSource ?? null,
+									requestMeta.agentAttributionSource ?? null,
+									null,
+									requestMeta.clientSessionId ?? null,
+								),
+							);
+							cancelDiscardedResponseBody(rawResponse);
 							return null;
 						}
 
@@ -842,6 +1155,10 @@ export async function proxyWithAccount(
 							ctx,
 						);
 						const responseTime = Date.now() - requestMeta.timestamp;
+						const modelRewrite = isModelRewrite(
+							requestMeta.originalModel,
+							requestMeta.appliedModel,
+						);
 						ctx.asyncWriter.enqueue(() =>
 							ctx.dbOps.saveRequest(
 								crypto.randomUUID(),
@@ -860,8 +1177,15 @@ export async function proxyWithAccount(
 								requestMeta.project ?? null,
 								undefined,
 								requestMeta.comboName ?? null,
+								modelRewrite ? (requestMeta.originalModel ?? null) : null,
+								modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+								requestMeta.projectAttributionSource ?? null,
+								requestMeta.agentAttributionSource ?? null,
+								null,
+								requestMeta.clientSessionId ?? null,
 							),
 						);
+						cancelDiscardedResponseBody(rawResponse);
 						return null;
 					}
 					// Model-not-found (404/400) is forwarded to the client so it can
@@ -898,6 +1222,7 @@ export async function proxyWithAccount(
 						headers,
 						body: new Uint8Array(patchedBody),
 						duplex: "half",
+						signal: req.signal,
 					};
 
 					const retryProviderRequest = new Request(targetUrl, retryRequestInit);
@@ -925,6 +1250,8 @@ export async function proxyWithAccount(
 									method: retryTransformedRequest.method,
 									headers: repatchedHeaders,
 									body: JSON.stringify(transformedBody),
+									// A URL-based rebuild drops the signal — carry it over.
+									signal: req.signal,
 								},
 							);
 						}
@@ -932,9 +1259,10 @@ export async function proxyWithAccount(
 						// If re-patching fails, proceed with the transformed request as-is
 					}
 
+					cancelDiscardedResponseBody(rawResponse);
 					rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
 						? materializeSyntheticResponse(retryTransformedRequest)
-						: await makeProxyRequest(retryTransformedRequest);
+						: await forwardUpstream(retryTransformedRequest);
 
 					if (!(await isModelUnavailableError(rawResponse.clone()))) {
 						break; // Success — stop cycling
@@ -959,8 +1287,7 @@ export async function proxyWithAccount(
 					// Same keepalive-skip as the no-fallback path above: synthetic
 					// keepalive bursts can trip Anthropic's per-IP limit even when
 					// individual accounts are healthy.
-					const isKeepalive =
-						req.headers.get("x-better-ccflare-keepalive") === "true";
+					const isKeepalive = isInternalProbe(req.headers, ctx, "keepalive");
 					if (isKeepalive) {
 						log.warn(
 							`Keepalive replay for ${account.name} got 429 (post-model-list) — skipping cooldown`,
@@ -978,6 +1305,10 @@ export async function proxyWithAccount(
 							ctx,
 						);
 						const responseTime = Date.now() - requestMeta.timestamp;
+						const modelRewrite = isModelRewrite(
+							requestMeta.originalModel,
+							requestMeta.appliedModel,
+						);
 						ctx.asyncWriter.enqueue(() =>
 							ctx.dbOps.saveRequest(
 								crypto.randomUUID(),
@@ -996,10 +1327,17 @@ export async function proxyWithAccount(
 								requestMeta.project ?? null,
 								undefined,
 								requestMeta.comboName ?? null,
+								modelRewrite ? (requestMeta.originalModel ?? null) : null,
+								modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+								requestMeta.projectAttributionSource ?? null,
+								requestMeta.agentAttributionSource ?? null,
+								null,
+								requestMeta.clientSessionId ?? null,
 							),
 						);
 					}
 				}
+				cancelDiscardedResponseBody(rawResponse);
 				return null;
 			}
 		}
@@ -1017,6 +1355,19 @@ export async function proxyWithAccount(
 				internalRequestStream,
 			);
 		}
+		const internalCustomTools = transformedRequest.headers.get(
+			"x-better-ccflare-codex-custom-tools",
+		);
+		if (internalCustomTools === "true" || internalCustomTools === "false") {
+			responseHeaders.set(
+				"x-better-ccflare-codex-custom-tools",
+				internalCustomTools,
+			);
+		}
+		// Inject the original request path so providers can identify the
+		// response type (e.g. /v1/models vs /v1/messages) in processResponse
+		// without needing the original request object.
+		responseHeaders.set("x-better-ccflare-request-path", requestMeta.path);
 		const taggedRawResponse = new Response(rawResponse.body, {
 			status: rawResponse.status,
 			statusText: rawResponse.statusText,
@@ -1028,6 +1379,7 @@ export async function proxyWithAccount(
 			taggedRawResponse,
 			account,
 			req.headers,
+			drainAbortController,
 		);
 
 		// Failover to next account on upstream 401 — credentials are invalid/expired
@@ -1035,6 +1387,7 @@ export async function proxyWithAccount(
 			log.warn(
 				`Authentication failed (401) for account ${account.name}, failing over to next account`,
 			);
+			cancelDiscardedResponseBody(response);
 			return null;
 		}
 
@@ -1043,7 +1396,12 @@ export async function proxyWithAccount(
 		// all accounts cooling simultaneously under concurrency spikes. Skipped for
 		// synthetic (keepalive / auto-refresh) requests to avoid loop amplification.
 		if (response.status === 529 && !isSyntheticInternal) {
-			const rlInfo = provider.parseRateLimit(response.clone());
+			// No clone: parseRateLimit is synchronous (providers/types.ts) and
+			// reads only headers and status, so it cannot touch the body. Cloning
+			// here teed the body into a second stream that nothing ever read or
+			// disposed of — one orphan per 529, plus one per in-place retry
+			// below. See issue #354.
+			const rlInfo = provider.parseRateLimit(response);
 			if (rlInfo.isRateLimited && !rlInfo.resetTime) {
 				const retryCfg = getOverloadRetryConfig();
 				if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
@@ -1060,16 +1418,52 @@ export async function proxyWithAccount(
 							`Account ${account.name}: in-place retry ${attempt}/${retryCfg.maxAttempts - 1} after ${Math.round(delayMs)}ms for 529 overloaded_error`,
 						);
 
-						const retryRaw = isSyntheticProviderResponse(
-							transformedRequestForRetry,
-						)
-							? materializeSyntheticResponse(transformedRequestForRetry.clone())
-							: await makeProxyRequest(transformedRequestForRetry.clone());
+						// Rebuild from the buffered body text instead of a
+						// pre-cloned Request — an unread clone branch retains
+						// its native buffer (#382).
+						const retryRequest = new Request(transformedRequest.url, {
+							method: transformedRequest.method,
+							headers: transformedRequest.headers,
+							body: retryBodyText || undefined,
+							signal: req.signal,
+						});
+						const retryRaw = isSyntheticProviderResponse(retryRequest)
+							? materializeSyntheticResponse(retryRequest)
+							: await forwardUpstream(retryRequest);
 
+						// Mirror the first response's metadata tagging: providers read
+						// stream intent / custom-tool state from these headers, and the
+						// map fallback behind them has a 30s TTL a long backoff can
+						// outlive — the request ID alone is not enough.
 						const retryTaggedHeaders = new Headers(retryRaw.headers);
 						retryTaggedHeaders.set(
 							"x-better-ccflare-request-id",
 							requestMeta.id,
+						);
+						const retryRequestStream = transformedRequest.headers.get(
+							"x-better-ccflare-request-stream",
+						);
+						if (
+							retryRequestStream === "true" ||
+							retryRequestStream === "false"
+						) {
+							retryTaggedHeaders.set(
+								"x-better-ccflare-request-stream",
+								retryRequestStream,
+							);
+						}
+						const retryCustomTools = transformedRequest.headers.get(
+							"x-better-ccflare-codex-custom-tools",
+						);
+						if (retryCustomTools === "true" || retryCustomTools === "false") {
+							retryTaggedHeaders.set(
+								"x-better-ccflare-codex-custom-tools",
+								retryCustomTools,
+							);
+						}
+						retryTaggedHeaders.set(
+							"x-better-ccflare-request-path",
+							requestMeta.path,
 						);
 						const retryTaggedRaw = new Response(retryRaw.body, {
 							status: retryRaw.status,
@@ -1080,8 +1474,10 @@ export async function proxyWithAccount(
 							retryTaggedRaw,
 							account,
 							req.headers,
+							drainAbortController,
 						);
 
+						cancelDiscardedResponseBody(response);
 						response = retryResponse;
 
 						// If credentials expired mid-retry, break out and let the 401
@@ -1097,7 +1493,9 @@ export async function proxyWithAccount(
 							break;
 						}
 
-						const retryRlInfo = provider.parseRateLimit(retryResponse.clone());
+						// Header-only read, see the note on the first parseRateLimit
+						// call above — the retry response must not be teed either.
+						const retryRlInfo = provider.parseRateLimit(retryResponse);
 						if (!retryRlInfo.isRateLimited || retryRlInfo.resetTime) {
 							// Got a reset hint on retry — stop; let processProxyResponse apply cooldown
 							break;
@@ -1120,14 +1518,25 @@ export async function proxyWithAccount(
 			log.warn(
 				`Authentication failed (401) on 529 retry for account ${account.name}, failing over to next account`,
 			);
+			cancelDiscardedResponseBody(response);
 			return null;
 		}
 
-		// Check for rate limit using account-specific provider
-		const responseForRateLimitCheck =
-			returnRateLimitedResponseOnExhaustion && response.status === 529
-				? response.clone()
-				: response;
+		// Check for rate limit using account-specific provider.
+		//
+		// The clone exists only for the terminal-529 path, where `response`
+		// itself still has to reach the client afterwards. It cannot be dropped
+		// like the header-only parseRateLimit calls above, because
+		// processProxyResponse may read the body (updateAccountMetadata's usage
+		// extraction). Whatever it does not read stays an open tee branch that
+		// keeps buffering for the client-facing twin, so it is disposed of via
+		// drainBody right after — not body.cancel(), which is a measured no-op
+		// leak on Bun (see discard-body-cancel.ts). See issue #354.
+		const needsRateLimitCheckClone =
+			returnRateLimitedResponseOnExhaustion && response.status === 529;
+		const responseForRateLimitCheck = needsRateLimitCheckClone
+			? response.clone()
+			: response;
 		const isRateLimited = await processProxyResponse(
 			responseForRateLimitCheck,
 			account,
@@ -1138,6 +1547,9 @@ export async function proxyWithAccount(
 			requestMeta.id,
 			requestMeta,
 		);
+		if (needsRateLimitCheckClone) {
+			cancelDiscardedResponseBody(responseForRateLimitCheck);
+		}
 		if (isRateLimited) {
 			if (returnRateLimitedResponseOnExhaustion && response.status === 529) {
 				log.warn(
@@ -1152,18 +1564,27 @@ export async function proxyWithAccount(
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						project: requestMeta.project,
+						clientSessionId: requestMeta.clientSessionId ?? null,
+						query: url.search || null,
+						projectAttributionSource:
+							requestMeta.projectAttributionSource ?? null,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
 						failoverAttempts,
 						agentUsed: requestMeta.agentUsed,
+						originalModel: requestMeta.originalModel,
+						appliedModel: requestMeta.appliedModel,
+						agentAttributionSource: requestMeta.agentAttributionSource ?? null,
 						comboName: requestMeta.comboName,
 						apiKeyId,
 						apiKeyName,
+						drainAbort: drainAbortController,
 					},
 					{ ...ctx, provider },
 				);
 			}
+			cancelDiscardedResponseBody(response);
 			return null; // Signal to try next account
 		}
 
@@ -1178,44 +1599,165 @@ export async function proxyWithAccount(
 				requestBody: effectiveBodyBuffer,
 				project: requestMeta.project,
 				cwdHint: requestMeta.cwdHint ?? null,
+				clientSessionId: requestMeta.clientSessionId ?? null,
+				query: url.search || null,
+				projectAttributionSource: requestMeta.projectAttributionSource ?? null,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts,
 				agentUsed: requestMeta.agentUsed,
+				originalModel: requestMeta.originalModel,
+				appliedModel: requestMeta.appliedModel,
+				agentAttributionSource: requestMeta.agentAttributionSource ?? null,
 				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
+				drainAbort: drainAbortController,
 			},
 			{ ...ctx, provider },
 		);
 	} catch (err) {
+		// A client disconnect now aborts the upstream fetch by design. That is
+		// not an account failure: returning null would send the proxy through
+		// every remaining account and every fallback route for a request nobody
+		// is listening to, and report "all accounts failed" at the end.
+		// `req.signal` is the discriminator — the header-phase timeout aborts
+		// only the internal controller and never touches it, so genuine timeouts
+		// still fail over. 499 mirrors nginx's "Client Closed Request"; the
+		// socket is gone, so the status matters only for the log and the record.
+		if (req.signal.aborted) {
+			log.info(
+				`Client disconnected during request to ${account.name} — ending instead of failing over`,
+			);
+			return new Response(null, { status: 499 });
+		}
 		handleProxyError(err, account, log);
 		return null;
 	}
 }
 
 /**
- * Create a 503 Service Unavailable response when the account pool is exhausted.
- * All accounts are paused, rate-limited, or filtered out.
- * @param accounts - All accounts that were considered but are unavailable
- * @returns 503 response with pool_exhausted error and Retry-After header
+ * Floor for `Retry-After` when no recovery time is known (cooldown cleared and
+ * usage reset unknown). Tuned to the UsageCache TTL (10 minutes — see
+ * providers/src/usage-fetcher.ts:1065) so a client that respects this header
+ * is guaranteed to see fresh usage telemetry on retry. Pre-fix this was the
+ * optimistic 60s that triggered CLAUDE_CODE_MAX_RETRIES=5 clients to die in
+ * 300s during an approximately two-hour outage (production trace).
  */
-export function createPoolExhaustedResponse(accounts: Account[]): Response {
+export const POOL_EXHAUSTED_UNKNOWN_RESET_RETRY_AFTER_SECONDS = 600;
+
+/** Upper bound on Retry-After so clients don't sleep through a recovery. */
+export const POOL_EXHAUSTED_MAX_RETRY_AFTER_SECONDS = 3600;
+
+/**
+ * Top-level error.type values produced by createPoolExhaustedResponse.
+ *
+ * `pool_exhausted` means "every account is genuinely exhausted (rate-limited,
+ * usage-capped, paused, requires reauth, or otherwise filtered out)".
+ * `circuit_open` means "the circuit breaker is refusing this account". The
+ * wire shape stays identical — only `error.type` and `accounts[].reason`
+ * differ — so SDK clients keep treating the response as a 503 transient.
+ * Downstream consumers that need to differentiate (e.g. the AO fleet reaper)
+ * read the JSON body.
+ */
+export type PoolExhaustionKind = "pool_exhausted" | "circuit_open";
+
+/**
+ * Per-account reason values emitted in `accounts[].reason`.
+ *
+ * `circuit_open` is distinct from the other values: it means the breaker
+ * refused this account, NOT that the account's cooldown is expired. Reporting
+ * a circuit-open account as `rate_limited` would mislead the reaper into
+ * pausing session spawns for the wrong reason.
+ */
+export type PoolExhaustionAccountReason =
+	| "requires_reauth"
+	| "paused"
+	| "usage_exhausted"
+	| "rate_limited"
+	| "circuit_open"
+	| "unavailable";
+
+/**
+ * Default Retry-After (seconds) for the `circuit_open` response. Matches the
+ * breaker's `OPEN_COOLDOWN_MS` so a polite client that respects Retry-After
+ * will retry exactly when the breaker is most likely to admit a half-open
+ * probe. Only used as a floor when no usage/cooldown recovery time is known
+ * or is sooner than this — see `retryAfterSeconds` below.
+ */
+const CIRCUIT_OPEN_RETRY_AFTER_SECONDS = 30;
+
+/**
+ * Create a 503 Service Unavailable response when the account pool is exhausted.
+ * All accounts are paused, rate-limited, usage-exhausted, circuit-open, or
+ * filtered out.
+ *
+ * Usage-aware: `usageSnapshots` (keyed by account.id) lets the function surface
+ * a `usage_exhausted` reason for accounts with no `rate_limited_until` cooldown
+ * — otherwise those would fall through to the `unavailable` bucket and the
+ * client would receive an optimistic `Retry-After: 60`, never reaching the
+ * upstream reset. The caller is responsible for sourcing snapshots from
+ * `usageCache` (or its own snapshot provider); the function itself stays pure
+ * and testable without touching I/O.
+ *
+ * `kind: "circuit_open"` overrides every per-account reason to `circuit_open`
+ * — the account's own state (paused, rate-limited, usage-exhausted) is
+ * irrelevant when the breaker itself is the gate refusing the request. The
+ * Retry-After is still the longer of the breaker's cooldown and any known
+ * usage/rate-limit recovery time: a 30s breaker hint on an account that is
+ * also usage-capped for hours would otherwise lie to the client about when
+ * capacity actually returns.
+ *
+ * @param accounts - All accounts that were considered but are unavailable
+ * @param usageSnapshots - Per-account usage telemetry (id → snapshot), used
+ *   to identify usage_exhausted accounts and to derive `next_available_at` /
+ *   `Retry-After` when an upstream reset time is known.
+ * @param kind - Which top-level cause to report. Defaults to `"pool_exhausted"`.
+ * @returns 503 response with the pool-exhausted JSON shape and Retry-After header
+ */
+export function createPoolExhaustedResponse(
+	accounts: Account[],
+	usageSnapshots?: ReadonlyMap<string, AccountUsageSnapshot>,
+	kind: PoolExhaustionKind = "pool_exhausted",
+): Response {
 	const now = Date.now();
+	const isCircuitOpen = kind === "circuit_open";
 
-	// Build account info list
+	// Build account info list — usage-exhausted outranks cooldown because the
+	// client needs the longer reset horizon (weekly vs minutes-long cooldowns)
+	// to avoid retrying an account upstream will reject immediately.
+	// `circuit_open` outranks everything else: the breaker was the gate, so
+	// the account's own state is irrelevant to why this request was refused.
 	const accountInfos = accounts.map((account) => {
-		const reason = account.paused
-			? "paused"
-			: account.rate_limited_until && account.rate_limited_until > now
-				? "rate_limited"
-				: "unavailable";
+		const usage = usageSnapshots?.get(account.id);
+		const usageExhausted =
+			usage !== undefined &&
+			isUsageExhausted(usage.utilization, usage.resetMs, now);
 
-		const availableAt =
-			account.rate_limited_until && account.rate_limited_until > now
-				? new Date(account.rate_limited_until).toISOString()
-				: null;
+		const reason: PoolExhaustionAccountReason = isCircuitOpen
+			? "circuit_open"
+			: account.requires_reauth
+				? "requires_reauth"
+				: account.paused
+					? "paused"
+					: usageExhausted
+						? "usage_exhausted"
+						: account.rate_limited_until && account.rate_limited_until > now
+							? "rate_limited"
+							: "unavailable";
+
+		let availableAt: string | null = null;
+		if (!isCircuitOpen) {
+			if (usageExhausted && usage?.resetMs && usage.resetMs > now) {
+				availableAt = new Date(usage.resetMs).toISOString();
+			} else if (
+				account.rate_limited_until &&
+				account.rate_limited_until > now
+			) {
+				availableAt = new Date(account.rate_limited_until).toISOString();
+			}
+		}
 
 		return {
 			name: account.name,
@@ -1224,43 +1766,69 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 		};
 	});
 
-	// Calculate next_available_at from earliest rate_limited_until
-	const rateLimitedAccounts = accounts.filter(
-		(account) => account.rate_limited_until && account.rate_limited_until > now,
-	);
+	// next_available_at / Retry-After = earliest of (active cooldown) and
+	// (future usage reset). Both signals have to be considered — a
+	// usage-capped account with `rate_limited_until = null` would otherwise be
+	// ignored and leak an optimistic Retry-After to the client. For
+	// circuit_open, the breaker's own cooldown floors the wait — but if the
+	// account is ALSO usage-capped or rate-limited past that, the longer,
+	// more honest wait wins (a 30s breaker hint must never undercut an hours-long
+	// usage cap).
+	const recoveryCandidates: number[] = [];
+	for (const account of accounts) {
+		if (account.rate_limited_until && account.rate_limited_until > now) {
+			recoveryCandidates.push(account.rate_limited_until);
+		}
+		const usage = usageSnapshots?.get(account.id);
+		if (
+			usage &&
+			isUsageExhausted(usage.utilization, usage.resetMs, now) &&
+			usage.resetMs &&
+			usage.resetMs > now
+		) {
+			recoveryCandidates.push(usage.resetMs);
+		}
+	}
+	const earliestRecoveryMs =
+		recoveryCandidates.length > 0 ? Math.min(...recoveryCandidates) : null;
+
 	const nextAvailableAt =
-		rateLimitedAccounts.length > 0
-			? new Date(
-					Math.min(
-						...rateLimitedAccounts.map(
-							(account) => account.rate_limited_until!,
-						),
-					),
-				).toISOString()
+		!isCircuitOpen && earliestRecoveryMs !== null
+			? new Date(earliestRecoveryMs).toISOString()
 			: null;
 
-	// Calculate Retry-After header (seconds) directly from numeric min
-	const retryAfterSeconds =
-		rateLimitedAccounts.length > 0
+	// Retry-After: clamped to [1, MAX], with a defensible floor when no
+	// recovery time is known. Mirrors model-capacity.ts's clamp semantics; the
+	// floor (600s = UsageCache TTL) ensures a client retry can observe fresh
+	// telemetry rather than retrying blindly against a stale snapshot.
+	const usageAwareRetryAfterSeconds =
+		earliestRecoveryMs !== null
 			? Math.max(
 					1,
-					Math.round(
-						(Math.min(
-							...rateLimitedAccounts.map(
-								(account) => account.rate_limited_until!,
-							),
-						) -
-							now) /
-							1000,
+					Math.min(
+						POOL_EXHAUSTED_MAX_RETRY_AFTER_SECONDS,
+						Math.ceil((earliestRecoveryMs - now) / 1000),
 					),
 				)
-			: 60; // Default 60s if no cooldown info
+			: POOL_EXHAUSTED_UNKNOWN_RESET_RETRY_AFTER_SECONDS;
+
+	// For circuit_open, take the longer of the breaker's own cooldown and any
+	// KNOWN usage/rate-limit recovery — "the longer, more honest wait wins".
+	// The 600s POOL_EXHAUSTED_UNKNOWN_RESET_RETRY_AFTER_SECONDS floor is a
+	// pool_exhausted-specific fallback for "no telemetry at all"; it must not
+	// leak into circuit_open's own 30s floor when no other recovery signal
+	// is known (earliestRecoveryMs === null).
+	const retryAfterSeconds = isCircuitOpen
+		? earliestRecoveryMs !== null
+			? Math.max(CIRCUIT_OPEN_RETRY_AFTER_SECONDS, usageAwareRetryAfterSeconds)
+			: CIRCUIT_OPEN_RETRY_AFTER_SECONDS
+		: usageAwareRetryAfterSeconds;
 
 	return new Response(
 		JSON.stringify({
 			type: "error",
 			error: {
-				type: "pool_exhausted",
+				type: kind,
 				message: ERROR_MESSAGES.POOL_EXHAUSTED,
 				next_available_at: nextAvailableAt,
 				accounts: accountInfos,
@@ -1271,6 +1839,9 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 			headers: {
 				"Content-Type": "application/json",
 				"Retry-After": String(retryAfterSeconds),
+				// Wire shape stays identical regardless of kind — the cause lives
+				// in `error.type`. Downstream consumers that need to differentiate
+				// (fleet reaper, capacity-state consumers) read the JSON body.
 				"x-better-ccflare-pool-status": "exhausted",
 			},
 		},

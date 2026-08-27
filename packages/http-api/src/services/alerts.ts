@@ -1,7 +1,9 @@
 import type { Config } from "@better-ccflare/config";
 import {
 	type AlertEvt,
+	type AuthFailureEvt,
 	alertEvents,
+	authFailureEvents,
 	getModelRates,
 	type RequestEvt,
 	requestEvents,
@@ -13,10 +15,13 @@ import type {
 	AlertsConfigPayload,
 	AlertType,
 	RequestResponse,
+	RunawayLoopGroup,
 } from "@better-ccflare/types";
 import {
 	type AnomalyRequestRow,
 	buildAnomalyInsightsResponse,
+	GROUP_KEY_SEPARATOR,
+	sanitizeProjectForDisplay,
 } from "./anomaly-insights";
 
 const log = new Logger("AlertsService");
@@ -53,6 +58,7 @@ interface AnomalySqlRow {
 	account: string | null;
 	model: string | null;
 	project: string | null;
+	agent_used: string | null;
 	input_tokens: number;
 	cache_read_input_tokens: number;
 	cache_creation_input_tokens: number;
@@ -67,6 +73,8 @@ export function getAlertsConfig(config: Config): AlertsConfigPayload {
 		requestTokens: config.getAlertRequestTokens(),
 		anomalyEnabled: config.getAlertAnomalyEnabled(),
 		anomalyIntervalMinutes: config.getAlertAnomalyIntervalMinutes(),
+		anomalyBaselineWindowMinutes: config.getAlertAnomalyBaselineWindowMinutes(),
+		loopMinRequests: config.getAlertAnomalyLoopMinRequests(),
 		cooldownMinutes: config.getAlertCooldownMinutes(),
 		webhookUrl: config.getAlertWebhookUrl(),
 	};
@@ -85,6 +93,10 @@ export function setAlertsConfig(
 	config.setAlertRequestTokens(payload.requestTokens);
 	config.setAlertAnomalyEnabled(payload.anomalyEnabled);
 	config.setAlertAnomalyIntervalMinutes(payload.anomalyIntervalMinutes);
+	config.setAlertAnomalyBaselineWindowMinutes(
+		payload.anomalyBaselineWindowMinutes,
+	);
+	config.setAlertAnomalyLoopMinRequests(payload.loopMinRequests);
 	config.setAlertCooldownMinutes(payload.cooldownMinutes);
 }
 
@@ -100,6 +112,41 @@ export function buildThresholdAlertId(
 ): string {
 	const bucketMs = Math.max(1, cooldownMinutes) * 60 * 1000;
 	return `${type}:${scope}:${Math.floor(timestamp / bucketMs)}`;
+}
+
+/**
+ * Encodes a possibly-null raw value for use inside a cooldown scope key,
+ * distinguishing "no value" from a real value that happens to equal the
+ * display fallback ("Unknown"). `event.account`/`event.model` on anomaly
+ * events are already normalized (null -> "Unknown") for display purposes,
+ * so a scope built directly from those two fields cannot tell an account
+ * literally named "Unknown" apart from a request with no account at all —
+ * this must be built from the raw (pre-normalization) field instead.
+ *
+ * `model` is attacker-controlled (taken verbatim from the inbound request's
+ * JSON `model` field, with no charset restriction — unlike account names,
+ * which are validated against patterns.accountName), so no fixed sentinel
+ * string is safe: a client could always send a model value equal to
+ * whatever sentinel was chosen. Instead, length-prefix the value
+ * (`${length}:${value}`) and use a length of 0 for null. Two distinct
+ * inputs can never produce the same encoding this way, regardless of what
+ * characters either one contains — the length prefix is unambiguous.
+ */
+function encodeScopePart(raw: string | null): string {
+	if (raw === null) return "0:";
+	return `${raw.length}:${raw}`;
+}
+
+export function buildRunawayLoopAlertId(
+	loop: RunawayLoopGroup,
+	cooldownMinutes: number,
+): string {
+	return buildThresholdAlertId(
+		"anomaly_runaway_loop",
+		`${loop.account}:${loop.model}:${loop.project ?? ""}:${loop.agentUsed ?? ""}`,
+		loop.windowEndMs,
+		cooldownMinutes,
+	);
 }
 
 function parseTimestamp(timestamp: string | number): number {
@@ -159,7 +206,11 @@ function toAlertEvent(row: AlertRow): AlertEvent {
 		threshold: row.threshold == null ? null : Number(row.threshold),
 		account: row.account,
 		model: row.model,
-		project: row.project,
+		// Defence in depth: sanitise at the read boundary so historical
+		// alert rows that pre-date the project-extraction fix cannot leak
+		// prompt content through the alerts UI. Stored DB data is not
+		// modified; only what the dashboard sees is clamped.
+		project: sanitizeProjectForDisplay(row.project),
 		requestId: row.request_id,
 		acknowledged: Boolean(row.acknowledged),
 	};
@@ -171,7 +222,17 @@ function toAnomalyRow(row: AnomalySqlRow): AnomalyRequestRow {
 		timestamp: Number(row.timestamp) || 0,
 		account: row.account,
 		model: row.model,
+		// Preserve the original project so the runaway-loop grouping key
+		// (account, model, project) sees distinct values for two projects
+		// that share a 63-char prefix but differ at the last char. The
+		// DB-side project is already sanitised at write time by
+		// sanitizeProjectName in proxy/src/project-attribution.ts
+		// (PROJECT_NAME_MAX_LEN=64, C0 control chars stripped). Display
+		// truncation for the API response below lives in the response
+		// builder, not here — truncation before detection makes the
+		// detector itself collapse distinct projects into one loop.
 		project: row.project,
+		agentUsed: row.agent_used,
 		inputTokens: Number(row.input_tokens) || 0,
 		cacheReadInputTokens: Number(row.cache_read_input_tokens) || 0,
 		cacheCreationInputTokens: Number(row.cache_creation_input_tokens) || 0,
@@ -184,6 +245,7 @@ export class AlertService {
 	private readonly db: BunSqlAdapter;
 	private readonly config: Config;
 	private readonly requestListener: (event: RequestEvt) => void;
+	private readonly authFailureListener: (event: AuthFailureEvt) => void;
 	private readonly configChangeListener: ({ key }: { key: string }) => void;
 	private anomalyTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -194,6 +256,9 @@ export class AlertService {
 			if (event.type === "summary") {
 				void this.evaluateRequest(event.payload);
 			}
+		};
+		this.authFailureListener = (event) => {
+			void this.handleAuthFailure(event);
 		};
 		this.configChangeListener = ({ key }: { key: string }) => {
 			if (
@@ -208,16 +273,44 @@ export class AlertService {
 	start(): void {
 		requestEvents.on("event", this.requestListener);
 		this.config.on("change", this.configChangeListener);
+		authFailureEvents.on("event", this.authFailureListener);
 		this.restartAnomalyTimer();
 	}
 
 	stop(): void {
 		requestEvents.off("event", this.requestListener);
 		this.config.off("change", this.configChangeListener);
+		authFailureEvents.off("event", this.authFailureListener);
 		if (this.anomalyTimer) {
 			clearInterval(this.anomalyTimer);
 			this.anomalyTimer = null;
 		}
+	}
+
+	private async handleAuthFailure(event: AuthFailureEvt): Promise<void> {
+		const timestamp = Date.now();
+		const config = getAlertsConfig(this.config);
+		const alert: AlertEvent = {
+			id: buildThresholdAlertId(
+				"auth_failure",
+				event.accountId,
+				timestamp,
+				config.cooldownMinutes,
+			),
+			timestamp,
+			type: "auth_failure",
+			severity: "critical",
+			title: "Account authentication failed",
+			message: `Account ${event.accountName} (${event.provider}) requires re-authentication: ${event.reason}`,
+			value: null,
+			threshold: null,
+			account: event.accountName,
+			model: null,
+			project: null,
+			requestId: null,
+			acknowledged: false,
+		};
+		await this.persistAndEmit(alert, config.webhookUrl);
 	}
 
 	private restartAnomalyTimer(): void {
@@ -269,7 +362,12 @@ export class AlertService {
 			`SELECT COUNT(*) as cnt FROM alerts WHERE id = ?`,
 			[id],
 		);
-		if (!row || row.cnt === 0) return false;
+		// Bun.SQL returns COUNT(*) on PostgreSQL as a JavaScript string (BIGINT
+		// is stringified, see Bun#22188). Strict equality `row.cnt === 0` is
+		// always false under that serialization, so the "missing id" branch
+		// never fires on PG. Coerce to Number first — the same coercion
+		// getUnacknowledgedCount() uses one method above.
+		if (!row || Number(row.cnt) === 0) return false;
 		await this.db.run(`UPDATE alerts SET acknowledged = 1 WHERE id = ?`, [id]);
 		return true;
 	}
@@ -352,8 +450,31 @@ export class AlertService {
 	async evaluateAnomalies(): Promise<void> {
 		const config = getAlertsConfig(this.config);
 		if (!config.anomalyEnabled) return;
-		const since = Date.now() - config.anomalyIntervalMinutes * 60 * 1000;
-		const rows = (
+		const baselineWindowMinutes = config.anomalyBaselineWindowMinutes;
+		const intervalMinutes = config.anomalyIntervalMinutes;
+		// Query one wider window spanning both the baseline history and the
+		// scoring interval, then partition client-side below into two
+		// GENUINELY DISJOINT sets: rows strictly before scoringSince feed the
+		// baseline, rows at/after scoringSince are what gets scored. This
+		// keeps the DB hit to a single query instead of two, while still
+		// upholding the leave-one-out contract documented on
+		// detectTokenOutliers (issue #410) — a scored row must never also be
+		// a member of its own baseline population.
+		//
+		// The query window must be ADDITIVE (baselineWindowMinutes +
+		// intervalMinutes), not Math.max(...). Math.max collapses to just
+		// intervalMinutes whenever baselineWindowMinutes <= intervalMinutes
+		// (a valid config — nothing prevents anomalyBaselineWindowMinutes
+		// from being set lower than anomalyIntervalMinutes), which would
+		// fetch ONLY the scoring interval's worth of history. Every fetched
+		// row would then have timestamp >= scoringSince, so baselineRows
+		// would come up empty and every anomaly would silently go
+		// undetected. The additive formula guarantees the fetch always
+		// extends a full baselineWindowMinutes further back than
+		// scoringSince, regardless of how intervalMinutes compares to it.
+		const scoringSince = Date.now() - intervalMinutes * 60 * 1000;
+		const baselineSince = scoringSince - baselineWindowMinutes * 60 * 1000;
+		const allRows = (
 			await this.db.query<AnomalySqlRow>(
 				`
 				SELECT
@@ -362,6 +483,7 @@ export class AlertService {
 					a.name as account,
 					r.model as model,
 					r.project as project,
+					r.agent_used as agent_used,
 					COALESCE(r.input_tokens, 0) as input_tokens,
 					COALESCE(r.cache_read_input_tokens, 0) as cache_read_input_tokens,
 					COALESCE(r.cache_creation_input_tokens, 0) as cache_creation_input_tokens,
@@ -372,13 +494,19 @@ export class AlertService {
 				WHERE r.timestamp >= ?
 				ORDER BY r.timestamp ASC
 			`,
-				[since],
+				[baselineSince],
 			)
 		).map(toAnomalyRow);
-		if (rows.length === 0) return;
+		if (allRows.length === 0) return;
+		// Partition by timestamp so the two sets never share a row: baseline is
+		// strictly OLDER history (up to a full baselineWindowMinutes wide),
+		// scoring is the recent slice.
+		const baselineRows = allRows.filter((row) => row.timestamp < scoringSince);
+		const scoringRows = allRows.filter((row) => row.timestamp >= scoringSince);
+		if (scoringRows.length === 0) return;
 		const modelIds = [
 			...new Set(
-				rows
+				scoringRows
 					.map((row) => row.model)
 					.filter((model): model is string => model != null && model !== ""),
 			),
@@ -390,9 +518,15 @@ export class AlertService {
 			modelIds.map((modelId, index) => [modelId, rateList[index]]),
 		);
 		const response = buildAnomalyInsightsResponse({
-			rows,
+			baselineRows,
+			scoringRows,
 			rates,
-			options: { range: `${config.anomalyIntervalMinutes}m`, truncated: false },
+			options: {
+				range: `${intervalMinutes}m`,
+				baselineWindowMinutes,
+				truncated: false,
+				loopMinRequests: config.loopMinRequests,
+			},
 		});
 		const alerts: AlertEvent[] = [];
 		for (const event of response.tokenOutliers.slice(
@@ -402,7 +536,7 @@ export class AlertService {
 			alerts.push({
 				id: buildThresholdAlertId(
 					"anomaly_token_outlier",
-					event.requestId,
+					`${encodeScopePart(event.accountRaw)}${GROUP_KEY_SEPARATOR}${encodeScopePart(event.modelRaw)}`,
 					event.timestamp,
 					config.cooldownMinutes,
 				),
@@ -410,7 +544,7 @@ export class AlertService {
 				type: "anomaly_token_outlier",
 				severity: "warning",
 				title: "Token usage anomaly detected",
-				message: `Request ${event.requestId} used ${event.value.toLocaleString()} tokens (${event.zScore.toFixed(1)}σ above baseline).`,
+				message: `Request ${event.requestId} used ${event.value.toLocaleString()} tokens (${(event.value / event.approxBaselineMedian).toFixed(1)}x the account/model baseline of ~${Math.round(event.approxBaselineMedian).toLocaleString()}; anomaly score ${event.zScore.toFixed(1)}).`,
 				value: event.value,
 				threshold: null,
 				account: event.account,
@@ -427,7 +561,7 @@ export class AlertService {
 			alerts.push({
 				id: buildThresholdAlertId(
 					"anomaly_output_blowup",
-					event.requestId,
+					`${encodeScopePart(event.accountRaw)}${GROUP_KEY_SEPARATOR}${encodeScopePart(event.modelRaw)}`,
 					event.timestamp,
 					config.cooldownMinutes,
 				),
@@ -435,7 +569,7 @@ export class AlertService {
 				type: "anomaly_output_blowup",
 				severity: "warning",
 				title: "Output token blowup detected",
-				message: `Request ${event.requestId} returned ${event.value.toLocaleString()} output tokens (${event.zScore.toFixed(1)}σ above baseline).`,
+				message: `Request ${event.requestId} returned ${event.value.toLocaleString()} output tokens (${(event.value / event.approxBaselineMedian).toFixed(1)}x the account/model baseline of ~${Math.round(event.approxBaselineMedian).toLocaleString()} output tokens; anomaly score ${event.zScore.toFixed(1)}).`,
 				value: event.value,
 				threshold: null,
 				account: event.account,
@@ -450,17 +584,12 @@ export class AlertService {
 			MAX_ANOMALY_ALERTS_PER_RUN,
 		)) {
 			alerts.push({
-				id: buildThresholdAlertId(
-					"anomaly_runaway_loop",
-					`${loop.account}:${loop.model}:${loop.project ?? ""}`,
-					loop.windowEndMs,
-					config.cooldownMinutes,
-				),
+				id: buildRunawayLoopAlertId(loop, config.cooldownMinutes),
 				timestamp: loop.windowEndMs,
 				type: "anomaly_runaway_loop",
 				severity: "critical",
 				title: "Runaway loop detected",
-				message: `${loop.requests} near-identical requests were sent in a short window for ${loop.model}.`,
+				message: `${loop.requests} near-identical requests were sent in a short window by ${loop.agentUsed ?? "an unattributed agent"} for ${loop.model}.`,
 				value: loop.requests,
 				threshold: null,
 				account: loop.account,
@@ -513,29 +642,47 @@ export class AlertService {
 		);
 		if (existing) return;
 
-		await this.db.run(
-			`
-			INSERT OR IGNORE INTO alerts (
-				id, timestamp, type, severity, title, message, value, threshold,
-				account, model, project, request_id, acknowledged
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-			[
-				alert.id,
-				alert.timestamp,
-				alert.type,
-				alert.severity,
-				alert.title,
-				alert.message,
-				alert.value,
-				alert.threshold,
-				alert.account,
-				alert.model,
-				alert.project,
-				alert.requestId,
-				alert.acknowledged ? 1 : 0,
-			],
-		);
+		// INSERT OR IGNORE is SQLite-only; PostgreSQL uses ON CONFLICT DO NOTHING.
+		// The pre-check above makes the conflict clause functionally redundant, but
+		// keeping it defends against a race between the SELECT and INSERT.
+		const conflictClause = this.db.isSQLite ? "INSERT OR IGNORE" : "INSERT";
+		const onConflictClause = this.db.isSQLite
+			? ""
+			: "ON CONFLICT (id) DO NOTHING";
+		try {
+			await this.db.run(
+				`
+				${conflictClause} INTO alerts (
+					id, timestamp, type, severity, title, message, value, threshold,
+					account, model, project, request_id, acknowledged
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				${onConflictClause}
+			`,
+				[
+					alert.id,
+					alert.timestamp,
+					alert.type,
+					alert.severity,
+					alert.title,
+					alert.message,
+					alert.value,
+					alert.threshold,
+					alert.account,
+					alert.model,
+					alert.project,
+					alert.requestId,
+					alert.acknowledged ? 1 : 0,
+				],
+			);
+		} catch (error) {
+			// Alerts are best-effort telemetry — a persistence failure must not
+			// terminate the proxy (the listener is invoked from an async event
+			// handler, so an unhandled rejection crashes Bun with exit code 1).
+			log.error(
+				`Failed to persist ${alert.type} alert: ${(error as Error).message}`,
+			);
+			return;
+		}
 		const event: AlertEvt = { type: "alert", payload: alert };
 		alertEvents.emit("event", event);
 		if (webhookUrl) {

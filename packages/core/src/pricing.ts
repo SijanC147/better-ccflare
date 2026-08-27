@@ -22,6 +22,13 @@ interface ModelDef {
 	id: string;
 	name: string;
 	cost?: ModelCost;
+	/**
+	 * models.dev also publishes each model's modalities. Only read by
+	 * listCatalogueModels (to drop models that provably cannot emit text);
+	 * pricing itself ignores it. Optional because the bundled fallback
+	 * entries do not carry it.
+	 */
+	modalities?: { input?: string[]; output?: string[] };
 }
 
 interface ApiResponse {
@@ -221,6 +228,67 @@ BUNDLED_PRICING.minimax = {
 	},
 };
 
+// Pricing for Meta's Muse Spark (Meta Model API) models (dollars per 1M tokens)
+BUNDLED_PRICING.meta = {
+	models: {
+		"muse-spark-1.1": {
+			id: "muse-spark-1.1",
+			name: "Muse Spark 1.1",
+			cost: {
+				input: 1.25,
+				output: 4.25,
+				cache_read: 0.15,
+				cache_write: 0,
+			},
+		},
+		"muse-spark-1.2": {
+			id: "muse-spark-1.2",
+			name: "Muse Spark 1.2",
+			cost: {
+				input: 1.25,
+				output: 4.25,
+				cache_read: 0.15,
+				cache_write: 0,
+			},
+		},
+		"muse-spark-1.2-contributor": {
+			id: "muse-spark-1.2-contributor",
+			name: "Muse Spark 1.2 (Contributor)",
+			cost: {
+				input: 0.1,
+				output: 0.2,
+				cache_read: 0.002,
+				cache_write: 0,
+			},
+		},
+	},
+};
+
+// Pricing for DeepSeek models (dollars per 1M tokens)
+// DeepSeek moved to peak/off-peak pricing on 2026-08-16 (off-peak rates used
+// here as a conservative flat-rate approximation; peak rates are roughly 2x).
+// This pricing engine has no time-varying rate support yet.
+BUNDLED_PRICING.deepseek = {
+	models: {
+		"deepseek-v4-pro": {
+			id: "deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
+			cost: {
+				input: 0.66,
+				output: 1.98,
+			},
+		},
+		"deepseek-v4-flash": {
+			id: "deepseek-v4-flash",
+			name: "DeepSeek V4 Flash",
+			cost: {
+				input: 0.22,
+				output: 0.66,
+			},
+		},
+	},
+};
+
 interface Logger {
 	warn(message: string, ...args: unknown[]): void;
 	debug(message: string, ...args: unknown[]): void;
@@ -245,6 +313,8 @@ interface NanoGPTApiResponse {
 	data: NanoGPTModel[];
 }
 
+const MODELS_DEV_FETCH_TIMEOUT_MS = 10_000;
+
 // Cache constants for NanoGPT pricing
 export const NANOGPT_CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
@@ -258,6 +328,7 @@ class PriceCatalogue {
 	private static instance: PriceCatalogue;
 	private priceData: ApiResponse | null = null;
 	private lastFetch = 0;
+	private remoteFetchPromise: Promise<ApiResponse | null> | null = null;
 	private warnedModels = new Set<string>();
 	private warnedRatesUnknownModels = new Set<string>();
 	private logger: Logger | null = null;
@@ -483,8 +554,30 @@ class PriceCatalogue {
 			return null;
 		}
 
+		if (this.remoteFetchPromise) return this.remoteFetchPromise;
+
+		const fetchPromise = this.fetchRemoteOnce();
+		this.remoteFetchPromise = fetchPromise;
 		try {
-			const response = await fetch("https://models.dev/api.json");
+			return await fetchPromise;
+		} finally {
+			if (this.remoteFetchPromise === fetchPromise) {
+				this.remoteFetchPromise = null;
+			}
+		}
+	}
+
+	private async fetchRemoteOnce(): Promise<ApiResponse | null> {
+		const controller = new AbortController();
+		const timeoutId = setTimeout(
+			() => controller.abort(),
+			MODELS_DEV_FETCH_TIMEOUT_MS,
+		);
+
+		try {
+			const response = await fetch("https://models.dev/api.json", {
+				signal: controller.signal,
+			});
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 			}
@@ -494,6 +587,8 @@ class PriceCatalogue {
 		} catch (error) {
 			this.logger?.warn("Failed to fetch pricing data: %s", error);
 			return null;
+		} finally {
+			clearTimeout(timeoutId);
 		}
 	}
 
@@ -622,12 +717,7 @@ export async function fetchNanoGPTPricingData(
 		const data: NanoGPTApiResponse = await response.json();
 
 		// Convert NanoGPT pricing format to our internal format
-		const nanogptPricing: ApiResponse = {
-			nanogpt: {
-				models: {},
-			},
-		};
-		const nanogptModels = nanogptPricing.nanogpt.models!;
+		const nanogptModels: Record<string, ModelDef> = {};
 
 		for (const model of data.data) {
 			nanogptModels[model.id] = {
@@ -640,6 +730,12 @@ export async function fetchNanoGPTPricingData(
 				},
 			};
 		}
+
+		const nanogptPricing: ApiResponse = {
+			nanogpt: {
+				models: nanogptModels,
+			},
+		};
 
 		logger?.debug(
 			"Successfully fetched and converted NanoGPT pricing data for %d models",
@@ -779,6 +875,7 @@ export function resetNanoGPTPricingCacheForTest(): void {
 
 	// Reset the PriceCatalogue instance by clearing the singleton instance
 	// This is done by accessing the private static property through the class
+	// biome-ignore lint/suspicious/noExplicitAny: test-only reset of a private static singleton field
 	(PriceCatalogue as any).instance = undefined;
 }
 
@@ -810,6 +907,50 @@ export async function initializeNanoGPTPricingIfAccountsExist(
  */
 export function setPricingLogger(logger: Logger): void {
 	PriceCatalogue.get().setLogger(logger);
+}
+
+export interface CatalogueModelEntry {
+	id: string;
+	name: string;
+}
+
+/**
+ * List the models the shared models.dev catalogue knows for one provider
+ * section (e.g. "openai", "anthropic").
+ *
+ * Deliberately built on PriceCatalogue.getPricing() rather than a second
+ * fetcher: pricing already downloads, merges and caches this exact document
+ * (in memory + on disk, honouring CF_PRICING_OFFLINE and
+ * CF_PRICING_REFRESH_HOURS), so listing models costs no extra network call.
+ *
+ * Models that provably cannot emit text (embeddings, image generation) are
+ * dropped — this list exists to be offered as a chat model. Entries with no
+ * declared modalities are kept: the catalogue is not validated, and absence
+ * of data is not evidence of absence.
+ *
+ * Never throws, and never distinguishes "section is empty" from "catalogue
+ * unavailable" — both return []. Callers must treat an empty list as
+ * inconclusive, not as proof that the provider has no models.
+ */
+export async function listCatalogueModels(
+	providerSection: string,
+): Promise<CatalogueModelEntry[]> {
+	try {
+		const pricing = await PriceCatalogue.get().getPricing();
+		const models = pricing[providerSection]?.models;
+		if (!models) return [];
+		const entries: CatalogueModelEntry[] = [];
+		for (const [key, def] of Object.entries(models)) {
+			const output = def?.modalities?.output;
+			if (Array.isArray(output) && !output.includes("text")) continue;
+			const id = def?.id || key;
+			if (!id) continue;
+			entries.push({ id, name: def?.name || id });
+		}
+		return entries;
+	} catch {
+		return [];
+	}
 }
 
 /**

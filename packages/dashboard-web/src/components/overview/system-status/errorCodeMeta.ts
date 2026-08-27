@@ -48,7 +48,7 @@ const KNOWN_ERROR_META: Record<
 	upstream_529_overloaded_with_reset: {
 		title: "Provider overload",
 		description:
-			"The upstream provider returned 529 (overloaded). Account temporarily cooled down — the cooldown window comes from the Retry-After header when provided, or a synthesized window for mid-stream overloaded_error detections (no Retry-After is available in that path).",
+			"The upstream provider returned 529 (overloaded) with a Retry-After header. Account temporarily cooled down for that duration.",
 		suggestion:
 			"No action needed — the account will recover automatically. Traffic will shift to other configured accounts in the meantime.",
 		severity: "warning",
@@ -56,9 +56,9 @@ const KNOWN_ERROR_META: Record<
 	upstream_529_overloaded_no_reset: {
 		title: "Provider overload (no Retry-After)",
 		description:
-			"The upstream provider returned 529 (overloaded) without a Retry-After header; entering probe cooldown.",
+			"The upstream provider returned 529 (overloaded) without a Retry-After header; entering probe cooldown. This also covers mid-stream overloaded_error detections, which never carry a Retry-After header — HTTP headers were already sent before the error occurred in that path.",
 		suggestion:
-			"Cooldown defaults to 60s. Set `CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS` in your environment to change it.",
+			"Cooldown defaults to 10s and pairs with a single-flight recovery probe (only one request re-probes the account once it expires, as long as another account is available to defer to — if every account is currently suppressed, the request runs ungated instead). Set `CCFLARE_OVERLOAD_COOLDOWN_MS` in your environment to change it.",
 		severity: "warning",
 	},
 	out_of_credits: {
@@ -67,6 +67,40 @@ const KNOWN_ERROR_META: Record<
 			"Anthropic returned 429 with `overage-disabled-reason: out_of_credits` — credits/overage for a specific model/beta (e.g. context-1m) is depleted. This is model-scoped, so the account stays in rotation for other models and the request fails over automatically.",
 		suggestion:
 			"Top up the account's credits or raise its overage allowance. Meanwhile, traffic for other models continues to use this account, and the rejected model shifts to other accounts.",
+		severity: "error",
+	},
+	windowless_429: {
+		title: "Request rejected (no rate-limit window)",
+		description:
+			"Anthropic returned 429 with `x-should-retry: true` and no rate-limit " +
+			"window at all — no `retry-after` and no `anthropic-ratelimit-*` " +
+			"header. Measured behaviour is that this is scoped to the request, not " +
+			"the account: the same account keeps serving other requests in the same " +
+			"second, while every other account rejects this particular request the " +
+			"same way. The account was NOT benched and stays in rotation. The " +
+			"request itself was tried on the remaining accounts and, because they " +
+			"all reject it identically, still failed for the client.",
+		suggestion:
+			"No action needed on the accounts — they are still routable and normal " +
+			"traffic is unaffected. Upstream rejected this specific request for " +
+			"reasons narrower than the account, so neither retrying it nor adding " +
+			"accounts helps; the client typically has to start a new request. A " +
+			"steady stream of these points at the requests themselves (session " +
+			"start-up, unusually large payload) rather than at your accounts.",
+		severity: "warning",
+	},
+	extra_usage_exhausted: {
+		title: "Extra usage credits depleted",
+		description:
+			"Anthropic returned 400 invalid_request_error: this OAuth account's " +
+			"extra-usage credit balance is $0. Anthropic bills third-party-app " +
+			"traffic on Claude OAuth accounts from a separate extra-usage pool, " +
+			"not the plan's included quota — Haiku requests may still succeed " +
+			"since routing/exemption can differ by model.",
+		suggestion:
+			"Add credits or enable auto-reload at claude.ai/settings/usage. This " +
+			"is an Anthropic billing state, not a proxy failure — the account " +
+			"stays in rotation and the request is passed through unchanged.",
 		severity: "error",
 	},
 };

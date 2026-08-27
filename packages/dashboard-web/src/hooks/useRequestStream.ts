@@ -1,3 +1,4 @@
+import type { AgentAttributionSource } from "@better-ccflare/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
 import {
@@ -98,6 +99,7 @@ export function useRequestStream(limit = 200) {
 							accountId: string | null;
 							statusCode: number;
 							agentUsed: string | null;
+							agentAttributionSource?: AgentAttributionSource | null;
 					  }
 					| { type: "summary"; payload: RequestResponse };
 
@@ -163,6 +165,8 @@ export function useRequestStream(limit = 200) {
 									success: false,
 									pending: true,
 									agentUsed: evt.agentUsed || undefined,
+									agentAttributionSource:
+										evt.agentAttributionSource || undefined,
 									rateLimited: evt.statusCode === 429,
 									bodiesOmitted: true,
 								},
@@ -248,7 +252,7 @@ export function useRequestStream(limit = 200) {
 
 	// Connect with connection pooling
 	const connect = useCallback(
-		(retryCount = 0): EventSource => {
+		async (retryCount = 0): Promise<EventSource | null> => {
 			// Ensure cleanup interval is running
 			getOrCreateCleanupInterval();
 
@@ -271,7 +275,15 @@ export function useRequestStream(limit = 200) {
 			}
 
 			console.log(`Creating new SSE connection: ${connectionKey}`);
-			const es = new EventSource(api.appendApiKeyToUrl("/api/requests/stream"));
+			// Mint a short-lived, single-use stream token rather than putting the
+			// durable API key in the URL (#379 — a key in a query string leaks via
+			// browser history, Referer, and reverse-proxy access logs).
+			const url = await api.streamUrl("/api/requests/stream");
+			// Minting is a round-trip, so the component may have unmounted while it
+			// was in flight. Opening an EventSource now would leak a connection that
+			// nothing holds a reference to and the cleanup below cannot reach.
+			if (!isMountedRef.current) return null;
+			const es = new EventSource(url);
 
 			// Setup event handlers
 			es.addEventListener("open", () => {
@@ -303,7 +315,7 @@ export function useRequestStream(limit = 200) {
 
 					setTimeout(() => {
 						if (isMountedRef.current) {
-							connect(retryCount + 1);
+							void connect(retryCount + 1);
 						}
 					}, delay);
 				} else if (retryCount >= MAX_RETRIES) {
@@ -327,7 +339,18 @@ export function useRequestStream(limit = 200) {
 
 	useEffect(() => {
 		isMountedRef.current = true;
-		const es = connect();
+		// connect() is async now (it mints a stream token first), so the effect
+		// cannot hold the EventSource synchronously. Cleanup below must therefore
+		// cope with `es` still being null when the component unmounts mid-mint.
+		let es: EventSource | null = null;
+		void connect().then((opened) => {
+			es = opened;
+			// Unmounted while the token was in flight: connect() already declined to
+			// open, but if it did open we close it here rather than orphan it.
+			if (!isMountedRef.current && opened) {
+				opened.close();
+			}
+		});
 
 		// Cleanup function
 		return () => {
@@ -340,9 +363,10 @@ export function useRequestStream(limit = 200) {
 
 				// Close connection immediately if no more references
 				if (pooled.refCount <= 0) {
-					console.log(
-						`No more references for ${connectionKey}, scheduling cleanup`,
-					);
+					console.log(`No more references for ${connectionKey}, closing`);
+					pooled.connection.close();
+					clearInterval(pooled.heartbeat);
+					CONNECTION_POOL.delete(connectionKey);
 				}
 			} else if (es) {
 				es.close();

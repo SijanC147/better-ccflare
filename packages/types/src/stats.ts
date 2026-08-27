@@ -6,6 +6,22 @@ import type { RateLimitReason } from "./account";
 export type IntegrityCheckKind = "quick" | "full";
 
 /**
+ * Cached data-retention job status. Minimal by design (#384): retention
+ * cleanup runs hourly and silently swallows errors into a log line today, so
+ * there's no way to distinguish "retention healthy" from "retention dead for
+ * weeks" without tailing logs. This exposes just enough for a dead-man alert
+ * on `lastSuccessAt` plus the most recent error for triage.
+ */
+export interface RetentionStatus {
+	/** Epoch ms when cleanupOldRequests + pruneUsageSnapshots last both completed without throwing; null before the first successful run. */
+	lastSuccessAt: number | null;
+	/** Most recent error message from a failed run; null if the last run succeeded (or none has failed yet). */
+	lastError: string | null;
+	/** Epoch ms of the most recent error; null if none has occurred. */
+	lastErrorAt: number | null;
+}
+
+/**
  * Cached integrity status. The `status` collapses both probes into a single
  * surface, but each probe's own most-recent result is preserved so a quick
  * `ok` cannot mask a previously-detected full `corrupt`.
@@ -189,6 +205,11 @@ export interface PoolStatus {
 	routable: number; // Available for routing
 	paused: number; // Manually or automatically paused
 	rate_limited: number; // Temporarily rate-limited
+	// Unpaused accounts whose usage window sits at 100%: they still count as
+	// routable (no active cooldown), but upstream will reject their requests.
+	// Surfaced separately so `routable > 0` stops masking an exhausted pool
+	// (incident 2026-07-09).
+	usage_exhausted: number;
 	next_available_at: string | null; // ISO timestamp when earliest rate-limit expires
 }
 
@@ -207,6 +228,21 @@ export interface HealthResponse {
 	accounts: number;
 	timestamp: string;
 	strategy: string;
+	/**
+	 * Build-time provenance. Populated from env vars injected by the
+	 * Dockerfile at build time:
+	 *   - version: `npm_package_version` (set by `bun run`/npm), or
+	 *     BETTER_CCFLARE_VERSION at build time. Falls back to the literal
+	 *     "unknown" if neither is set (dev runs without a build).
+	 *   - git_sha: full 40-char commit SHA, or "unknown" if not set.
+	 *   - git_ref: branch / tag name (e.g. "main", "deploy/2026-07-30"),
+	 *     or "unknown" if not set.
+	 *   - build_date: RFC 3339 timestamp the image was built, or "unknown".
+	 */
+	version?: string;
+	git_sha?: string;
+	git_ref?: string;
+	build_date?: string;
 	pool?: PoolStatus;
 	accounts_detail?: Array<AccountDetail>;
 	runtime?: {
@@ -219,7 +255,7 @@ export interface HealthResponse {
 			state: string;
 		};
 		storage?: {
-			integrity: {
+			integrity?: {
 				status: "ok" | "corrupt" | "unchecked" | "running";
 				runningKind: IntegrityCheckKind | null;
 				lastCheckAt: string | null;
@@ -228,6 +264,11 @@ export interface HealthResponse {
 				lastQuickResult: "ok" | "corrupt" | null;
 				lastFullCheckAt: string | null;
 				lastFullResult: "ok" | "corrupt" | null;
+			};
+			retention?: {
+				lastSuccessAt: string | null;
+				lastError: string | null;
+				lastErrorAt: string | null;
 			};
 		};
 	};

@@ -152,6 +152,7 @@ export interface TransformStreamContext {
 	buffer: string;
 	hasStarted: boolean;
 	extractedModel: string;
+	contextWindowSize?: number;
 	hasSentStart: boolean;
 	hasSentContentBlockStart: boolean;
 	hasSentThinkingBlockStart: boolean;
@@ -203,6 +204,7 @@ export interface OpenAIResponse {
 			content?: string | null;
 			role?: string;
 			tool_calls?: OpenAIToolCall[];
+			reasoning_content?: string;
 		};
 		delta?: OpenAIStreamDelta;
 		finish_reason?: string;

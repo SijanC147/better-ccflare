@@ -16,11 +16,18 @@ import type {
  * live in @better-ccflare/types and are re-exported here for convenience.
  *
  * Detectors (all batch, computed over the requested window):
- * - baselines: mean/stddev of tokens per request per (account, model)
- * - tokenOutliers / outputBlowups: requests >= zScoreThreshold stddevs
- *   above their baseline mean (total tokens / output tokens respectively)
+ * - baselines: log-space median/MAD of tokens per request per (account, model)
+ * - tokenOutliers / outputBlowups: requests >= zScoreThreshold modified
+ *   z-scores above their baseline median (total tokens / output tokens
+ *   respectively), scored in log space (see detectTokenOutliers doc comment
+ *   for why this eliminates the old sqrt(n-1) ceiling — issue #410)
  * - runawayLoops: dense bursts of near-identical requests per
- *   (account, model, project)
+ *   (account, model, project, agent) — keyed by per-agent identity so
+ *   many workers sharing one account+model+project (each on its own
+ *   agent) do not collapse into one bucket that falsely reports as a
+ *   loop. `project` is also part of the key so requests with no agent
+ *   attribution still split by project (the x-claude-code-session-id
+ *   header is unreliable in some clients and is not always present).
  * - misrouting: expensive models repeatedly used for trivially small calls
  */
 
@@ -41,6 +48,13 @@ export interface AnomalyRequestRow {
 	account: string | null;
 	model: string | null;
 	project: string | null;
+	/**
+	 * Per-request agent identity (from the agent-attribution pipeline).
+	 * Used by the runaway-loop detector as the per-bucket key so distinct
+	 * workers sharing one (account, model, project) do not collapse
+	 * into a single bucket that falsely reports as a loop.
+	 */
+	agentUsed: string | null;
 	inputTokens: number;
 	cacheReadInputTokens: number;
 	cacheCreationInputTokens: number;
@@ -50,10 +64,20 @@ export interface AnomalyRequestRow {
 
 export interface AnomalyInsightsOptions {
 	range: string;
-	/** Flag requests >= this many stddevs above the baseline mean. Default 3. */
+	/**
+	 * Flag requests >= this many modified z-score units (log-space
+	 * median/MAD) above the baseline median. Default 3.5.
+	 */
 	zScoreThreshold?: number;
 	/** Minimum token-bearing requests per (account, model) to form a baseline. Default 20. */
 	minBaselineRequests?: number;
+	/**
+	 * Minutes of trailing history the baseline is built from, decoupled from
+	 * the scoring window. Echoed back verbatim in meta.baselineWindowMinutes;
+	 * purely informational at this layer — the caller is responsible for
+	 * actually fetching baselineRows over this window. Default 1440 (24h).
+	 */
+	baselineWindowMinutes?: number;
 	/** Sliding window length for runaway-loop detection. Default 5. */
 	loopWindowMinutes?: number;
 	/** Minimum requests inside one window to qualify as a loop. Default 10. */
@@ -73,14 +97,33 @@ export interface AnomalyInsightsOptions {
 }
 
 export interface BuildAnomalyInsightsInput {
-	rows: AnomalyRequestRow[];
+	/**
+	 * Rows the baselines (median/MAD per account+model) are computed from.
+	 * Should span the trailing baselineWindowMinutes, decoupled from
+	 * scoringRows so a scored row is never a member of its own baseline
+	 * population (issue #410 — see detectTokenOutliers doc comment).
+	 */
+	baselineRows: AnomalyRequestRow[];
+	/**
+	 * Rows actually scored/scanned by every detector (token outliers,
+	 * output blowups, runaway loops, model misrouting). Typically the
+	 * newly-arrived slice since the last alert sweep.
+	 */
+	scoringRows: AnomalyRequestRow[];
 	/** Rates per model id ($ per 1M tokens); null for unknown models. */
 	rates: Map<string, ModelRates | null>;
 	options: AnomalyInsightsOptions;
 }
 
-export const DEFAULT_Z_SCORE_THRESHOLD = 3;
+/**
+ * Iglewicz & Hoaglin (1993) standard cutoff for the modified z-score
+ * (median/MAD based), applied here in log space. This is NOT a raw
+ * standard-deviation count — see detectTokenOutliers for the full
+ * modified-z-score contract.
+ */
+export const DEFAULT_Z_SCORE_THRESHOLD = 3.5;
 export const DEFAULT_MIN_BASELINE_REQUESTS = 20;
+export const DEFAULT_BASELINE_WINDOW_MINUTES = 24 * 60;
 export const DEFAULT_LOOP_WINDOW_MINUTES = 5;
 export const DEFAULT_LOOP_MIN_REQUESTS = 10;
 export const DEFAULT_LOOP_SIMILARITY_TOLERANCE = 0.25;
@@ -89,8 +132,55 @@ export const DEFAULT_MISROUTING_MIN_OUTPUT_RATE_USD = 25;
 export const DEFAULT_MISROUTING_MIN_REQUESTS = 5;
 export const DEFAULT_MAX_EVENTS_PER_DETECTOR = 50;
 
+/**
+ * Display cap for project names. The upstream `project` field on requests
+ * is built from free-form text (#368 — known to sometimes leak prompt
+ * content), so this is a defense-in-depth at the presentation layer: any
+ * string leaving the API/alert pipeline through a `project` slot is
+ * stripped of control characters and clamped to this many chars with an
+ * ellipsis. Longer values look like obvious junk to the operator rather
+ * than authentic-looking prompt content.
+ */
+export const PROJECT_DISPLAY_MAX_CHARS = 64;
+/** Replacement character used when an input cannot be rendered. */
+const ELLIPSIS = "…";
+
+/**
+ * Defence-in-depth sanitiser for values that originate as a request's
+ * `project` field. The real extraction bug (prompt content leaking into
+ * `project`) is fixed upstream in proxy/src/project-attribution.ts (#368)
+ * — this function does not address that, it only ensures that whatever
+ * reaches the JSON response or an alert message can never render as if
+ * it were a normal label.
+ *
+ * - null / undefined / empty -> null
+ * - control chars (incl. newlines, tabs) are stripped
+ * - collapses runs of whitespace
+ * - clamps to PROJECT_DISPLAY_MAX_CHARS, appending an ellipsis when truncated
+ */
+export function sanitizeProjectForDisplay(
+	raw: string | null | undefined,
+): string | null {
+	if (raw == null) return null;
+	// Strip ANSI CSI sequences FIRST while the leading ESC byte is
+	// still present, then strip remaining C0 control chars (incl. any
+	// orphan ESC) and DEL so prompt content cannot smuggle terminal
+	// control bytes through the UI. See sanitizeProjectName in
+	// packages/proxy/src/project-attribution.ts for the same pattern.
+	const stripped = raw
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI CSI sequences are the target, not a literal
+		.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: C0 control range is the target, not a literal
+		.replace(/[\x00-\x1f\x7f]+/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (stripped === "") return null;
+	if (stripped.length <= PROJECT_DISPLAY_MAX_CHARS) return stripped;
+	return stripped.slice(0, PROJECT_DISPLAY_MAX_CHARS - 1) + ELLIPSIS;
+}
+
 const UNKNOWN_KEY = "Unknown";
-const GROUP_KEY_SEPARATOR = "\u001f"; // unit separator: never appears in names, keys cannot collide
+export const GROUP_KEY_SEPARATOR = "\u001f"; // unit separator: never appears in names, keys cannot collide
 const MAX_EXAMPLE_REQUEST_IDS = 5;
 
 function normalizeKey(key: string | null | undefined): string {
@@ -114,18 +204,58 @@ function requestSideTokens(row: AnomalyRequestRow): number {
 	);
 }
 
-function meanAndStdDev(values: number[]): { mean: number; stdDev: number } {
-	if (values.length === 0) return { mean: 0, stdDev: 0 };
-	let sum = 0;
-	for (const value of values) sum += value;
-	const mean = sum / values.length;
-	let sumSquares = 0;
-	for (const value of values) {
-		const deviation = value - mean;
-		sumSquares += deviation * deviation;
+/**
+ * Epsilon below which a baseline's scaledMad is treated as genuinely zero
+ * variance (all baseline values identical — plausible for deterministic
+ * health-check calls, fixed-size embedding requests, templated system
+ * prompts). There is deliberately NO flooring of scaledMad in medianAndMad
+ * anymore: a zero-variance baseline carries no signal to score against, so
+ * detectTokenOutliers SKIPS scoring that metric for that baseline entirely
+ * (mirroring the pre-#410 `if (stdDev <= 0) continue;` guard) rather than
+ * flagging every non-identical future value as an extreme anomaly. Flooring
+ * scaledMad to a tiny positive number would make even a 1-token deviation
+ * produce a z-score in the millions (ln(101/100) / 1e-9 ≈ 9.95e6), which
+ * would always exceed the default 3.5 threshold and cause alert storms for
+ * deterministic traffic.
+ */
+const MIN_SCALED_MAD = 1e-6;
+
+/** Standard median: sorts a copy, averages the two middle values if even length. */
+function median(values: number[]): number {
+	if (values.length === 0) {
+		throw new Error("median() requires at least one value");
 	}
-	// Population stddev: the window is the whole population we report on.
-	return { mean, stdDev: Math.sqrt(sumSquares / values.length) };
+	const sorted = [...values].sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 0
+		? (sorted[mid - 1] + sorted[mid]) / 2
+		: sorted[mid];
+}
+
+/**
+ * Median + scaled median-absolute-deviation of ln(values), the log-space
+ * statistic the modified z-score is built from (issue #410).
+ *
+ * `values` are RAW (non-log, must be > 0); this function takes the log
+ * internally. `scaledMad` is returned RAW/unfloored — it can genuinely be
+ * 0 when every value in the group is identical. The "no signal, skip
+ * scoring" decision for a zero-variance baseline belongs to the caller
+ * (detectTokenOutliers), not here — see MIN_SCALED_MAD.
+ */
+function medianAndMad(values: number[]): {
+	medianLog: number;
+	scaledMad: number;
+} {
+	if (values.length === 0) {
+		throw new Error("medianAndMad() requires at least one value");
+	}
+	const logs = values.map((v) => Math.log(v));
+	const medianLog = median(logs);
+	const mad = median(logs.map((l) => Math.abs(l - medianLog)));
+	// 1.4826: consistency constant that makes scaledMad a consistent
+	// estimator of the standard deviation for normally-distributed data.
+	const scaledMad = 1.4826 * mad;
+	return { medianLog, scaledMad };
 }
 
 function baselineKey(account: string | null, model: string | null): string {
@@ -133,21 +263,42 @@ function baselineKey(account: string | null, model: string | null): string {
 }
 
 /**
- * Compute per-(account, model) token baselines over the window.
+ * Compute per-(account, model) token baselines from `baselineRows`.
+ *
+ * `baselineRows` is a DIFFERENT row set than whatever is later scored
+ * against these baselines (see detectTokenOutliers) — this function has
+ * no knowledge of, and does not need, the scoring rows.
  *
  * Rows with zero total tokens (failed or empty requests) carry no token
- * signal and are excluded so they don't drag means down. Groups with fewer
- * than minBaselineRequests qualifying rows produce no baseline.
+ * signal and are excluded so they don't distort the log-space statistics
+ * (ln(0) is undefined). The output-tokens metric additionally filters to
+ * outputTokens > 0 for the same reason (a request with zero output tokens,
+ * e.g. an input-only call, has no signal for the output-blowup detector).
+ *
+ * The two metrics (total tokens, output tokens) qualify INDEPENDENTLY: a
+ * group with enough rows overall but fewer than minBaselineRequests rows
+ * with outputTokens > 0 still gets a valid total-tokens baseline — only the
+ * output-tokens side of that entry is marked invalid (medianLogOutputTokens
+ * / madOutputTokens / approxMedianOutputTokens set to `null`), which
+ * detectTokenOutliers treats as "no baseline for this metric" and skips.
+ * The group is omitted entirely only when NEITHER metric has enough rows.
+ *
+ * `null` (not `NaN`) is the sentinel for "no baseline for this metric" so
+ * the value survives JSON.stringify/parse as a literal `null` instead of
+ * silently becoming `null` anyway via NaN's non-standard JSON serialization
+ * while the declared AnomalyBaseline type claimed a non-nullable `number`
+ * (issue #410 follow-up).
  *
  * Sorted by requests descending, then account/model ascending.
  */
 export function computeBaselines(
-	rows: AnomalyRequestRow[],
+	baselineRows: AnomalyRequestRow[],
 	minBaselineRequests: number,
 ): AnomalyBaseline[] {
 	const groups = new Map<string, AnomalyRequestRow[]>();
-	for (const row of rows) {
-		if (totalTokens(row) === 0) continue;
+	for (const row of baselineRows) {
+		const total = totalTokens(row);
+		if (!Number.isFinite(total) || total <= 0) continue;
 		const key = baselineKey(row.account, row.model);
 		const group = groups.get(key);
 		if (group) {
@@ -159,17 +310,28 @@ export function computeBaselines(
 
 	const baselines: AnomalyBaseline[] = [];
 	for (const group of groups.values()) {
-		if (group.length < minBaselineRequests) continue;
-		const total = meanAndStdDev(group.map(totalTokens));
-		const output = meanAndStdDev(group.map((row) => row.outputTokens));
+		const outputRows = group.filter(
+			(row) => Number.isFinite(row.outputTokens) && row.outputTokens > 0,
+		);
+		const hasTotal = group.length >= minBaselineRequests;
+		const hasOutput = outputRows.length >= minBaselineRequests;
+		// Neither metric has enough data: no baseline entry at all for this
+		// group (nothing downstream could use it).
+		if (!hasTotal && !hasOutput) continue;
+		const total = hasTotal ? medianAndMad(group.map(totalTokens)) : null;
+		const output = hasOutput
+			? medianAndMad(outputRows.map((row) => row.outputTokens))
+			: null;
 		baselines.push({
 			account: normalizeKey(group[0].account),
 			model: normalizeKey(group[0].model),
 			requests: group.length,
-			meanTotalTokens: total.mean,
-			stdDevTotalTokens: total.stdDev,
-			meanOutputTokens: output.mean,
-			stdDevOutputTokens: output.stdDev,
+			medianLogTotalTokens: total ? total.medianLog : null,
+			madTotalTokens: total ? total.scaledMad : null,
+			medianLogOutputTokens: output ? output.medianLog : null,
+			madOutputTokens: output ? output.scaledMad : null,
+			approxMedianTotalTokens: total ? Math.exp(total.medianLog) : null,
+			approxMedianOutputTokens: output ? Math.exp(output.medianLog) : null,
 		});
 	}
 	return baselines.sort(
@@ -181,15 +343,36 @@ export function computeBaselines(
 }
 
 /**
- * Flag requests whose token usage sits >= zScoreThreshold stddevs ABOVE
- * their (account, model) baseline mean. Low-side deviations are not
- * anomalies for cost purposes and are never reported. Groups without a
- * baseline, or with zero variance, produce no outliers.
+ * Flag requests whose token usage sits >= zScoreThreshold modified z-score
+ * units ABOVE their (account, model) baseline median, in log space. Low-side
+ * deviations are not anomalies for cost purposes and are never reported.
+ * Groups without a baseline produce no outliers.
+ *
+ * LEAVE-ONE-OUT CONTRACT (issue #410): `scoringRows` and the rows that fed
+ * `baselines` (via computeBaselines' `baselineRows`) are two independent
+ * row sets. A row being scored here is not assumed to be a member of the
+ * population its baseline was built from. This matters even when the
+ * caller happens to pass the same underlying data for both — the periodic
+ * alert sweep always uses genuinely disjoint sets (new rows scored against
+ * a trailing history window).
+ *
+ * There is deliberately no `sqrt(n-1)`-style ceiling on the resulting
+ * z-score, for two independent reasons:
+ *   1. Structural — because scoringRows and baselineRows are decoupled, a
+ *      scored value is not necessarily part of the population it's
+ *      compared against, so there is no algebraic identity binding the
+ *      z-score to the baseline's sample size.
+ *   2. Statistical — median/MAD (unlike mean/stddev) has a 50% breakdown
+ *      point: even in the on-demand case where scoringRows and
+ *      baselineRows happen to be the same set, one extreme point out of
+ *      minBaselineRequests (default 20) cannot materially shift the
+ *      median or MAD, so it cannot cap its own z-score the way one point
+ *      out of n could cap a population-stddev z-score at sqrt(n-1).
  *
  * Sorted by z-score descending.
  */
 export function detectTokenOutliers(
-	rows: AnomalyRequestRow[],
+	scoringRows: AnomalyRequestRow[],
 	baselines: AnomalyBaseline[],
 	zScoreThreshold: number,
 	metric: TokenOutlierMetric,
@@ -202,34 +385,51 @@ export function detectTokenOutliers(
 	);
 
 	const outliers: TokenOutlierEvent[] = [];
-	for (const row of rows) {
-		if (totalTokens(row) === 0) continue;
+	for (const row of scoringRows) {
+		const rowTotal = totalTokens(row);
+		if (!Number.isFinite(rowTotal) || rowTotal <= 0) continue;
+		if (
+			metric === "output_tokens" &&
+			(!Number.isFinite(row.outputTokens) || row.outputTokens <= 0)
+		)
+			continue;
 		const baseline = baselineByKey.get(baselineKey(row.account, row.model));
 		if (!baseline) continue;
-		const mean =
+		const medianLog =
 			metric === "total_tokens"
-				? baseline.meanTotalTokens
-				: baseline.meanOutputTokens;
-		const stdDev =
+				? baseline.medianLogTotalTokens
+				: baseline.medianLogOutputTokens;
+		const scaledMad =
 			metric === "total_tokens"
-				? baseline.stdDevTotalTokens
-				: baseline.stdDevOutputTokens;
-		if (stdDev <= 0) continue;
-		const value =
-			metric === "total_tokens" ? totalTokens(row) : row.outputTokens;
-		const zScore = (value - mean) / stdDev;
-		if (zScore < zScoreThreshold) continue;
+				? baseline.madTotalTokens
+				: baseline.madOutputTokens;
+		// Two independent "no signal" cases, both skipped without emitting an
+		// event (never flagged):
+		//  - null: this metric's side of the baseline didn't qualify at all
+		//    (computeBaselines saw < minBaselineRequests rows for it).
+		//  - <= MIN_SCALED_MAD: the baseline is genuinely zero-variance (every
+		//    value identical). Mirrors the pre-#410 `if (stdDev <= 0) continue;`
+		//    guard — see MIN_SCALED_MAD doc comment for why this must skip
+		//    rather than floor-and-flag.
+		if (medianLog === null || scaledMad === null || scaledMad <= MIN_SCALED_MAD)
+			continue;
+		const value = metric === "total_tokens" ? rowTotal : row.outputTokens;
+		const modifiedZ = (Math.log(value) - medianLog) / scaledMad;
+		if (modifiedZ < zScoreThreshold) continue;
 		outliers.push({
 			requestId: row.id,
 			timestamp: row.timestamp,
 			account: normalizeKey(row.account),
 			model: normalizeKey(row.model),
+			accountRaw: row.account,
+			modelRaw: row.model,
 			project: row.project,
 			metric,
 			value,
-			baselineMean: mean,
-			baselineStdDev: stdDev,
-			zScore,
+			baselineMedianLog: medianLog,
+			baselineMad: scaledMad,
+			approxBaselineMedian: Math.exp(medianLog),
+			zScore: modifiedZ,
 		});
 	}
 	return outliers.sort(
@@ -245,8 +445,20 @@ export interface RunawayLoopOptions {
 
 /**
  * Detect runaway loops: bursts of >= minRequests requests within windowMs
- * for one (account, model, project), where the request-side token profile
- * is similar (coefficient of variation <= similarityTolerance).
+ * for one (account, model, project, agent), where the request-side token
+ * profile is similar (coefficient of variation <= similarityTolerance).
+ *
+ * The key carries BOTH `project` and `agentUsed` so the bucket is no
+ * coarser than the most informative available signal:
+ *  - When `agentUsed` is set (e.g. via x-better-ccflare-agent-id or
+ *    x-claude-code-session-id), many independent workers sharing one
+ *    (account, model, project) — each running its own agent — do not
+ *    collapse into a single bucket that falsely reports as a loop.
+ *  - When `agentUsed` is null, `project` still distinguishes requests
+ *    on the (account, model) pair so unattributed traffic does not
+ *    collapse either.
+ *  - Both signals collapse to `Unknown` only when both are null, which
+ *    is the strictest reasonable bucket.
  *
  * All rows count, including zero-token ones — repeated failing retries are
  * exactly the signal.
@@ -268,7 +480,7 @@ export function detectRunawayLoops(
 ): RunawayLoopGroup[] {
 	const groups = new Map<string, AnomalyRequestRow[]>();
 	for (const row of rows) {
-		const key = `${baselineKey(row.account, row.model)}${GROUP_KEY_SEPARATOR}${normalizeKey(row.project)}`;
+		const key = `${baselineKey(row.account, row.model)}${GROUP_KEY_SEPARATOR}${normalizeKey(row.project)}${GROUP_KEY_SEPARATOR}${normalizeKey(row.agentUsed)}`;
 		const group = groups.get(key);
 		if (group) {
 			group.push(row);
@@ -360,6 +572,7 @@ export function detectRunawayLoops(
 				account: normalizeKey(group[run.start].account),
 				model: normalizeKey(group[run.start].model),
 				project: group[run.start].project,
+				agentUsed: group[run.start].agentUsed,
 				windowStartMs,
 				windowEndMs,
 				requests: run.end - run.start + 1,
@@ -475,36 +688,46 @@ export function buildAnomalyInsightsResponse(
 		options.misroutingMinRequests ?? DEFAULT_MISROUTING_MIN_REQUESTS;
 	const maxEventsPerDetector =
 		options.maxEventsPerDetector ?? DEFAULT_MAX_EVENTS_PER_DETECTOR;
+	const baselineWindowMinutes =
+		options.baselineWindowMinutes ?? DEFAULT_BASELINE_WINDOW_MINUTES;
 
-	const baselines = computeBaselines(input.rows, minBaselineRequests);
+	const baselines = computeBaselines(input.baselineRows, minBaselineRequests);
 	const tokenOutliers = detectTokenOutliers(
-		input.rows,
+		input.scoringRows,
 		baselines,
 		zScoreThreshold,
 		"total_tokens",
 	);
 	const outputBlowups = detectTokenOutliers(
-		input.rows,
+		input.scoringRows,
 		baselines,
 		zScoreThreshold,
 		"output_tokens",
 	);
-	const runawayLoops = detectRunawayLoops(input.rows, {
+	const runawayLoops = detectRunawayLoops(input.scoringRows, {
 		windowMs: loopWindowMinutes * 60_000,
 		minRequests: loopMinRequests,
 		similarityTolerance: loopSimilarityTolerance,
 	});
-	const misrouting = detectModelMisrouting(input.rows, input.rates, {
+	const misrouting = detectModelMisrouting(input.scoringRows, input.rates, {
 		maxTotalTokens: misroutingMaxTotalTokens,
 		minOutputRateUsd: misroutingMinOutputRateUsd,
 		minRequests: misroutingMinRequests,
 	});
+
+	const baselinesTop = baselines.slice(0, maxEventsPerDetector);
+	const tokenOutliersTop = tokenOutliers.slice(0, maxEventsPerDetector);
+	const outputBlowupsTop = outputBlowups.slice(0, maxEventsPerDetector);
+	const runawayLoopsTop = runawayLoops.slice(0, maxEventsPerDetector);
+	const misroutingTop = misrouting.slice(0, maxEventsPerDetector);
 
 	return {
 		meta: {
 			range: options.range,
 			zScoreThreshold,
 			minBaselineRequests,
+			baselineWindowMinutes,
+			baselineWindowRequests: input.baselineRows.length,
 			loopWindowMinutes,
 			loopMinRequests,
 			loopSimilarityTolerance,
@@ -512,13 +735,29 @@ export function buildAnomalyInsightsResponse(
 			misroutingMinOutputRateUsd,
 			misroutingMinRequests,
 			maxEventsPerDetector,
-			scannedRequests: input.rows.length,
+			scannedRequests: input.scoringRows.length,
 			truncated: options.truncated ?? false,
 		},
-		baselines: baselines.slice(0, maxEventsPerDetector),
-		tokenOutliers: tokenOutliers.slice(0, maxEventsPerDetector),
-		outputBlowups: outputBlowups.slice(0, maxEventsPerDetector),
-		runawayLoops: runawayLoops.slice(0, maxEventsPerDetector),
-		misrouting: misrouting.slice(0, maxEventsPerDetector),
+		baselines: baselinesTop,
+		tokenOutliers: tokenOutliersTop,
+		tokenOutliersSummary: {
+			totalCount: tokenOutliers.length,
+			truncated: tokenOutliers.length > tokenOutliersTop.length,
+		},
+		outputBlowups: outputBlowupsTop,
+		outputBlowupsSummary: {
+			totalCount: outputBlowups.length,
+			truncated: outputBlowups.length > outputBlowupsTop.length,
+		},
+		runawayLoops: runawayLoopsTop,
+		runawayLoopsSummary: {
+			totalCount: runawayLoops.length,
+			truncated: runawayLoops.length > runawayLoopsTop.length,
+		},
+		misrouting: misroutingTop,
+		misroutingSummary: {
+			totalCount: misrouting.length,
+			truncated: misrouting.length > misroutingTop.length,
+		},
 	};
 }

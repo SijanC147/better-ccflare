@@ -37,10 +37,12 @@ export function AccountsTab() {
 	const [adding, setAdding] = useState(false);
 	const [confirmDelete, setConfirmDelete] = useState<{
 		show: boolean;
+		accountId: string;
 		accountName: string;
 		confirmInput: string;
 	}>({
 		show: false,
+		accountId: "",
 		accountName: "",
 		confirmInput: "",
 	});
@@ -102,6 +104,7 @@ export function AccountsTab() {
 			| "console"
 			| "zai"
 			| "minimax"
+			| "deepseek"
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
@@ -220,6 +223,23 @@ export function AccountsTab() {
 	}) => {
 		try {
 			await api.addMinimaxAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddDeepseekAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addDeepseekAccount(params);
 			await loadAccounts();
 			setAdding(false);
 			setActionError(null);
@@ -350,8 +370,31 @@ export function AccountsTab() {
 		}
 	};
 
-	const handleRemoveAccount = (name: string) => {
-		setConfirmDelete({ show: true, accountName: name, confirmInput: "" });
+	const handleAddMetaAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		customEndpoint?: string;
+		modelMappings?: { [key: string]: string };
+	}) => {
+		try {
+			await api.addMetaAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleRemoveAccount = (account: Account) => {
+		setConfirmDelete({
+			show: true,
+			accountId: account.id,
+			accountName: account.name,
+			confirmInput: "",
+		});
 	};
 
 	const handleConfirmDelete = async () => {
@@ -363,12 +406,23 @@ export function AccountsTab() {
 		}
 
 		try {
+			const accountId = confirmDelete.accountId;
+			if (!accountId) {
+				setActionError("Missing account id; cannot delete.");
+				return;
+			}
 			await api.removeAccount(
+				accountId,
 				confirmDelete.accountName,
 				confirmDelete.confirmInput,
 			);
 			await loadAccounts();
-			setConfirmDelete({ show: false, accountName: "", confirmInput: "" });
+			setConfirmDelete({
+				show: false,
+				accountId: "",
+				accountName: "",
+				confirmInput: "",
+			});
 			setActionError(null);
 		} catch (err) {
 			setActionError(formatError(err));
@@ -419,9 +473,13 @@ export function AccountsTab() {
 
 	const handleRefreshUsage = async (account: Account) => {
 		try {
-			await api.refreshUsage(account.id);
+			// The endpoint answers 200 even when the refresh failed (`success:
+			// false` plus a reason), so discarding the body makes a failed refresh
+			// indistinguishable from a successful one — the button just appears to
+			// do nothing. Surface the reason instead.
+			const result = await api.refreshUsage(account.id);
 			await loadAccounts();
-			setActionError(null);
+			setActionError(result.success ? null : result.message);
 		} catch (err) {
 			setActionError(formatError(err));
 		}
@@ -596,6 +654,7 @@ export function AccountsTab() {
 							onAddBedrockAccount={handleAddBedrockAccount}
 							onAddZaiAccount={handleAddZaiAccount}
 							onAddMinimaxAccount={handleAddMinimaxAccount}
+							onAddDeepseekAccount={handleAddDeepseekAccount}
 							onAddNanoGPTAccount={handleAddNanoGPTAccount}
 							onAddAlibabaCodingPlanAccount={handleAddAlibabaCodingPlanAccount}
 							onAddKiloAccount={handleAddKiloAccount}
@@ -606,6 +665,7 @@ export function AccountsTab() {
 							onAddOpenAIAccount={handleAddOpenAIAccount}
 							onAddOllamaAccount={handleAddOllamaAccount}
 							onAddOllamaCloudAccount={handleAddOllamaCloudAccount}
+							onAddMetaAccount={handleAddMetaAccount}
 							onCancel={() => {
 								setAdding(false);
 								setActionError(null);
@@ -653,6 +713,7 @@ export function AccountsTab() {
 					onCancel={() => {
 						setConfirmDelete({
 							show: false,
+							accountId: "",
 							accountName: "",
 							confirmInput: "",
 						});

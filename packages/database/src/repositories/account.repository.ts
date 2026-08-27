@@ -1,3 +1,4 @@
+import { Logger } from "@better-ccflare/logger";
 import {
 	type Account,
 	type AccountRow,
@@ -5,6 +6,31 @@ import {
 	toAccount,
 } from "@better-ccflare/types";
 import { BaseRepository } from "./base.repository";
+
+const log = new Logger("AccountRepository");
+
+/**
+ * Result of {@link AccountRepository.markAccountRateLimited}. `applied`
+ * distinguishes an actually-persisted write from one the 529 forward guard
+ * rejected (or that found no matching row) — callers must not assume the
+ * write happened just because the call resolved.
+ */
+export interface MarkAccountRateLimitedResult {
+	consecutiveRateLimits: number;
+	applied: boolean;
+}
+
+/**
+ * Identifiers for an account whose `rate_limited_until` was just cleared
+ * by `AccountRepository.clearExpiredRateLimits`. Returned so the caller
+ * can notify the circuit breaker (`recordSuccess`) — see the active-clear
+ * wiring in `apps/server` and the integration design §3 "active clear"
+ * path.
+ */
+export interface ClearedRateLimit {
+	id: string;
+	provider: string;
+}
 
 export class AccountRepository extends BaseRepository<Account> {
 	async findAll(): Promise<Account[]> {
@@ -14,6 +40,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				expires_at, created_at, last_used, request_count, total_requests,
 				rate_limited_until, rate_limited_reason, rate_limited_at, session_start, session_request_count,
 				COALESCE(paused, 0) as paused,
+				COALESCE(requires_reauth, 0) as requires_reauth,
 				rate_limit_reset, rate_limit_status, rate_limit_remaining,
 				COALESCE(priority, 0) as priority,
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
@@ -42,6 +69,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				expires_at, created_at, last_used, request_count, total_requests,
 				rate_limited_until, rate_limited_reason, rate_limited_at, session_start, session_request_count,
 				COALESCE(paused, 0) as paused,
+				COALESCE(requires_reauth, 0) as requires_reauth,
 				rate_limit_reset, rate_limit_status, rate_limit_remaining,
 				COALESCE(priority, 0) as priority,
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
@@ -74,15 +102,114 @@ export class AccountRepository extends BaseRepository<Account> {
 		const now = Date.now();
 		if (refreshToken) {
 			await this.run(
-				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
+				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?, requires_reauth = 0 WHERE id = ?`,
 				[accessToken, expiresAt, refreshToken, now, accountId],
 			);
 		} else {
 			await this.run(
-				`UPDATE accounts SET access_token = ?, expires_at = ? WHERE id = ?`,
+				`UPDATE accounts SET access_token = ?, expires_at = ?, requires_reauth = 0 WHERE id = ?`,
 				[accessToken, expiresAt, accountId],
 			);
 		}
+	}
+
+	async setRequiresReauth(accountId: string, value: boolean): Promise<void> {
+		await this.run(`UPDATE accounts SET requires_reauth = ? WHERE id = ?`, [
+			value ? 1 : 0,
+			accountId,
+		]);
+	}
+
+	/**
+	 * Compare-and-set variant of {@link updateTokens}, guarded on the caller's
+	 * expected `refresh_token`. If a rotation lands between the caller's read
+	 * and this write (e.g. a concurrent refresh cycle already rotated the
+	 * token), the WHERE clause matches no row and the write becomes a no-op
+	 * instead of overwriting the newer token with a stale one. See the
+	 * rotation-race hardening design.
+	 *
+	 * @returns `true` if a row was updated, `false` if the refresh token no
+	 * longer matched (or the account doesn't exist).
+	 */
+	async updateTokensIfRefreshTokenMatches(
+		accountId: string,
+		expectedRefreshToken: string,
+		accessToken: string,
+		expiresAt: number,
+		refreshToken?: string,
+	): Promise<boolean> {
+		const now = Date.now();
+		if (refreshToken) {
+			const changes = await this.runWithChanges(
+				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?, requires_reauth = 0 WHERE id = ? AND refresh_token = ?`,
+				[
+					accessToken,
+					expiresAt,
+					refreshToken,
+					now,
+					accountId,
+					expectedRefreshToken,
+				],
+			);
+			return changes > 0;
+		}
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET access_token = ?, expires_at = ?, requires_reauth = 0 WHERE id = ? AND refresh_token = ?`,
+			[accessToken, expiresAt, accountId, expectedRefreshToken],
+		);
+		return changes > 0;
+	}
+
+	/**
+	 * Compare-and-set variant of {@link updateTokens}, guarded on the account
+	 * currently having no refresh token (`NULL` or `''`). Used when a token
+	 * refresh cycle started from an account that had no refresh token to
+	 * begin with — if a concurrent rotation has since given the account a
+	 * real refresh token, the WHERE clause matches no row and this write
+	 * becomes a no-op instead of clobbering the newer token.
+	 *
+	 * @returns `true` if a row was updated, `false` if the account already
+	 * has a refresh token (or the account doesn't exist).
+	 */
+	async updateTokensIfRefreshTokenAbsent(
+		accountId: string,
+		accessToken: string,
+		expiresAt: number,
+		refreshToken?: string,
+	): Promise<boolean> {
+		const now = Date.now();
+		if (refreshToken) {
+			const changes = await this.runWithChanges(
+				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?, requires_reauth = 0 WHERE id = ? AND (refresh_token IS NULL OR refresh_token = '')`,
+				[accessToken, expiresAt, refreshToken, now, accountId],
+			);
+			return changes > 0;
+		}
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET access_token = ?, expires_at = ?, requires_reauth = 0 WHERE id = ? AND (refresh_token IS NULL OR refresh_token = '')`,
+			[accessToken, expiresAt, accountId],
+		);
+		return changes > 0;
+	}
+
+	/**
+	 * Compare-and-set variant of {@link setRequiresReauth}(accountId, true),
+	 * guarded on the caller's expected `refresh_token`. Prevents condemning a
+	 * healthy account whose refresh token was rotated by a concurrent refresh
+	 * cycle between the failed-refresh read and this flagging write.
+	 *
+	 * @returns `true` if a row was flagged, `false` if the refresh token no
+	 * longer matched (or the account doesn't exist).
+	 */
+	async flagRequiresReauthIfTokenMatches(
+		accountId: string,
+		expectedRefreshToken: string,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET requires_reauth = 1 WHERE id = ? AND refresh_token = ?`,
+			[accountId, expectedRefreshToken],
+		);
+		return changes > 0;
 	}
 
 	async incrementUsage(
@@ -126,21 +253,69 @@ export class AccountRepository extends BaseRepository<Account> {
 		accountId: string,
 		until: number,
 		reason: RateLimitReason,
-	): Promise<number> {
-		await this.run(
-			`UPDATE accounts
+		incrementStreak = true,
+	): Promise<MarkAccountRateLimitedResult> {
+		let applied = true;
+		if (incrementStreak) {
+			await this.run(
+				`UPDATE accounts
            SET consecutive_rate_limits = COALESCE(consecutive_rate_limits, 0) + 1,
                rate_limited_until      = ?,
                rate_limited_reason     = ?,
                rate_limited_at         = ?
          WHERE id = ?`,
-			[until, reason, Date.now(), accountId],
-		);
+				[until, reason, Date.now(), accountId],
+			);
+		} else {
+			// 529 overload: cooldown state moves, but the 429 streak counter
+			// is left untouched — an overload is not a quota signal.
+			//
+			// WHERE-guarded against a concurrent writer having set a longer,
+			// still-active cooldown between this call's read and write (e.g. a
+			// real 429 quota bench applied by another in-flight request for the
+			// same account) — only apply this 529's cooldown when the account
+			// currently has none, or its existing one already expires at or
+			// before this one would. `<=`, not `<`: the in-process forward guard
+			// in rate-limit-cooldown.ts only REJECTS on a strictly longer existing
+			// cooldown (`account.rate_limited_until > cooldownUntil`) and lets an
+			// equal-expiry write proceed — a strict `<` here would reject that
+			// same equal-expiry case, leaving memory holding the new 529 reason
+			// while the DB silently keeps the old one. This mirrors the in-process
+			// guard but covers the cross-request DB race that guard can't see. A
+			// plain WHERE predicate (not GREATEST/MAX) so the same SQL runs
+			// unchanged on both SQLite and PostgreSQL.
+			const changes = await this.runWithChanges(
+				`UPDATE accounts
+           SET rate_limited_until      = ?,
+               rate_limited_reason     = ?,
+               rate_limited_at         = ?
+         WHERE id = ?
+           AND (rate_limited_until IS NULL OR rate_limited_until <= ?)`,
+				[until, reason, Date.now(), accountId, until],
+			);
+			applied = changes > 0;
+			if (!applied) {
+				// The guarded write was skipped. This has two distinct causes the
+				// row count alone can't distinguish: a longer cooldown is already
+				// active for this account (set by a concurrent request between
+				// this call's read and write), or the row itself no longer exists
+				// (account deleted/renamed since the caller last read it) — so this
+				// message states neither as fact. The caller (applyRateLimitCooldown
+				// in rate-limit-cooldown.ts) receives `applied` below and logs the
+				// correct outcome for its own event instead of asserting a cause.
+				log.warn(
+					`[ccflare] account=${accountId} rate_limited_write_skipped reason=${reason} candidate_until=${new Date(until).toISOString()} — guarded write skipped: existing rate_limited_until is later, or the row is absent`,
+				);
+			}
+		}
 		const row = await this.get<{ consecutive_rate_limits: number }>(
 			`SELECT consecutive_rate_limits FROM accounts WHERE id = ?`,
 			[accountId],
 		);
-		return row?.consecutive_rate_limits ?? 0;
+		return {
+			consecutiveRateLimits: row?.consecutive_rate_limits ?? 0,
+			applied,
+		};
 	}
 
 	async resetConsecutiveRateLimits(accountId: string): Promise<void> {
@@ -250,15 +425,35 @@ export class AccountRepository extends BaseRepository<Account> {
 	}
 
 	/**
-	 * Clear expired rate_limited_until values from all accounts
+	 * Clear expired rate_limited_until values from all accounts.
+	 *
+	 * Returns the `(id, provider)` pairs that had their bench cleared so the
+	 * caller can feed the circuit breaker (the active-clear path from the
+	 * circuit-breaker integration design §3). The repository stays
+	 * framework-agnostic: it does NOT import the breaker module — that is
+	 * the proxy/server layer's job.
+	 *
 	 * @param now The current timestamp to compare against
-	 * @returns Number of accounts that had their rate_limited_until cleared
+	 * @returns The accounts whose `rate_limited_until` was cleared
 	 */
-	async clearExpiredRateLimits(now: number): Promise<number> {
-		return this.runWithChanges(
+	async clearExpiredRateLimits(now: number): Promise<ClearedRateLimit[]> {
+		// The repository layer doesn't use RETURNING (per the adapter note in
+		// bun-sql-adapter.ts:159 — no RETURNING clauses). Select first, then
+		// update. The two queries can race against a fresh cooldown-write
+		// happening concurrently, but the window is microseconds and the
+		// worst case is one row reported as "cleared" without an actual
+		// write — recordSuccess is idempotent for an already-closed circuit
+		// entry, so the breaker converges correctly.
+		const cleared = await this.query<ClearedRateLimit>(
+			`SELECT id, provider FROM accounts WHERE rate_limited_until <= ?`,
+			[now],
+		);
+		if (cleared.length === 0) return [];
+		await this.runWithChanges(
 			`UPDATE accounts SET rate_limited_until = NULL WHERE rate_limited_until <= ?`,
 			[now],
 		);
+		return cleared;
 	}
 
 	/**

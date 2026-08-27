@@ -15,14 +15,14 @@ import type {
 	OpenAIRequest,
 	OpenAIResponse,
 } from "./types";
-import { mapOpenAIFinishReason, removeUriFormat } from "./utils";
+import { mapOpenAIFinishReason, sanitizeSchemaForOpenAI } from "./utils";
 
 const log = new Logger("openai-formats/converters");
 
 /**
  * Safely parse JSON with error handling
  */
-export function safeParseJSON(jsonString: string): any {
+export function safeParseJSON(jsonString: string): unknown {
 	try {
 		return JSON.parse(jsonString);
 	} catch (error) {
@@ -114,7 +114,7 @@ export function convertAnthropicRequestToOpenAI(
 			function: {
 				name: tool.name,
 				description: tool.description,
-				parameters: removeUriFormat(tool.input_schema) as Record<
+				parameters: sanitizeSchemaForOpenAI(tool.input_schema) as Record<
 					string,
 					unknown
 				>,
@@ -335,6 +335,15 @@ export function convertOpenAIResponseToAnthropic(
 	// Build content array with text and tool calls
 	const content: AnthropicContentBlock[] = [];
 
+	// Add thinking content first (Anthropic ordering) — DeepSeek/reasoning
+	// providers return reasoning_content on the message in non-streaming responses.
+	if (choice.message?.reasoning_content) {
+		content.push({
+			type: "thinking",
+			thinking: choice.message.reasoning_content,
+		});
+	}
+
 	// Add text content if present
 	if (choice.message?.content) {
 		content.push({
@@ -350,7 +359,13 @@ export function convertOpenAIResponseToAnthropic(
 			type: "tool_use",
 			id: toolCall.id,
 			name: toolCall.function.name,
-			input: safeParseJSON(toolCall.function.arguments || "{}"),
+			// Tool call arguments are always a JSON object per the OpenAI spec;
+			// safeParseJSON is intentionally generic (used with arbitrary JSON
+			// elsewhere), so narrow the known-object shape here.
+			input: safeParseJSON(toolCall.function.arguments || "{}") as Record<
+				string,
+				unknown
+			>,
 		});
 	}
 

@@ -2,10 +2,13 @@
 export {
 	BUFFER_SIZES,
 	CACHE,
+	computeOverloadCooldownMs,
+	computeOverloadWithResetCapMs,
 	computeRateLimitBackoffMs,
 	getOverloadRetryConfig,
 	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
+	isOverloadReason,
 	LIMITS,
 	NETWORK,
 	TIME_CONSTANTS,
@@ -31,6 +34,8 @@ export type ModelMappingData = {
 };
 export type ModelFallback = { [modelFamily: string]: string };
 export * from "./alert-events";
+export * from "./auth-failure-events";
+export * from "./force-account-model";
 export {
 	formatBuildIdentity,
 	normalizeBuildCommit,
@@ -56,10 +61,13 @@ export {
 	parseCustomEndpointData,
 	parseModelFallbacks,
 	parseModelMappings,
+	providerAcceptsClientModel,
 	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
+	weeklyScopedWindowKey,
 } from "./model-mappings";
 export {
+	BUNDLED_MODELS_AS_OF,
 	CLAUDE_MODEL_IDS,
 	type ClaudeModelId,
 	DEFAULT_AGENT_MODEL,
@@ -75,9 +83,15 @@ export {
 	MODEL_SHORT_NAMES,
 } from "./models";
 export {
+	installOutboundProxy,
+	uninstallOutboundProxy,
+} from "./outbound-proxy";
+export {
+	type CatalogueModelEntry,
 	estimateCostUSD,
 	getModelRates,
 	initializeNanoGPTPricingIfAccountsExist,
+	listCatalogueModels,
 	type ModelRates,
 	resetNanoGPTPricingCacheForTest,
 	setPricingLogger,
@@ -91,6 +105,7 @@ export {
 	type ResolverRuleInput,
 	ResolverSnapshot,
 } from "./project-resolver";
+export * from "./probe-backoff";
 export * from "./request-events";
 export * from "./strategy";
 export {
@@ -119,3 +134,7 @@ export {
 	getVersionSync,
 	trackClientVersion,
 } from "./version";
+export {
+	resolveXaiContextWindow,
+	type XaiContextWindowResolution,
+} from "./xai";

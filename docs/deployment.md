@@ -800,7 +800,7 @@ graph TB
 
 ### Database Considerations
 
-better-ccflare uses SQLite by default, which is suitable for single-instance deployments. For Kubernetes multi-pod deployments, set `DATABASE_URL` to use PostgreSQL (see [PostgreSQL Support for Multi-Pod Deployments](#postgresql-support-for-multi-pod-deployments) above).
+better-ccflare uses SQLite by default, which is suitable for single-instance deployments. For Kubernetes deployments where the pod's local disk isn't durable across restarts, set `DATABASE_URL` to use PostgreSQL instead (see [PostgreSQL Support for Kubernetes Deployments](#postgresql-support-for-kubernetes-deployments) above). This does not permit running multiple replicas — see [Multi-Instance Deployment](#multi-instance-deployment-single-instance-per-database) below.
 
 #### SQLite Optimization (Default)
 
@@ -813,9 +813,9 @@ PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 268435456;
 ```
 
-### PostgreSQL Support for Multi-Pod Deployments
+### PostgreSQL Support for Kubernetes Deployments
 
-SQLite is unsuitable for Kubernetes deployments with multiple replicas because pods cannot safely share a single file. better-ccflare has first-class PostgreSQL support via `Bun.SQL` — set the `DATABASE_URL` environment variable and the schema is created automatically on startup.
+SQLite is unsuitable for Kubernetes deployments because a pod's local disk is not guaranteed to survive a restart or reschedule. better-ccflare has first-class PostgreSQL support via `Bun.SQL` — set the `DATABASE_URL` environment variable and the schema is created automatically on startup. Note this solves *durability*, not *concurrency*: better-ccflare is still [single-instance-per-database](#multi-instance-deployment-single-instance-per-database), so this is for a single pod (`replicas: 1`), not a multi-pod fleet sharing one database.
 
 ```bash
 # Create a PostgreSQL database
@@ -831,7 +831,7 @@ The full schema (`accounts`, `requests`, `request_payloads`, `oauth_sessions`, `
 
 ### Kubernetes Deployment
 
-> **Important**: For multi-pod Kubernetes deployments, you **must** use PostgreSQL. Set `DATABASE_URL` to share a single database across all replicas. SQLite cannot be safely shared across pods.
+> **Important**: better-ccflare is [single-instance-per-database](#multi-instance-deployment-single-instance-per-database) — run exactly **one** replica per `DATABASE_URL`. Use PostgreSQL (not SQLite) so the pod's state survives a restart or reschedule, but do not scale this deployment horizontally; two pods sharing one database will silently diverge (as of [PR #376](https://github.com/tombii/better-ccflare/pull/376), the startup guard will warn — but not refuse by default — when this happens). To scale, run separate `DATABASE_URL`-per-deployment stacks with disjoint account sets (see [Multi-Instance Deployment](#multi-instance-deployment-single-instance-per-database)).
 
 ```yaml
 # better-ccflare-deployment.yaml
@@ -842,7 +842,7 @@ metadata:
   labels:
     app: better-ccflare
 spec:
-  replicas: 3
+  replicas: 1 # single-instance-per-database — do not scale this without a separate DATABASE_URL
   selector:
     matchLabels:
       app: better-ccflare
@@ -922,6 +922,38 @@ stringData:
 - [ ] Performance baselines established
 - [ ] Security audit completed
 - [ ] Documentation up to date
+
+## Multi-Instance Deployment: Single-Instance-per-Database
+
+> **Operator rule (read first):** better-ccflare is **single-instance-per-database**. Run exactly one process per database. Running two or more instances against the same database is unsupported and will silently diverge.
+
+This is the most important sentence in the deployment guide. The rest of this section explains why, what diverges, and what the operator should do instead.
+
+### What this rule means
+
+A second instance sharing the same database is not a "high availability" setup — it is a hidden divergent state. The database is shared, but the seven categories of in-process coordination state below are not. They diverge silently: each instance sees consistent durable state and inconsistent transient state, so nothing errors. Routing decisions, rate-limit handling, and OAuth refreshes simply start to disagree across instances.
+
+### What diverges when two instances share a database
+
+In operator terms, the seven categories of in-process coordination state are:
+
+- **Sticky client-to-account routing.** A client talking to instance A can be routed to a different account than the same client talking to instance B. The same conversation can hop between accounts mid-flight.
+- **Account recency penalty.** Recently-used accounts are penalised to spread load. Two instances independently keep this recency map, so they can both pick the same "fresh" account, or both penalise the same account.
+- **In-memory usage cache.** Used to make rate-limit decisions. Two instances have two views of the same account's recent usage. Each instance may decide the account has headroom when the other has seen it exhausted.
+- **Keepalive body replay cache.** Cached upstream responses can be replayed by one instance and missed by another, leading to duplicate upstream requests or missed replay-style fast paths.
+- **OAuth refresh scheduler.** A second instance refreshes the same OAuth token concurrently. This is a **race against the upstream provider**, not just a duplicate request — concurrent refreshes can invalidate the token the other instance is about to use.
+- **Rate-limit recovery probe lease map.** A single-flight probe map prevents two probes from running at once on the same account. Two instances each run their own probe map, so the recovery probe can run twice in parallel.
+- **Session-volume circuit breaker.** A circuit breaker that opens on session overage fires per-instance. Sessions can be ended earlier or later than expected depending on which instance handles them.
+
+### Why it is silent
+
+There is no error. Each instance sees the same database and the same set of accounts. There is no coordination layer (no Redis, no leader election, no distributed lock) that would let an instance know the other has fresher in-process state. The divergence is a property of the design, not a bug in the steady-state.
+
+### What to do instead
+
+- **Run one instance per database.** This is the standard, supported, and only safe configuration.
+- **For zero-downtime deploys, use a cold handoff (rolling restart), not blue/green.** Because the rule above forbids two live instances against one database, true blue/green — run both and cut over — is not achievable here. The supported pattern is: stop instance A, wait for it to exit, then start instance B. There is a brief unavailability window while instance B starts and becomes ready (typically a few seconds for process startup). Eliminating that window entirely would require either a second database or an external coordination layer (leader election or advisory lock) — the project provides neither.
+- **For horizontal scaling, scale the accounts, not the instances — and only with one database per instance.** Each instance must own its own database holding its own disjoint account subset, and the client (or upstream load balancer) routes to the instance owning the account it needs. This partitioning is an operator-maintained convention: the product does not enforce it. If two instances share one database, every instance loads the full account set and selects server-side, so the partition is imaginary and all seven divergence categories above remain reachable.
 
 ## Security Considerations
 
@@ -1165,7 +1197,7 @@ find /backup/better-ccflare -name "*.tar.gz" -mtime +30 -delete
 | `RETRY_BACKOFF` | 2 | Backoff multiplier for exponential retry delays |
 | `better-ccflare_CONFIG_PATH` | Platform-specific | Path to configuration file |
 | `better-ccflare_DB_PATH` | Platform-specific | Path to SQLite database file (ignored when `DATABASE_URL` is set) |
-| `DATABASE_URL` | - | PostgreSQL connection string. When set, PostgreSQL is used instead of SQLite. Required for multi-pod Kubernetes deployments. Example: `postgresql://user:pass@host:5432/db` |
+| `DATABASE_URL` | - | PostgreSQL connection string. When set, PostgreSQL is used instead of SQLite. Recommended for single-pod Kubernetes deployments (durable state across restarts). Each better-ccflare instance requires its own database — see [Multi-Instance Deployment](#multi-instance-deployment-single-instance-per-database). Example: `postgresql://user:pass@host:5432/db` |
 
 ### Configuration File
 

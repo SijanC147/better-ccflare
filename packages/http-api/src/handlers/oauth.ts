@@ -23,6 +23,7 @@ import {
 	initiateDeviceFlow as initiateQwenDeviceFlow,
 	pollForToken as pollQwenForToken,
 } from "@better-ccflare/providers/qwen";
+import { clearAccountRefreshCache } from "@better-ccflare/proxy";
 
 const log = new Logger("OAuthHandler");
 
@@ -33,6 +34,22 @@ type QwenSession =
 	| { status: "error"; accountName: string; error: string };
 
 const qwenSessions = new Map<string, QwenSession>();
+
+/**
+ * SQLite surfaces a UNIQUE-constraint violation as an Error whose message
+ * contains "UNIQUE constraint failed:". PostgreSQL (via Bun.SQL) surfaces
+ * the same condition as SQLSTATE 23505 (unique_violation) on `.code`, with
+ * a message that does NOT contain the SQLite string — so both must be
+ * checked for this to work on either database backend.
+ */
+const PG_UNIQUE_VIOLATION = "23505";
+
+function isUniqueConstraintError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	if (error.message.includes("UNIQUE constraint failed")) return true;
+	const code = (error as { code?: string }).code;
+	return code === PG_UNIQUE_VIOLATION;
+}
 
 function normalizeQwenBaseUrl(url: string): string {
 	let normalized = url.trim();
@@ -100,27 +117,47 @@ export function createQwenDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 						? normalizeQwenBaseUrl(tokens.resource_url)
 						: null;
 
-					await dbOps.getAdapter().run(
-						`INSERT INTO accounts (
-							id, name, provider, api_key, refresh_token, access_token,
-							expires_at, created_at, request_count, total_requests, priority,
-							custom_endpoint, model_mappings, model_fallbacks
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
-						[
-							accountId,
-							name,
-							"qwen",
-							null,
-							tokens.refresh_token,
-							tokens.access_token,
-							now + tokens.expires_in * 1000,
-							now,
-							priority,
-							resourceUrl,
-							null,
-							null,
-						],
-					);
+					try {
+						await dbOps.getAdapter().run(
+							`INSERT INTO accounts (
+								id, name, provider, api_key, refresh_token, access_token,
+								expires_at, created_at, request_count, total_requests, priority,
+								custom_endpoint, model_mappings, model_fallbacks
+							) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+							[
+								accountId,
+								name,
+								"qwen",
+								null,
+								tokens.refresh_token,
+								tokens.access_token,
+								now + tokens.expires_in * 1000,
+								now,
+								priority,
+								resourceUrl,
+								null,
+								null,
+							],
+						);
+					} catch (insertErr) {
+						// The DB-level UNIQUE index
+						// (idx_accounts_unique_name_provider_endpoint) is the
+						// authoritative gate. Surface the same "is already
+						// taken" wording the http-api handlers use so the
+						// dashboard can render a uniform error.
+						if (isUniqueConstraintError(insertErr)) {
+							const msg = `Account name '${name}' is already taken`;
+							log.warn(`Qwen account add rejected: ${msg}`);
+							qwenSessions.set(sessionId, {
+								status: "error",
+								accountName: name,
+								error: msg,
+							});
+							setTimeout(() => qwenSessions.delete(sessionId), 10 * 60 * 1000);
+							return;
+						}
+						throw insertErr;
+					}
 
 					qwenSessions.set(sessionId, {
 						status: "complete",
@@ -256,7 +293,8 @@ export function createQwenReauthHandler(dbOps: DatabaseOperations) {
 							refresh_token = ?,
 							access_token = ?,
 							expires_at = ?,
-							custom_endpoint = ?
+							custom_endpoint = ?,
+							requires_reauth = 0
 						WHERE id = ?`,
 						[
 							tokens.refresh_token,
@@ -266,6 +304,7 @@ export function createQwenReauthHandler(dbOps: DatabaseOperations) {
 							account.id,
 						],
 					);
+					clearAccountRefreshCache(account.id);
 
 					qwenSessions.set(sessionId, {
 						status: "complete",
@@ -365,27 +404,47 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 					const accountId = crypto.randomUUID();
 					const now = Date.now();
 
-					await dbOps.getAdapter().run(
-						`INSERT INTO accounts (
-							id, name, provider, api_key, refresh_token, access_token,
-							expires_at, created_at, request_count, total_requests, priority,
-							custom_endpoint, model_mappings, model_fallbacks
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
-						[
-							accountId,
-							name,
-							"codex",
-							null,
-							tokens.refresh_token,
-							tokens.access_token,
-							now + tokens.expires_in * 1000,
-							now,
-							priority,
-							null,
-							null,
-							null,
-						],
-					);
+					try {
+						await dbOps.getAdapter().run(
+							`INSERT INTO accounts (
+								id, name, provider, api_key, refresh_token, access_token,
+								expires_at, created_at, request_count, total_requests, priority,
+								custom_endpoint, model_mappings, model_fallbacks
+							) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+							[
+								accountId,
+								name,
+								"codex",
+								null,
+								tokens.refresh_token,
+								tokens.access_token,
+								now + tokens.expires_in * 1000,
+								now,
+								priority,
+								null,
+								null,
+								null,
+							],
+						);
+					} catch (insertErr) {
+						// Same atomicity rationale as the Qwen path: the DB-level
+						// UNIQUE index is the authoritative gate. Surface a
+						// uniform "is already taken" error so the dashboard
+						// can render it consistently with the http-api
+						// handlers.
+						if (isUniqueConstraintError(insertErr)) {
+							const msg = `Account name '${name}' is already taken`;
+							log.warn(`Codex account add rejected: ${msg}`);
+							codexSessions.set(sessionId, {
+								status: "error",
+								accountName: name,
+								error: msg,
+							});
+							setTimeout(() => codexSessions.delete(sessionId), 10 * 60 * 1000);
+							return;
+						}
+						throw insertErr;
+					}
 
 					codexSessions.set(sessionId, {
 						status: "complete",
@@ -493,7 +552,8 @@ export function createCodexReauthHandler(dbOps: DatabaseOperations) {
 						`UPDATE accounts SET
 							refresh_token = ?,
 							access_token = ?,
-							expires_at = ?
+							expires_at = ?,
+							requires_reauth = 0
 						WHERE id = ?`,
 						[
 							tokens.refresh_token,
@@ -502,6 +562,7 @@ export function createCodexReauthHandler(dbOps: DatabaseOperations) {
 							account.id,
 						],
 					);
+					clearAccountRefreshCache(account.id);
 
 					codexSessions.set(sessionId, {
 						status: "complete",
@@ -723,6 +784,7 @@ export function createAnthropicReauthCallbackHandler(
 					{ sessionId, code, name, id: account.id },
 					flowData,
 				);
+				clearAccountRefreshCache(account.id);
 
 				await dbOps.deleteOAuthSession(sessionId);
 
@@ -880,13 +942,13 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 			const sessionId = validateString(body.sessionId, "sessionId", {
 				required: true,
 				pattern: patterns.uuid,
-			})!;
+			});
 
 			// Validate code - validateString throws ValidationError if invalid
 			const code = validateString(body.code, "code", {
 				required: true,
 				minLength: 1,
-			})!;
+			});
 
 			// Get stored PKCE verifier from database
 			const oauthSession = await dbOps.getOAuthSession(sessionId);

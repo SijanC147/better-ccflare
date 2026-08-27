@@ -14,8 +14,15 @@ import {
 	type KiloUsageData,
 } from "./kilo-usage-fetcher";
 import {
+	fetchMinimaxUsageData,
+	getRepresentativeMinimaxUtilization,
+	getRepresentativeMinimaxWindow,
+	type MinimaxUsageData,
+} from "./minimax-usage-fetcher";
+import {
 	fetchNanoGPTUsageData,
 	getRepresentativeNanoGPTUtilization,
+	getRepresentativeNanoGPTWindow,
 	type NanoGPTUsageData,
 } from "./nanogpt-usage-fetcher";
 import {
@@ -40,18 +47,51 @@ export interface ExtraUsage {
 	utilization: number | null;
 }
 
+// Anthropic's generic per-limit representation (2026 usage API). Session and
+// all-models weekly come as kind "session" / "weekly_all"; per-model weekly caps
+// (Fable/Opus/Sonnet) come ONLY as kind "weekly_scoped" with scope.model.
+export interface UsageLimit {
+	kind: string; // "session" | "weekly_all" | "weekly_scoped" | ...
+	group?: string; // "session" | "weekly"
+	percent: number | null;
+	severity?: "normal" | "warning" | "critical" | string;
+	resets_at: string | null;
+	scope?: {
+		model?: { id: string | null; display_name: string } | null;
+		surface?: string | null;
+	} | null;
+	is_active?: boolean;
+}
+
+// Overage / pay-as-you-go credit spend block from the usage payload.
+export interface UsageSpend {
+	used?: { amount_minor: number; currency: string; exponent: number } | null;
+	limit?: unknown;
+	percent?: number | null;
+	severity?: string;
+	enabled?: boolean;
+	currency?: string | null;
+	disabled_reason?: string | null;
+}
+
 export interface UsageData {
-	// Core windows (always present in older API versions)
-	five_hour: UsageWindow;
-	seven_day: UsageWindow;
+	// Core windows — present on legacy payloads but ABSENT on limits[]-only
+	// payloads (Anthropic is migrating the flat windows into the generic limits[]).
+	five_hour?: UsageWindow;
+	seven_day?: UsageWindow;
 	seven_day_oauth_apps?: UsageWindow;
 	seven_day_opus?: UsageWindow | null;
 	// New fields from 2025-11 API update (all optional for backward compatibility)
 	seven_day_sonnet?: UsageWindow | null;
+	seven_day_fable?: UsageWindow | null;
 	iguana_necktie?: unknown; // Unknown purpose, keep as flexible type
 	extra_usage?: ExtraUsage;
+	// New generic representation (2026 API): session/weekly_all/weekly_scoped
+	// entries. Per-model weekly caps (Fable/Opus/Sonnet) live ONLY here.
+	limits?: UsageLimit[];
+	spend?: UsageSpend;
 	// Allow any additional fields Anthropic might add in the future
-	[key: string]: UsageWindow | ExtraUsage | unknown;
+	[key: string]: UsageWindow | ExtraUsage | UsageLimit[] | UsageSpend | unknown;
 }
 
 // Union type for all provider usage data
@@ -61,7 +101,21 @@ export type AnyUsageData =
 	| ZaiUsageData
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData
-	| XaiUsageData;
+	| XaiUsageData
+	| MinimaxUsageData;
+
+/**
+ * Minimum advance of the upstream reset timestamp that counts as a real window
+ * rollover.
+ *
+ * Providers recompute `resets_at` per response and it jitters by fractions of a
+ * second around the same instant, so comparing for any advance at all reports a
+ * rollover on nearly every poll. Measured over 48h of production traffic across
+ * three Anthropic accounts: 1554 of 1564 detections were jitter (largest 1.879s)
+ * and the 10 genuine rollovers all advanced by exactly 5.00h — nothing landed in
+ * between. 60s sits in that empty gap with a wide margin on both sides.
+ */
+export const WINDOW_RESET_MIN_ADVANCE_MS = 60_000;
 
 /**
  * Extract the primary window reset timestamp (ms) from usage data.
@@ -75,16 +129,15 @@ export function extractWindowResetTime(
 		const zai = data as ZaiUsageData;
 		return zai.tokens_limit?.resetAt ?? null;
 	}
-	if (provider === "anthropic") {
-		const anthropic = data as UsageData;
-		const resetsAt = anthropic.five_hour?.resets_at;
-		if (!resetsAt) return null;
-		const ms = new Date(resetsAt).getTime();
-		return Number.isFinite(ms) ? ms : null;
-	}
-	if (provider === "codex") {
-		const codex = data as UsageData;
-		const resetsAt = codex.five_hour?.resets_at;
+	if (provider === "anthropic" || provider === "codex") {
+		const d = data as UsageData;
+		// Prefer the flat five_hour window; fall back to the limits[] session
+		// entry so limits-only payloads still expose a session reset time.
+		const resetsAt =
+			d.five_hour?.resets_at ??
+			(Array.isArray(d.limits)
+				? (d.limits.find((l) => l?.kind === "session")?.resets_at ?? null)
+				: null);
 		if (!resetsAt) return null;
 		const ms = new Date(resetsAt).getTime();
 		return Number.isFinite(ms) ? ms : null;
@@ -96,7 +149,43 @@ export function extractWindowResetTime(
 		const ms = new Date(resetsAt).getTime();
 		return Number.isFinite(ms) ? ms : null;
 	}
+	if (provider === "minimax") {
+		const m = data as MinimaxUsageData;
+		const windowName = getRepresentativeMinimaxWindow(m);
+		if (windowName === "seven_day") {
+			return m.seven_day?.resetAt ?? null;
+		}
+		// Default and "five_hour": prefer the short window's reset
+		return m.five_hour?.resetAt ?? m.seven_day?.resetAt ?? null;
+	}
 	return null;
+}
+
+/**
+ * Extract the weekly_all (all-models weekly) window reset timestamp (ms).
+ * Distinct from {@link extractWindowResetTime}, which prefers the shorter
+ * five_hour/session window — this reads specifically the account-level
+ * weekly cap ("use it or lose it": unused capacity does not roll over past
+ * this reset), used by SessionDrainSoonestStrategy to rank accounts by
+ * which one's weekly window expires soonest. Only Anthropic and Codex
+ * expose this window; other providers return null.
+ */
+export function extractWeeklyResetTime(
+	data: AnyUsageData,
+	provider: string,
+): number | null {
+	if (provider !== "anthropic" && provider !== "codex") return null;
+	const d = data as UsageData;
+	// Prefer the flat seven_day window; fall back to the limits[] weekly_all
+	// entry so limits-only payloads still expose a weekly reset time.
+	const resetsAt =
+		d.seven_day?.resets_at ??
+		(Array.isArray(d.limits)
+			? (d.limits.find((l) => l?.kind === "weekly_all")?.resets_at ?? null)
+			: null);
+	if (!resetsAt) return null;
+	const ms = new Date(resetsAt).getTime();
+	return Number.isFinite(ms) ? ms : null;
 }
 
 /**
@@ -204,6 +293,24 @@ export async function fetchUsageData(
  * Returns the highest utilization across all windows
  * Dynamically handles any usage window fields in the response
  */
+// Account-level utilization from Anthropic's generic limits[] array: session ->
+// five_hour, weekly_all -> seven_day. Per-model (weekly_scoped) caps are excluded
+// — they are mutual fallbacks, not hard account limits.
+function accountLevelLimitWindows(
+	usage: UsageData,
+): Array<{ window: string; util: number }> {
+	if (!Array.isArray(usage.limits)) return [];
+	const out: Array<{ window: string; util: number }> = [];
+	for (const limit of usage.limits) {
+		if (!limit || typeof limit.percent !== "number") continue;
+		if (limit.kind === "session")
+			out.push({ window: "five_hour", util: limit.percent });
+		else if (limit.kind === "weekly_all")
+			out.push({ window: "seven_day", util: limit.percent });
+	}
+	return out;
+}
+
 export function getRepresentativeUtilization(
 	usage: UsageData | null,
 ): number | null {
@@ -234,15 +341,19 @@ export function getRepresentativeUtilization(
 		}
 	}
 
-	return utilizations.length > 0 ? Math.max(...utilizations) : 0;
+	// Fold in Anthropic's generic limits[] account-level caps (session / weekly_all).
+	for (const { util } of accountLevelLimitWindows(usage)) {
+		utilizations.push(util);
+	}
+
+	// Return null (not 0) when nothing was found: 0 reads as "fully available" and
+	// would falsely un-bench an exhausted account (capacity guard) and mis-rank it.
+	return utilizations.length > 0 ? Math.max(...utilizations) : null;
 }
 
-/**
- * Determine which window is the most restrictive (highest utilization)
- * Dynamically handles any usage window fields in the response
- */
-export function getRepresentativeWindow(
+function representativeWindow(
 	usage: UsageData | null,
+	includeExtraUsage: boolean,
 ): string | null {
 	if (!usage) return null;
 
@@ -250,6 +361,7 @@ export function getRepresentativeWindow(
 
 	// Iterate through all properties to find UsageWindow objects
 	for (const [key, value] of Object.entries(usage)) {
+		if (key === "extra_usage" && !includeExtraUsage) continue;
 		// Check if this is a UsageWindow object
 		if (
 			value &&
@@ -271,6 +383,10 @@ export function getRepresentativeWindow(
 		}
 	}
 
+	for (const { window, util } of accountLevelLimitWindows(usage)) {
+		windows.push({ name: window, util });
+	}
+
 	if (windows.length === 0) return null;
 
 	const max = windows.reduce((prev, current) =>
@@ -281,13 +397,29 @@ export function getRepresentativeWindow(
 }
 
 /**
- * Get the representative utilization for any supported provider type.
- * Returns null if the provider is not supported or data is unavailable.
+ * Determine which window is the most restrictive (highest utilization)
+ * Dynamically handles any usage window fields in the response.
+ *
+ * Display surface — `extra_usage` is included, because a dashboard showing a
+ * 100%-spent overage pool is telling the truth. Reset derivation for the
+ * admission path deliberately uses the hard-limit-only variant instead, so the
+ * reset it reports belongs to a window that actually has one.
  */
-export function getRepresentativeUtilizationForProvider(
-	data: AnyUsageData,
+export function getRepresentativeWindow(
+	usage: UsageData | null,
+): string | null {
+	return representativeWindow(usage, true);
+}
+
+function utilizationForProvider(
+	data: AnyUsageData | null | undefined,
 	provider: string,
+	includeExtraUsage: boolean,
 ): number | null {
+	// Same defensive guard as getRepresentativeUsageResetMs — callers that
+	// derive a display label may hold a null payload for providers that expose
+	// no usage surface.
+	if (!data || typeof data !== "object") return null;
 	switch (provider) {
 		case "anthropic":
 		case "codex": {
@@ -304,9 +436,12 @@ export function getRepresentativeUtilizationForProvider(
 				const w = d[key] as UsageWindow | undefined;
 				if (w?.utilization != null) utils.push(w.utilization);
 			}
-			// extra_usage has utilization: number | null
-			if (d.extra_usage?.utilization != null)
+			// extra_usage has utilization: number | null. Ranking only — see the
+			// exported wrappers below for why it must never gate admission.
+			if (includeExtraUsage && d.extra_usage?.utilization != null)
 				utils.push(d.extra_usage.utilization);
+			// Account-level limits[] caps (session / weekly_all) for limits-only payloads.
+			for (const { util } of accountLevelLimitWindows(d)) utils.push(util);
 			return utils.length > 0 ? Math.max(...utils) : null;
 		}
 		case "nanogpt": {
@@ -331,9 +466,236 @@ export function getRepresentativeUtilizationForProvider(
 		case "xai": {
 			return getRepresentativeXaiUtilization(data as XaiUsageData);
 		}
+		case "minimax": {
+			return getRepresentativeMinimaxUtilization(data as MinimaxUsageData);
+		}
 		default:
 			return null;
 	}
+}
+
+/**
+ * Representative utilization for admission decisions: the max across the
+ * account's **hard-limit** windows only. Returns null if the provider is not
+ * supported or data is unavailable.
+ *
+ * `extra_usage` is deliberately NOT folded in. It is a *billing* pool
+ * (monthly overage credits), not a rate-limit window:
+ *
+ * - It has no `resets_at`, so a 100% reading pairs with `resetMs = null` and
+ *   `isUsageExhausted()`'s staleness guard can never clear it — the account
+ *   would be benched permanently, with no recovery path, while its real
+ *   five_hour/seven_day quota sits idle.
+ * - Upstream keeps serving from plan quota when the overage pool is spent, so
+ *   excluding a maxed-out `extra_usage` account is a false exclusion that
+ *   removes a working account. `isAccountExhaustedForModel` already encodes
+ *   exactly that trade-off ("a false exclusion removes a working account, a
+ *   false pass costs one reactive 429 round-trip") and fails open here.
+ * - Genuine overage rejection is a billing-policy 400 handled reactively as
+ *   `extra_usage_exhausted` (issue #293), not something to predict from
+ *   telemetry.
+ *
+ * Use {@link getRankingUtilizationForProvider} for load-balancing order, where
+ * a spent overage pool legitimately makes an account the less attractive pick.
+ */
+export function getRepresentativeUtilizationForProvider(
+	data: AnyUsageData | null | undefined,
+	provider: string,
+): number | null {
+	return utilizationForProvider(data, provider, false);
+}
+
+/**
+ * Utilization for **ranking** same-priority accounts (the water-filling sort in
+ * SessionStrategy). Identical to {@link getRepresentativeUtilizationForProvider}
+ * except that `extra_usage` counts: an account whose overage pool is spent has
+ * genuinely less headroom than one with credits left, so it should sort later.
+ * Ordering only — this value must never gate admission.
+ */
+export function getRankingUtilizationForProvider(
+	data: AnyUsageData | null | undefined,
+	provider: string,
+): number | null {
+	return utilizationForProvider(data, provider, true);
+}
+
+/**
+ * Pull the reset timestamp (ms epoch) of a named usage window out of raw
+ * provider usage data. Handles both timestamp shapes in use:
+ * anthropic-style `resets_at` (ISO string) and zai/nanogpt-style `resetAt`
+ * (ms number).
+ */
+export function extractUsageResetMs(
+	usageData: unknown,
+	windowName: string | null,
+): number | null {
+	if (!usageData || typeof usageData !== "object" || !windowName) return null;
+	const window = (usageData as Record<string, unknown>)[windowName];
+	if (!window || typeof window !== "object") return null;
+	const w = window as { resets_at?: unknown; resetAt?: unknown };
+	if (typeof w.resets_at === "string") {
+		const ms = new Date(w.resets_at).getTime();
+		return Number.isFinite(ms) ? ms : null;
+	}
+	if (typeof w.resetAt === "number" && Number.isFinite(w.resetAt)) {
+		return w.resetAt;
+	}
+	return null;
+}
+
+/**
+ * limits[] `kind` that maps to each synthetic window name produced by
+ * getRepresentativeWindow's accountLevelLimitWindows fold (session ->
+ * five_hour, weekly_all -> seven_day). Kept in lockstep with that mapping
+ * above in this file.
+ */
+const WINDOW_NAME_TO_LIMIT_KIND: Record<string, string> = {
+	five_hour: "session",
+	seven_day: "weekly_all",
+};
+
+/**
+ * Reset time (ms epoch) for a limits[]-only Anthropic/Codex payload: finds
+ * the limits[] entry whose `kind` corresponds to the given synthetic window
+ * name and returns its own `resets_at`.
+ */
+function getRepresentativeLimitResetMs(
+	usage: UsageData,
+	windowName: string | null,
+): number | null {
+	if (!windowName || !Array.isArray(usage.limits)) return null;
+	const kind = WINDOW_NAME_TO_LIMIT_KIND[windowName];
+	if (!kind) return null;
+	const limit = usage.limits.find((l) => l?.kind === kind);
+	const resetsAt = limit?.resets_at;
+	if (typeof resetsAt !== "string") return null;
+	const ms = new Date(resetsAt).getTime();
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Reset time (ms epoch) of the representative usage window, derived the same
+ * way for every provider — the single source BOTH the /health usage_exhausted
+ * counter and the accounts rateLimitStatus display use, so their staleness
+ * guards cannot diverge (PR #299 review finding). Note zai: the display
+ * window is labeled "five_hour" (Claude terminology), but the payload key
+ * carrying the reset is `tokens_limit` — extraction must use the payload key,
+ * not the display label.
+ */
+export function getRepresentativeUsageResetMs(
+	usageData: unknown,
+	provider: string,
+): number | null {
+	if (!usageData || typeof usageData !== "object") return null;
+	try {
+		const data = usageData as AnyUsageData;
+		switch (provider) {
+			case "anthropic":
+			case "codex": {
+				// Hard-limit windows only — must stay in lockstep with
+				// getRepresentativeUtilizationForProvider, which also excludes
+				// extra_usage. Pairing a utilization drawn from the hard-limit
+				// set with a reset drawn from a set that includes extra_usage
+				// would report the wrong window's recovery time (and extra_usage
+				// has no resets_at at all, so it would report none).
+				const windowName = representativeWindow(data as UsageData, false);
+				// Flat legacy shape: the window name is an actual property
+				// (five_hour/seven_day/...) carrying its own resets_at.
+				const flatReset = extractUsageResetMs(data, windowName);
+				if (flatReset !== null) return flatReset;
+				// limits[]-only payloads (2026 API): five_hour/seven_day are
+				// absent as properties — representativeWindow derives those
+				// same names synthetically from limits[] kind "session" /
+				// "weekly_all". Fall back to the matching limits[] entry's own
+				// resets_at so the staleness guard still has a real reset time.
+				return getRepresentativeLimitResetMs(data as UsageData, windowName);
+			}
+			case "zai":
+				return extractUsageResetMs(
+					data,
+					(data as ZaiUsageData).tokens_limit ? "tokens_limit" : null,
+				);
+			case "nanogpt":
+				return extractUsageResetMs(
+					data,
+					getRepresentativeNanoGPTWindow(data as NanoGPTUsageData),
+				);
+			case "kilo":
+				return extractUsageResetMs(
+					data,
+					getRepresentativeKiloWindow(data as KiloUsageData),
+				);
+			case "alibaba-coding-plan":
+				return extractUsageResetMs(
+					data,
+					getRepresentativeAlibabaCodingPlanWindow(
+						data as AlibabaCodingPlanUsageData,
+					),
+				);
+			case "xai":
+				return extractUsageResetMs(
+					data,
+					getRepresentativeXaiWindow(data as XaiUsageData),
+				);
+			case "minimax": {
+				const windowName = getRepresentativeMinimaxWindow(
+					data as MinimaxUsageData,
+				);
+				// extractUsageResetMs reads `resets_at` (string) OR `resetAt` (ms);
+				// the Minimax fetcher populates `resetAt` with epoch ms, so this
+				// works for both 5h and 7d windows.
+				return extractUsageResetMs(data, windowName);
+			}
+			default:
+				return null;
+		}
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Representative utilization paired with the reset that belongs to the same
+ * winning window. Zai needs special handling because its utilization is the
+ * max of time_limit and tokens_limit while getRepresentativeUsageResetMs is
+ * intentionally tokens_limit-only for display surfaces. Other providers keep
+ * their existing representative-reset behavior unchanged.
+ */
+export function getRepresentativeUsageSnapshotForProvider(
+	data: AnyUsageData,
+	provider: string,
+): { utilization: number; resetMs: number | null } | null {
+	if (provider === "zai") {
+		const zai = data as ZaiUsageData;
+		const candidates = [zai.time_limit, zai.tokens_limit].filter(
+			(window): window is NonNullable<typeof window> => window !== null,
+		);
+		if (candidates.length === 0) return null;
+		// On a tie (both windows equally exhausted), prefer the LATER reset —
+		// the account isn't actually available again until every exhausted
+		// window clears, so picking the earlier one would tell clients to
+		// retry while the other window is still capped.
+		const winning = candidates.reduce((prev, current) => {
+			if (current.percentage !== prev.percentage) {
+				return current.percentage > prev.percentage ? current : prev;
+			}
+			if (current.resetAt === null || prev.resetAt === null) {
+				return prev.resetAt === null ? prev : current;
+			}
+			return current.resetAt > prev.resetAt ? current : prev;
+		});
+		return {
+			utilization: winning.percentage,
+			resetMs: winning.resetAt,
+		};
+	}
+
+	const utilization = getRepresentativeUtilizationForProvider(data, provider);
+	if (utilization === null) return null;
+	return {
+		utilization,
+		resetMs: getRepresentativeUsageResetMs(data, provider),
+	};
 }
 
 /**
@@ -356,6 +718,10 @@ class UsageCache {
 	private capacityRestoredCallbacks = new Map<
 		string,
 		(accountId: string) => void
+	>();
+	private snapshotCallbacks = new Map<
+		string,
+		(accountId: string, data: UsageData) => void
 	>();
 	private inFlightFetches = new Map<
 		string,
@@ -438,6 +804,7 @@ class UsageCache {
 		customEndpoint?: string | null,
 		onWindowReset?: (accountId: string) => void,
 		onCapacityRestored?: (accountId: string) => void,
+		onSnapshot?: (accountId: string, data: UsageData) => void,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -482,6 +849,11 @@ class UsageCache {
 			this.capacityRestoredCallbacks.set(accountId, onCapacityRestored);
 		} else {
 			this.capacityRestoredCallbacks.delete(accountId);
+		}
+		if (onSnapshot) {
+			this.snapshotCallbacks.set(accountId, onSnapshot);
+		} else {
+			this.snapshotCallbacks.delete(accountId);
 		}
 
 		// Default to 90s if not provided
@@ -546,6 +918,7 @@ class UsageCache {
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
 			this.capacityRestoredCallbacks.delete(accountId);
+			this.snapshotCallbacks.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
 			this.cache.delete(accountId);
 			this.usageRateLimitedUntil.delete(accountId);
@@ -720,6 +1093,25 @@ class UsageCache {
 					);
 					return { success: true, retryAfterMs: null };
 				}
+			} else if (provider === "minimax") {
+				// Fetch Minimax Token Plan remains (metadata-only GET, zero quota).
+				data = await fetchMinimaxUsageData(token);
+				if (data) {
+					const callback = this.windowResetCallbacks.get(accountId);
+					if (callback)
+						this.notifyWindowReset(accountId, data, "minimax", callback);
+					this.cache.set(accountId, { data, timestamp: Date.now() });
+					const utilization = getRepresentativeMinimaxUtilization(
+						data as MinimaxUsageData,
+					);
+					const window = getRepresentativeMinimaxWindow(
+						data as MinimaxUsageData,
+					);
+					log.debug(
+						`Successfully fetched Minimax usage data for account ${accountId}: ${utilization?.toFixed(1)}% used (${window} window)`,
+					);
+					return { success: true, retryAfterMs: null };
+				}
 			} else {
 				// Default to Anthropic usage data
 				const result = await fetchUsageData(token);
@@ -739,6 +1131,8 @@ class UsageCache {
 						data: result.data,
 						timestamp: Date.now(),
 					});
+					const snapshotCb = this.snapshotCallbacks.get(accountId);
+					if (snapshotCb) snapshotCb(accountId, result.data as UsageData);
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,
 					);
@@ -843,7 +1237,9 @@ class UsageCache {
 
 	/**
 	 * Check if the usage window has reset by comparing the new data's reset time
-	 * against the previously cached data, and fire the callback if it has advanced.
+	 * against the previously cached data, and fire the callback if it has advanced
+	 * by more than {@link WINDOW_RESET_MIN_ADVANCE_MS} — smaller advances are
+	 * upstream jitter on the same window, not a rollover.
 	 * Should be called after successfully fetching new data, before updating the cache.
 	 * No-ops on the first poll (no previous data) to avoid spurious resets.
 	 */
@@ -862,7 +1258,7 @@ class UsageCache {
 		if (
 			prevResetAt !== null &&
 			newResetAt !== null &&
-			newResetAt > prevResetAt
+			newResetAt - prevResetAt > WINDOW_RESET_MIN_ADVANCE_MS
 		) {
 			log.info(
 				`Usage window reset detected for account ${accountId} (${provider}): ` +

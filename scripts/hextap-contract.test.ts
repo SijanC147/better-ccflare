@@ -74,9 +74,31 @@ describe("Hextap schema-2 repository contract", () => {
 
 		const activeWorkflows = readdirSync(
 			join(REPOSITORY_ROOT, ".github/workflows"),
-		).filter((name) => /\.ya?ml$/.test(name));
+		)
+			.filter((name) => /\.ya?ml$/.test(name))
+			.sort();
+
+		// Exact allowlist of ACTIVE workflows. GitHub only loads *.yml / *.yaml,
+		// so the fork disables upstream workflows by renaming them .yml.disabled.
+		// This assertion is deliberately a filename list rather than a content
+		// scan: during the 2026-08 upstream sync, upstream added a
+		// signpath-release.yml that triggered on `- 'v*'` (single quotes, trailing
+		// comment) and uploaded a signed asset into the release Hextap publishes
+		// as immutable. It arrived as a clean auto-merge and the previous
+		// substring check — which matched only the double-quoted form — passed.
+		// A filename allowlist cannot be evaded by quoting, comments, inline
+		// arrays, `on: push` with no filters, or any other trigger spelling: any
+		// new active workflow fails here and must be reviewed deliberately.
+		expect(activeWorkflows).toEqual([
+			"ci.yml",
+			"hextap-release.yml",
+			"signpath-test.yml",
+		]);
+
+		// Belt-and-braces: still assert the Hextap caller is the only workflow
+		// carrying a v* tag trigger, but quote-agnostically this time.
 		const tagResponders = activeWorkflows.filter((name) =>
-			read(`.github/workflows/${name}`).includes('tags:\n      - "v*"'),
+			/tags:\s*(\n\s*-\s*|\[\s*)['"]?v\*/.test(read(`.github/workflows/${name}`)),
 		);
 		expect(tagResponders).toEqual(["hextap-release.yml"]);
 	});
