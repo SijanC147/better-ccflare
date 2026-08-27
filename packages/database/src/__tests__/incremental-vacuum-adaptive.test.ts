@@ -29,27 +29,44 @@ function tempDbPath(): string {
  * the on-disk file grows by a few hundred KB. request_payloads.id is a FK to
  * requests(id) (cascade), and foreign_keys is ON, so the parent request row
  * must exist first.
+ *
+ * Seeded through bun:sqlite's synchronous prepared-statement + transaction API
+ * rather than `count * 2` awaited `adapter.run()` calls. Each `adapter.run()`
+ * commits its own implicit transaction, so the old loop paid ~4000 commits to
+ * build a fixture: ~2280ms of the test's ~2600ms total, against ~255ms spent in
+ * the code actually under test. On a loaded hosted runner that overshot Bun's
+ * 5s default timeout and the suite flaked (SB23-677).
+ *
+ * One transaction produces a byte-identical fixture — same rows, same page
+ * count, same resulting freelist — in ~29ms. Keep it batched; reverting to
+ * per-statement commits reintroduces the flake without changing what is tested.
+ *
+ * Synchronous by design: this suite is SQLite-only (it reads `PRAGMA
+ * auto_vacuum` off `getSQLiteDb()` directly), so there is no PostgreSQL path to
+ * keep generic here.
  */
-async function seedRows(
+function seedRows(
 	dbOps: DatabaseOperations,
 	count: number,
 	bytesPerRow: number,
-): Promise<void> {
-	const adapter = dbOps.getAdapter();
+): void {
+	const db = dbOps.getAdapter().getSQLiteDb();
 	const blob = "x".repeat(bytesPerRow);
 	const now = Date.now();
-	for (let i = 0; i < count; i++) {
-		const id = `seed-${i}-${now}`;
-		await adapter.run(
-			`INSERT INTO requests (id, timestamp, method, path, account_used, status_code, success, error_message, response_time_ms, failover_attempts)
-			 VALUES (?, ?, 'POST', '/v1/messages', NULL, 200, 1, NULL, 100, 0)`,
-			[id, now],
-		);
-		await adapter.run(
-			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
-			[id, blob, now],
-		);
-	}
+	const insertRequest = db.prepare(
+		`INSERT INTO requests (id, timestamp, method, path, account_used, status_code, success, error_message, response_time_ms, failover_attempts)
+		 VALUES (?, ?, 'POST', '/v1/messages', NULL, 200, 1, NULL, 100, 0)`,
+	);
+	const insertPayload = db.prepare(
+		`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
+	);
+	db.transaction(() => {
+		for (let i = 0; i < count; i++) {
+			const id = `seed-${i}-${now}`;
+			insertRequest.run(id, now);
+			insertPayload.run(id, blob, now);
+		}
+	})();
 }
 
 describe("DatabaseOperations.getFreelistCount", () => {
@@ -101,7 +118,7 @@ describe("DatabaseOperations.incrementalVacuumAdaptive", () => {
 		expect(auto_vacuum).toBe(2);
 
 		// Grow the file: ~2000 rows of ~512 bytes of JSON ≈ ~1 MB of payload.
-		await seedRows(dbOps, 2000, 512);
+		seedRows(dbOps, 2000, 512);
 
 		// Delete everything (cascade removes payloads too).
 		await adapter.run(`DELETE FROM requests`, []);
@@ -128,7 +145,7 @@ describe("DatabaseOperations.incrementalVacuumAdaptive", () => {
 	it("respects maxPagesPerTick (bounds the number of chunks)", async () => {
 		const adapter = dbOps.getAdapter();
 
-		await seedRows(dbOps, 2000, 512);
+		seedRows(dbOps, 2000, 512);
 		await adapter.run(`DELETE FROM requests`, []);
 		await adapter.run(`PRAGMA wal_checkpoint(TRUNCATE)`, []);
 
