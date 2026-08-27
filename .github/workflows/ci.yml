@@ -60,11 +60,11 @@ jobs:
           path: source
           persist-credentials: false
 
-      - name: Check out provisional Hextap v0.4.0 contract
+      - name: Check out Hextap v0.4.1 contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: 7cffee849dcd60ad0ea6d6614a280136896799ce
+          ref: 67898bb09280a5325b89c1b23a70f2fc8b64ffae
           path: toolkit
           persist-credentials: false
 
@@ -87,6 +87,10 @@ jobs:
         env:
           SOURCE_ROOT: ${{ github.workspace }}/source
         run: |
+          BUN_INSTALL_CACHE_DIR="$RUNNER_TEMP/bun-runtime-cache"
+          mkdir "$BUN_INSTALL_CACHE_DIR"
+          chmod 700 "$BUN_INSTALL_CACHE_DIR"
+          export BUN_INSTALL_CACHE_DIR
           "$RUNNER_TEMP/hextapctl" manifest validate \
             --file "$SOURCE_ROOT/.hextap.json"
           "$RUNNER_TEMP/hextapctl" release profile \
@@ -94,16 +98,31 @@ jobs:
             --source "$SOURCE_ROOT" \
             --phase build
           mkdir "$RUNNER_TEMP/release-assets"
-          "$RUNNER_TEMP/hextapctl" release build \
-            --manifest "$SOURCE_ROOT/.hextap.json" \
-            --version 3.8.2-rc.1 \
-            --commit "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" \
-            --source "$SOURCE_ROOT" \
+          source_commit="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+          build_command=(
+            "$RUNNER_TEMP/hextapctl" release build
+            --manifest "$SOURCE_ROOT/.hextap.json"
+            --version 3.8.2-rc.1
+            --commit "$source_commit"
+            --source "$SOURCE_ROOT"
             --output "$RUNNER_TEMP/release-assets"
+          )
+          sudo -n unshare --net -- \
+            sudo -n -u "$USER" env \
+              HOME="$HOME" \
+              PATH="$PATH" \
+              BUN_INSTALL_CACHE_DIR="$BUN_INSTALL_CACHE_DIR" \
+              LANG="${LANG:-C}" \
+              LC_ALL="${LC_ALL:-C}" \
+              TMPDIR="${TMPDIR:-/tmp}" \
+              TZ="${TZ:-UTC}" \
+              USER="$USER" \
+              LOGNAME="${LOGNAME:-$USER}" \
+              "${build_command[@]}"
           "$RUNNER_TEMP/hextapctl" release verify \
             --manifest "$SOURCE_ROOT/.hextap.json" \
             --version 3.8.2-rc.1 \
-            --commit "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" \
+            --commit "$source_commit" \
             --dir "$RUNNER_TEMP/release-assets" \
             --execute-target linux-amd64
           git -C "$SOURCE_ROOT" diff --exit-code

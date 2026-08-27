@@ -3,8 +3,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const REPOSITORY_ROOT = join(import.meta.dir, "..");
-const TOOLKIT_SHA = "7cffee849dcd60ad0ea6d6614a280136896799ce";
-const TOOLKIT_TAG = "v0.4.0";
+const TOOLKIT_SHA = "67898bb09280a5325b89c1b23a70f2fc8b64ffae";
+const TOOLKIT_TAG = "v0.4.1";
 
 function read(relativePath: string): string {
 	return readFileSync(join(REPOSITORY_ROOT, relativePath), "utf8");
@@ -90,6 +90,10 @@ describe("Hextap schema-2 repository contract", () => {
 		expect(ci).toContain("name: Bun and release tooling");
 		expect(ci).toContain("name: Hextap release contract");
 		expect(ci).toContain(`ref: ${TOOLKIT_SHA}`);
+		expect(ci).toContain(
+			'BUN_INSTALL_CACHE_DIR="$RUNNER_TEMP/bun-runtime-cache"',
+		);
+		expect(ci).toContain("sudo -n unshare --net --");
 
 		const ruleset = JSON.parse(read(".hextap/rulesets/main.json"));
 		const required = ruleset.rules.find(
