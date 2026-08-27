@@ -114,8 +114,8 @@ describe("DiscoveryScheduler.runOnce()", () => {
 	});
 
 	test("sentinel path is filtered out", async () => {
-		// Create a project whose cwd resolves to /private/var/folders/... (tmpdir sentinel).
-		const sentinelCwd = path.join(os.tmpdir(), "some-claude-thing");
+		// Create a project in the macOS transient namespace filtered on every host.
+		const sentinelCwd = "/private/var/folders/some-claude-thing";
 		const encodedName = sentinelCwd.replace(/\//g, "-").replace(/^-/, "");
 		createProjectDir(tmpDir, encodedName, sentinelCwd);
 
