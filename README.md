@@ -5,6 +5,16 @@
 
 The ultimate Claude API proxy with intelligent load balancing across multiple accounts. Full visibility into every request, response, and rate limit.
 
+> **This is a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare).**
+> Nearly everything here — the load balancer, the provider integrations, the dashboard, the
+> analytics — is [@tombii](https://github.com/tombii)'s work and that of the contributors
+> credited in [Acknowledgments](#acknowledgments). This fork tracks upstream closely and
+> adds project attribution, a Windows build, and its own release pipeline. **If you are
+> looking for the canonical project, go upstream.**
+>
+> Downloads below point at this fork's releases. The npm package `better-ccflare` is
+> upstream's and is not published from here.
+
 https://github.com/user-attachments/assets/c859872f-ca5e-4f8b-b6a0-7cc7461fe62a
 
 
@@ -69,7 +79,14 @@ npm install -g better-ccflare
 # Start better-ccflare (Server + Dashboard)
 better-ccflare
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+
+> **Note:** `better-ccflare` on npm is published by [upstream](https://github.com/tombii/better-ccflare),
+> not from this fork. Installing it gives you upstream's build, which may be a different
+> version than this repository. For fork builds, use a
+> [pre-compiled binary](#install-pre-compiled-binary-all-architectures) or
+> [install from source](#install-from-source).
+
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 
 **⚠️ Windows npm Installation Issue**: If you installed via npm on Windows and encounter a path error like `"C:\\Program Files\\nodejs\\\\node_modules\\better-ccflare\\dist\\better-ccflare" is either misspelled or could not be found`, this is a known [npm bug on Windows](https://github.com/npm/cli/issues/969) affecting how npm generates wrapper scripts. See [Windows Troubleshooting](#windows-troubleshooting) for workarounds.
 ### Install via bun
@@ -80,28 +97,28 @@ bun install -g better-ccflare
 # Start better-ccflare (Server + Dashboard)
 better-ccflare
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 ### Install Pre-compiled Binary (All Architectures)
 
-Download the appropriate binary for your platform from [GitHub Releases](https://github.com/tombii/better-ccflare/releases/latest):
+Download the appropriate binary for your platform from [GitHub Releases](https://github.com/SijanC147/better-ccflare/releases/latest):
 
 #### Linux x86_64
 ```bash
-wget https://github.com/tombii/better-ccflare/releases/latest/download/better-ccflare-linux-amd64
+wget https://github.com/SijanC147/better-ccflare/releases/latest/download/better-ccflare-linux-amd64
 chmod +x better-ccflare-linux-amd64
 ./better-ccflare-linux-amd64
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 #### Linux ARM64 (Raspberry Pi 3/4/5, Oracle Cloud ARM, AWS Graviton)
 ```bash
-wget https://github.com/tombii/better-ccflare/releases/latest/download/better-ccflare-linux-arm64
+wget https://github.com/SijanC147/better-ccflare/releases/latest/download/better-ccflare-linux-arm64
 chmod +x better-ccflare-linux-arm64
 ./better-ccflare-linux-arm64
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 #### macOS Intel
 ```bash
-curl -L -o better-ccflare-macos-x86_64 https://github.com/tombii/better-ccflare/releases/latest/download/better-ccflare-macos-x86_64
+curl -L -o better-ccflare-macos-x86_64 https://github.com/SijanC147/better-ccflare/releases/latest/download/better-ccflare-macos-x86_64
 chmod +x better-ccflare-macos-x86_64
 
 # Remove quarantine attribute (required on macOS to run unsigned binaries)
@@ -109,10 +126,10 @@ xattr -d com.apple.quarantine better-ccflare-macos-x86_64
 
 ./better-ccflare-macos-x86_64
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 #### macOS Apple Silicon
 ```bash
-curl -L -o better-ccflare-macos-arm64 https://github.com/tombii/better-ccflare/releases/latest/download/better-ccflare-macos-arm64
+curl -L -o better-ccflare-macos-arm64 https://github.com/SijanC147/better-ccflare/releases/latest/download/better-ccflare-macos-arm64
 chmod +x better-ccflare-macos-arm64
 
 # Remove quarantine attribute (required on macOS to run unsigned binaries)
@@ -120,13 +137,13 @@ xattr -d com.apple.quarantine better-ccflare-macos-arm64
 
 ./better-ccflare-macos-arm64
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 
 **macOS Gatekeeper Notice:** Our macOS binaries are not notarized by Apple as this requires a paid Apple Developer subscription. After downloading, you must remove the quarantine attribute using the `xattr` command shown above to run the binary. If you prefer not to run unsigned binaries, you can [install from source](#install-from-source) instead.
 
 #### Windows x86_64
-Download [`better-ccflare-windows-x64.exe`](https://github.com/tombii/better-ccflare/releases/latest/download/better-ccflare-windows-x64.exe) and run it.
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Download [`better-ccflare-windows-x64.exe`](https://github.com/SijanC147/better-ccflare/releases/latest/download/better-ccflare-windows-x64.exe) and run it.
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 ### Run without installation (npx/bunx)
 
 ```bash
@@ -136,12 +153,38 @@ npx better-ccflare@latest
 # Run with bunx (faster for bun users)
 bunx better-ccflare@latest
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
+### Install via Homebrew (macOS)
+
+```bash
+brew tap sean/hextap https://github.com/SijanC147/homebrew-hextap
+brew install better-ccflare
+
+# Run in the foreground
+better-ccflare
+
+# Or as a background service (launchd)
+brew services start better-ccflare
+```
+
+> **The tap is private** — this path works only for operators with access to it. Everyone
+> else should use a [pre-compiled binary](#install-pre-compiled-binary-all-architectures)
+> or [install from source](#install-from-source).
+
+The explicit tap URL is required: the tap is named `sean/hextap` but lives under the
+`SijanC147` GitHub account, so a bare `brew tap sean/hextap` resolves to the wrong host.
+
+Homebrew's download path normally avoids the macOS quarantine attribute, so the Gatekeeper
+step below is usually unnecessary when installing this way. Logs land in
+`$(brew --prefix)/var/log/better-ccflare/`.
+
+Continue to [Configure Claude SDK](#configure-claude-sdk).
+
 ### Install from source
 
 ```bash
 # Clone and install
-git clone https://github.com/tombii/better-ccflare
+git clone https://github.com/SijanC147/better-ccflare
 cd better-ccflare
 bun install
 
@@ -151,7 +194,7 @@ bun run build
 # Start better-ccflare (TUI + Server)
 bun run better-ccflare
 ```
-Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
+Continue to [Configure Claude SDK](#configure-claude-sdk).
 
 **Note**: You must run `bun run build` at least once to build the dashboard files before starting the server. This can also be done by running `bun run better-ccflare` which includes the build step.
 
@@ -273,6 +316,12 @@ docker run -v $(pwd)/.env:/app/.env:ro -p 8080:8080 ghcr.io/tombii/better-ccflar
 ```
 
 ### Docker (Multi-Platform: linux/amd64, linux/arm64)
+
+> **Note:** the `ghcr.io/tombii/better-ccflare` images referenced below are published by
+> [upstream](https://github.com/tombii/better-ccflare). This fork does not build or publish
+> container images, so Docker gives you upstream's build, not this repository's. For fork
+> builds use a [pre-compiled binary](#install-pre-compiled-binary-all-architectures),
+> [Homebrew](#install-via-homebrew-macos), or [source](#install-from-source).
 
 ```bash
 # Quick start with docker-compose
@@ -619,7 +668,7 @@ This bypasses the npm wrapper script entirely and runs better-ccflare directly.
 
 **Option 2: Use the Pre-compiled Binary**
 
-Download the standalone Windows executable from [GitHub Releases](https://github.com/tombii/better-ccflare/releases/latest):
+Download the standalone Windows executable from [GitHub Releases](https://github.com/SijanC147/better-ccflare/releases/latest):
 
 ```powershell
 # Download better-ccflare-windows-x64.exe and run it directly
@@ -804,6 +853,13 @@ Full documentation available in [`docs/`](docs/):
 - ARM32 devices (Raspberry Pi Zero, Pi 1, Pi 2, or 32-bit OS)
 
 ## Acknowledgments
+
+**This fork stands on [@tombii](https://github.com/tombii)'s work.**
+[tombii/better-ccflare](https://github.com/tombii/better-ccflare) is the upstream project
+and the origin of essentially everything documented above — the load-balancing strategies,
+the provider integrations, the OAuth handling, the dashboard and analytics, the database
+layer. This fork tracks it closely and contributes a small amount on top. Please star and
+follow the upstream repository.
 
 Inspired by [snipeship/ccflare](https://github.com/snipeship/ccflare) - thanks for the original idea and implementation!
 
