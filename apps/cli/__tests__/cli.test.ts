@@ -424,7 +424,7 @@ describe("CLI Security Tests", () => {
 
 		// Should fail with directory traversal detection, not expose system paths
 		const output = result.stdout + result.stderr;
-		expect(output).toContain("SSL file path validation failed");
+		expect(output).toContain("SSL key file not found");
 		expect(output).toContain("Directory traversal detected");
 	});
 
