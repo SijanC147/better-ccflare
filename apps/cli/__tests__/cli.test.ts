@@ -92,15 +92,16 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["--version"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
-			expect(result.stdout).toMatch(/v\d+\.\d+\.\d+/);
+			expect(result.stdout).toMatch(
+				/^better-ccflare \d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)? \(commit [^)]+\)\n$/,
+			);
 		});
 
 		it("should display version with -v flag", async () => {
 			const result = await runCLI(["-v"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
+			expect(result.stdout).toContain("better-ccflare 3.8.1 (commit ");
 		});
 
 		it("should exit quickly for version command", async () => {

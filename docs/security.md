@@ -685,7 +685,7 @@ function addSecurityHeaders(response: Response): Response {
 ### Critical Security Fixes (October 27, 2025)
 - **ReDoS Vulnerability Fix**: Replaced polynomial regex with deterministic string-based approach for system reminder parsing in `packages/ui-common/src/parsers/parse-conversation.ts:50-78`
 - **Sensitive Data Logging Fix**: Added comprehensive redaction for API keys, tokens, passwords, and other sensitive patterns in error logs (`packages/http-common/src/responses.ts:42-83`)
-- **GitHub Actions Security**: Implemented principle of least privilege in workflow permissions (`.github/workflows/release.yml`, `.github/workflows/docker-publish.yml`)
+- **GitHub Actions Security**: Implemented principle of least privilege in workflow permissions (`.github/workflows/hextap-release.yml`, `.github/workflows/docker-publish.yml`)
 - **Code Injection Prevention**: Fixed potential code injection vulnerabilities in Docker publishing workflow
 
 ### Response Header Sanitization (July 2025)

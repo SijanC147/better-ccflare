@@ -31,11 +31,18 @@ if (process.argv[1]) {
 	}
 }
 
-// Try each possible .env location
-for (const envPath of possibleEnvPaths) {
-	const result = config({ path: envPath });
-	if (result.parsed && Object.keys(result.parsed).length > 0) {
-		break; // Stop after finding the first .env with variables
+const rawArguments = process.argv.slice(2);
+const isInformationalCommand = rawArguments.some((argument) =>
+	["--version", "-v", "--help", "-h"].includes(argument),
+);
+
+// Version/help must be side-effect free: do not inspect user configuration.
+if (!isInformationalCommand) {
+	for (const envPath of possibleEnvPaths) {
+		const result = config({ path: envPath, quiet: true });
+		if (result.parsed && Object.keys(result.parsed).length > 0) {
+			break;
+		}
 	}
 }
 
@@ -66,6 +73,7 @@ import {
 import { Config } from "@better-ccflare/config";
 import {
 	CLAUDE_MODEL_IDS,
+	getBuildIdentitySync,
 	getVersionSync,
 	levenshteinDistance,
 	NETWORK,
@@ -845,14 +853,12 @@ function parseArgs(args: string[]): ParsedArgs {
 }
 
 async function main() {
-	const args = process.argv.slice(2);
+	const args = rawArguments;
 	const parsed = parseArgs(args);
 
 	// Handle version - check before any expensive initializations
 	if (parsed.version) {
-		// Use sync version to avoid async overhead
-		const version = getVersionSync();
-		console.log(`better-ccflare v${version}`);
+		console.log(getBuildIdentitySync());
 		fastExit(0);
 		return;
 	}
