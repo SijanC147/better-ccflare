@@ -23,8 +23,13 @@ if (process.argv[1]) {
 // XDG config dir — used by `brew services start better-ccflare` and any
 // installation where the user wants persistent env vars across restarts.
 {
+	const xdgConfigHome = process.env.XDG_CONFIG_HOME;
 	const homeDir = require("node:os").homedir();
-	if (homeDir) {
+	if (xdgConfigHome) {
+		possibleEnvPaths.push(
+			require("node:path").join(xdgConfigHome, "better-ccflare", ".env"),
+		);
+	} else if (homeDir) {
 		possibleEnvPaths.push(
 			require("node:path").join(homeDir, ".config", "better-ccflare", ".env"),
 		);
@@ -32,9 +37,8 @@ if (process.argv[1]) {
 }
 
 const rawArguments = process.argv.slice(2);
-const isInformationalCommand = rawArguments.some((argument) =>
-	["--version", "-v", "--help", "-h"].includes(argument),
-);
+const parsedArguments = parseArgs(rawArguments);
+const isInformationalCommand = parsedArguments.version || parsedArguments.help;
 
 // Version/help must be side-effect free: do not inspect user configuration.
 if (!isInformationalCommand) {
@@ -853,8 +857,7 @@ function parseArgs(args: string[]): ParsedArgs {
 }
 
 async function main() {
-	const args = rawArguments;
-	const parsed = parseArgs(args);
+	const parsed = parsedArguments;
 
 	// Handle version - check before any expensive initializations
 	if (parsed.version) {

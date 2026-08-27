@@ -10,14 +10,18 @@ const CLI_PATH = join(process.cwd(), "apps/cli/src/main.ts");
  * Helper function to run CLI command and get output
  * Available to all test suites
  */
-function runCLI(args: string[]): Promise<{
+function runCLI(
+	args: string[],
+	options: { cwd?: string; env?: Record<string, string> } = {},
+): Promise<{
 	stdout: string;
 	stderr: string;
 	exitCode: number;
 }> {
 	return new Promise((resolve) => {
 		const proc = spawn("bun", ["--no-orphans", "run", CLI_PATH, ...args], {
-			env: { ...process.env, NODE_ENV: "test" },
+			cwd: options.cwd,
+			env: { ...process.env, ...options.env, NODE_ENV: "test" },
 		});
 
 		let stdout = "";
@@ -274,6 +278,24 @@ describe("CLI Integration Tests", () => {
 			// Version should take precedence and exit early
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout).toContain("better-ccflare 3.8.1 (commit ");
+		});
+
+		it("should not treat an option value named -v as the version flag", async () => {
+			const xdgConfigHome = join(tempDir, "xdg");
+			const appConfigDirectory = join(xdgConfigHome, "better-ccflare");
+			mkdirSync(appConfigDirectory, { recursive: true });
+			writeFileSync(
+				join(appConfigDirectory, ".env"),
+				"BETTER_CCFLARE_VERSION=9.9.9\n",
+			);
+			const result = await runCLI(["--show-config", "--profile", "-v"], {
+				cwd: tempDir,
+				env: { XDG_CONFIG_HOME: xdgConfigHome },
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toContain("better-ccflare v9.9.9 - Configuration");
+			expect(result.stdout).not.toMatch(/^better-ccflare 3\.8\.1 \(commit /);
 		});
 	});
 
