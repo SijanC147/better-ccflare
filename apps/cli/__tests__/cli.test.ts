@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -424,22 +424,40 @@ describe("CLI Security Tests", () => {
 
 		// Should fail with directory traversal detection, not expose system paths
 		const output = result.stdout + result.stderr;
-		expect(output).toContain("SSL key file not found");
+		expect(output).toContain("SSL file path validation failed");
 		expect(output).toContain("Directory traversal detected");
 	});
 
 	it("should sanitize error messages", async () => {
-		const result = await runCLI([
-			"--serve",
-			"--ssl-key",
-			"/tmp/nonexistent-key-with-sensitive-data-abc123.pem",
-			"--ssl-cert",
-			"/tmp/nonexistent-cert-with-sensitive-data-abc123.pem",
-		]);
+		const sensitiveRoot = mkdtempSync(
+			join(tmpdir(), "better-ccflare-sensitive-"),
+		);
+		try {
+			const sensitiveKeyPath = join(
+				sensitiveRoot,
+				"nonexistent-key-with-sensitive-data-abc123.pem",
+			);
+			const sensitiveCertPath = join(
+				sensitiveRoot,
+				"nonexistent-cert-with-sensitive-data-abc123.pem",
+			);
+			const startedAt = Date.now();
+			const result = await runCLI([
+				"--serve",
+				"--ssl-key",
+				sensitiveKeyPath,
+				"--ssl-cert",
+				sensitiveCertPath,
+			]);
 
-		const output = result.stdout + result.stderr;
-		// Should show error but not leak full paths unnecessarily
-		expect(output).toContain("SSL file path validation failed");
-		expect(result.exitCode).toBeGreaterThan(0);
+			const output = result.stdout + result.stderr;
+			expect(output).toContain("SSL key file not found");
+			expect(output).not.toContain(sensitiveKeyPath);
+			expect(output).not.toContain(sensitiveCertPath);
+			expect(result.exitCode).toBeGreaterThan(0);
+			expect(Date.now() - startedAt).toBeLessThan(2000);
+		} finally {
+			rmSync(sensitiveRoot, { recursive: true, force: true });
+		}
 	});
 });
