@@ -8,9 +8,14 @@ export const CLAUDE_CLI_VERSION = "2.1.197";
 // Build-time injected version via --define __BETTER_CCFLARE_VERSION__="x.y.z"
 // Replaced by bun bundler with a string literal; undefined at dev/runtime.
 declare const __BETTER_CCFLARE_VERSION__: string | undefined;
+declare const __BETTER_CCFLARE_COMMIT__: string | undefined;
+
+import packageJson from "../../../package.json";
+import { formatBuildIdentity } from "./build-identity";
 
 // Cache the version to avoid repeated file reads
 let cachedVersion: string | null = null;
+let cachedCommit: string | null = null;
 
 export async function getVersion(): Promise<string> {
 	if (cachedVersion) {
@@ -54,7 +59,7 @@ export async function getVersion(): Promise<string> {
 	}
 
 	// 4. Final fallback
-	cachedVersion = CLAUDE_CLI_VERSION;
+	cachedVersion = packageJson.version;
 	return cachedVersion;
 }
 
@@ -84,8 +89,36 @@ export function getVersionSync(): string {
 		return cachedVersion;
 	}
 
-	cachedVersion = CLAUDE_CLI_VERSION;
+	cachedVersion = packageJson.version;
 	return cachedVersion;
+}
+
+/** Return the linker-injected source commit or a development fallback. */
+export function getCommitSync(): string {
+	if (cachedCommit) {
+		return cachedCommit;
+	}
+
+	if (
+		typeof __BETTER_CCFLARE_COMMIT__ !== "undefined" &&
+		__BETTER_CCFLARE_COMMIT__
+	) {
+		cachedCommit = __BETTER_CCFLARE_COMMIT__;
+		return cachedCommit;
+	}
+
+	if (process.env.BETTER_CCFLARE_COMMIT) {
+		cachedCommit = process.env.BETTER_CCFLARE_COMMIT;
+		return cachedCommit;
+	}
+
+	cachedCommit = "development";
+	return cachedCommit;
+}
+
+/** Return the complete application identity used by `--version`. */
+export function getBuildIdentitySync(): string {
+	return formatBuildIdentity(getVersionSync(), getCommitSync());
 }
 
 /**

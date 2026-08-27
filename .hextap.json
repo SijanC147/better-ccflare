@@ -1,0 +1,98 @@
+{
+  "schema": 2,
+  "formula": {
+    "name": "better-ccflare",
+    "class": "BetterCcflare",
+    "description": "Claude API proxy with intelligent load balancing across multiple accounts",
+    "homepage": "https://github.com/SijanC147/better-ccflare",
+    "license": "MIT",
+    "repository": {
+      "owner": "SijanC147",
+      "name": "better-ccflare"
+    },
+    "binary": "better-ccflare",
+    "assets": {
+      "darwin_arm64": "better-ccflare-macos-arm64.tar.gz",
+      "darwin_amd64": "better-ccflare-macos-x86_64.tar.gz"
+    }
+  },
+  "release": {
+    "build_script": "scripts/hextap-build",
+    "profile": {
+      "runtime": "bun",
+      "runtime_version": "1.3.14",
+      "install": {
+        "name": "install",
+        "argv": [
+          "bun",
+          "install",
+          "--frozen-lockfile"
+        ]
+      },
+      "quality": [
+        {
+          "name": "typecheck",
+          "argv": [
+            "bun",
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "name": "test",
+          "argv": [
+            "bun",
+            "test"
+          ]
+        },
+        {
+          "name": "dashboard",
+          "argv": [
+            "bun",
+            "run",
+            "build:dashboard"
+          ]
+        }
+      ],
+      "prepare": [
+        {
+          "name": "dashboard",
+          "argv": [
+            "bun",
+            "run",
+            "build:dashboard"
+          ]
+        }
+      ]
+    },
+    "targets": {
+      "darwin_arm64": {
+        "binary": "better-ccflare-macos-arm64",
+        "archive": "better-ccflare-macos-arm64.tar.gz",
+        "archive_contents": "binary"
+      },
+      "darwin_amd64": {
+        "binary": "better-ccflare-macos-x86_64",
+        "archive": "better-ccflare-macos-x86_64.tar.gz",
+        "archive_contents": "binary"
+      },
+      "linux_arm64": {
+        "binary": "better-ccflare-linux-arm64"
+      },
+      "linux_amd64": {
+        "binary": "better-ccflare-linux-amd64"
+      },
+      "windows_amd64": {
+        "binary": "better-ccflare-windows-x64.exe"
+      }
+    }
+  },
+  "homebrew": {
+    "macos_only": true,
+    "test_args": [
+      "--version"
+    ],
+    "formula_profile": "better-ccflare",
+    "service_enabled": true
+  }
+}

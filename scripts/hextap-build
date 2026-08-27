@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+: "${HEXTAP_TARGET_OS:?HEXTAP_TARGET_OS is required}"
+: "${HEXTAP_TARGET_ARCH:?HEXTAP_TARGET_ARCH is required}"
+: "${HEXTAP_OUTPUT:?HEXTAP_OUTPUT is required}"
+: "${HEXTAP_VERSION:?HEXTAP_VERSION is required}"
+: "${HEXTAP_COMMIT:?HEXTAP_COMMIT is required}"
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+exec bun run "$REPOSITORY_ROOT/apps/cli/hextap-build.ts"

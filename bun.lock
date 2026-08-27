@@ -13,7 +13,7 @@
     },
     "apps/cli": {
       "name": "better-ccflare",
-      "version": "3.8.0",
+      "version": "3.8.1",
       "bin": {
         "better-ccflare": "dist/better-ccflare",
       },

@@ -658,44 +658,37 @@ We use semantic versioning (SemVer):
 
 ### Release Workflow
 
-1. **Prepare Release**
-   ```bash
-   # Update version in package.json files
-   # Create/Update CHANGELOG.md (if not exists, create following Keep a Changelog format)
-   git checkout -b release/vX.Y.Z
-   ```
+1. **Prepare and validate on a feature branch**
+   - Update the package versions and `bun.lock` together when the source version changes.
+   - Use Bun `1.3.14` and `bun install --frozen-lockfile`.
+   - Run the source checks and the pinned Hextap validation ladder.
 
-2. **Create Release PR**
-   - Title: `Release vX.Y.Z`
-   - Include changelog in description
-   - Get approval from maintainers
+2. **Merge through the protected pull-request path**
+   - Require `Bun and release tooling` and `Hextap release contract`.
+   - Resolve every review thread and require the merged-main checks before tagging.
 
-3. **Merge and Tag**
-   ```bash
-   git checkout main
-   git pull upstream main
-   git tag -a vX.Y.Z -m "Release version X.Y.Z"
-   git push upstream vX.Y.Z
-   ```
+3. **Create a new strict SemVer tag from canonical main**
+   - Use a new `vX.Y.Z-rc.N` prerelease first when release plumbing changed.
+   - Use a new `vX.Y.Z` for stable publication.
+   - Push only to the owned `origin`; the upstream repository is fetch-only.
 
-4. **Create GitHub Release**
-   - Use the tag
-   - Copy changelog entries
-   - Attach built binaries if applicable
+4. **Let the pinned Hextap caller publish**
+   - Hextap validates tag ancestry, source quality, all declared native targets, checksums, attestations, and the immutable GitHub release.
+   - Prereleases intentionally skip Homebrew.
+   - Stable releases update only the canonical Formula URL/SHA metadata and wait for the exact tap CI run.
 
-5. **Post-Release**
-   - Announce in discussions/Discord
-   - Update documentation site
-   - Monitor for issues
+5. **Recover Homebrew non-destructively when needed**
+   - Dispatch the same existing stable tag through `homebrew-only`.
+   - Never delete, recreate, move, or clobber a published release or tag.
 
 **Note**: There is no CHANGELOG.md file in the repository yet. When implementing releases, create and maintain a CHANGELOG.md file following the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Emergency Patches
 
 For critical fixes:
-1. Create patch from the release tag
-2. Follow expedited review process
-3. Release as patch version
+1. Create a patch branch from current canonical main.
+2. Follow the same protected review and validation process.
+3. Publish a new patch version; never replace a historical tag.
 
 ## Getting Help
 

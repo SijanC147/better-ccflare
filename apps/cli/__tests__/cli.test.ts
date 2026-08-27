@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,18 +10,31 @@ const CLI_PATH = join(process.cwd(), "apps/cli/src/main.ts");
  * Helper function to run CLI command and get output
  * Available to all test suites
  */
-function runCLI(args: string[]): Promise<{
+function runCLI(
+	args: string[],
+	options: { cwd?: string; env?: Record<string, string> } = {},
+): Promise<{
 	stdout: string;
 	stderr: string;
 	exitCode: number;
 }> {
 	return new Promise((resolve) => {
-		const proc = spawn("bun", ["run", CLI_PATH, ...args], {
-			env: { ...process.env, NODE_ENV: "test" },
+		const proc = spawn("bun", ["--no-orphans", "run", CLI_PATH, ...args], {
+			cwd: options.cwd,
+			env: { ...process.env, ...options.env, NODE_ENV: "test" },
 		});
 
 		let stdout = "";
 		let stderr = "";
+		let settled = false;
+		let timeoutHandle: ReturnType<typeof setTimeout>;
+
+		const finish = (exitCode: number): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeoutHandle);
+			resolve({ stdout, stderr, exitCode });
+		};
 
 		proc.stdout?.on("data", (data) => {
 			stdout += data.toString();
@@ -31,23 +44,15 @@ function runCLI(args: string[]): Promise<{
 			stderr += data.toString();
 		});
 
-		proc.on("close", (exitCode) => {
-			resolve({
-				stdout,
-				stderr,
-				exitCode: exitCode || 0,
-			});
+		proc.once("error", () => finish(1));
+		proc.once("close", (exitCode) => {
+			finish(exitCode ?? 1);
 		});
 
-		// Kill after 6 seconds to prevent hanging (some CLI operations take longer)
-		setTimeout(() => {
-			proc.kill();
-			resolve({
-				stdout,
-				stderr,
-				exitCode: 1,
-			});
-		}, 6000);
+		// Bound commands that intentionally start a server and reap descendants.
+		timeoutHandle = setTimeout(() => {
+			proc.kill("SIGKILL");
+		}, 3000);
 	});
 }
 
@@ -92,15 +97,16 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["--version"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
-			expect(result.stdout).toMatch(/v\d+\.\d+\.\d+/);
+			expect(result.stdout).toMatch(
+				/^better-ccflare \d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)? \(commit [^)]+\)\n$/,
+			);
 		});
 
 		it("should display version with -v flag", async () => {
 			const result = await runCLI(["-v"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
+			expect(result.stdout).toContain("better-ccflare 3.8.1 (commit ");
 		});
 
 		it("should exit quickly for version command", async () => {
@@ -271,7 +277,25 @@ describe("CLI Integration Tests", () => {
 
 			// Version should take precedence and exit early
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
+			expect(result.stdout).toContain("better-ccflare 3.8.1 (commit ");
+		});
+
+		it("should not treat an option value named -v as the version flag", async () => {
+			const xdgConfigHome = join(tempDir, "xdg");
+			const appConfigDirectory = join(xdgConfigHome, "better-ccflare");
+			mkdirSync(appConfigDirectory, { recursive: true });
+			writeFileSync(
+				join(appConfigDirectory, ".env"),
+				"BETTER_CCFLARE_VERSION=9.9.9\n",
+			);
+			const result = await runCLI(["--show-config", "--profile", "-v"], {
+				cwd: tempDir,
+				env: { XDG_CONFIG_HOME: xdgConfigHome },
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toContain("better-ccflare v9.9.9 - Configuration");
+			expect(result.stdout).not.toMatch(/^better-ccflare 3\.8\.1 \(commit /);
 		});
 	});
 
@@ -405,14 +429,35 @@ describe("CLI Security Tests", () => {
 	});
 
 	it("should sanitize error messages", async () => {
-		const result = await runCLI([
-			"--serve",
-			"--ssl-key",
-			"/tmp/nonexistent-key-with-sensitive-data-abc123.pem",
-		]);
+		const sensitiveRoot = mkdtempSync(
+			join(tmpdir(), "better-ccflare-sensitive-"),
+		);
+		try {
+			const sensitiveKeyPath = join(
+				sensitiveRoot,
+				"nonexistent-key-with-sensitive-data-abc123.pem",
+			);
+			const sensitiveCertPath = join(
+				sensitiveRoot,
+				"nonexistent-cert-with-sensitive-data-abc123.pem",
+			);
+			const startedAt = Date.now();
+			const result = await runCLI([
+				"--serve",
+				"--ssl-key",
+				sensitiveKeyPath,
+				"--ssl-cert",
+				sensitiveCertPath,
+			]);
 
-		const _output = result.stdout + result.stderr;
-		// Should show error but not leak full paths unnecessarily
-		expect(result.exitCode).toBeGreaterThan(0);
+			const output = result.stdout + result.stderr;
+			expect(output).toContain("SSL key file not found");
+			expect(output).not.toContain(sensitiveKeyPath);
+			expect(output).not.toContain(sensitiveCertPath);
+			expect(result.exitCode).toBeGreaterThan(0);
+			expect(Date.now() - startedAt).toBeLessThan(2000);
+		} finally {
+			rmSync(sensitiveRoot, { recursive: true, force: true });
+		}
 	});
 });

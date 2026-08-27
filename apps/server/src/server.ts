@@ -583,17 +583,11 @@ export default async function startServer(options?: {
 		}
 
 		if (!existsSync(validatedSslKeyPath)) {
-			// Don't expose paths in error messages
-			console.error("SSL key file not found", {
-				path: validatedSslKeyPath,
-			});
+			console.error("SSL key file not found");
 			throw new Error("SSL key file not found. Check server logs for details.");
 		}
 		if (!existsSync(validatedSslCertPath)) {
-			// Don't expose paths in error messages
-			console.error("SSL certificate file not found", {
-				path: validatedSslCertPath,
-			});
+			console.error("SSL certificate file not found");
 			throw new Error(
 				"SSL certificate file not found. Check server logs for details.",
 			);

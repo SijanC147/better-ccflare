@@ -32,6 +32,11 @@ export type ModelMappingData = {
 export type ModelFallback = { [modelFamily: string]: string };
 export * from "./alert-events";
 export {
+	formatBuildIdentity,
+	normalizeBuildCommit,
+	normalizeBuildVersion,
+} from "./build-identity";
+export {
 	type IntervalConfig,
 	intervalManager,
 	registerCleanup,
@@ -78,6 +83,14 @@ export {
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";
+export {
+	type ResolveResult,
+	ResolverManager,
+	type ResolverOptions,
+	type ResolverProjectInput,
+	type ResolverRuleInput,
+	ResolverSnapshot,
+} from "./project-resolver";
 export * from "./request-events";
 export * from "./strategy";
 export {
@@ -97,18 +110,11 @@ export {
 	validateString,
 } from "./validation";
 export {
-	ResolverManager,
-	ResolverSnapshot,
-	type ResolverOptions,
-	type ResolverProjectInput,
-	type ResolverRuleInput,
-	type ResolveResult,
-} from "./project-resolver";
-
-export {
 	CLAUDE_CLI_VERSION,
 	extractClaudeVersion,
+	getBuildIdentitySync,
 	getClientVersion,
+	getCommitSync,
 	getVersion,
 	getVersionSync,
 	trackClientVersion,

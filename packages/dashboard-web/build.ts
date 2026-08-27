@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import plugin from "bun-plugin-tailwind";
+import packageJson from "../../package.json";
 
 console.log("\n🚀 Building dashboard...\n");
 
@@ -14,6 +15,9 @@ if (existsSync(outdir)) {
 }
 
 const start = performance.now();
+const buildVersion =
+	process.env.BETTER_CCFLARE_BUILD_VERSION ?? packageJson.version;
+const buildCommit = process.env.BETTER_CCFLARE_BUILD_COMMIT ?? "development";
 
 const entrypoints = ["src/index.html"];
 console.log(`📄 Building dashboard from ${entrypoints[0]}\n`);
@@ -28,6 +32,8 @@ const result = await Bun.build({
 	splitting: true,
 	define: {
 		"process.env.NODE_ENV": JSON.stringify("production"),
+		__BETTER_CCFLARE_VERSION__: JSON.stringify(buildVersion),
+		__BETTER_CCFLARE_COMMIT__: JSON.stringify(buildCommit),
 	},
 });
 

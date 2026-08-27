@@ -16,8 +16,6 @@ packages/dashboard-web/dist/
 *.log
 tsconfig.tsbuildinfo
 packages/proxy/src/embedded-tiktoken-wasm.ts
-packages/database/src/inline-vacuum-worker.ts
-packages/database/src/inline-incremental-vacuum-worker.ts
 CLAUDE.md
 CLAUDE.original.md
 AGENTS.md
@@ -53,5 +51,3 @@ docs/superpowers/
 
 _archive.worktrees/
 _archive
-
-packages/database/src/inline-integrity-check-worker.ts

@@ -24,7 +24,7 @@ import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
 import { useAlerts } from "../hooks/queries";
 import { cn } from "../lib/utils";
-import { version } from "../lib/version";
+import { commit, version } from "../lib/version";
 import { CopyButton } from "./CopyButton";
 import { ThemeToggle } from "./theme-toggle";
 import { Button } from "./ui/button";
@@ -566,7 +566,7 @@ export function Navigation({
 							<div className="hidden lg:flex items-center justify-between">
 								<div className="flex items-center gap-2 text-xs text-muted-foreground">
 									<GitBranch className="h-3 w-3" />
-									<span>{version}</span>
+									<span title={`commit ${commit}`}>{version}</span>
 								</div>
 								<ThemeToggle />
 							</div>

@@ -114,8 +114,8 @@ describe("DiscoveryScheduler.runOnce()", () => {
 	});
 
 	test("sentinel path is filtered out", async () => {
-		// Create a project whose cwd resolves to /private/var/folders/... (tmpdir sentinel).
-		const sentinelCwd = path.join(os.tmpdir(), "some-claude-thing");
+		// Create a project in the macOS transient namespace filtered on every host.
+		const sentinelCwd = "/private/var/folders/some-claude-thing";
 		const encodedName = sentinelCwd.replace(/\//g, "-").replace(/^-/, "");
 		createProjectDir(tmpDir, encodedName, sentinelCwd);
 
@@ -132,7 +132,7 @@ describe("DiscoveryScheduler.runOnce()", () => {
 
 		// The sentinel path must not appear in the upsert call.
 		const paths = captured.map((r) => (r as { canonicalPath: string }).canonicalPath);
-		expect(paths.every((p) => !p.startsWith(os.tmpdir()))).toBe(true);
+		expect(paths).not.toContain(sentinelCwd);
 	});
 
 	test("start/stop registers and de-registers discovery runner", () => {
