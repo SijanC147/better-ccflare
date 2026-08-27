@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   release:
-    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml@67898bb09280a5325b89c1b23a70f2fc8b64ffae # v0.4.1
+    uses: SijanC147/hextap-toolkit/.github/workflows/release-go.yml@613f0d37a0c84cff20a8e277fc5e9c374f9cbc26 # v0.4.2
     with:
       manifest_path: .hextap.json
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}

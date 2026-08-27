@@ -3,8 +3,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const REPOSITORY_ROOT = join(import.meta.dir, "..");
-const TOOLKIT_SHA = "67898bb09280a5325b89c1b23a70f2fc8b64ffae";
-const TOOLKIT_TAG = "v0.4.1";
+const TOOLKIT_SHA = "613f0d37a0c84cff20a8e277fc5e9c374f9cbc26";
+const TOOLKIT_TAG = "v0.4.2";
 
 function read(relativePath: string): string {
 	return readFileSync(join(REPOSITORY_ROOT, relativePath), "utf8");

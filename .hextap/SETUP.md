@@ -34,4 +34,4 @@ Coordinator bootstrap/recovery is an external adopter task:
 4. Open one tap pull request that adds both `Projects/better-ccflare.json` and the release-backed `Formula/better-ccflare.rb`; merge only after tap CI passes.
 5. Dispatch the existing stable tag in `homebrew-only` mode to finish or recover publication. Do not create a replacement tag.
 
-The caller is pinned to stable toolkit tag `v0.4.1` at full commit `67898bb09280a5325b89c1b23a70f2fc8b64ffae`; keep both the tag comment and immutable SHA provenance when upgrading. Never replace the pin with `@main` or a floating major tag.
+The caller is pinned to stable toolkit tag `v0.4.2` at full commit `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26`; keep both the tag comment and immutable SHA provenance when upgrading. Never replace the pin with `@main` or a floating major tag.
