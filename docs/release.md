@@ -223,9 +223,13 @@ The tap is private. It is operator infrastructure, not a public installation cha
 
 ## Open questions
 
-- **Package/npm versioning policy.** `package.json` sits at `3.8.1` against a `3.8.2`
-  release. Should package versions track stable tags? Is npm still published, and from
-  which file? Undecided.
+- **Package versioning policy.** `package.json` sits at `3.8.1` against a `3.8.2` release.
+  Partly resolved: **this fork does not publish to npm.** The `better-ccflare` package is
+  upstream's (tombii, `3.5.69` at time of writing), so there is no fork npm version to keep
+  in sync and `cd apps/cli && bun publish` is not part of any release path here. What
+  remains open is whether `package.json` should track stable tags for other reasons — it is
+  what source-mode `--version` and `bun run build` report, so the divergence is visible to
+  developers even though release binaries are always correct.
 - **Signing and notarization.** Not implemented for macOS or Windows.
 - **No CHANGELOG.** `docs/contributing.md` recommends one; the repository has none.
 
