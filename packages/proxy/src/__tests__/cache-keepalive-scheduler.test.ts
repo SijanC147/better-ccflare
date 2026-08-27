@@ -151,6 +151,15 @@ function resetStore(): void {
 // ---------------------------------------------------------------------------
 
 describe("CacheKeepaliveScheduler", () => {
+	// Bun runs test files in one process and shares globals across them, so this
+	// suite must hand back exactly the fetch it was given. The previous teardown
+	// assigned `undefined` under a comment claiming that let Bun restore the
+	// native implementation — it does not. It destroyed fetch for the remainder
+	// of the run, and every later file calling it failed with
+	// "TypeError: fetch is not a function" (9 failures across
+	// request-handler-client-abort.test.ts and bun-leak-273-safety.test.ts).
+	const originalFetch = globalThis.fetch;
+
 	beforeEach(() => {
 		resetMocks();
 		resetStore();
@@ -159,9 +168,7 @@ describe("CacheKeepaliveScheduler", () => {
 	});
 
 	afterEach(() => {
-		// Restore fetch to the real implementation.
-		// @ts-expect-error — resetting to undefined lets bun restore native fetch.
-		globalThis.fetch = undefined;
+		globalThis.fetch = originalFetch;
 		resetStore();
 	});
 

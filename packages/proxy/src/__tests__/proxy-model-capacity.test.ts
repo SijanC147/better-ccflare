@@ -272,7 +272,15 @@ function makeComboAccount(overrides: Partial<Account> = {}): Account {
 }
 
 describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
+	// Several tests below replace globalThis.fetch with a mock. Bun shares
+	// globals across test files in a run, so a mock left installed here leaks
+	// into every file that runs afterwards — the abort-semantics suites in
+	// request-handler-client-abort.test.ts and bun-leak-273-safety.test.ts
+	// exercise real fetch behaviour and fail against a stub.
+	const originalFetch = globalThis.fetch;
+
 	afterEach(() => {
+		globalThis.fetch = originalFetch;
 		usageCache.clear();
 		delete process.env.CCFLARE_DISABLE_COMBO_SESSION_FALLBACK;
 	});
