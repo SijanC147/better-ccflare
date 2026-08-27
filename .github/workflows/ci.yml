@@ -60,11 +60,11 @@ jobs:
           path: source
           persist-credentials: false
 
-      - name: Check out Hextap v0.4.1 contract
+      - name: Check out Hextap v0.4.2 contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: 67898bb09280a5325b89c1b23a70f2fc8b64ffae
+          ref: 613f0d37a0c84cff20a8e277fc5e9c374f9cbc26
           path: toolkit
           persist-credentials: false
 
