@@ -42,14 +42,36 @@ owns it for idempotency.
 
 ### The 11 remaining failures are upstream's, not ours
 
-All three clusters — `issue #273 forwarded bodies`, `AgentRegistry workspace persistence`,
-`makeProxyRequest` — pass in isolation and fail only in a full run: cross-file `mock.module`
-pollution. All three victim files are upstream-only (absent from the fork pre-merge).
+Two distinct causes, both in upstream files byte-identical to `4d27cb22`:
 
-Verified by running upstream's own suite standalone at `4d27cb22`: **182 fail / 2,507 pass**,
-including every one of these clusters. Inherited, not introduced. Upstream's entire
-`CLI Integration Tests` and `AutoRefreshScheduler` suites are also red on their own main and
-green here.
+**9 from destroyed global fetch.** `packages/proxy/src/__tests__/cache-keepalive-scheduler.test.ts`
+does this in `afterEach`:
+
+```ts
+// Restore fetch to the real implementation.
+// @ts-expect-error — resetting to undefined lets bun restore native fetch.
+globalThis.fetch = undefined;
+```
+
+The comment is wrong: assigning `undefined` does not restore Bun's native fetch, it destroys it
+for the rest of the process. Every later file calling global fetch dies with
+`TypeError: fetch is not a function` — hence the sub-millisecond failures in
+`request-handler-client-abort.test.ts` (6) and `bun-leak-273-safety.test.ts` (3). This is not
+`mock.module` pollution and `mock.restore()` would not help. Minimal repro:
+
+```sh
+bun test packages/proxy/src/__tests__/cache-keepalive-scheduler.test.ts \
+         packages/proxy/src/handlers/__tests__/request-handler-client-abort.test.ts
+```
+
+**2 from a macOS-only path assertion.** `packages/agents/src/__tests__/discovery-workspace-isolation.test.ts`
+fails *standalone*, not from pollution: it expects `/private/var/folders/…` where the registry
+stores `/var/folders/…`. `fs.realpathSync` resolves the macOS symlink; the assertion does not.
+Would pass on Linux CI. (`discovery.test.ts` is clean — 15/15 everywhere.)
+
+Verified inherited by running upstream's own suite standalone at `4d27cb22`: **182 fail /
+2,507 pass**, including every one of these clusters. Upstream's entire `CLI Integration Tests`
+and `AutoRefreshScheduler` suites are also red on their own main and green here.
 
 ### Defects found that produced NO merge conflict
 
