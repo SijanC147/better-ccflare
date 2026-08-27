@@ -104,6 +104,7 @@ A release is a pushed annotated tag on protected main — nothing else starts on
 ## More Details
 
 - **Releases & publishing**: `docs/release.md` (tracked)
+- **Upstream sync calibration**: `docs/upstream-sync.md` (tracked)
 - **CLI & account setup**: `.claude/docs/cli-commands.md` *(gitignored — absent in fresh clones)*
 - **Database configuration**: `.claude/docs/database.md` *(gitignored)*
 - **GitNexus code intelligence**: `.claude/docs/gitnexus.md` *(gitignored)*
@@ -119,7 +120,7 @@ A release is a pushed annotated tag on protected main — nothing else starts on
 
 - Backlog: `SB23-313` (28 pre-existing biome lint errors), `SB23-314` (9 bun-test teardown unhandled rejections) — both non-blocking tech debt
 - Upstream sync: last completed PR #33 (2026-07-03). Next `/sync-upstream` anchor: `last-sync-sha 412e6326` in `MERGELOG.md`. **PR #35 is open and conflicting** — a raw `tombii:main → main` pull, not a curated sync. Do not merge it; supersede with a fresh `sync/upstream-*` branch that preserves the Hextap files
-- `/sync-upstream` command is stale (predates Hextap) — retool before use
+- `/sync-upstream` is now a **user-scoped, repo-agnostic** command; this repo's specifics live in tracked `docs/upstream-sync.md` (remotes, ref-ambiguity, protection, commands, generated files, inviolable Hextap paths, standing conflict resolutions, and the "breaks without conflicting" audit). Read that before any sync
 - `incrementalVacuumAdaptive > shrinks the freelist end-to-end` is timing-sensitive: 5.42s against Bun's 5s default on one hosted run, ~1.6s in PR CI. Fix the test, don't normalize reruns
 
 ## Commit Messages
