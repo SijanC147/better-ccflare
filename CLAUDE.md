@@ -120,10 +120,11 @@ A release is a pushed annotated tag on protected main — nothing else starts on
 
 ## Next Actions
 
-- Backlog: `SB23-313` (28 pre-existing biome lint errors), `SB23-314` (9 bun-test teardown unhandled rejections) — both non-blocking tech debt
-- Upstream sync: last completed PR #33 (2026-07-03). Next `/sync-upstream` anchor: `last-sync-sha 412e6326` in `MERGELOG.md`. **PR #35 is open and conflicting** — a raw `tombii:main → main` pull, not a curated sync. Do not merge it; supersede with a fresh `sync/upstream-*` branch that preserves the Hextap files
-- `/sync-upstream` is now a **user-scoped, repo-agnostic** command; this repo's specifics live in tracked `docs/upstream-sync.md` (remotes, ref-ambiguity, protection, commands, generated files, inviolable Hextap paths, standing conflict resolutions, and the "breaks without conflicting" audit). Read that before any sync
-- `incrementalVacuumAdaptive > shrinks the freelist end-to-end` is timing-sensitive: 5.42s against Bun's 5s default on one hosted run, ~1.6s in PR CI. Fix the test, don't normalize reruns
+- Backlog: `SB23-313` (28 pre-existing biome lint errors), `SB23-314` (non-deterministic `bun test` exit code — downgraded to Low 2026-08-28; the original evidence compared different checkouts rather than repeats in one tree, and the exit code is now consistently 1, correctly reflecting the two macOS-only failures) — both non-blocking tech debt
+- Two tests fail on macOS only and pass on Linux CI: `AgentRegistry — injected workspace persistence` (both cases). Cause is macOS `/var` → `/private/var` realpath, not a defect. Do not "fix" them by loosening the assertion
+- Upstream sync: last completed PR #41 (2026-08-28, 624 commits `412e6326..4d27cb22`). Next `/sync-upstream` anchor: `last-sync-sha 4d27cb22` in `MERGELOG.md`. PR #35 (raw `tombii:main → main` pull) was closed unmerged — it would have dropped the Hextap files; never merge that bot PR
+- `/sync-upstream` is a **user-scoped, repo-agnostic** command; this repo's specifics live in tracked `docs/upstream-sync.md` (remotes, ref-ambiguity, protection, commands, generated files, inviolable Hextap paths, standing conflict resolutions, and the "breaks without conflicting" audit). Read that before any sync
+- `brew hextap validate --build` refuses unless the local Bun is **exactly 1.3.14** (CI pin). A newer local Bun can still run every other gate step — the five-target compile is proven by cutting an `-rc.N` tag instead
 
 ## Commit Messages
 
