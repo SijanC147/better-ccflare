@@ -109,7 +109,16 @@ describe("models.dev pricing", () => {
 });
 
 describe("NanoGPT Pricing", () => {
+	// Several tests below assign global.fetch a vi.fn() mock and never hand it
+	// back. Bun shares globals across test files in a run, so the mock outlives
+	// this file and every later suite that calls fetch receives it instead of
+	// the real implementation — surfacing as `response.status === undefined`
+	// in the proxy abort-semantics suites. The sibling "models.dev pricing"
+	// describe above already does this correctly; this block did not.
+	let originalFetch: typeof global.fetch;
+
 	beforeEach(() => {
+		originalFetch = global.fetch;
 		// Clear any existing intervals
 		stopNanoGPTPricingRefresh();
 		// Reset the global cache state to ensure test isolation
@@ -117,6 +126,10 @@ describe("NanoGPT Pricing", () => {
 
 		// Clear mocks
 		vi.clearAllMocks();
+	});
+
+	afterEach(() => {
+		global.fetch = originalFetch;
 	});
 
 	afterEach(() => {
