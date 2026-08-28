@@ -115,7 +115,7 @@ A release is a pushed annotated tag on protected main — nothing else starts on
 
 - `linear_project`: better-ccflare — id `4317856f-1f0f-449a-b311-c211d5fc6528`, team `SB23`
 - URL: https://linear.app/sb23/project/better-ccflare-9139ce4ab6ff
-- `linear_last_sync`: 2026-08-27 @ fb95f734
+- `linear_last_sync`: 2026-08-28 @ 7d95892b
 - Hextap migration tracked as `SB23-642` (Done) — canonical audit trail for why the release architecture looks the way it does
 
 ## Next Actions
