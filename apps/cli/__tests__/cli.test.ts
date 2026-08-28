@@ -3,6 +3,12 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// The CLI reports its version from apps/cli/package.json in source mode. Deriving
+// the expectation from the same file keeps these assertions correct across releases
+// instead of hardcoding a literal that every version bump silently invalidates.
+import cliPackageJson from "../package.json";
+
+const EXPECTED_VERSION_LINE = `better-ccflare ${cliPackageJson.version} (commit `;
 
 const CLI_PATH = join(process.cwd(), "apps/cli/src/main.ts");
 
@@ -127,7 +133,7 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["-v"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare 3.8.1 (commit ");
+			expect(result.stdout).toContain(EXPECTED_VERSION_LINE);
 		});
 
 		it("should exit quickly for version command", async () => {
@@ -316,7 +322,7 @@ describe("CLI Integration Tests", () => {
 
 			// Version should take precedence and exit early
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare 3.8.1 (commit ");
+			expect(result.stdout).toContain(EXPECTED_VERSION_LINE);
 		});
 
 		it("should not treat an option value named -v as the version flag", async () => {

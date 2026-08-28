@@ -46,9 +46,9 @@ form is accepted only when validating the historical `3.8.1` binary.
 
 Consequences worth internalizing:
 
-- **Hextap does not edit `package.json` or `apps/cli/package.json`.** They currently read
-  `3.8.1` while the published release is `3.8.2`. That divergence is expected, not a bug —
-  though the npm-versioning policy is still undecided (see Open questions).
+- **Hextap does not edit `package.json` or `apps/cli/package.json`.** It reads the tag and
+  injects it; nothing writes back. **Policy: bump them yourself, before tagging**, so the
+  manifests always match the version about to be released. See *Cutting a release* below.
 - `packages/core/src/version.ts` is **not** a version-bump target. It holds
   `CLAUDE_CLI_VERSION` (the Claude CLI user-agent string) and the compile-time define
   declarations. Do not put a release number there.
@@ -135,6 +135,37 @@ those three paths afterward. If you did not change worker source and they still 
 that is a signal — usually the wrong Bun version — not churn to commit away.
 
 ## Cutting a release
+
+### Bump the manifests first
+
+**Decided 2026-08-28: package versions are not independent of the release.** Before tagging
+`vX.Y.Z`, set that exact version in both manifests, in its own PR merged ahead of the tag:
+
+```
+package.json           "version": "X.Y.Z"
+apps/cli/package.json  "version": "X.Y.Z"
+```
+
+Nothing else carries a release version. `packages/core/src/version.ts` holds
+`CLAUDE_CLI_VERSION` (the Claude CLI user-agent) and the compile-time define declarations —
+**not** a version-bump target. `apps/cli/__tests__/cli.test.ts` derives its expectation from
+`apps/cli/package.json` rather than hardcoding, so it follows the bump automatically.
+
+Two things that look like they need updating and do not:
+
+- **`bun.lock`** carries a stale `"version"` under the `apps/cli` workspace entry. `bun
+  install` does not rewrite it on a version-only change, and `bun install --frozen-lockfile`
+  passes regardless — the field is informational and bun resolves workspaces by path.
+  Verified 2026-08-28. (The v3.8.0 release failure was a *missing workspace package*, which
+  is a different problem and does require a regenerated committed lockfile.)
+- **npm.** This fork does not publish there; `better-ccflare` on npm is upstream's package.
+  `cd apps/cli && bun publish` is not part of any release path here.
+
+Why bother, given Hextap injects the tag version into release binaries regardless: source-mode
+`bun run cli --version` and everyday `bun run build` both report the manifest version, so a
+stale manifest misleads developers even while released binaries stay correct.
+
+### Cutting the tag
 
 Verify you are on clean, current, protected `main` with both CI jobs green on the merge
 commit, then run the full local gate plus:
@@ -223,13 +254,6 @@ The tap is private. It is operator infrastructure, not a public installation cha
 
 ## Open questions
 
-- **Package versioning policy.** `package.json` sits at `3.8.1` against a `3.8.2` release.
-  Partly resolved: **this fork does not publish to npm.** The `better-ccflare` package is
-  upstream's (tombii, `3.5.69` at time of writing), so there is no fork npm version to keep
-  in sync and `cd apps/cli && bun publish` is not part of any release path here. What
-  remains open is whether `package.json` should track stable tags for other reasons — it is
-  what source-mode `--version` and `bun run build` report, so the divergence is visible to
-  developers even though release binaries are always correct.
 - **Signing and notarization.** Not implemented for macOS or Windows.
 - **No CHANGELOG.** `docs/contributing.md` recommends one; the repository has none.
 
