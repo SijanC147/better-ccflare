@@ -1,4 +1,10 @@
-import type { AgentUpdatePayload, Project, WorktreeRule } from "@better-ccflare/types";
+import { getModelDisplayName } from "@better-ccflare/core";
+import type {
+	AgentUpdatePayload,
+	Project,
+	WorktreeRule,
+} from "@better-ccflare/types";
+import { COMMON_MODELS } from "@better-ccflare/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { queryKeys } from "../lib/query-keys";
@@ -82,6 +88,17 @@ export const useAccounts = () => {
 		queryFn: () => api.getAccounts(),
 		staleTime: 20000, // Consider data fresh for 20 seconds
 		refetchInterval: 60000, // Refresh every minute for usage data
+		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
+		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
+	});
+};
+
+export const useRoutingObservations = () => {
+	return useQuery({
+		queryKey: queryKeys.routingObservations(),
+		queryFn: () => api.getRoutingObservations(),
+		staleTime: 20000, // Consider data fresh for 20 seconds
+		refetchInterval: 60000, // Same cadence as useAccounts -- both drive the pool cards
 		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
 		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
 	});
@@ -229,10 +246,34 @@ export const useCacheInsights = (timeRange: string, threshold?: number) => {
 	});
 };
 
+export const useUsageHistory = (account: string, range: string) => {
+	return useQuery({
+		queryKey: queryKeys.usageHistory(account, range),
+		queryFn: () => api.getUsageHistory(account, range),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 15 * 60 * 1000,
+		enabled: !!account,
+	});
+};
+
 export const useContextInsights = (timeRange: string) => {
 	return useQuery({
 		queryKey: queryKeys.insightsContext(timeRange),
 		queryFn: () => api.getContextInsights(timeRange),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 15 * 60 * 1000,
+		enabled: !!timeRange,
+	});
+};
+
+export const useAnomalyInsights = (timeRange: string) => {
+	return useQuery({
+		queryKey: queryKeys.insightsAnomalies(timeRange),
+		queryFn: () => api.getAnomalyInsights(timeRange),
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
@@ -283,12 +324,14 @@ export const useRemoveAccount = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: ({
+			id,
 			name,
 			confirmInput,
 		}: {
+			id: string;
 			name: string;
 			confirmInput: string;
-		}) => api.removeAccount(name, confirmInput),
+		}) => api.removeAccount(id, name, confirmInput),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
 		},
@@ -321,11 +364,20 @@ export const useResetStats = () => {
 	});
 };
 
+/**
+ * Sentinel select value for "remove the explicit preference" — routed to
+ * DELETE /api/agents/:id/preference instead of the POST update (which
+ * requires a concrete model). Deliberately not a valid model id.
+ */
+export const AGENT_DEFAULT_MODEL_SENTINEL = "__agent_default__";
+
 export const useUpdateAgentPreference = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: ({ agentId, model }: { agentId: string; model: string }) =>
-			api.updateAgentPreference(agentId, model),
+			model === AGENT_DEFAULT_MODEL_SENTINEL
+				? api.clearAgentPreference(agentId)
+				: api.updateAgentPreference(agentId, model),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.agents() });
 		},
@@ -362,6 +414,46 @@ export const useBulkUpdateAgentPreferences = () => {
 		mutationFn: (model: string) => api.setBulkAgentPreferences(model),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.agents() });
+		},
+	});
+};
+
+export const useModels = () => {
+	return useQuery({
+		queryKey: queryKeys.models(),
+		queryFn: () => api.getModels(),
+		staleTime: 2 * 60 * 1000, // Consider data fresh for 2 minutes
+		refetchInterval: 5 * 60 * 1000, // Poll every 5 minutes
+		refetchIntervalInBackground: false,
+		gcTime: 30 * 60 * 1000, // Keep in cache for 30 minutes
+	});
+};
+
+/**
+ * Model select options, sourced from the live Anthropic model catalog when
+ * available. Falls back to the bundled static list while the catalog is
+ * loading or if it comes back empty for any reason.
+ */
+export const useModelOptions = (): { id: string; displayName: string }[] => {
+	const { data: modelCatalog } = useModels();
+
+	return modelCatalog && modelCatalog.models.length > 0
+		? modelCatalog.models.map((m) => ({
+				id: m.id,
+				displayName: m.displayName,
+			}))
+		: COMMON_MODELS.map((id) => ({
+				id,
+				displayName: getModelDisplayName(id),
+			}));
+};
+
+export const useRefreshModels = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: () => api.refreshModels(),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.models() });
 		},
 	});
 };
@@ -479,6 +571,42 @@ export const useSetUsageThrottling = () => {
 	});
 };
 
+export const useStrategy = () => {
+	return useQuery({
+		queryKey: ["strategy"],
+		queryFn: () => api.getStrategy(),
+	});
+};
+
+export const useSetStrategy = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (strategy: string) => api.setStrategy(strategy),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["strategy"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+		},
+	});
+};
+
+export const useModelCapacityRouting = () => {
+	return useQuery({
+		queryKey: ["model-capacity-routing"],
+		queryFn: () => api.getModelCapacityRouting(),
+	});
+};
+
+export const useSetModelCapacityRouting = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (mode: "off" | "exhausted") =>
+			api.setModelCapacityRouting(mode),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["model-capacity-routing"] });
+		},
+	});
+};
+
 export const useCleanupNow = () => {
 	return useMutation({
 		mutationFn: () => api.cleanupNow(),
@@ -588,6 +716,7 @@ export const useUpdateCombo = () => {
 export const useGetCombo = (id: string | null) => {
 	return useQuery({
 		queryKey: ["combo", id],
+		// biome-ignore lint/style/noNonNullAssertion: queryFn only runs when `enabled: !!id` is true, so id is guaranteed non-null here — TS can't see the enabled/queryFn connection.
 		queryFn: () => api.getCombo(id!),
 		enabled: !!id,
 	});
@@ -711,7 +840,11 @@ export const useUpdateProject = () => {
 			body,
 		}: {
 			id: string;
-			body: Partial<{ display_name: string; enabled: boolean; parent_project_id: string | null }>;
+			body: Partial<{
+				display_name: string;
+				enabled: boolean;
+				parent_project_id: string | null;
+			}>;
 		}) => api.updateProject(id, body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.projectsAll() });
@@ -761,8 +894,12 @@ export const useWorktreeRules = () => {
 export const useCreateWorktreeRule = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (body: { kind: string; pattern: string; parent_project_id?: string | null; priority?: number }) =>
-			api.createWorktreeRule(body),
+		mutationFn: (body: {
+			kind: string;
+			pattern: string;
+			parent_project_id?: string | null;
+			priority?: number;
+		}) => api.createWorktreeRule(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });
 		},
@@ -777,7 +914,13 @@ export const useUpdateWorktreeRule = () => {
 			body,
 		}: {
 			id: string;
-			body: Partial<{ kind: string; pattern: string; parent_project_id: string | null; priority: number; enabled: boolean }>;
+			body: Partial<{
+				kind: string;
+				pattern: string;
+				parent_project_id: string | null;
+				priority: number;
+				enabled: boolean;
+			}>;
 		}) => api.updateWorktreeRule(id, body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });

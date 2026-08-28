@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Config } from "@better-ccflare/config";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import type {
@@ -66,13 +66,29 @@ const mockExchangeCode = mock(
 	}),
 );
 
+// mock.module replaces the WHOLE module globally and across file boundaries
+// in Bun (no per-file isolation without --isolate), so spread the real
+// module's exports and only override getOAuthProvider — otherwise other test
+// files importing @better-ccflare/providers later in the same process (e.g.
+// request-handler.test.ts, model-catalog.test.ts) would lose every other
+// export this file doesn't otherwise need to touch.
+const actualProviders = await import("@better-ccflare/providers");
+
 mock.module("@better-ccflare/providers", () => ({
+	...actualProviders,
 	getOAuthProvider: (_name: string) => ({
 		exchangeCode: mockExchangeCode,
 		getOAuthConfig: (_mode: string) => ({ ...testOauthConfig }),
 		generateAuthUrl: mock(() => "https://example.com/oauth/authorize?mock"),
 	}),
 }));
+
+// Restore the real module once this file's tests finish so later test files
+// in the same process resolve the real @better-ccflare/providers exports
+// again.
+afterAll(() => {
+	mock.module("@better-ccflare/providers", () => actualProviders);
+});
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -119,6 +135,7 @@ describe("OAuthFlow.completeReauth", () => {
 		expect(sql).toMatch(/refresh_token/i);
 		expect(sql).toMatch(/access_token/i);
 		expect(sql).toMatch(/expires_at/i);
+		expect(sql).toMatch(/requires_reauth\s*=\s*0/i);
 		// Params: [refreshToken, accessToken, expiresAt, refreshTokenIssuedAt, accountId]
 		expect(params[0]).toBe("new-refresh-token");
 		expect(params[1]).toBe("new-access-token");
@@ -166,6 +183,7 @@ describe("OAuthFlow.completeReauth", () => {
 			const [sql, params] = runSpy.mock.calls[0];
 			expect(sql).toMatch(/UPDATE\s+accounts/i);
 			expect(sql).toMatch(/api_key/i);
+			expect(sql).toMatch(/requires_reauth\s*=\s*0/i);
 			expect(params[0]).toBe("sk-console-api-key");
 			expect(params[1]).toBe(accountId);
 		} finally {

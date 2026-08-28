@@ -120,9 +120,9 @@ export function BaseScatterChart({
 								: undefined
 						}
 					/>
-					{/* biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined */}
 					<Tooltip
 						contentStyle={tooltipStyles}
+						// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 						formatter={tooltipFormatter as any}
 					/>
 					<Scatter
@@ -136,8 +136,8 @@ export function BaseScatterChart({
 							data.map((entry) => (
 								<text
 									key={`label-${entry[xKey]}-${entry[yKey]}`}
-									x={entry[xKey]}
-									y={entry[yKey]}
+									x={entry[xKey] ?? undefined}
+									y={entry[yKey] ?? undefined}
 									dy={-10}
 									textAnchor="middle"
 									className="text-xs fill-foreground"

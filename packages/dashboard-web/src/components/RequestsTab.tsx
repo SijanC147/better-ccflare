@@ -26,6 +26,7 @@ import { useMemo, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { useAccounts, useApiKeys, useRequests } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
+import { attributionSourceLabel } from "../lib/attribution";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
@@ -1580,7 +1581,15 @@ export function RequestsTab() {
 									: null);
 							const agent = summary?.agentUsed || request.meta.agentUsed;
 							const project = summary?.project || request.meta.project;
-							const worktreePath = summary?.worktreePath || request.meta.worktreePath;
+							const worktreePath =
+								summary?.worktreePath || request.meta.worktreePath;
+							const agentSrcLabel = attributionSourceLabel(
+								summary?.agentAttributionSource ||
+									request.meta.agentAttributionSource,
+							);
+							const projectSrcLabel = attributionSourceLabel(
+								summary?.projectAttributionSource,
+							);
 							const isZaiPeak =
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
@@ -1597,8 +1606,12 @@ export function RequestsTab() {
 											: statusCode >= 500
 												? "bg-red-500/10 text-red-600 dark:text-red-400"
 												: "bg-muted text-muted-foreground";
-							const modelColor = summary?.model ? getModelColor(summary.model) : null;
-							const accountColor = getAccountBadgeColor(request.meta.accountName);
+							const modelColor = summary?.model
+								? getModelColor(summary.model)
+								: null;
+							const accountColor = getAccountBadgeColor(
+								request.meta.accountName,
+							);
 
 							return (
 								<div
@@ -1705,6 +1718,7 @@ export function RequestsTab() {
 
 									{/* Badges row: wraps freely, holds all the non-essential context */}
 									{(summary?.model ||
+										summary?.project ||
 										agent ||
 										project ||
 										worktreePath ||
@@ -1735,6 +1749,11 @@ export function RequestsTab() {
 												>
 													<FolderOpen className="h-3 w-3 mr-1" />
 													{project}
+													{projectSrcLabel && (
+														<span className="text-muted-foreground/70 ml-1">
+															· {projectSrcLabel}
+														</span>
+													)}
 												</Badge>
 											)}
 											{worktreePath && (
@@ -1743,16 +1762,19 @@ export function RequestsTab() {
 													className="text-xs border-teal-500 text-teal-600 dark:text-teal-400"
 												>
 													<GitBranch className="h-3 w-3 mr-1" />
-													{worktreePath
-														.split("/")
-														.filter(Boolean)
-														.pop() || "worktree"}
+													{worktreePath.split("/").filter(Boolean).pop() ||
+														"worktree"}
 												</Badge>
 											)}
 											{agent && (
 												<Badge variant="secondary" className="text-xs">
 													<Bot className="h-3 w-3 mr-1" />
 													{agent}
+													{agentSrcLabel && (
+														<span className="text-muted-foreground/70 ml-1">
+															· {agentSrcLabel}
+														</span>
+													)}
 												</Badge>
 											)}
 											{summary?.comboName && (

@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import type {
 	Account,
 	ComboWithSlots,
@@ -6,12 +6,17 @@ import type {
 } from "@better-ccflare/types";
 import {
 	getComboSlotInfo,
+	resolveEffectiveModel,
 	selectAccountsForRequest,
 	setComboSlotInfo,
 } from "../account-selector";
 import type { ProxyContext } from "../proxy-types";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
+
+afterEach(() => {
+	delete process.env.CCFLARE_DISABLE_COMBO_SESSION_FALLBACK;
+});
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -262,6 +267,43 @@ describe("selectAccountsForRequest — combo routing", () => {
 		expect(slotInfo?.slots[0]?.modelOverride).toBe("claude-opus-4-5");
 	});
 
+	// An empty slot model means passthrough: the client's requested model is
+	// sent upstream untouched. The slot still routes to its account - only the
+	// override is absent. Downstream (proxy-operations.ts) guards with
+	// `if (modelOverride && ...)`, so an empty string already means "do not
+	// overwrite the model"; this test pins that the selector propagates it
+	// verbatim instead of substituting the request model.
+	it("propagates an empty slot model as an empty modelOverride (passthrough slot)", async () => {
+		const acc = makeAccount({ id: "acc-passthrough" });
+		const combo = makeCombo([
+			{
+				id: "slot-1",
+				combo_id: "combo-1",
+				account_id: "acc-passthrough",
+				model: "", // passthrough - no model override
+				priority: 0,
+				enabled: true,
+			},
+		]);
+
+		const ctx = makeCtx({ accounts: [acc], activeCombo: combo });
+		const meta = makeRequestMeta();
+
+		const result = await selectAccountsForRequest(
+			meta,
+			ctx,
+			"claude-sonnet-4-5",
+		);
+
+		expect(result.map((a) => a.id)).toEqual(["acc-passthrough"]);
+		const slotInfo = getComboSlotInfo(meta);
+		expect(slotInfo?.comboName).toBe("Test Combo");
+		expect(slotInfo?.slots).toEqual([
+			{ accountId: "acc-passthrough", modelOverride: "" },
+		]);
+		expect(meta.comboName).toBe("Test Combo");
+	});
+
 	it("sets meta.comboName when combo routing is active", async () => {
 		const acc = makeAccount({ id: "acc-1" });
 		const combo = makeCombo([
@@ -279,7 +321,7 @@ describe("selectAccountsForRequest — combo routing", () => {
 		const meta = makeRequestMeta();
 
 		await selectAccountsForRequest(meta, ctx, "claude-haiku-4-5");
-		expect((meta as any).comboName).toBe("Test Combo");
+		expect(meta.comboName).toBe("Test Combo");
 	});
 
 	it("skips disabled slots", async () => {
@@ -357,6 +399,54 @@ describe("selectAccountsForRequest — combo routing", () => {
 		expect(result[0]?.id).toBe("acc-fallback");
 	});
 
+	it("does not fall back to SessionStrategy when all combo slots are unavailable and combo fallback is disabled", async () => {
+		// Set through the config, not the environment: the variable is adopted
+		// into the config once at boot and no longer decides at request time.
+		const rateLimitedAcc = makeAccount({
+			id: "acc-1",
+			rate_limited_until: Date.now() + 3_600_000,
+		});
+		const fallbackAcc = makeAccount({ id: "acc-fallback" });
+
+		const combo = makeCombo([
+			{
+				id: "slot-1",
+				combo_id: "combo-1",
+				account_id: "acc-1",
+				model: "claude-sonnet-4-5",
+				priority: 0,
+				enabled: true,
+			},
+		]);
+
+		const select = mock(() => [fallbackAcc]);
+		const ctx = {
+			strategy: { select },
+			dbOps: {
+				getAllAccounts: mock(async () => [rateLimitedAcc, fallbackAcc]),
+				getActiveComboForFamily: mock(async () => combo),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+			config: { getComboSessionFallback: () => false },
+		} as unknown as ProxyContext;
+
+		const meta = makeRequestMeta();
+		const result = await selectAccountsForRequest(
+			meta,
+			ctx,
+			"claude-sonnet-4-5",
+		);
+
+		expect(result).toEqual([]);
+		expect(meta.comboName).toBe("Test Combo");
+		expect(getComboSlotInfo(meta)).toEqual({
+			comboName: "Test Combo",
+			slots: [],
+		});
+		expect(select).not.toHaveBeenCalled();
+	});
+
 	it("falls back to SessionStrategy when no combo is active for the model family", async () => {
 		const acc = makeAccount({ id: "acc-normal" });
 		const ctx = makeCtx({ accounts: [acc], activeCombo: null });
@@ -391,7 +481,10 @@ describe("selectAccountsForRequest — combo routing", () => {
 			ctx,
 			"gpt-4-turbo-unknown",
 		);
-		// getActiveComboForFamily should not be called for unknown families
+		// getActiveComboForFamily should not be called for unknown families.
+		// dbOps is a plain mock object (not a real DatabaseOperations instance),
+		// so the mock-specific assertion methods require escaping the type here.
+		// biome-ignore lint/suspicious/noExplicitAny: accessing bun:test mock assertion API on a test double
 		const ctxAny = ctx as any;
 		expect(ctxAny.dbOps.getActiveComboForFamily).not.toHaveBeenCalled();
 		expect(result[0]?.id).toBe("acc-normal");
@@ -644,5 +737,71 @@ describe("selectAccountsForRequest — paused accounts in combo", () => {
 			"claude-sonnet-4-5",
 		);
 		expect(result.map((a) => a.id)).toEqual(["acc-active"]);
+	});
+});
+
+// ── resolveEffectiveModel ──────────────────────────────────────────────────────
+
+describe("resolveEffectiveModel", () => {
+	it("returns the applied model when the interceptor rewrote the request", () => {
+		expect(resolveEffectiveModel("claude-opus-4-5", "claude-sonnet-4-5")).toBe(
+			"claude-opus-4-5",
+		);
+	});
+
+	it("falls back to the original request model when nothing was applied", () => {
+		expect(resolveEffectiveModel(null, "claude-sonnet-4-5")).toBe(
+			"claude-sonnet-4-5",
+		);
+		expect(resolveEffectiveModel(undefined, "claude-sonnet-4-5")).toBe(
+			"claude-sonnet-4-5",
+		);
+	});
+
+	it("returns null when neither an applied nor an original model is available", () => {
+		expect(resolveEffectiveModel(null, null)).toBeNull();
+		expect(resolveEffectiveModel(undefined, undefined)).toBeNull();
+	});
+});
+
+// ── selectAccountsForRequest — routes on the post-rewrite (effective) model ────
+
+describe("selectAccountsForRequest — routes on effective model, not the client's original model", () => {
+	it("combo routing matches the applied model's family, not the original request's family", async () => {
+		// Client requested a sonnet model, but the agent interceptor rewrote it
+		// to an opus model (e.g. via an agent preference). Routing must pick
+		// the combo for the *opus* family, mirroring what proxy.ts does by
+		// calling selectAccountsForRequest with resolveEffectiveModel's result
+		// instead of the raw client-requested model.
+		const opusAcc = makeAccount({ id: "acc-opus" });
+		const opusCombo = makeCombo([
+			{
+				id: "slot-1",
+				combo_id: "combo-opus",
+				account_id: "acc-opus",
+				model: "claude-opus-4-5",
+				priority: 0,
+				enabled: true,
+			},
+		]);
+
+		const ctx = makeCtx({ accounts: [opusAcc], activeCombo: opusCombo });
+		const meta = makeRequestMeta();
+
+		const originalModel = "claude-sonnet-4-5";
+		const appliedModel = "claude-opus-4-5"; // simulates interceptor rewrite
+		const effectiveModel = resolveEffectiveModel(appliedModel, originalModel);
+		expect(effectiveModel).toBe("claude-opus-4-5");
+
+		const result = await selectAccountsForRequest(
+			meta,
+			ctx,
+			effectiveModel ?? undefined,
+		);
+
+		expect(result.map((a) => a.id)).toEqual(["acc-opus"]);
+		const slotInfo = getComboSlotInfo(meta);
+		expect(slotInfo?.comboName).toBe("Test Combo");
+		expect(slotInfo?.slots[0]?.modelOverride).toBe("claude-opus-4-5");
 	});
 });

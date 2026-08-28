@@ -17,6 +17,7 @@ import {
 	DEFAULT_MISROUTING_MIN_OUTPUT_RATE_USD,
 	DEFAULT_MISROUTING_MIN_REQUESTS,
 	DEFAULT_Z_SCORE_THRESHOLD,
+	sanitizeProjectForDisplay,
 } from "../services/anomaly-insights";
 import {
 	buildCacheInsightsResponse,
@@ -177,6 +178,7 @@ interface AnomalyRequestSqlRow {
 	account: string | null;
 	model: string | null;
 	project: string | null;
+	agent_used: string | null;
 	input_tokens: number;
 	cache_read_input_tokens: number;
 	cache_creation_input_tokens: number;
@@ -190,7 +192,11 @@ function toAnomalyRequestRow(row: AnomalyRequestSqlRow): AnomalyRequestRow {
 		timestamp: Number(row.timestamp) || 0,
 		account: row.account,
 		model: row.model,
-		project: row.project,
+		// Defence in depth: sanitise the project field at the boundary so
+		// control chars / overly long prompt content cannot leak through
+		// the API response. The real extraction bug is upstream (#368).
+		project: sanitizeProjectForDisplay(row.project),
+		agentUsed: row.agent_used,
 		inputTokens: Number(row.input_tokens) || 0,
 		cacheReadInputTokens: Number(row.cache_read_input_tokens) || 0,
 		cacheCreationInputTokens: Number(row.cache_creation_input_tokens) || 0,
@@ -312,6 +318,7 @@ export function createAnomalyInsightsHandler(context: APIContext) {
 					a.name as account,
 					r.model as model,
 					r.project as project,
+					r.agent_used as agent_used,
 					COALESCE(r.input_tokens, 0) as input_tokens,
 					COALESCE(r.cache_read_input_tokens, 0) as cache_read_input_tokens,
 					COALESCE(r.cache_creation_input_tokens, 0) as cache_creation_input_tokens,
@@ -348,11 +355,22 @@ export function createAnomalyInsightsHandler(context: APIContext) {
 				modelIds.map((modelId, index) => [modelId, rateList[index]]),
 			);
 
+			// This endpoint uses the same row set for both baseline and scoring
+			// (baselineRows === scoringRows === rows), so the effective baseline
+			// window IS the user's selected `range`. Without this, meta always
+			// echoed the DEFAULT_BASELINE_WINDOW_MINUTES fallback (24h) inside
+			// buildAnomalyInsightsResponse regardless of which range was picked.
+			const baselineWindowMinutes = Math.max(
+				0,
+				Math.round((Date.now() - startMs) / 60_000),
+			);
+
 			return jsonResponse(
 				buildAnomalyInsightsResponse({
-					rows,
+					baselineRows: rows,
+					scoringRows: rows,
 					rates,
-					options: { ...options, truncated },
+					options: { ...options, baselineWindowMinutes, truncated },
 				}),
 			);
 		} catch (error) {

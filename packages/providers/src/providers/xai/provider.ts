@@ -1,9 +1,18 @@
-import { getEndpointUrl, validateEndpointUrl } from "@better-ccflare/core";
+import {
+	getEndpointUrl,
+	resolveXaiContextWindow,
+	validateEndpointUrl,
+} from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import type { OpenAIRequest } from "@better-ccflare/openai-formats";
 import type { Account } from "@better-ccflare/types";
+import {
+	registerProviderModelDefaultFactory,
+	resolveProviderModelDefault,
+} from "../../provider-model-defaults";
 import type { TokenRefreshResult } from "../../types";
 import { OpenAICompatibleProvider } from "../openai/provider";
+import { isOfficialXaiEndpoint } from "./cache-native";
 
 const log = new Logger("XaiProvider");
 
@@ -18,8 +27,27 @@ export const XAI_MODEL_MAPPINGS = {
 	fable: "grok-4.3",
 };
 
+registerProviderModelDefaultFactory("xai", XAI_MODEL_MAPPINGS);
+
+function resolvedXaiModelMappings(): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(XAI_MODEL_MAPPINGS).map(([family, factory]) => [
+			family,
+			resolveProviderModelDefault("xai", family) ?? factory,
+		]),
+	);
+}
+
 export class XaiProvider extends OpenAICompatibleProvider {
 	override name = "xai";
+
+	protected override resolveStreamContextWindow(
+		model: string,
+		account: Account | null,
+	): number | undefined {
+		if (!isOfficialXaiEndpoint(account)) return undefined;
+		return resolveXaiContextWindow(model)?.contextWindow;
+	}
 
 	override async refreshToken(
 		account: Account,
@@ -50,7 +78,12 @@ export class XaiProvider extends OpenAICompatibleProvider {
 					error?: string;
 					error_description?: string;
 				};
-				message = data.error_description || data.error || message;
+				// Preserve the machine-readable OAuth error code (e.g. "invalid_grant")
+				// ahead of the human description so the token-manager's requires_reauth
+				// detection can classify a dead xAI refresh token.
+				message =
+					[data.error, data.error_description].filter(Boolean).join(": ") ||
+					message;
 			} catch {
 				// Do not include raw response bodies in refresh errors; auth servers
 				// should not echo credentials, but keeping messages structured avoids
@@ -123,7 +156,7 @@ export class XaiProvider extends OpenAICompatibleProvider {
 			...account,
 			custom_endpoint: account.custom_endpoint ?? XAI_DEFAULT_ENDPOINT,
 			model_mappings:
-				account.model_mappings ?? JSON.stringify(XAI_MODEL_MAPPINGS),
+				account.model_mappings ?? JSON.stringify(resolvedXaiModelMappings()),
 		};
 	}
 

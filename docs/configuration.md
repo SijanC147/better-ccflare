@@ -9,6 +9,9 @@ This guide covers all configuration options for better-ccflare, including file-b
 - [Configuration File Format](#configuration-file-format)
 - [Configuration Options](#configuration-options)
 - [Environment Variables](#environment-variables)
+- [Model Catalog](#model-catalog)
+- [Editable Provider Model Defaults](#editable-provider-model-defaults)
+- [Force Account Model](#force-account-model)
 - [Runtime Configuration API](#runtime-configuration-api)
 - [Example Configurations](#example-configurations)
 - [Auto-Fallback Setup](#auto-fallback-setup)
@@ -66,7 +69,7 @@ The configuration file is stored at:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `lb_strategy` | string | `"session"` | Load balancing strategy. Only `"session"` is supported (using other strategies risks account bans) |
+| `lb_strategy` | string | `"session"` | Load balancing strategy. Use session-class strategies only: `"session"` (default), `"session-drain-soonest"` (same session semantics, prefers the soonest-resetting weekly window), or `"session-drain-soonest-strict"` (drain ranking applies to every selection; an active 5h session only breaks ties). Per-request spreading strategies risk account bans — see warning below |
 | `client_id` | string | `"9d1c250a-e61b-44d9-88ed-5944d1962f5e"` | OAuth client ID for authentication |
 | `retry_attempts` | number | `3` | Maximum number of retry attempts for failed requests |
 | `retry_delay_ms` | number | `1000` | Initial delay in milliseconds between retry attempts |
@@ -76,11 +79,13 @@ The configuration file is stored at:
 
 ### Load Balancing Strategy
 
-⚠️ **WARNING**: Only use the `session` strategy. Other strategies can trigger Claude's anti-abuse systems and result in account bans.
+⚠️ **WARNING**: Only use session-class strategies — `session` (default), `session-drain-soonest`, or `session-drain-soonest-strict`, which share the same 5-hour session semantics. Strategies that spread individual requests across accounts can trigger Claude's anti-abuse systems and result in account bans.
 
 | Strategy | Description | Use Case |
 |----------|-------------|----------|
-| `session` | Maintains client-account affinity for session duration, with automatic alignment to Anthropic OAuth usage window resets | Only supported strategy - mimics natural usage patterns and optimizes resource utilization |
+| `session` | Maintains client-account affinity for session duration, with automatic alignment to Anthropic OAuth usage window resets | Default and recommended - mimics natural usage patterns and optimizes resource utilization |
+| `session-drain-soonest` | Same session semantics as `session` (5h windows, auto-fallback, session stickiness), but at every fresh selection (session start/expiry, account unavailable) it prefers the account whose weekly_all usage window resets soonest, so weekly capacity is drained before it expires ("use it or lose it"). Active sessions are never preempted by drain ranking mid-window; the one deliberate exception is auto-fallback reactivation (same as `session`): an eligible account whose usage window has reset takes over immediately. Accounts without weekly telemetry rank last; ties fall back to priority, then utilization. Note: with several concurrently active sessions (opened by served requests, keepalive probes, or the usage poller), the MOST RECENTLY started session holds all traffic — the drain ranking only orders the failover tail | Multi-account pools with staggered weekly resets where unused weekly capacity should be consumed before it is lost |
+| `session-drain-soonest-strict` | Same strategy class in strict mode: one canonical comparator ranks every available account at every selection — earliest future weekly_all reset first, then active-session status as the tie-break (an active 5h session no longer pins the account), then priority, utilization, and account id. The drain-earliest account keeps winning even after its own 5h window ages out; with all weekly resets unknown (cold usage cache right after a restart) the incumbent active account keeps the traffic. Auto-fallback reactivation still forces position 0 | Pools where traffic must actually follow the earliest-resetting account instead of the most recently started session |
 
 ### Logging Configuration (Environment Only)
 
@@ -120,9 +125,76 @@ These environment variables are not stored in the configuration file and must be
 | `DATABASE_URL` | Use PostgreSQL instead of SQLite. Set to a `postgresql://` or `postgres://` connection string. When set, `better-ccflare_DB_PATH` is ignored. | - | `DATABASE_URL=postgresql://user:pass@localhost:5432/ccflare` |
 | `CF_PRICING_REFRESH_HOURS` | Hours between pricing data refreshes | `24` | `CF_PRICING_REFRESH_HOURS=12` |
 | `CF_PRICING_OFFLINE` | Disable online pricing updates | - | `CF_PRICING_OFFLINE=1` |
+| `CF_PRICING_TIMEOUT_MS` | Pricing estimate deadline in milliseconds. Accepts integers from `1` through `60000`; unset or invalid values fall back to `5000` | `5000` | `CF_PRICING_TIMEOUT_MS=10000` |
+| `BETTER_CCFLARE_MODELS_REFRESH_HOURS` | Hours between scheduled model catalog refreshes; `0` disables scheduled refresh entirely | `168` (7 days) | `BETTER_CCFLARE_MODELS_REFRESH_HOURS=48` |
+| `BETTER_CCFLARE_MODELS_OFFLINE` | Disable scheduled/manual model catalog refresh **and** passive `/v1/models` capture | - | `BETTER_CCFLARE_MODELS_OFFLINE=1` |
+| `BETTER_CCFLARE_MODELS_CACHE_DIR` | Directory for the persisted model catalog cache file. Use a persistent directory (not a tmpdir that's wiped on restart) to keep the refresh schedule stable across restarts | Platform tmp dir | `BETTER_CCFLARE_MODELS_CACHE_DIR=/var/lib/better-ccflare` |
+| `BETTER_CCFLARE_MODELS_OAUTH_REFRESH` | Allow OAuth accounts as a fallback source for *scheduled* model catalog refreshes when no console/API-key account is eligible. Manual refreshes always allow the OAuth fallback regardless of this setting | - (console-only) | `BETTER_CCFLARE_MODELS_OAUTH_REFRESH=1` |
+| `BETTER_CCFLARE_HOST` | Server binding host | `0.0.0.0` | `BETTER_CCFLARE_HOST=127.0.0.1` (localhost-only) |
+| `SSL_KEY_PATH` / `SSL_CERT_PATH` | SSL private key / certificate paths for HTTPS | - | `SSL_KEY_PATH=/path/to/key.pem` |
+| `CCFLARE_OVERLOAD_RETRY_ENABLED` | In-place retry of Anthropic 529 "no reset" overloads before falling back to account cooldown | `true` | `CCFLARE_OVERLOAD_RETRY_ENABLED=false` |
+| `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS` | Total attempts including the original request | `2` | `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS=3` |
+| `CCFLARE_OVERLOAD_RETRY_BASE_MS` | Overload retry backoff base in ms; `0` = no sleep | `750` | `CCFLARE_OVERLOAD_RETRY_BASE_MS=500` |
+| `CCFLARE_OVERLOAD_RETRY_MAX_MS` | Overload retry backoff ceiling in ms | `3000` | `CCFLARE_OVERLOAD_RETRY_MAX_MS=5000` |
+| `CCFLARE_OVERLOAD_COOLDOWN_MS` | Fixed per-account cooldown after a 529 (overloaded) response with no Retry-After header. Unlike 429 cooldowns it never ramps with a streak; pairs with a single-flight recovery probe that admits exactly one request once the cooldown expires, as long as another account is available to defer to — if every account in the pool is currently suppressed, the request runs ungated instead | `10000` (10s) | `CCFLARE_OVERLOAD_COOLDOWN_MS=15000` |
+| `CCFLARE_OVERLOAD_WITH_RESET_MAX_MS` | Cap on a 529-with-reset cooldown duration (`min(resetTime, now + cap)`). Guards against a multi-hour quota-window reset header (`anthropic-ratelimit-unified-reset`) being mistaken for a short, real retry-after | `60000` (60s) | `CCFLARE_OVERLOAD_WITH_RESET_MAX_MS=120000` |
+| `CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS` | Base delay for adaptive per-account 429 cooldown backoff | `30000` (30s) | `CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS=15000` |
+| `CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS` | Ceiling for adaptive per-account 429 cooldown backoff | `300000` (5min) | `CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS=600000` |
+| `CCFLARE_RATE_LIMIT_RESET_STABILITY_MS` | Window after which a clean streak resets the consecutive-429 counter | `300000` (5min) | `CCFLARE_RATE_LIMIT_RESET_STABILITY_MS=600000` |
+| `HEALTH_DETAIL_ENABLED` | Expose per-account status on `GET /health?detail=1` | `false` | `HEALTH_DETAIL_ENABLED=true` |
+| `CCFLARE_DISABLE_COMBO_SESSION_FALLBACK` | **Legacy.** The setting now lives in Settings → Advanced → Combo Session Fallback and is read from the config file only. This variable is adopted into that setting once, at boot, when the config field is absent — so an install that was using it keeps behaving the same — and is never consulted again. It inverts on the way in: the switch says whether the fallthrough is *allowed*. Blocking the fallthrough is now the default for new installs | adopted once, then ignored | `CCFLARE_DISABLE_COMBO_SESSION_FALLBACK=true` |
+| — (no env var) | Whether saved combos take part in routing at all. Config-file-only (`combos_enabled`), no environment override — the `BETTER_CCFLARE_SHOW_COMBOS` env var that used to gate the Combos tab's visibility has been removed; the tab is now always visible and this switch controls routing only. Manage via Settings → Advanced → Combos, or `GET`/`POST /api/config/combos-enabled`. See [FEATURE_COMBOS.md](../FEATURE_COMBOS.md) | `false` | n/a — config file or API only |
+| — (no env var) | Whether the model a client asks for must be the model that is sent (`force_account_model`), skipping combos, agent model preferences, and provider default-model mapping. See [Force Account Model](#force-account-model) below. Deliberately ships without an env var, matching the combo switches | `false` | n/a — config file or API only |
+| `CCFLARE_ENABLE_HEADING_PROJECT_ATTRIBUTION` | When project attribution finds no `x-better-ccflare-project`/`x-project` header and no workspace path in the system prompt, it can fall back to the first eligible H1 heading (`# Heading`) in the system prompt as the project name. This heading is usually the client's own prompt boilerplate (e.g. a coding assistant's `# Harness` or `# Scratchpad Directory` section), not a real project identifier, so this fallback is off by default (#413). Enable only if your client's system prompt reliably opens with a real project-identifying H1 | `false` | `CCFLARE_ENABLE_HEADING_PROJECT_ATTRIBUTION=true` |
+| `MODEL_SCOPED_CAPACITY_ROUTING` | `off` leaves account selection unchanged. `exhausted` skips an account for a request when its weekly per-model-family cap (`limits[] kind=weekly_scoped`, e.g. a Fable/Opus/Sonnet-specific quota) is at/above 100% with a future reset AND overage cannot serve the account (`spend`/`extra_usage` signal unavailable; unknown or available fails open) — both in normal and combo-slot routing. Observed `out_of_credits` 429s additionally sideline the (account, family) pair for 5 minutes to bridge telemetry lag. When every candidate account for a model family is filtered out, the request gets a `429` with `error.type: rate_limit_error` and `error.code: model_family_exhausted` (capped Retry-After) instead of exhausting the per-account failover loop against accounts already known to reject that family. Telemetry can lag up to the poll interval; with polling degraded, expect one probe 429 per family every ~5 minutes. Same as the `model_scoped_capacity_routing` config file field; env var takes precedence | `off` | `MODEL_SCOPED_CAPACITY_ROUTING=exhausted` |
+| `BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS` | Discover agents distributed by Claude Code plugins (reads `~/.claude/plugins/installed_plugins.json`) | `false` | `BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS=true` |
+| `STORE_PAYLOADS` | Set to `false` to stop storing request/response bodies (token counts, cost, model, status, and timing are still recorded) | `true` | `STORE_PAYLOADS=false` |
+| `PAYLOAD_ENCRYPTION_KEY` | AES-256-GCM key encrypting `request_payloads` at rest. 64-char hex (32 bytes), generate with `openssl rand -hex 32`. Unset = plaintext storage. Losing the key makes encrypted rows unreadable; read once at process start (and per Bun worker), so rotation needs a re-encrypt migration (not yet built) | - (plaintext) | `PAYLOAD_ENCRYPTION_KEY=$(openssl rand -hex 32)` |
+| `CCFLARE_CODEX_PROMPT_CACHE_KEY` | Enabled by default: attach an OpenAI `prompt_cache_key` to converted Codex requests, per [OpenAI's prompt-caching guidance](https://platform.openai.com/docs/guides/prompt-caching) for GPT-5.6-family models. Only applies when the account's resolved endpoint is OpenAI's own `chatgpt.com` / `api.openai.com` — custom/self-hosted OpenAI-compatible endpoints and native Anthropic accounts are unaffected regardless of this setting. Set to `0` to opt out | `1` | `CCFLARE_CODEX_PROMPT_CACHE_KEY=0` |
+| `CCFLARE_CODEX_CACHE_KEY_MODE` | Cache key granularity when the above is enabled. `conversation` keys off session id + instructions + first input item — stable per conversation turn, distinct per subagent, so concurrent subagent fan-out doesn't thrash one OpenAI cache machine (recommended for Claude Code with subagents). `session` uses one coarse key per session, shared by all subagents in it. Independent of `LB_STRATEGY`/`SESSION_DURATION_MS`, which pick the upstream *account* for a session rather than the OpenAI-side cache key | `conversation` | `CCFLARE_CODEX_CACHE_KEY_MODE=session` |
+| `BETTER_CCFLARE_MODELS_OAUTH_REFRESH` | Allow OAuth accounts as a fallback source for *scheduled* (automatic) model catalog refreshes when no console/API-key account is eligible. Same as the `model_catalog_oauth_refresh_enabled` config file field; env var takes precedence. Manual refreshes (`POST /api/models/refresh`) always allow the OAuth fallback regardless of this setting | - (console-only) | `BETTER_CCFLARE_MODELS_OAUTH_REFRESH=1` |
 | `CF_STREAM_USAGE_BUFFER_KB` | Stream usage buffer size in KB | `64` | `CF_STREAM_USAGE_BUFFER_KB=128` |
 | `CF_STREAM_TIMEOUT_MS` | Stream processing timeout in milliseconds | `60000` (1 minute) | `CF_STREAM_TIMEOUT_MS=120000` |
 | `PAYLOAD_ENCRYPTION_KEY` | Optional 64-char hex key (32 bytes / AES-256) enabling AES-256-GCM encryption-at-rest for the `request_payloads` table. See [security.md](security.md#payload-encryption-at-rest). | unset (plaintext) | `PAYLOAD_ENCRYPTION_KEY=$(openssl rand -hex 32)` |
+| `BETTER_CCFLARE_OUTBOUND_PROXY` | Routes all outbound HTTP(S) traffic through a forward proxy | unset | `BETTER_CCFLARE_OUTBOUND_PROXY=http://127.0.0.1:3636` |
+| `CCFLARE_MODEL_DEFAULTS_PROVIDERS` | Comma-separated list of providers whose model-default map is editable via `POST /api/config/provider-model-defaults` and the dashboard's Advanced Settings card. Gates only the override *surface* — every provider's built-in factory map keeps translating models regardless | `codex` | `CCFLARE_MODEL_DEFAULTS_PROVIDERS=codex,xai,qwen` |
+| `CCFLARE_XAI_CACHE_NATIVE` | Opt-in: derive a privacy-safe conversation id from the client's Claude session id and attach it as `x-grok-conv-id` on requests to `api.x.ai`, with sticky account affinity so a conversation stays on the account owning its upstream cache partition. Byte-for-byte no-op when unset | unset (off) | `CCFLARE_XAI_CACHE_NATIVE=1` |
+| `CODEX_FIVE_HOUR_WINDOW_ENABLED` | Whether Codex accounts on this install still report a 5-hour usage window alongside the weekly one. Defaults to `false`: OpenAI removed the 5-hour limit for Plus, Business and Pro on 2026-07-12 ([announcement](https://x.com/thsottiaux/status/2076365965915467978), never added to the Codex changelog; user-visible report in [openai/codex#32791](https://github.com/openai/codex/issues/32791)), so the `x-codex-*` response headers carry the weekly window alone. With the flag off, Codex session expiry follows whichever usage window the account actually reports; set it to `true` to restore the earlier behaviour, which tracks the 5-hour window specifically and treats a weekly rollover as no rollover at all. The removal was announced as temporary, which is why this is a switch rather than a new built-in assumption. Scope: the flag selects the window the rollover detector watches in the proxy; it does not reach the load-balancer's session expiry, which reads the single `rate_limit_reset` column and cannot tell which window wrote it — so with the flag on and no 5-hour window reported, a session still ends at the weekly boundary. Same as the `codex_five_hour_window_enabled` config file field; env var takes precedence | `false` | `CODEX_FIVE_HOUR_WINDOW_ENABLED=true` |
+
+## Outbound Proxy
+
+better-ccflare can route all of its outbound HTTP(S) traffic — provider requests, OAuth flows, usage polling, and webhooks — through an explicit forward proxy using HTTP CONNECT. This is useful for enterprises that want every egress connection from better-ccflare to pass through a security/inspection proxy.
+
+Configure it via the `BETTER_CCFLARE_OUTBOUND_PROXY` environment variable (or the equivalent `outbound_proxy` config file key); env var takes precedence over the config file value, matching the pattern used elsewhere in this doc. A dedicated variable is used instead of the conventional `HTTPS_PROXY`/`HTTP_PROXY` because those affect every process on the machine by convention — a dedicated variable lets operators scope the proxy to just this application (e.g. via MDM/provisioning) without redirecting traffic for every other tool.
+
+Loopback destinations (`localhost`, `127.0.0.0/8` addresses, `::1`) are always exempt and never routed through the configured proxy, so local testing setups (e.g. a local Ollama or LiteLLM instance) keep working unaffected.
+
+If the forward proxy performs TLS interception (MITM), such as an LLM security/inspection gateway, its CA certificate must be trusted by the Node/Bun process. Set `NODE_EXTRA_CA_CERTS` as a real environment variable at process launch — not inside a `.env` file loaded at runtime — since it must be present before the process starts.
+
+This setting operates at the transport layer and is unrelated to a per-account `custom_endpoint`, which is a URL/routing-level override rather than a proxy.
+
+Coverage spans both the running server process and CLI-only commands that never start the server (e.g. `better-ccflare --add-account`, `--reauthenticate`) — account management and OAuth flows invoked directly from the CLI are proxied the same way; the one carve-out is the embedded database-maintenance worker threads, which run in their own global scope outside this wrapper, but they make no outbound HTTP requests themselves so no traffic escapes unproxied through them.
+
+## Alerts
+
+better-ccflare can emit threshold and anomaly alerts and deliver them via webhook and the dashboard. Alerts are persisted to the same database as requests and deduplicated per cooldown bucket; persistence is best-effort — a database failure is logged and skipped rather than failing the request or crashing the proxy. All `ALERT_*` env vars have equivalent config-file fields (`alert_daily_spend_usd`, `alert_tokens_per_hour`, `alert_request_tokens`, `alert_anomaly_enabled`, `alert_anomaly_interval_minutes`, `alert_cooldown_minutes`, `alert_webhook_url`); env vars take precedence.
+
+| Variable | Purpose | Default | Example |
+|----------|---------|---------|---------|
+| `ALERT_DAILY_SPEND_USD` | Fire a warning alert when aggregate spend since local midnight meets or exceeds this USD amount. Clamped to `[0, 1000000]`; `0` disables | `0` | `ALERT_DAILY_SPEND_USD=25` |
+| `ALERT_TOKENS_PER_HOUR` | Fire a warning alert when total tokens consumed in the trailing hour meets or exceeds this count. `0` disables | `0` | `ALERT_TOKENS_PER_HOUR=500000` |
+| `ALERT_REQUEST_TOKENS` | Fire a critical alert when a single request's total token count meets or exceeds this value. `0` disables | `0` | `ALERT_REQUEST_TOKENS=200000` |
+| `ALERT_ANOMALY_ENABLED` | Run periodic anomaly detection over recent requests (token outliers, output blowups, runaway loops, model misrouting). Accepts `1`/`true`/`0`/`false` | `false` | `ALERT_ANOMALY_ENABLED=true` |
+| `ALERT_ANOMALY_INTERVAL_MINUTES` | Cadence of anomaly-detection sweeps, in minutes. Clamped to `[5, 1440]` | `15` | `ALERT_ANOMALY_INTERVAL_MINUTES=30` |
+| `ALERT_ANOMALY_LOOP_MIN_REQUESTS` | Minimum request count in the detection window before the runaway-loop detector will flag a burst, keyed per account + model + project + agent (with the `x-claude-code-session-id` header as an attribution fallback). Set above the rate a single legitimate worker reaches in the window so a true loop (50+ req/min) stands out. Clamped to `[5, 1000]` | `25` | `ALERT_ANOMALY_LOOP_MIN_REQUESTS=50` |
+| `ALERT_COOLDOWN_MINUTES` | Per-alert-type-and-scope cooldown bucket size in minutes — within a bucket, only the first alert is persisted and delivered (no SSE storms or duplicate webhooks). Clamped to `[1, 1440]` | `60` | `ALERT_COOLDOWN_MINUTES=120` |
+| `ALERT_WEBHOOK_URL` | `http(s)` URL to receive `POST` deliveries of `{ type: "alert", alert: { ... } }`. Unset = no webhook delivery. Must be a valid URL or the setter rejects it | unset | `ALERT_WEBHOOK_URL=https://example.com/alerts` |
+
+In addition to threshold alerts, an `auth_failure` alert (severity `critical`) fires automatically when an OAuth account's refresh token fails definitively (e.g. `invalid_grant`) and the account is marked `requires_reauth`. It is deduplicated by the same cooldown bucket as the threshold alerts.
+
+"Scope" for the anomaly detectors (`anomaly_token_outlier`, `anomaly_output_blowup`, `anomaly_runaway_loop`) is the account/model pairing the anomaly was detected on, not the individual request — two outlier spikes on the same account and model within one cooldown bucket collapse into a single delivered alert, while a spike on a different account or model always gets its own bucket, even within the same window.
+
+Alerts are listed on the dashboard and via the API; unacknowledged counts surface in `/health`. Persistence uses dialect-appropriate conflict handling (`INSERT OR IGNORE` on SQLite, `ON CONFLICT (id) DO NOTHING` on PostgreSQL), so alerts work identically on both backends.
 
 ## Database Configuration
 
@@ -158,7 +230,9 @@ The schema and any missing columns are created automatically on startup. No manu
 |----------|---------|-------------|
 | `BETTER_CCFLARE_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `BETTER_CCFLARE_DB_IDLE_TIMEOUT` | `0` (disabled) | Seconds before an idle pooled connection is closed |
-| `BETTER_CCFLARE_DB_STATEMENT_TIMEOUT` | `7000` | Server-side statement timeout in milliseconds (clamped below the 8000ms client-side timeout) |
+| `BETTER_CCFLARE_DB_STATEMENT_TIMEOUT` | `7000` | Server-side statement timeout in milliseconds (clamped below the client-side timeout — see `BETTER_CCFLARE_DB_CLIENT_TIMEOUT`) |
+| `BETTER_CCFLARE_DB_CLIENT_TIMEOUT` | `8000` | Client-side query timeout in milliseconds for PostgreSQL — the `statement_timeout` ceiling is derived from this value minus 1000ms |
+| `BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE` | `200` | Row batch size per DELETE statement during retention cleanup — lower this if rows are large (e.g. big JSON payloads) and cleanup batches are timing out |
 | `BETTER_CCFLARE_DB_PG_PREPARE` | `false` | Set to `true` to re-enable named prepared statement caching |
 
 ```yaml
@@ -181,6 +255,62 @@ env:
       name: better-ccflare-secrets
       key: database-url
 ```
+
+## Model Catalog
+
+better-ccflare maintains a cache of the Anthropic model catalog (id, display name, creation date) used to populate model dropdowns in the dashboard (agent preferences, default agent model). It's exposed read-only via `GET /api/models` and force-refreshable via `POST /api/models/refresh` — see [api-http.md](api-http.md#model-catalog) for the endpoint reference.
+
+### Why this isn't fetched from every account
+
+A consumer OAuth account (`claude-oauth` mode) is meant for interactive Claude Code traffic. Recurring background API calls — and the proactive OAuth token refreshes they can trigger — are an atypical automation pattern for that account type and risk a flag or ban. API-key accounts (`console`, `zai`, `minimax`, `anthropic-compatible`, `openai-compatible`) are the sanctioned surface for unattended, programmatic requests. Because of this, the model catalog refresh is deliberately restrictive by default:
+
+- **Scheduled (automatic) refresh**: only console/API-key accounts are eligible, unless `BETTER_CCFLARE_MODELS_OAUTH_REFRESH=1` (or the `model_catalog_oauth_refresh_enabled` config field) opts in to an OAuth fallback.
+- **Manual refresh** (`POST /api/models/refresh`, human-triggered from the dashboard or `curl`): always allows the OAuth fallback in addition to console accounts, since a one-off manual action doesn't carry the same recurring-automation risk.
+- If no eligible account exists at all, a refresh (scheduled or manual) is a no-op — the existing cached catalog (live or bundled fallback) is left untouched; it's never emptied or errored out.
+
+### Refresh cadence
+
+When at least one eligible account exists, the catalog refreshes automatically on a schedule controlled by `BETTER_CCFLARE_MODELS_REFRESH_HOURS` (default **168 hours / 7 days**; `0` disables scheduled refresh). To avoid many independently-restarting instances all hitting Anthropic at the same wall-clock moment, each scheduled refresh is smeared with random jitter (up to 24 hours) on top of the configured interval. Every successful catalog write — scheduled, manual, or passive (see below) — recomputes and persists the next scheduled refresh time, so the schedule stays anchored to the most recent real data rather than drifting.
+
+### Passive capture
+
+Any successful `GET /v1/models` response proxied through better-ccflare from a console/API-key account (a client calling the pass-through endpoint directly) is also captured into the catalog cache opportunistically, independent of the scheduled/manual refresh paths. This never triggers extra outbound calls — it only observes traffic that was going to happen anyway.
+
+### Bundled fallback
+
+If no live fetch has ever succeeded (fresh install, no eligible account, or `BETTER_CCFLARE_MODELS_OFFLINE=1`), `GET /api/models` serves a static list bundled with better-ccflare (`CLAUDE_MODEL_IDS` in `packages/core/src/models.ts`). Its response reports `source: "fallback"` and a `fetchedAt` timestamp equal to the bundled list's snapshot date (`BUNDLED_MODELS_AS_OF`), not the current time — this is an intentional, honest "as of `<date>`" provenance rather than a `Date.now()` that would misleadingly imply the list was just fetched. The dashboard surfaces this distinction next to the model catalog's refresh button ("Live model list · fetched ..." vs. "Bundled model list · as of ...").
+
+## Editable Provider Model Defaults
+
+When a request has no combo-slot model and no account-level model mapping, better-ccflare falls back to a per-provider, per-family default model map. For most providers that map is compiled in; for Codex it's derived live from the account's own model listing (`chatgpt.com/backend-api/codex/models`), since the compiled guess (`gpt-5.3-codex` for opus/sonnet) 400s on ChatGPT-subscription accounts that don't support it.
+
+Resolution order:
+
+```
+combo slot model -> account.model_mappings -> global override -> account listing (Codex only) -> factory map
+```
+
+The **global override** is an editable layer in between: an operator-set default per provider+family that applies when no combo slot or account mapping specifies a model. It's stored in the config file, applied via an in-memory registry populated at boot and refreshed on every `POST`, and takes effect immediately — no restart required. Overrides are merged per family, so setting `codex.opus` never clears `codex.haiku`. Setting a family to an empty string removes its override rather than mapping it to an empty model.
+
+Only `codex` is editable by default. `xai` and `qwen` use the same mechanism but are gated behind `CCFLARE_MODEL_DEFAULTS_PROVIDERS` (see [Additional Environment Variables](#additional-environment-variables)) since they haven't been exercised against real accounts as extensively. Disabling a provider doesn't discard its stored override — it just stops applying until the provider is re-enabled.
+
+Manage this via the dashboard (Settings → Advanced → Provider Model Defaults) or directly through the API — see [api-http.md](api-http.md#get-apiconfigprovider-model-defaults).
+
+## Force Account Model
+
+`force_account_model` (config file only — no environment variable, off by default) makes better-ccflare serve the model a client asked for, or nothing. With it on:
+
+- **Combos are skipped** — no slot model is applied.
+- **Agent model preferences are not applied** — the agent is still attributed, but the rewrite that would send a different model does not happen.
+- **`mapModelName` and `CodexProvider.mapModel` return the model untouched** — the compiled per-provider default map (see [Editable Provider Model Defaults](#editable-provider-model-defaults) above) never substitutes a model, including the global override layer.
+- **Account selection keeps only accounts that can serve the requested model as written.** An account's own model listing decides first, when available; otherwise the provider namespace decides, since a Claude model id can only travel untranslated to a provider that speaks Claude ids. A request with no eligible account gets a `503` with `error.code: force_account_model_no_account` instead of a substitute — this also applies to a request pinned with `x-better-ccflare-account-id`.
+- **Switching accounts to serve the same model is still allowed.** The setting is about the model, not the account, so failover across accounts continues to work.
+
+Internal probes (auto-refresh, keepalive) are exempt: they send a compiled-in model list to whatever account they're checking, independent of what any client asked for, so the switch is treated as off for the lifetime of a verified probe request.
+
+This is off by default because it changes what a Claude family model name means for the install: with it on, asking for a Claude model no longer silently reaches an OpenAI-compatible account through a mapping.
+
+Manage this via the dashboard (Settings → Advanced → Force Account Model) or the API — see [api-http.md](api-http.md#get-apiconfigforce-account-model).
 
 ## Runtime Configuration API
 

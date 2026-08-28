@@ -8,9 +8,12 @@
  * headers were already sent to the client. It only prevents future requests
  * from being routed to the overloaded account until the cooldown expires.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { forwardToClient } from "../../response-handler";
+import * as usageCollectorModule from "../../usage-collector";
 import type { ProxyContext } from "../proxy-types";
+import * as rateLimitCooldownModule from "../rate-limit-cooldown";
 import { handleRateLimitResponse } from "../response-processor";
 import { createSseRateLimitSniffer } from "../sse-rate-limit-sniffer";
 
@@ -83,7 +86,7 @@ function makeCtxWithReason() {
 				reason: string,
 			) => {
 				calls.markRateLimited.push({ accountId, resetTime, reason });
-				return Promise.resolve(1);
+				return Promise.resolve({ consecutiveRateLimits: 1, applied: true });
 			},
 			updateAccountUsage: () => {},
 			updateAccountRateLimitMeta: () => {},
@@ -186,5 +189,330 @@ describe("production sniffer integration — overloaded_error mid-stream", () =>
 			'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
 		);
 		expect(sniffer.feed(frame)).toBe(false);
+	});
+});
+
+// ── real forwardToClient call form (review Befund 4/8) ───────────────────────
+//
+// The tests above exercise handleRateLimitResponse (response-processor.ts's
+// status-based 429/529 path) and the sniffer in isolation. Neither drives the
+// actual code that constructs the mid-stream applyRateLimitCooldown() call in
+// response-handler.ts's forwardToClient — the synthetic-resetTime bug (an
+// invented reset passed off as an upstream instruction) lived entirely in
+// that construction and would have stayed green through CI without a test
+// that runs the real call form.
+describe("forwardToClient — real mid-stream sniffer call form", () => {
+	function createStreamingCtx(): ProxyContext {
+		return {
+			provider: { name: "anthropic", isStreamingResponse: () => true },
+			config: { getStorePayloads: () => true },
+			dbOps: {
+				markAccountRateLimited: () =>
+					Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+	}
+
+	function mockCollector() {
+		return {
+			handleStart: () => {},
+			handleChunk: () => {},
+			handleEnd: () => Promise.resolve(),
+		};
+	}
+
+	async function feedSseErrorFrame(
+		errorType: "overloaded_error" | "rate_limit_error",
+		account: Account,
+		ctx: ProxyContext,
+	): Promise<void> {
+		const collectorSpy = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue(
+			mockCollector() as unknown as usageCollectorModule.UsageCollector,
+		);
+		try {
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(
+						new TextEncoder().encode(
+							`event: error\ndata: {"type":"error","error":{"type":"${errorType}","message":"Overloaded"}}\n\n`,
+						),
+					);
+					controller.close();
+				},
+			});
+
+			const response = await forwardToClient(
+				{
+					requestId: `req-real-${errorType}`,
+					method: "POST",
+					path: "/v1/messages",
+					account,
+					requestHeaders: new Headers({ "content-type": "application/json" }),
+					requestBody: new TextEncoder().encode("{}"),
+					response: new Response(body, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+					timestamp: Date.now(),
+					retryAttempt: 0,
+					failoverAttempts: 0,
+				},
+				ctx,
+			);
+			await response.text();
+		} finally {
+			collectorSpy.mockRestore();
+		}
+	}
+
+	it("overloaded_error: calls applyRateLimitCooldown with reason='upstream_529_overloaded_no_reset' and no resetTime — no synthetic upstream instruction", async () => {
+		const account = makeAccount({ id: "acct-real-529" });
+		const ctx = createStreamingCtx();
+		const spy = spyOn(rateLimitCooldownModule, "applyRateLimitCooldown");
+
+		try {
+			await feedSseErrorFrame("overloaded_error", account, ctx);
+
+			expect(spy).toHaveBeenCalledTimes(1);
+			const [, rateLimitInfo] = spy.mock.calls[0] as [
+				Account,
+				{ resetTime?: number; reason?: string },
+				ProxyContext,
+			];
+			expect(rateLimitInfo.reason).toBe("upstream_529_overloaded_no_reset");
+			expect(rateLimitInfo.resetTime).toBeUndefined();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("rate_limit_error: calls applyRateLimitCooldown with reason='upstream_429_with_reset' and a synthetic ~60s resetTime — unchanged 429 behaviour", async () => {
+		const account = makeAccount({ id: "acct-real-429" });
+		const ctx = createStreamingCtx();
+		const spy = spyOn(rateLimitCooldownModule, "applyRateLimitCooldown");
+		const before = Date.now();
+
+		try {
+			await feedSseErrorFrame("rate_limit_error", account, ctx);
+
+			expect(spy).toHaveBeenCalledTimes(1);
+			const [, rateLimitInfo] = spy.mock.calls[0] as [
+				Account,
+				{ resetTime?: number; reason?: string },
+				ProxyContext,
+			];
+			expect(rateLimitInfo.reason).toBe("upstream_429_with_reset");
+			expect(rateLimitInfo.resetTime).toBeGreaterThanOrEqual(before + 59_000);
+			expect(rateLimitInfo.resetTime).toBeLessThanOrEqual(Date.now() + 61_000);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+});
+
+// ── mid-stream keepalive exemption (upstream PR #196 greptile-apps gap) ────
+//
+// The pre-stream 429 paths in proxy-operations.ts (3 sites) and
+// response-processor.ts already skip cooldowns for synthetic keepalive
+// replays — the cache-keepalive scheduler fires parallel requests across
+// every cached account simultaneously, and bursts of 4+ concurrent requests
+// trip Anthropic's per-IP burst limit. Treating those as real per-account
+// rate limits drains the pool to zero routable accounts even though no
+// user-visible quota was actually exhausted.
+//
+// The mid-stream SSE rate-limit path in response-handler.ts did NOT carry
+// the same exemption — a keepalive replay whose 200 OK later emits an
+// `event: error` SSE frame would still write rate_limited_until and cool
+// the account. The tests below pin the exemption: a mid-stream sniffer
+// fire on a request carrying the keepalive marker + matching secret MUST
+// NOT call applyRateLimitCooldown. The anti-forgery gate (matching secret)
+// is also pinned — without it the marker is silently ignored, which is the
+// expected behaviour against an external client forging the header.
+describe("forwardToClient — mid-stream keepalive exemption", () => {
+	const KEEPALIVE_SECRET = "test-secret";
+
+	function createKeepaliveCtx(): ProxyContext {
+		return {
+			provider: { name: "anthropic", isStreamingResponse: () => true },
+			config: { getStorePayloads: () => true },
+			dbOps: {
+				markAccountRateLimited: () =>
+					Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+			internalProbeSecret: KEEPALIVE_SECRET,
+		} as unknown as ProxyContext;
+	}
+
+	function keepaliveMockCollector() {
+		return {
+			handleStart: () => {},
+			handleChunk: () => {},
+			handleEnd: () => Promise.resolve(),
+		};
+	}
+
+	function makeKeepaliveHeaders(): Headers {
+		return new Headers({
+			"content-type": "application/json",
+			"x-better-ccflare-keepalive": "true",
+			"x-better-ccflare-internal-probe-secret": KEEPALIVE_SECRET,
+		});
+	}
+
+	async function feedSseErrorFrameKeepalive(
+		errorType: "overloaded_error" | "rate_limit_error",
+		account: Account,
+		ctx: ProxyContext,
+	): Promise<void> {
+		const collectorSpy = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue(
+			keepaliveMockCollector() as unknown as usageCollectorModule.UsageCollector,
+		);
+		try {
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(
+						new TextEncoder().encode(
+							`event: error\ndata: {"type":"error","error":{"type":"${errorType}","message":"Overloaded"}}\n\n`,
+						),
+					);
+					controller.close();
+				},
+			});
+
+			const response = await forwardToClient(
+				{
+					requestId: `req-keepalive-${errorType}`,
+					method: "POST",
+					path: "/v1/messages",
+					account,
+					requestHeaders: makeKeepaliveHeaders(),
+					requestBody: new TextEncoder().encode("{}"),
+					response: new Response(body, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+					timestamp: Date.now(),
+					retryAttempt: 0,
+					failoverAttempts: 0,
+				},
+				ctx,
+			);
+			await response.text();
+		} finally {
+			collectorSpy.mockRestore();
+		}
+	}
+
+	it("overloaded_error mid-stream on a keepalive replay: applyRateLimitCooldown is NOT called (regression for PR #196 greptile-apps)", async () => {
+		const account = makeAccount({ id: "acct-keepalive-529" });
+		const ctx = createKeepaliveCtx();
+		const spy = spyOn(rateLimitCooldownModule, "applyRateLimitCooldown");
+
+		try {
+			await feedSseErrorFrameKeepalive("overloaded_error", account, ctx);
+
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("rate_limit_error mid-stream on a keepalive replay: applyRateLimitCooldown is NOT called (regression for PR #196 greptile-apps)", async () => {
+		const account = makeAccount({ id: "acct-keepalive-429" });
+		const ctx = createKeepaliveCtx();
+		const spy = spyOn(rateLimitCooldownModule, "applyRateLimitCooldown");
+
+		try {
+			await feedSseErrorFrameKeepalive("rate_limit_error", account, ctx);
+
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("keepalive header WITHOUT the matching internal-probe secret: applyRateLimitCooldown IS called (anti-forgery gate still holds)", async () => {
+		// The keepalive marker alone is not enough — isInternalProbe requires
+		// the request to carry the process-local secret too. An external
+		// client forging just the marker must not be able to suppress
+		// cooldowns.
+		const account = makeAccount({ id: "acct-keepalive-forgery" });
+		const ctx = createKeepaliveCtx();
+		const forgedHeaders = new Headers({
+			"content-type": "application/json",
+			"x-better-ccflare-keepalive": "true",
+			// Note: no x-better-ccflare-internal-probe-secret header
+		});
+
+		const collectorSpy = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue(
+			keepaliveMockCollector() as unknown as usageCollectorModule.UsageCollector,
+		);
+		const cooldownSpy = spyOn(
+			rateLimitCooldownModule,
+			"applyRateLimitCooldown",
+		);
+
+		try {
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(
+						new TextEncoder().encode(
+							'event: error\ndata: {"type":"error","error":{"type":"rate_limit_error","message":"limit"}}\n\n',
+						),
+					);
+					controller.close();
+				},
+			});
+
+			const response = await forwardToClient(
+				{
+					requestId: "req-keepalive-forgery",
+					method: "POST",
+					path: "/v1/messages",
+					account,
+					requestHeaders: forgedHeaders,
+					requestBody: new TextEncoder().encode("{}"),
+					response: new Response(body, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+					timestamp: Date.now(),
+					retryAttempt: 0,
+					failoverAttempts: 0,
+				},
+				ctx,
+			);
+			await response.text();
+
+			expect(cooldownSpy).toHaveBeenCalledTimes(1);
+			const [, rateLimitInfo] = cooldownSpy.mock.calls[0] as [
+				Account,
+				{ resetTime?: number; reason?: string },
+				ProxyContext,
+			];
+			expect(rateLimitInfo.reason).toBe("upstream_429_with_reset");
+		} finally {
+			cooldownSpy.mockRestore();
+			collectorSpy.mockRestore();
+		}
 	});
 });

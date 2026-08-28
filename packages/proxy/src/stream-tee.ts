@@ -32,6 +32,7 @@ export function teeStream(
 				if (done) {
 					onClose?.(buffered);
 					controller.close();
+					reader.releaseLock();
 					return;
 				}
 
@@ -57,11 +58,37 @@ export function teeStream(
 			} catch (error) {
 				onError?.(error as Error);
 				controller.error(error);
+				reader.releaseLock();
 			}
 		},
 
-		cancel(reason) {
-			return reader.cancel(reason);
+		cancel() {
+			// A client-initiated cancel (Esc, tab close, network drop) must
+			// finalize the same way a clean `done` does — otherwise the
+			// caller's onClose (and whatever it drives, e.g. usage-collector's
+			// per-request state) never fires and the entry only gets reclaimed
+			// by the collector's periodic stale-request sweep, up to
+			// CF_STREAM_TIMEOUT_MS later.
+			onClose?.(buffered);
+
+			// reader.cancel() is a no-op on Bun (oven-sh/bun#35093) and leaks
+			// the upstream's native buffer; drain to `done` instead — see
+			// handlers/discard-body-cancel.ts for the full rationale (#382).
+			// Bounded by the caller's fetch() abort signal (request-handler.ts's
+			// effectiveSignal), which rejects reader.read() once the same
+			// client disconnect that triggered this cancel() propagates there.
+			void (async () => {
+				try {
+					while (true) {
+						const { done } = await reader.read();
+						if (done) return;
+					}
+				} catch {
+					// Swallow — cancel() must not throw during teardown.
+				} finally {
+					reader.releaseLock();
+				}
+			})();
 		},
 	});
 }

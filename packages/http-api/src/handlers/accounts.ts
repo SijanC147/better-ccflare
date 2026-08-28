@@ -26,6 +26,7 @@ import {
 	type AnyUsageData,
 	fetchUsageData,
 	getRepresentativeUtilization,
+	getRepresentativeUtilizationForProvider,
 	getRepresentativeWindow,
 	parseCodexUsageHeaders,
 	type UsageData,
@@ -33,18 +34,28 @@ import {
 } from "@better-ccflare/providers";
 import {
 	clearAccountRefreshCache,
+	clearAutoRefreshTrackingForAccount,
+	clearCodexModelCacheForAccount,
+	clearFamilyExhaustionForAccount,
+	clearOpenAICompatibleModelCacheForAccount,
+	clearPendingRotation,
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
 } from "@better-ccflare/proxy";
 import type {
 	Account,
+	AnthropicUsageData,
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
 } from "@better-ccflare/types";
 import { requiresSessionDurationTracking } from "@better-ccflare/types";
 import type { AccountResponse } from "../types";
+import {
+	computeRateLimitStatusDisplay,
+	getRepresentativeUsageResetMs,
+} from "./rate-limit-status";
 
 const log = new Logger("AccountsHandler");
 
@@ -59,6 +70,12 @@ const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
 	"upstream_529_overloaded_with_reset",
 	"upstream_529_overloaded_no_reset",
 	"out_of_credits",
+	"extra_usage_exhausted",
+	// Never actually written to accounts.rate_limited_reason today (a
+	// windowless 429 does not bench the account), but listed so this set stays
+	// a faithful mirror of the union and cannot silently null the value if a
+	// future path ever persists it.
+	"windowless_429",
 ]);
 
 function toRateLimitReason(v: string | null): RateLimitReason | null {
@@ -68,39 +85,96 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
 		: null;
 }
 
-function normalizeCodexUsageData(usage: UsageData): UsageData | null {
-	const normalized: UsageData = {
-		five_hour: { ...usage.five_hour },
-		seven_day: { ...usage.seven_day },
-	};
+/** A window we know nothing about: unknown percentage, unknown reset. */
+const UNKNOWN_WINDOW = { utilization: null, resets_at: null } as const;
+
+function hasWindowInfo(window: {
+	utilization: number | null;
+	resets_at: string | null;
+}): boolean {
+	return window.utilization !== null || window.resets_at !== null;
+}
+
+/**
+ * Input shape accepted by the normalizer. Looser than the provider's `UsageData`
+ * on purpose: the snapshot fallback feeds it windows whose utilization is
+ * already unknown, and `UsageWindow.utilization` in the providers package is a
+ * plain `number`.
+ */
+type CodexUsageInput = {
+	five_hour?: { utilization: number | null; resets_at: string | null } | null;
+	seven_day?: { utilization: number | null; resets_at: string | null } | null;
+};
+
+/**
+ * Returns the display shape (`AnthropicUsageData`, whose windows are nullable),
+ * not the provider shape — an unknown window is `utilization: null` here.
+ */
+function normalizeCodexUsageData(
+	usage: CodexUsageInput,
+): AnthropicUsageData | null {
+	// Codex payloads carry the flat windows; default to unknown windows if a
+	// limits-only shape ever reaches here (five_hour/seven_day are now optional).
+	//
+	// An absent window is UNKNOWN, not zero. Reporting 0% made the dashboard draw
+	// a confident "nothing used" bar and made the Overview pool average count the
+	// account as an idle contributor. null renders as "N/A / Data unavailable"
+	// and lands the account in the honest excluded/no_usage_data bucket
+	// (pool-usage.ts extractFiveHour -> pct null).
+	let five_hour = usage.five_hour
+		? { ...usage.five_hour }
+		: { ...UNKNOWN_WINDOW };
+	let seven_day = usage.seven_day
+		? { ...usage.seven_day }
+		: { ...UNKNOWN_WINDOW };
+	// A reset already in the past means the window rolled over; how much has been
+	// used since is unknown, so drop the stale percentage rather than claim zero.
 	if (
-		normalized.five_hour.resets_at &&
-		new Date(normalized.five_hour.resets_at).getTime() <= Date.now()
+		five_hour.resets_at &&
+		new Date(five_hour.resets_at).getTime() <= Date.now()
 	) {
-		normalized.five_hour = { utilization: 0, resets_at: null };
+		five_hour = { ...UNKNOWN_WINDOW };
 	}
 	if (
-		normalized.seven_day.resets_at &&
-		new Date(normalized.seven_day.resets_at).getTime() <= Date.now()
+		seven_day.resets_at &&
+		new Date(seven_day.resets_at).getTime() <= Date.now()
 	) {
-		normalized.seven_day = { utilization: 0, resets_at: null };
+		seven_day = { ...UNKNOWN_WINDOW };
 	}
-	return normalized.five_hour.resets_at !== null ||
-		normalized.seven_day.resets_at !== null
-		? normalized
+	// Usable when either window still carries something: a reset OR a percentage.
+	// The percentage alone must be enough — a weekly value recovered from
+	// usage_snapshots may have no reset stored (accounts.rate_limit_reset keeps
+	// only the soonest one), and requiring a reset here is what used to discard it.
+	return hasWindowInfo(five_hour) || hasWindowInfo(seven_day)
+		? { five_hour, seven_day }
 		: null;
 }
 
+/**
+ * Best available Codex usage, in descending order of freshness:
+ *   1. the in-memory cache (10-minute TTL, empty after a restart)
+ *   2. headers reparsed from recently stored request payloads (pruned after
+ *      DATA_RETENTION_DAYS, default 1 day, and unreadable when payload
+ *      encryption is on)
+ *   3. the last usage_snapshots row for the weekly window (90-day retention)
+ *
+ * Step 3 exists because Codex has no usage-polling endpoint: without it the
+ * weekly percentage — the window that actually limits the account — is gone
+ * after a restart or a quiet day, and the card shows an empty bar.
+ */
 async function getCachedOrPersistedCodexUsage(
-	db: ReturnType<DatabaseOperations["getAdapter"]>,
+	dbOps: DatabaseOperations,
 	accountId: string,
 	accountName: string,
 	cacheData: FullUsageData | null,
 ): Promise<FullUsageData | null> {
+	const db = dbOps.getAdapter();
 	if (cacheData) {
-		const normalizedCache = normalizeCodexUsageData(cacheData as UsageData);
+		const normalizedCache = normalizeCodexUsageData(
+			cacheData as CodexUsageInput,
+		);
 		if (normalizedCache) {
-			return normalizedCache as FullUsageData;
+			return normalizedCache;
 		}
 	}
 	const rows = await db.query<{ json: string; timestamp: number | null }>(
@@ -136,15 +210,50 @@ async function getCachedOrPersistedCodexUsage(
 			const normalizedUsage = normalizeCodexUsageData(usage);
 			if (!normalizedUsage) continue;
 
-			usageCache.set(accountId, normalizedUsage);
+			// The cache's window type still declares `utilization: number`, while a
+			// normalized window may legitimately be unknown (null). Storing it is
+			// intended: every reader re-normalizes, and null renders as N/A.
+			usageCache.set(accountId, normalizedUsage as AnyUsageData);
 			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
-			return normalizedUsage as FullUsageData;
+			return normalizedUsage;
 		} catch (error) {
 			log.warn(
 				`Failed to recover Codex usage from stored payload for ${accountName}:`,
 				error instanceof Error ? error.message : String(error),
 			);
 		}
+	}
+
+	// Last resort: the durable weekly snapshot. Deliberately NOT written back to
+	// usageCache — the cache stands for "fresh enough to serve as current", and a
+	// snapshot can be days old. The card shows the percentage without an age
+	// label (product decision), so it must at least not shadow fresher data on the
+	// next request.
+	try {
+		const snapshot = await dbOps.getLatestUsageSnapshot(accountId, "seven_day");
+		if (snapshot) {
+			const normalizedSnapshot = normalizeCodexUsageData({
+				five_hour: { ...UNKNOWN_WINDOW },
+				seven_day: {
+					utilization: snapshot.utilization,
+					resets_at:
+						snapshot.resetsAt == null
+							? null
+							: new Date(snapshot.resetsAt).toISOString(),
+				},
+			});
+			if (normalizedSnapshot) {
+				log.debug(
+					`Recovered Codex weekly usage from history for ${accountName}`,
+				);
+				return normalizedSnapshot;
+			}
+		}
+	} catch (error) {
+		log.warn(
+			`Failed to read Codex usage history for ${accountName}:`,
+			error instanceof Error ? error.message : String(error),
+		);
 	}
 
 	return null;
@@ -199,6 +308,7 @@ export function createAccountsListHandler(
 			model_fallbacks: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
+			requires_reauth: 0 | 1;
 		}>(
 			`
 				SELECT
@@ -221,6 +331,7 @@ export function createAccountsListHandler(
 					refresh_token,
 					access_token,
 					COALESCE(paused, 0) as paused,
+					COALESCE(requires_reauth, 0) as requires_reauth,
 					COALESCE(priority, 0) as priority,
 					COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 					COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
@@ -266,6 +377,7 @@ export function createAccountsListHandler(
 								id: a.id,
 								provider: a.provider ?? "",
 								paused: !!a.paused,
+								requires_reauth: !!a.requires_reauth,
 								// pause_reason and rate_limit_reset feed wouldAutoUnpause —
 								// without them peek() can't simulate the auto-unpause that
 								// select() performs on safe-reason paused accounts whose
@@ -300,32 +412,13 @@ export function createAccountsListHandler(
 
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {
-				let rateLimitStatus = "OK";
-
-				// Use unified rate limit status if available
-				if (account.rate_limit_status) {
-					rateLimitStatus = account.rate_limit_status;
-					const resetMs = Number(account.rate_limit_reset);
-					if (resetMs && resetMs > now) {
-						const minutesLeft = Math.ceil((resetMs - now) / 60000);
-						rateLimitStatus = `${account.rate_limit_status} (${minutesLeft}m)`;
-					}
-				} else if (account.rate_limited && account.rate_limited_until) {
-					// Fall back to legacy rate limit check
-					const limitedMs = Number(account.rate_limited_until);
-					if (limitedMs > now) {
-						const minutesLeft = Math.ceil((limitedMs - now) / 60000);
-						rateLimitStatus = `Rate limited (${minutesLeft}m)`;
-					}
-				}
-
 				// Get usage data from cache for providers that expose account-page quota or credit data
 				const cachedUsageData = usageCache.get(account.id);
 				let usageData: FullUsageData | null =
 					cachedUsageData as FullUsageData | null;
 				if (account.provider === "codex") {
 					usageData = await getCachedOrPersistedCodexUsage(
-						db,
+						dbOps,
 						account.id,
 						account.name,
 						usageData,
@@ -342,7 +435,8 @@ export function createAccountsListHandler(
 					usageData
 				) {
 					const isAnthropicStyleData =
-						"five_hour" in usageData && "seven_day" in usageData;
+						("five_hour" in usageData && "seven_day" in usageData) ||
+						Array.isArray((usageData as { limits?: unknown }).limits);
 					if (isAnthropicStyleData) {
 						try {
 							usageUtilization = getRepresentativeUtilization(
@@ -458,6 +552,26 @@ export function createAccountsListHandler(
 							);
 						}
 					}
+				} else if (account.provider === "minimax" && usageData) {
+					// Minimax Token Plan usage data — 5h/7d windows from /v1/token_plan/remains
+					const isMinimaxData =
+						"five_hour" in usageData || "seven_day" in usageData;
+					if (isMinimaxData) {
+						try {
+							const {
+								getRepresentativeMinimaxUtilization,
+								getRepresentativeMinimaxWindow,
+							} = require("@better-ccflare/providers");
+							usageUtilization = getRepresentativeMinimaxUtilization(usageData);
+							usageWindow = getRepresentativeMinimaxWindow(usageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process Minimax usage data for account ${account.name}:`,
+								error,
+							);
+						}
+					}
 				}
 
 				const usageThrottleSettings = {
@@ -473,10 +587,50 @@ export function createAccountsListHandler(
 						fullUsageData as AnyUsageData,
 						usageThrottleSettings,
 						now,
+						// Display path: surface ALL per-model caps (m3 amber highlight);
+						// routing-side model matching happens in proxy.ts only.
+						{ scopedMode: "all" },
 					);
 					usageThrottledUntil = usageThrottleStatus.throttleUntil;
 					usageThrottledWindows = usageThrottleStatus.throttledWindows;
 				}
+
+				// Computed after usage resolution so an exhausted usage window can
+				// outrank stale header snapshots and the bare "OK" default
+				// (incident 2026-07-09: 100% weekly utilization displayed as "OK").
+				const rateLimitStatus = computeRateLimitStatusDisplay(
+					{
+						rate_limit_status: account.rate_limit_status ?? null,
+						rate_limit_reset: account.rate_limit_reset
+							? Number(account.rate_limit_reset)
+							: null,
+						rate_limited_until: account.rate_limited_until
+							? Number(account.rate_limited_until)
+							: null,
+						// The STATUS LABEL must be derived from the same signal that
+						// gates admission, not from the display utilization: the
+						// latter includes extra_usage, so a routable account whose
+						// overage pool is spent would be labelled usage_exhausted
+						// while it happily serves traffic. usageUtilization /
+						// usageWindow below still report the pool for display.
+						usageUtilization:
+							getRepresentativeUtilizationForProvider(
+								// FullUsageData is the http-api display shape (nullable
+								// utilization); the provider helpers read the same fields.
+								fullUsageData as AnyUsageData | null,
+								account.provider ?? "anthropic",
+							) ?? usageUtilization,
+						// Shared provider-aware derivation (same as /health) — a plain
+						// extractUsageResetMs(fullUsageData, usageWindow) silently loses
+						// the zai reset because usageWindow is the display label
+						// ("five_hour"), not the payload key ("tokens_limit").
+						usageResetMs: getRepresentativeUsageResetMs(
+							fullUsageData,
+							account.provider ?? "anthropic",
+						),
+					},
+					now,
+				);
 
 				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, NanoGPT, and OpenRouter providers
 				let modelMappings: { [key: string]: string } | null = null;
@@ -527,6 +681,8 @@ export function createAccountsListHandler(
 						: null,
 					created: new Date(Number(account.created_at)).toISOString(),
 					paused: account.paused === 1,
+					requiresReauth: account.requires_reauth === 1,
+					pauseReason: account.pause_reason ?? null,
 					priority: Number(account.priority) || 0,
 					tokenStatus: account.token_valid ? "valid" : "expired",
 					tokenExpiresAt: account.expires_at
@@ -616,6 +772,71 @@ export function createAccountPriorityUpdateHandler(dbOps: DatabaseOperations) {
 }
 
 /**
+ * Reject an add whose (name, provider, custom_endpoint) tuple already
+ * has a row. Mirrors the rename handler's "is already taken" error
+ * style at `createAccountRenameHandler` so duplicate accounts are
+ * rejected consistently across add and rename paths.
+ *
+ * `customEndpoint` is treated as NULL-equivalent to empty string so that
+ * two Anthropic console accounts (which never set a custom endpoint)
+ * collide on name as expected. Returns the response to send back, or
+ * `null` if the name is available.
+ *
+ * This is the friendly fast-path: the atomic uniqueness guarantee comes
+ * from the DB-level UNIQUE index
+ * `idx_accounts_unique_name_provider_endpoint` enforced on every INSERT.
+ * Concurrent adds that race past this SELECT are still rejected at the
+ * INSERT via `isUniqueConstraintError` below — see Greptile P1.
+ */
+async function assertAccountNameAvailable(
+	dbOps: DatabaseOperations,
+	name: string,
+	provider: string,
+	customEndpoint: string | null,
+): Promise<Response | null> {
+	const db = dbOps.getAdapter();
+	const existing = await db.get<{ id: string }>(
+		`SELECT id FROM accounts
+		 WHERE name = ?
+		   AND provider = ?
+		   AND COALESCE(custom_endpoint, '') = COALESCE(?, '')`,
+		[name, provider, customEndpoint],
+	);
+	if (existing) {
+		return errorResponse(BadRequest(`Account name '${name}' is already taken`));
+	}
+	return null;
+}
+
+/**
+ * SQLite surfaces a UNIQUE-constraint violation as an Error whose message
+ * contains "UNIQUE constraint failed:". PostgreSQL (via Bun.SQL) surfaces
+ * the same condition as SQLSTATE 23505 (unique_violation) on `.code`, with
+ * a message like `duplicate key value violates unique constraint "..."` —
+ * it does NOT contain the SQLite string, so both must be checked. Map
+ * either to the same BadRequest the pre-check returns so callers see a
+ * consistent 400 regardless of which side of the race the second add
+ * loses on, and regardless of which database backend is in use.
+ *
+ * Keeping the pre-check is intentional: it gives a clean 400 for the
+ * common sequential case without a wasted INSERT round-trip, and lets
+ * us attach the friendly "Account name '<name>' is already taken" copy
+ * that points at the field the user just typed. The DB constraint is the
+ * authoritative gate; this catch is what makes the add path survive
+ * concurrent callers (different processes, network-attached SQLite,
+ * future async adapters, or any INSERT site that bypasses the pre-check
+ * — cli-commands, oauth-flow, dashboard-web, etc.).
+ */
+const PG_UNIQUE_VIOLATION = "23505";
+
+function isUniqueConstraintError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	if (error.message.includes("UNIQUE constraint failed")) return true;
+	const code = (error as { code?: string }).code;
+	return code === PG_UNIQUE_VIOLATION;
+}
+
+/**
  * Create an account add handler (manual token addition)
  * This is primarily used for adding accounts with existing tokens
  * For OAuth flow, use the OAuth handlers
@@ -698,6 +919,18 @@ export function createAccountAddHandler(
 			);
 
 			try {
+				// Reject adds that would collide with an existing row on
+				// (name, provider, custom_endpoint). Mirrors the rename handler
+				// collision check so duplicate accounts cannot be created via
+				// this path.
+				const conflict = await assertAccountNameAvailable(
+					dbOps,
+					name,
+					provider,
+					customEndpoint || null,
+				);
+				if (conflict) return conflict;
+
 				// Add account directly to database
 				const accountId = crypto.randomUUID();
 				const now = Date.now();
@@ -732,6 +965,15 @@ export function createAccountAddHandler(
 				) {
 					return errorResponse(BadRequest(error.message));
 				}
+				if (isUniqueConstraintError(error)) {
+					// Concurrent caller raced past assertAccountNameAvailable
+					// and lost on the DB UNIQUE index. Surface the same 400 the
+					// pre-check would have produced so the response shape is
+					// identical across the two paths.
+					return errorResponse(
+						BadRequest(`Account name '${name}' is already taken`),
+					);
+				}
 				return errorResponse(InternalServerError((error as Error).message));
 			}
 		} catch (error) {
@@ -745,9 +987,16 @@ export function createAccountAddHandler(
 
 /**
  * Create an account remove handler
+ *
+ * The URL is `/api/accounts/:id` where `:id` is the account row id. The
+ * router already extracts the third path segment as `accountId`. The
+ * confirm-string safety UX is preserved by looking up the account's name
+ * via id, then comparing the submitted `confirm` against that name.
+ * Deletion is then dispatched via the id-keyed path on the CLI commands
+ * layer (`removeAccountById`) so a shared name never cascades.
  */
 export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
-	return async (req: Request, accountName: string): Promise<Response> => {
+	return async (req: Request, accountId: string): Promise<Response> => {
 		try {
 			// Parse and validate confirmation
 			const body = await req.json();
@@ -757,7 +1006,20 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				required: true,
 			});
 
-			if (confirm !== accountName) {
+			// Resolve the account by id so we can compare `confirm` against
+			// the actual stored name (defence-in-depth: a typo in the URL
+			// segment should fail with 404, not silently succeed).
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (confirm !== account.name) {
 				return errorResponse(
 					BadRequest("Confirmation string does not match account name", {
 						confirmationRequired: true,
@@ -765,23 +1027,37 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			const result = await cliCommands.removeAccount(dbOps, accountName);
+			const result = await cliCommands.removeAccountById(dbOps, accountId);
 
 			if (!result.success) {
 				return errorResponse(NotFound(result.message));
 			}
 
-			// Find the account ID to clean up usage cache (check before deletion)
-			const db = dbOps.getAdapter();
-			const account = await db.get<{ id: string }>(
-				"SELECT id FROM accounts WHERE name = ?",
-				[accountName],
-			);
+			// Stop usage polling and clear all cached state for the removed
+			// account to prevent memory leaks. `delete()` only clears the cache
+			// entry — `stopPolling()` also clears the timer and tracking maps,
+			// otherwise the poll loop keeps rescheduling itself forever.
+			usageCache.stopPolling(accountId);
 
-			if (account) {
-				// Clear usage cache for removed account to prevent memory leaks
-				usageCache.delete(account.id);
-			}
+			// Also clear token-manager state (in-flight refresh, failure/backoff
+			// counters) for the removed account — otherwise it lingers until the
+			// 5-minute TTL sweep or the 1000-entry cap evicts it.
+			clearAccountRefreshCache(accountId);
+
+			// And clear auto-refresh-scheduler tracking state — otherwise it
+			// lingers until the scheduler's next periodic cleanup sweep (up to
+			// 60s later) or server shutdown.
+			clearAutoRefreshTrackingForAccount(accountId);
+
+			// Clear the remaining account-keyed in-memory caches that have no
+			// TTL/periodic sweep of their own: a pending refresh-token rotation
+			// still waiting to be persisted, this account's cached Codex/
+			// openai-compatible model listing, and any negative-cache exhaustion
+			// marks for it.
+			clearPendingRotation(accountId);
+			clearCodexModelCacheForAccount(accountId);
+			clearOpenAICompatibleModelCacheForAccount(accountId);
+			clearFamilyExhaustionForAccount(accountId);
 
 			return jsonResponse({
 				success: true,
@@ -1004,6 +1280,17 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 
 			const db = dbOps.getAdapter();
+
+			// Reject duplicate (name, provider, custom_endpoint) — same guard as
+			// the manual add handler and the rename collision check.
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"zai",
+				customEndpoint || null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1083,6 +1370,11 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 			});
 		} catch (error) {
 			log.error("z.ai account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				error instanceof Error
 					? error
@@ -1168,6 +1460,15 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"openai-compatible",
+				customEndpoint || null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1246,6 +1547,11 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 			});
 		} catch (error) {
 			log.error("OpenAI-compatible account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				error instanceof Error
 					? error
@@ -1313,6 +1619,15 @@ export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"vertex-ai",
+				vertexConfig,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1386,6 +1701,11 @@ export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
 			if (error instanceof ValidationError) {
 				return errorResponse(BadRequest(error.message));
 			}
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				InternalServerError(
 					error instanceof Error ? error.message : "Failed to add account",
@@ -1437,6 +1757,15 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"minimax",
+				null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1515,10 +1844,180 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 			});
 		} catch (error) {
 			log.error("Minimax account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				error instanceof Error
 					? error
 					: new Error("Failed to create Minimax account"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a DeepSeek account add handler
+ */
+export function createDeepseekAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate account name
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			// Validate API key
+			const apiKey = validateString(body.apiKey, "apiKey", {
+				required: true,
+				minLength: 1,
+			});
+
+			if (!apiKey) {
+				return errorResponse(BadRequest("API key is required"));
+			}
+
+			// Validate priority
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			let validatedModelMappings = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				try {
+					const sanitized = validateAndSanitizeModelMappings(
+						body.modelMappings,
+					);
+					if (sanitized && Object.keys(sanitized).length > 0) {
+						validatedModelMappings = JSON.stringify(sanitized);
+					}
+				} catch (err) {
+					return errorResponse(
+						BadRequest(
+							`Invalid model mappings: ${err instanceof Error ? err.message : String(err)}`,
+						),
+					);
+				}
+			}
+
+			// Create DeepSeek account directly in database
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"deepseek",
+				null,
+			);
+			if (conflict) return conflict;
+
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"deepseek",
+					apiKey,
+					apiKey, // Use API key as refresh token for consistency with CLI
+					apiKey, // Use API key as access token
+					now + 365 * 24 * 60 * 60 * 1000, // 1 year from now
+					now,
+					0,
+					0,
+					priority,
+					null, // No custom endpoint for DeepSeek
+					validatedModelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added DeepSeek account: ${name} (Priority ${priority})`,
+			);
+
+			// Get the created account for response
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `DeepSeek account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("DeepSeek account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create DeepSeek account"),
 			);
 		}
 	};
@@ -1604,6 +2103,15 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"nanogpt",
+				customEndpoint || null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1681,6 +2189,11 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 			log.error("NanoGPT account creation error:", error);
 			if (error instanceof ValidationError) {
 				return errorResponse(BadRequest(error.message));
+			}
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
 			}
 			return errorResponse(
 				error instanceof Error
@@ -1768,6 +2281,15 @@ export function createAnthropicCompatibleAccountAddHandler(
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"anthropic-compatible",
+				customEndpoint || null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1847,10 +2369,193 @@ export function createAnthropicCompatibleAccountAddHandler(
 			});
 		} catch (error) {
 			log.error("Anthropic-compatible account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				error instanceof Error
 					? error
 					: new Error("Failed to create Anthropic-compatible account"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a Meta Model API account add handler
+ */
+export function createMetaAccountAddHandler(dbOps: DatabaseOperations) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate account name
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+				transform: sanitizers.trim,
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Account name is required"));
+			}
+
+			// Validate API key
+			const apiKey = validateString(body.apiKey, "apiKey", {
+				required: true,
+				minLength: 1,
+			});
+
+			if (!apiKey) {
+				return errorResponse(
+					BadRequest("API key is required for Meta Model API"),
+				);
+			}
+
+			// Validate priority
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
+
+			// Validate custom endpoint (optional — defaults to the official Meta API)
+			const customEndpoint = validateString(
+				body.customEndpoint || null,
+				"customEndpoint",
+				{
+					required: false,
+					transform: (value: string) => {
+						if (!value) return "";
+						const trimmed = value.trim();
+						if (!trimmed) return "";
+						try {
+							new URL(trimmed);
+							return trimmed;
+						} catch {
+							throw new Error("Invalid URL format");
+						}
+					},
+				},
+			);
+
+			// Validate and sanitize model mappings (optional)
+			let modelMappings = null;
+			if (body.modelMappings && typeof body.modelMappings === "object") {
+				const validatedMappings = validateAndSanitizeModelMappings(
+					body.modelMappings,
+				);
+				modelMappings = JSON.stringify(validatedMappings);
+			}
+
+			// Create Meta account directly in database
+			const accountId = crypto.randomUUID();
+			const now = Date.now();
+			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"meta",
+				customEndpoint || null,
+			);
+			if (conflict) return conflict;
+
+			await db.run(
+				`INSERT INTO accounts (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					accountId,
+					name,
+					"meta",
+					apiKey,
+					null,
+					null,
+					now + 365 * 24 * 60 * 60 * 1000, // 1 year from now — "never expires" sentinel for static-key accounts
+					now,
+					0,
+					0,
+					priority,
+					customEndpoint || null,
+					modelMappings,
+				],
+			);
+
+			log.info(
+				`Successfully added Meta account: ${name} (Priority ${priority})`,
+			);
+
+			// Get the created account for response
+			const account = await db.get<{
+				id: string;
+				name: string;
+				provider: string;
+				request_count: number;
+				total_requests: number;
+				last_used: number | null;
+				created_at: number;
+				expires_at: number;
+				refresh_token: string | null;
+				paused: number;
+			}>(
+				`SELECT
+					id, name, provider, request_count, total_requests,
+					last_used, created_at, expires_at, refresh_token,
+					COALESCE(paused, 0) as paused
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(
+					InternalServerError("Failed to retrieve created account"),
+				);
+			}
+
+			return jsonResponse({
+				message: `Meta account '${name}' added successfully`,
+				account: {
+					id: account.id,
+					name: account.name,
+					provider: account.provider,
+					requestCount: account.request_count,
+					totalRequests: account.total_requests,
+					lastUsed: account.last_used
+						? new Date(account.last_used).toISOString()
+						: null,
+					created: new Date(account.created_at).toISOString(),
+					paused: account.paused === 1,
+					priority: priority,
+					tokenStatus: "valid" as const,
+					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					rateLimitStatus: "OK",
+					rateLimitReset: null,
+					rateLimitRemaining: null,
+					rateLimitedUntil: null,
+					sessionInfo: "No active session",
+					hasRefreshToken: false,
+				},
+			});
+		} catch (error) {
+			log.error("Meta account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to create Meta account"),
 			);
 		}
 	};
@@ -1918,6 +2623,15 @@ export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"ollama",
+				customEndpoint || null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -1996,6 +2710,11 @@ export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
 			});
 		} catch (error) {
 			log.error("Ollama account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				error instanceof Error
 					? error
@@ -2054,6 +2773,15 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"ollama-cloud",
+				"https://ollama.com",
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -2132,6 +2860,11 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 			});
 		} catch (error) {
 			log.error("Ollama Cloud account creation error:", error);
+			if (isUniqueConstraintError(error)) {
+				return errorResponse(
+					BadRequest(`Account name '${name}' is already taken`),
+				);
+			}
 			return errorResponse(
 				error instanceof Error
 					? error
@@ -2772,6 +3505,13 @@ export function createAccountForceResetRateLimitHandler(
 				const { data: usageData } = await fetchUsageData(account.access_token);
 				if (usageData) {
 					usageCache.set(account.id, usageData);
+					dbOps
+						.recordUsageSnapshot(account.id, usageData, Date.now())
+						.catch((err) =>
+							log.warn(
+								`Failed to record usage snapshot for ${account.name}: ${err}`,
+							),
+						);
 					usagePollTriggered = true;
 				}
 			}
@@ -3020,6 +3760,14 @@ export function createBedrockAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 			const oneYearFromNow = now + 365 * 24 * 60 * 60 * 1000; // 1 year expiry
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"bedrock",
+				bedrockConfig,
+			);
+			if (conflict) return conflict;
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -3169,6 +3917,15 @@ export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"kilo",
+				null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -3317,6 +4074,15 @@ export function createAlibabaCodingPlanAccountAddHandler(
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"alibaba-coding-plan",
+				null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -3470,6 +4236,15 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
+
+			const conflict = await assertAccountNameAvailable(
+				dbOps,
+				name,
+				"openrouter",
+				null,
+			);
+			if (conflict) return conflict;
+
 			await db.run(
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
@@ -3565,8 +4340,8 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
  *
  * For Anthropic accounts this restarts the free `/api/oauth/usage` polling
  * loop. For Codex accounts there is no free usage endpoint, so this sends a
- * minimal real `/responses` request (capped via `max_output_tokens: 1` and
- * abort-after-headers) and parses the `x-codex-*` headers off the response.
+ * minimal real `/responses` request, aborts immediately after receiving the
+ * headers, and parses the `x-codex-*` usage data from that snapshot.
  */
 export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 	return async (_req: Request, accountId: string): Promise<Response> => {

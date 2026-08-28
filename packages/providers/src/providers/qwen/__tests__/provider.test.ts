@@ -39,11 +39,13 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 	};
 }
 
-function makeOpenAIRequest(systemContent: unknown): OpenAIRequest {
+function makeOpenAIRequest(
+	systemContent: OpenAIRequest["messages"][number]["content"],
+): OpenAIRequest {
 	return {
 		model: "coder-model",
 		messages: [
-			{ role: "system", content: systemContent as any },
+			{ role: "system", content: systemContent },
 			{ role: "user", content: "Hello" },
 		],
 	};
@@ -193,6 +195,7 @@ describe("QwenProvider", () => {
 			const result = provider.beforeConvert({}, account);
 			expect(result).toBeDefined();
 			const mappings = JSON.parse(result?.model_mappings as string);
+			expect(mappings.fable).toBe("coder-model");
 			expect(mappings.opus).toBe("coder-model");
 			expect(mappings.sonnet).toBe("coder-model");
 			expect(mappings.haiku).toBe("coder-model");
@@ -449,7 +452,10 @@ describe("QwenProvider", () => {
 					{ type: "text", text: "Instruction." },
 				]);
 				provider.afterConvert(body);
-				expect((body as any).vl_high_resolution_images).toBe(true);
+				expect(
+					(body as OpenAIRequest & { vl_high_resolution_images?: boolean })
+						.vl_high_resolution_images,
+				).toBe(true);
 			});
 
 			it("sets vl_high_resolution_images even when no system message exists", () => {
@@ -458,7 +464,10 @@ describe("QwenProvider", () => {
 					messages: [{ role: "user", content: "Hello" }],
 				};
 				provider.afterConvert(body);
-				expect((body as any).vl_high_resolution_images).toBe(true);
+				expect(
+					(body as OpenAIRequest & { vl_high_resolution_images?: boolean })
+						.vl_high_resolution_images,
+				).toBe(true);
 			});
 		});
 

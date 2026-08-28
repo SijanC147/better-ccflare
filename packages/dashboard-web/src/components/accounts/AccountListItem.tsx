@@ -20,6 +20,7 @@ import {
 	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { RateLimitProgress } from "./RateLimitProgress";
@@ -30,6 +31,11 @@ function formatTokenCount(n: number): string {
 	return String(n);
 }
 
+function formatPauseReason(reason: string | null): string | null {
+	if (!reason) return null;
+	return reason.replaceAll("_", " ");
+}
+
 interface AccountListItemProps {
 	account: Account;
 	isPrimary?: boolean;
@@ -37,7 +43,7 @@ interface AccountListItemProps {
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
-	onRemove: (name: string) => void;
+	onRemove: (account: Account) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
@@ -254,8 +260,22 @@ export function AccountListItem({
 						<span className="text-sm text-muted-foreground">
 							{presenter.sessionInfo}
 						</span>
-						{presenter.isPaused && (
-							<span className="text-sm text-muted-foreground">Paused</span>
+						{account.requiresReauth ? (
+							<Badge
+								variant="destructive"
+								title="Refresh token invalid — re-authenticate"
+							>
+								Needs authentication
+							</Badge>
+						) : (
+							presenter.isPaused && (
+								<span className="text-sm text-muted-foreground">
+									Paused
+									{formatPauseReason(account.pauseReason)
+										? ` (${formatPauseReason(account.pauseReason)})`
+										: ""}
+								</span>
+							)
 						)}
 						{!presenter.isPaused && presenter.rateLimitStatus !== "OK" && (
 							<span
@@ -431,11 +451,7 @@ export function AccountListItem({
 							<Pause className="h-4 w-4" />
 						)}
 					</Button>
-					<Button
-						variant="ghost"
-						size="sm"
-						onClick={() => onRemove(account.name)}
-					>
+					<Button variant="ghost" size="sm" onClick={() => onRemove(account)}>
 						<Trash2 className="h-4 w-4" />
 					</Button>
 				</div>
@@ -465,6 +481,11 @@ export function AccountListItem({
 			{(account.rateLimitReset ||
 				account.usageData ||
 				account.usageRateLimitedUntil ||
+				// Codex quota data only arrives piggybacked on real traffic (no usage
+				// polling endpoint), so gaps are routine. Mount the bar anyway: it
+				// renders the weekly window as "Data unavailable" instead of
+				// disappearing, and a missing quota bar reads as "no limit".
+				account.provider === "codex" ||
 				providerShowsCreditsBalance(account.provider)) && (
 				<RateLimitProgress
 					resetIso={account.rateLimitReset}

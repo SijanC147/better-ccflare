@@ -95,6 +95,28 @@ curl http://localhost:8080/health?detail=1
 curl http://localhost:8080/health
 ```
 
+**Retention job telemetry**
+
+The response includes `runtime.storage.retention`, reporting the health of the hourly data-retention cleanup job (request/payload/usage-snapshot pruning). Use `lastSuccessAt` for dead-man alerting — if it stops advancing, the job has stalled or is failing silently:
+
+```json
+{
+  "runtime": {
+    "storage": {
+      "retention": {
+        "lastSuccessAt": "2024-12-17T10:30:45.123Z",
+        "lastError": null,
+        "lastErrorAt": null
+      }
+    }
+  }
+}
+```
+
+- `lastSuccessAt` — ISO timestamp of the last successful cleanup run (startup or hourly), or `null` if none has completed yet
+- `lastError` — message from the most recent failure, or `null` if the last run succeeded (cleared on the next success)
+- `lastErrorAt` — ISO timestamp of `lastError`, or `null`
+
 ---
 
 ### Claude Proxy
@@ -119,7 +141,7 @@ Note: this is distinct from the `codex` *provider*, which routes requests outbou
 - `previous_response_id` is accepted but ignored — better-ccflare is stateless and does not store prior responses. Codex uses this field only over WebSocket (which better-ccflare does not implement); for regular HTTP requests Codex always sends the full conversation history in `input`, so this field has no effect.
 - Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are silently skipped; only `type: "function"` tools are forwarded to Anthropic.
 
-**Note:** There is no `/v1/models` endpoint provided by better-ccflare. Model listing would need to be done directly through Claude's API if such an endpoint exists.
+**Note:** `GET /v1/models` is proxied through to Claude like any other `/v1/*` request. A successful response (from a console/API-key account) is also passively captured into better-ccflare's own model catalog cache — see [Model Catalog](#model-catalog) below for the read endpoint (`GET /api/models`) and how the catalog is kept up to date.
 
 **Headers:**
 - All standard Claude API headers are supported
@@ -418,6 +440,43 @@ curl -X POST http://localhost:8080/api/accounts/uuid-here/resume
 
 ---
 
+### Sessions
+
+#### GET /api/sessions/:sessionId/account
+
+Resolve the account that most recently served a given client session (the `x-claude-code-session-id` header value). Intended for local status-line integrations that want to show which account is currently serving a session.
+
+DB-backed lookup only: the most recent `requests` row for this session id with a non-null account. There is no live/in-memory path — a session with no recorded requests, or whose serving account was since removed, resolves to `"unknown"`.
+
+This endpoint is **exempt from API key authentication** (matches `GET /api/sessions/:id/account` exactly), since it's meant to be polled locally without credentials.
+
+**Response (`known`):**
+```json
+{
+  "status": "known",
+  "account": {
+    "id": "uuid-here",
+    "name": "account1",
+    "provider": "anthropic",
+    "...": "same shape as GET /api/accounts"
+  }
+}
+```
+
+**Response (`unknown`):**
+```json
+{
+  "status": "unknown"
+}
+```
+
+**Example:**
+```bash
+curl http://localhost:8080/api/sessions/your-session-id/account
+```
+
+---
+
 ### Statistics
 
 #### GET /api/stats
@@ -498,7 +557,13 @@ Get recent request summary.
     "cacheCreationInputTokens": 0,
     "costUsd": 0.0125,
     "agentUsed": null,
-    "tokensPerSecond": null
+    "tokensPerSecond": null,
+    "project": null,
+    "projectAttributionSource": null,
+    "agentAttributionSource": null,
+    "clientSessionId": null,
+    "streamTerminalState": null,
+    "rateLimited": false
   }
 ]
 ```
@@ -507,6 +572,11 @@ Get recent request summary.
 ```bash
 curl "http://localhost:8080/api/requests?limit=100"
 ```
+
+**Field notes:**
+- `streamTerminalState` — the real SSE outcome for a streaming `/v1/messages` request. One of `complete`, `recovered`, `error`, `truncated`, or `client_cancelled`; `undefined` for non-streaming requests. A response can carry `statusCode: 200` and still be `truncated` or `client_cancelled`, so this is the authoritative "did the stream actually finish?" signal. An unrecognized value (e.g. written by a newer build, surviving a rollback) surfaces as `"unknown"` rather than vanishing.
+- `clientSessionId` — the `x-claude-code-session-id` header value when the client sent one; used to attribute requests to a Claude Code session.
+- `rateLimited` — convenience flag, `true` when `statusCode === 429`.
 
 #### GET /api/requests/detail
 
@@ -636,6 +706,144 @@ List all available load balancing strategies.
 **Example:**
 ```bash
 curl http://localhost:8080/api/strategies
+```
+
+#### GET /api/config/provider-model-defaults
+
+Get the editable override layer sitting between account model mappings and each provider's compiled default model map (see [configuration.md](configuration.md#editable-provider-model-defaults)). Only providers enabled via `CCFLARE_MODEL_DEFAULTS_PROVIDERS` (default: `codex` only) are listed.
+
+**Response:**
+```json
+{
+  "providers": [
+    {
+      "provider": "codex",
+      "fields": [
+        {
+          "family": "opus",
+          "factory": "gpt-5.3-codex",
+          "override": null,
+          "effective": "gpt-5.3-codex"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`factory` is the compiled default (`null` if nothing has been discovered yet for a provider that derives its map from a live account listing, e.g. Codex). `override` is the operator-set value, if any. `effective` is what's actually applied (`override` when set, otherwise `factory`).
+
+**Example:**
+```bash
+curl http://localhost:8080/api/config/provider-model-defaults
+```
+
+#### POST /api/config/provider-model-defaults
+
+Set or clear model-default overrides. Overrides are merged per family — updating `codex.opus` doesn't clear `codex.haiku`. Sending an empty string for `model` removes that family's override.
+
+**Request:**
+```json
+{
+  "overrides": [
+    { "provider": "codex", "family": "opus", "model": "gpt-5.3-codex" },
+    { "provider": "codex", "family": "haiku", "model": "" }
+  ]
+}
+```
+
+**Response:** Same shape as `GET /api/config/provider-model-defaults`, reflecting the change immediately (no restart required).
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/config/provider-model-defaults \
+  -H "Content-Type: application/json" \
+  -d '{"overrides": [{"provider": "codex", "family": "opus", "model": "gpt-5.3-codex"}]}'
+```
+
+#### GET /api/config/combos-enabled
+
+Whether saved combos take part in routing. Config-file-only setting, no environment variable — see [FEATURE_COMBOS.md](../FEATURE_COMBOS.md).
+
+**Response:**
+```json
+{ "enabled": false, "source": "default" }
+```
+
+`source` is `"file"` when the config file has a stored value, `"default"` otherwise.
+
+**Example:**
+```bash
+curl http://localhost:8080/api/config/combos-enabled
+```
+
+#### POST /api/config/combos-enabled
+
+Enable or disable combo routing. Saved combos are never deleted by turning this off — they just stop being consulted during account selection.
+
+**Request:**
+```json
+{ "enabled": true }
+```
+
+**Response:**
+```json
+{ "success": true, "enabled": true, "source": "file", "effective": true }
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/config/combos-enabled \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+#### GET /api/config/force-account-model
+
+Whether the model a client asks for must be the model that is sent — no combo slot, no account model mapping, no provider default map. Config-file-only setting, no environment variable, off by default — see [Force Account Model](configuration.md#force-account-model) in configuration.md.
+
+**Response:**
+```json
+{ "enabled": false, "source": "default" }
+```
+
+**Example:**
+```bash
+curl http://localhost:8080/api/config/force-account-model
+```
+
+#### POST /api/config/force-account-model
+
+Enable or disable forced account model. Takes effect immediately, no restart required.
+
+**Request:**
+```json
+{ "enabled": true }
+```
+
+**Response:**
+```json
+{ "success": true, "enabled": true, "source": "file", "effective": true }
+```
+
+With this on, a request whose model can't be served as-written by any account gets a `503`:
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "service_unavailable_error",
+    "message": "No available account can serve \"claude-opus-4-20250514\", and forcing the account model is enabled so no substitute was used.",
+    "code": "force_account_model_no_account",
+    "model": "claude-opus-4-20250514"
+  }
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/config/force-account-model \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
 ```
 
 ---
@@ -799,6 +1007,57 @@ curl -X POST http://localhost:8080/api/agents/agent-uuid/preference \
   -d '{"model": "claude-3-5-sonnet-20241022"}'
 ```
 
+#### DELETE /api/agents/:agentId/preference
+
+Remove an agent's model preference, reverting it to its default (the agent's frontmatter model, or the session model if it has none).
+
+**Response:**
+```json
+{
+  "success": true,
+  "agentId": "agent-uuid",
+  "deleted": true
+}
+```
+
+**Example:**
+```bash
+curl -X DELETE http://localhost:8080/api/agents/agent-uuid/preference
+```
+
+#### PATCH /api/agents/:agentId
+
+Update an agent's configuration. Changes are written to the agent's `.md` file.
+
+**Request:** (all fields optional)
+```json
+{
+  "description": "Reviews code for quality and best practices",
+  "model": "claude-3-5-sonnet-20241022",
+  "tools": ["Read", "Edit"],
+  "color": "blue",
+  "systemPrompt": "You are a code reviewer...",
+  "mode": "edit"
+}
+```
+
+`model` accepts a valid model id, `null`, or the string `"inherit"` (case-insensitive); the latter two remove the `model:` key from the agent file so it inherits the session model. **Side effect:** including `model` in the request body at all — even to set it to `null` — clears the agent's runtime model preference (see `POST`/`DELETE /api/agents/:agentId/preference` above), so the two override mechanisms don't end up conflicting.
+
+**Response:**
+```json
+{
+  "success": true,
+  "agent": { ... }
+}
+```
+
+**Example:**
+```bash
+curl -X PATCH http://localhost:8080/api/agents/agent-uuid \
+  -H "Content-Type: application/json" \
+  -d '{"model": null}'
+```
+
 #### GET /api/workspaces
 
 List all available workspaces with agent counts.
@@ -819,6 +1078,55 @@ List all available workspaces with agent counts.
 **Example:**
 ```bash
 curl http://localhost:8080/api/workspaces
+```
+
+---
+
+### Model Catalog
+
+#### GET /api/models
+
+Return the cached Anthropic model catalog used to populate model dropdowns (dashboard agent/default-model selects). Returns the live catalog if a successful fetch has occurred (scheduled refresh, manual refresh, or passive capture from a proxied `GET /v1/models`); otherwise the bundled static fallback shipped with better-ccflare.
+
+**Response:**
+```json
+{
+  "models": [
+    { "id": "claude-sonnet-5", "displayName": "Claude Sonnet 5", "createdAt": "2026-01-15T00:00:00Z" }
+  ],
+  "fetchedAt": 1751270400000,
+  "source": "live"
+}
+```
+
+`source` is `"live"` when the catalog came from a real Anthropic response, or `"fallback"` when no live fetch has ever succeeded and the bundled model list is being served instead (`fetchedAt` is then the bundled list's snapshot date, not the current time — see [Model Catalog](configuration.md#model-catalog) in the configuration guide).
+
+**Example:**
+```bash
+curl http://localhost:8080/api/models
+```
+
+#### POST /api/models/refresh
+
+Force an immediate live model catalog refresh, bypassing the scheduled interval. Prefers a console/API-key account but falls back to an OAuth account if `BETTER_CCFLARE_MODELS_OAUTH_REFRESH` (or the equivalent config toggle) is enabled. Never throws — always returns `200` with the outcome, even on failure (e.g. no eligible account, network error).
+
+**Response:**
+```json
+{
+  "success": true,
+  "catalog": {
+    "models": [ ... ],
+    "fetchedAt": 1751270400000,
+    "source": "live"
+  }
+}
+```
+
+On failure, `success` is `false` and an `error` field describes the reason; `catalog` still reflects the current (unchanged) cached catalog.
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/models/refresh
 ```
 
 ---
@@ -955,6 +1263,10 @@ better-ccflare can be configured using the following environment variables:
 - `RETRY_ATTEMPTS` - Number of retry attempts for failed requests (default: 3)
 - `RETRY_DELAY_MS` - Initial delay between retries in milliseconds (default: 1000)
 - `RETRY_BACKOFF` - Exponential backoff multiplier for retries (default: 2)
+- `BETTER_CCFLARE_MODELS_REFRESH_HOURS` - Hours between scheduled model catalog refreshes, 0 disables scheduled refresh (default: 168 / 7 days). See [Model Catalog](configuration.md#model-catalog).
+- `BETTER_CCFLARE_MODELS_OFFLINE` - Disable scheduled/manual model catalog refresh and passive `/v1/models` capture (default: unset)
+- `BETTER_CCFLARE_MODELS_CACHE_DIR` - Directory for the persisted model catalog cache file (default: platform config dir)
+- `BETTER_CCFLARE_MODELS_OAUTH_REFRESH` - Allow OAuth accounts as a fallback source for manual model catalog refreshes (default: unset / console-only)
 
 ### Configuration File
 

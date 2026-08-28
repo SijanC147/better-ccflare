@@ -6,10 +6,13 @@ export * from "./alibaba-coding-plan-usage-fetcher";
 export { BaseProvider } from "./base";
 // Export Kilo usage fetcher
 export * from "./kilo-usage-fetcher";
+// Export Minimax usage fetcher
+export * from "./minimax-usage-fetcher";
 // Export NanoGPT usage fetcher
 export * from "./nanogpt-usage-fetcher";
 // Export OAuth utilities
 export * from "./oauth";
+export * from "./provider-model-defaults";
 // Factory functions for creating providers
 export {
 	type AnthropicCompatibleConfig,
@@ -30,6 +33,8 @@ export {
 export * from "./types";
 // Export usage fetcher
 export * from "./usage-fetcher";
+// Export shared stream-drain helpers
+export * from "./utils/stream-drain";
 // Export xAI usage fetcher
 export * from "./xai-usage-fetcher";
 // Export Zai usage fetcher
@@ -40,7 +45,9 @@ import { AnthropicProvider } from "./providers/anthropic/provider";
 import { AnthropicCompatibleProvider } from "./providers/anthropic-compatible/provider";
 import { BedrockProvider } from "./providers/bedrock/provider";
 import { CodexProvider } from "./providers/codex/provider";
+import { DeepseekProvider } from "./providers/deepseek/provider";
 import { KiloProvider } from "./providers/kilo/provider";
+import { MetaProvider } from "./providers/meta/provider";
 import { MinimaxProvider } from "./providers/minimax/provider";
 import { NanoGPTProvider } from "./providers/nanogpt/provider";
 import { OllamaCloudProvider } from "./providers/ollama/ollama-cloud-provider";
@@ -62,6 +69,7 @@ registry.registerProvider(new KiloProvider());
 registry.registerProvider(new OpenRouterProvider());
 registry.registerProvider(new QwenProvider());
 registry.registerProvider(new MinimaxProvider());
+registry.registerProvider(new DeepseekProvider());
 registry.registerProvider(new NanoGPTProvider());
 registry.registerProvider(new ZaiProvider());
 registry.registerProvider(new VertexAIProvider());
@@ -70,3 +78,4 @@ registry.registerProvider(new OpenAICompatibleProvider());
 registry.registerProvider(new OllamaProvider());
 registry.registerProvider(new OllamaCloudProvider());
 registry.registerProvider(new AnthropicCompatibleProvider());
+registry.registerProvider(new MetaProvider());

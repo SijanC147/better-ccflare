@@ -1,20 +1,49 @@
+import { createHash } from "node:crypto";
 import {
+	isForceAccountModelEnabled,
 	mapModelName,
 	ValidationError,
 	validateEndpointUrl,
 } from "@better-ccflare/core";
 import { sanitizeProxyHeaders } from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
-import { resolveReasoningEffort } from "@better-ccflare/openai-formats";
+import {
+	resolveReasoningEffort,
+	sanitizeSchemaForOpenAI,
+} from "@better-ccflare/openai-formats";
 import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
+import { resolveProviderModelDefault } from "../../provider-model-defaults";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { drainReader, drainReaderWithDeadline } from "../../utils/stream-drain";
+import {
+	CodexStreamLiveness,
+	type CodexStreamLivenessOptions,
+} from "./stream-liveness";
+import { normalizeCodexInputUsage } from "./usage";
 
 const log = new Logger("CodexProvider");
+
+/**
+ * Enabled by default: attaches an OpenAI prompt_cache_key to converted
+ * requests. OpenAI documents that on GPT-5.6-family models this key is
+ * required for reliable prompt-cache matching. Set to "0" to opt out and
+ * restore the old (no cache key) behavior.
+ *
+ * Attaching the key is also gated on the resolved account endpoint (see
+ * isOpenAiPromptCacheEndpoint): it is only sent when the account targets
+ * OpenAI's own chatgpt.com / api.openai.com hosts. Custom or self-hosted
+ * OpenAI-compatible endpoints may reject the unknown field, so the key is
+ * skipped for those regardless of this flag.
+ */
+export const CODEX_PROMPT_CACHE_KEY_ENV = "CCFLARE_CODEX_PROMPT_CACHE_KEY";
+/** "conversation" (default) or "session"; see derivePromptCacheKey. */
+export const CODEX_CACHE_KEY_MODE_ENV = "CCFLARE_CODEX_CACHE_KEY_MODE";
 
 const INTERNAL_HEADERS = [
 	"x-better-ccflare-request-id",
 	"x-better-ccflare-request-stream",
+	"x-better-ccflare-codex-custom-tools",
 ];
 
 function sanitizeResponseHeaders(headers: Headers): Headers {
@@ -25,15 +54,53 @@ function sanitizeResponseHeaders(headers: Headers): Headers {
 	return sanitized;
 }
 
+// Matches the SSE event name or item "type" marker, not a bare substring,
+// so assistant-generated text can't trigger a false positive.
+const CUSTOM_TOOL_CALL_PATTERN =
+	/(?:^|\n)event:\s*response\.custom_tool_call|"type"\s*:\s*"(?:response\.)?custom_tool_call/;
+
+function hasCustomToolCallEvent(sseText: string): boolean {
+	return CUSTOM_TOOL_CALL_PATTERN.test(sseText);
+}
+
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.142.5";
+export const CODEX_VERSION = "0.149.1";
+/** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
+const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
-export const CODEX_PING_MODEL = "gpt-5-codex";
+/**
+ * Fallback model for the usage-header probe (`fetchCodexUsageOnDemand`) — never
+ * used by real traffic, which always carries the client's own model.
+ *
+ * The probe's model must be one the account can actually address. `gpt-5-codex`
+ * no longer is: the subscription endpoint answers
+ * `400 {"detail":"The 'gpt-5-codex' model is not supported when using Codex
+ * with a ChatGPT account."}`, and that rejection happens *before* quota
+ * accounting, so the response carries no `x-codex-*` headers at all. The probe
+ * then returns `data: null` and the manual refresh reports failure with nothing
+ * to show for it. A body-level rejection (e.g. an unsupported reasoning effort)
+ * still returns the full header set, which is how the difference was confirmed.
+ *
+ * Which is why a name compiled in here is the *last* resort: the refresher asks
+ * the account for its own model listing and pings the weakest entry in it
+ * (`lowestTierCodexModel`), the same list the family mapping is derived from —
+ * weakest because the probe throws the answer away and the quota headers report
+ * the subscription, so the cheapest accepted name wins. This constant only
+ * answers when that listing has never been readable — a brand new account whose
+ * first read failed. `gpt-5.6-sol` stays the fallback rather than a small model:
+ * a guess has to be a name that certainly exists, and the frontier one is the
+ * only name every measured account resolved to.
+ */
+export const CODEX_PING_MODEL = "gpt-5.6-sol";
 const CODEX_SYNTHETIC_COUNT_TOKENS_URL =
 	"https://better-ccflare.local/codex/count_tokens";
+// Structured (non-text) tool_result blocks larger than this are replaced with
+// a size marker: replaying megabyte payloads (e.g. base64 documents) into
+// every subsequent turn bloats context and destroys prompt-cache reuse.
+const CODEX_MAX_STRUCTURED_BLOCK_CHARS = 8_192;
 
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
@@ -54,18 +121,94 @@ const _normalizeUsage = (value: unknown): Record<string, number> => {
 	};
 };
 
+// Known Codex failure codes -> Anthropic error types. Quota exhaustion cools
+// the account like a rate limit; slow_down/server_is_overloaded are throttles;
+// context/policy and subscription errors are permanent and must not be
+// retried as 5xx. Codes and their retry semantics mirror the reference
+// client (openai/codex codex-api/src/sse/responses.rs + api_bridge.rs).
+const CODEX_ERROR_TYPE_BY_CODE: Record<string, string> = {
+	rate_limit_exceeded: "rate_limit_error",
+	insufficient_quota: "rate_limit_error",
+	server_is_overloaded: "overloaded_error",
+	slow_down: "overloaded_error",
+	server_error: "api_error",
+	context_length_exceeded: "invalid_request_error",
+	cyber_policy: "invalid_request_error",
+	usage_not_included: "permission_error",
+};
+
 // Default model mapping: Anthropic model name prefixes → Codex model names
-const DEFAULT_MODEL_MAP: Record<string, string> = {
+const _DEFAULT_MODEL_MAP: Record<string, string> = {
+	// Same value as opus/sonnet, for consistency in the factory map. ChatGPT
+	// subscription accounts reject 5.3-codex (HTTP 400); in those cases the
+	// fix lives in the layers above — per-account mapping or a global
+	// override in Settings — not here.
+	fable: "gpt-5.3-codex",
 	opus: "gpt-5.3-codex",
 	sonnet: "gpt-5.3-codex",
 	haiku: "gpt-5.4-mini",
 };
 
-const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+// Deliberately NOT registered as a factory default any more.
+//
+// A map compiled at build time cannot know what a subscription is entitled
+// to: this one pointed `opus` and `sonnet` at `gpt-5.3-codex`, which a
+// ChatGPT-plan account refuses with HTTP 400 — the incident this whole line
+// of work came from. The account's own listing knows, so it decides; the map
+// below survives only as documentation of the shape and for the tests that
+// exercise family resolution.
+
+// Synced from the Codex CLI model cache (~/.codex/models_cache.json,
+// codex-cli 0.144.1). Missing entries mean no context_window block is
+// reported to the client, which disables its context gauge and compaction
+// triggers for that model.
+export const CODEX_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.3-codex": 272_000,
+	"gpt-5.3-codex-spark": 128_000,
 	"gpt-5.4": 272_000,
 	"gpt-5.4-mini": 272_000,
+	"gpt-5.5": 272_000,
+	"gpt-5.6-sol": 372_000,
+	"gpt-5.6-terra": 372_000,
+	"gpt-5.6-luna": 372_000,
 };
+
+/**
+ * The Codex model ids ccflare itself knows about, derived from the context
+ * window table above so the two can never drift apart.
+ *
+ * Being on this list means "ccflare ships knowledge of this model", NOT
+ * "the account you are about to use may call it": a ChatGPT-subscription
+ * account rejects gpt-5.3-codex with HTTP 400 even though the model plainly
+ * exists. Callers that surface this list to a human must keep that
+ * distinction visible (see GET /api/models, which tags these as `builtin`
+ * and the models.dev entries as `reference`).
+ */
+export const CODEX_KNOWN_MODELS: readonly string[] = Object.freeze(
+	Object.keys(CODEX_MODEL_CONTEXT_WINDOWS),
+);
+
+/**
+ * Exact lookup first, then longest-prefix fallback so dated or suffixed
+ * variants the API may return (e.g. "gpt-5.6-sol-2026-05-13") still resolve
+ * to their family's window instead of silently losing the client's context
+ * gauge. Prefix matches require a "-" boundary so "gpt-5.55" cannot match
+ * "gpt-5.5".
+ */
+function lookupContextWindow(model: string): number | undefined {
+	const exact = CODEX_MODEL_CONTEXT_WINDOWS[model];
+	if (exact) return exact;
+	let bestKey: string | undefined;
+	for (const key of Object.keys(CODEX_MODEL_CONTEXT_WINDOWS)) {
+		if (
+			model.startsWith(`${key}-`) &&
+			(bestKey === undefined || key.length > bestKey.length)
+		) {
+			bestKey = key;
+		}
+	}
+	return bestKey ? CODEX_MODEL_CONTEXT_WINDOWS[bestKey] : undefined;
+}
 
 // ── Codex Responses API types ─────────────────────────────────────────────────
 
@@ -116,10 +259,18 @@ interface CodexRequest {
 	model: string;
 	input: (CodexMessage | CodexFunctionCallItem | CodexFunctionCallOutputItem)[];
 	stream: boolean;
-	store: false;
-	reasoning?: { effort: string };
+	store: boolean;
+	max_output_tokens?: number;
+	reasoning?: { effort: string; context?: string };
 	instructions?: string;
 	tools?: CodexTool[];
+	prompt_cache_key?: string;
+	tool_choice?:
+		| "auto"
+		| "required"
+		| "none"
+		| { type: "function"; name: string };
+	parallel_tool_calls?: boolean;
 }
 
 // ── Anthropic request types ───────────────────────────────────────────────────
@@ -139,7 +290,14 @@ interface AnthropicToolUse {
 interface AnthropicToolResult {
 	type: "tool_result";
 	tool_use_id: string;
-	content: string | AnthropicTextContent[];
+	is_error?: boolean;
+	content:
+		| string
+		| Array<{
+				type: string;
+				text?: string;
+				[key: string]: unknown;
+		  }>;
 }
 
 type AnthropicContentBlock =
@@ -158,6 +316,12 @@ interface AnthropicTool {
 	input_schema?: Record<string, unknown>;
 }
 
+interface AnthropicToolChoice {
+	type: "auto" | "any" | "none" | "tool";
+	name?: string;
+	disable_parallel_tool_use?: boolean;
+}
+
 interface AnthropicRequest {
 	model: string;
 	max_tokens: number;
@@ -165,7 +329,10 @@ interface AnthropicRequest {
 	system?: string | { type: string; text: string }[];
 	stream?: boolean;
 	tools?: AnthropicTool[];
+	tool_choice?: AnthropicToolChoice;
 	reasoning?: { effort?: string };
+	/** Claude Code sends a JSON-encoded object with a session_id here. */
+	metadata?: { user_id?: string };
 	[key: string]: unknown;
 }
 
@@ -213,15 +380,94 @@ interface StreamState {
 	};
 }
 
+/**
+ * Resolves the endpoint a Codex request would be sent to, mirroring
+ * CodexProvider.buildUrl's fallback (invalid/missing custom_endpoint falls
+ * back to CODEX_DEFAULT_ENDPOINT). Read-only: unlike buildUrl it never logs,
+ * since it may be called on every request just to decide prompt_cache_key
+ * eligibility.
+ */
+function resolveCodexPromptCacheEndpoint(account?: Account): string {
+	if (account?.custom_endpoint) {
+		try {
+			return validateEndpointUrl(account.custom_endpoint, "custom_endpoint");
+		} catch {
+			return CODEX_DEFAULT_ENDPOINT;
+		}
+	}
+	return CODEX_DEFAULT_ENDPOINT;
+}
+
+/**
+ * prompt_cache_key is an OpenAI-specific Responses API field. Custom or
+ * self-hosted OpenAI-compatible endpoints may reject the unknown field, so
+ * only attach it when the account resolves to OpenAI's own hosts.
+ */
+function isOpenAiPromptCacheEndpoint(account?: Account): boolean {
+	try {
+		const { hostname } = new URL(resolveCodexPromptCacheEndpoint(account));
+		return OPENAI_PROMPT_CACHE_HOSTS.has(hostname);
+	} catch {
+		return false;
+	}
+}
+
+function isCodexSubscriptionEndpoint(account?: Account): boolean {
+	try {
+		const endpoint = new URL(resolveCodexPromptCacheEndpoint(account));
+		const normalizedPath = endpoint.pathname.replace(/\/+$/, "");
+		return (
+			endpoint.origin === "https://chatgpt.com" &&
+			normalizedPath === "/backend-api/codex/responses"
+		);
+	} catch {
+		return false;
+	}
+}
+
+export interface CodexProviderOptionsForTests {
+	streamHeartbeatIntervalMs?: number;
+	streamRawSilenceTimeoutMs?: number;
+	streamDrainDeadlineMs?: number;
+}
+
+/**
+ * Upper bound on how long processEvents' post-cancel upstream drain will
+ * wait for reader.read() to settle before giving up. `reader.cancel()` is a
+ * documented no-op on every released Bun version (oven-sh/bun#35093): it
+ * never releases the native off-heap buffer backing the upstream fetch
+ * Response body, leaking RSS while JS heap stays flat (issue #382). Draining
+ * the reader to `done` instead actually releases the buffer.
+ *
+ * A dedicated constant (not a shared import from packages/proxy's
+ * ANTHROPIC_DRAIN_DEADLINE_MS) because packages/providers cannot depend on
+ * packages/proxy — proxy's package.json depends on
+ * @better-ccflare/providers, so the reverse import would be circular.
+ */
+export const CODEX_STREAM_DRAIN_DEADLINE_MS = 30_000;
+
 export class CodexProvider extends BaseProvider {
 	name = "codex";
+	private readonly streamLivenessOptions: CodexStreamLivenessOptions;
+	private readonly streamDrainDeadlineMs: number;
+
+	constructor(options: CodexProviderOptionsForTests = {}) {
+		super();
+		this.streamLivenessOptions = {
+			heartbeatIntervalMs: options.streamHeartbeatIntervalMs,
+			rawSilenceTimeoutMs: options.streamRawSilenceTimeoutMs,
+		};
+		this.streamDrainDeadlineMs =
+			options.streamDrainDeadlineMs ?? CODEX_STREAM_DRAIN_DEADLINE_MS;
+	}
 	// Fallback map: proxy-operations.ts injects x-better-ccflare-request-id and
 	// x-better-ccflare-request-stream into the upstream response before calling
 	// processResponse, so headerRequestedStream is normally set. This map covers
-	// the race where a response arrives after the 30s TTL sweep evicts the entry.
+	// the race where a response arrives after the 30s TTL sweep evicts the entry,
+	// and the 529 in-place retry path (which doesn't re-tag those headers).
 	private requestStreamById = new Map<
 		string,
-		{ stream: boolean; ts: number }
+		{ stream: boolean; hasCustomTools: boolean; ts: number }
 	>();
 
 	private sweepRequestStreamById(): void {
@@ -234,7 +480,11 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	canHandle(path: string): boolean {
-		return path === "/v1/messages" || path === "/v1/messages/count_tokens";
+		return (
+			path === "/v1/messages" ||
+			path === "/v1/messages/count_tokens" ||
+			path === "/v1/models"
+		);
 	}
 
 	async refreshToken(
@@ -270,13 +520,20 @@ export class CodexProvider extends BaseProvider {
 				// ignore
 			}
 
+			// Preserve the machine-readable OAuth error code ahead of the human
+			// description so the token-manager's requires_reauth detection can
+			// classify a dead refresh token; a description-only message hides it.
 			const errorMessage =
-				errorData?.error_description || errorData?.error || response.statusText;
+				[errorData?.error, errorData?.error_description]
+					.filter(Boolean)
+					.join(": ") || response.statusText;
 
-			// Rotating refresh tokens: reuse → must re-auth
+			// Rotating refresh tokens: reuse → must re-auth. Keep the
+			// "refresh_token_reused" marker verbatim in the thrown message so
+			// downstream detection fires — the friendly hint alone would not match.
 			if (errorData?.error === "refresh_token_reused") {
 				throw new Error(
-					`Codex refresh token was reused for account ${account.name}. Please re-authenticate with: bun run cli --reauthenticate ${account.name}`,
+					`Failed to refresh Codex token for account ${account.name}: refresh_token_reused - the refresh token was already used; re-authenticate with: bun run cli --reauthenticate ${account.name}`,
 				);
 			}
 
@@ -309,6 +566,10 @@ export class CodexProvider extends BaseProvider {
 			return CODEX_SYNTHETIC_COUNT_TOKENS_URL;
 		}
 
+		if (_path === "/v1/models") {
+			return `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`;
+		}
+
 		if (account?.custom_endpoint) {
 			try {
 				return validateEndpointUrl(account.custom_endpoint, "custom_endpoint");
@@ -333,6 +594,13 @@ export class CodexProvider extends BaseProvider {
 		newHeaders.delete("x-api-key");
 		newHeaders.delete("host");
 
+		// Remove internal proxy headers.
+		for (const key of [...newHeaders.keys()]) {
+			if (key.startsWith("x-better-ccflare-")) {
+				newHeaders.delete(key);
+			}
+		}
+
 		// Set Codex-required headers
 		if (accessToken) {
 			newHeaders.set("Authorization", `Bearer ${accessToken}`);
@@ -349,6 +617,12 @@ export class CodexProvider extends BaseProvider {
 		request: Request,
 		account?: Account,
 	): Promise<Request> {
+		// /v1/models is handled as a passthrough GET.
+		const codexModelsUrl = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`;
+		if (request.url.startsWith(codexModelsUrl.split("?")[0])) {
+			return request;
+		}
+
 		const isSyntheticCountTokens = this.isSyntheticCountTokensRequest(
 			request.url,
 		);
@@ -370,19 +644,54 @@ export class CodexProvider extends BaseProvider {
 			if (isSyntheticCountTokens) {
 				return this.createSyntheticCountTokensResponse(request, body);
 			}
+			const isSubscriptionEndpoint = isCodexSubscriptionEndpoint(account);
+			if (
+				isSubscriptionEndpoint &&
+				typeof body.max_tokens === "number" &&
+				body.max_tokens <= 0
+			) {
+				return this.createSyntheticErrorResponse(
+					request,
+					400,
+					"invalid_request_error",
+					`Codex subscription endpoint does not support max_tokens: ${body.max_tokens}.`,
+				);
+			}
 
 			const requestId = request.headers.get("x-better-ccflare-request-id");
-			if (requestId) {
-				this.requestStreamById.set(requestId, {
-					stream: body.stream === true,
-					ts: Date.now(),
-				});
-			}
+			// Extract internal passthrough metadata.
+			const passthrough = body.__better_ccflare_codex_passthrough as
+				| Record<string, unknown>
+				| undefined;
+			delete body.__better_ccflare_codex_passthrough;
 			const codexBody = this.convertToCodexFormat(
 				body,
 				account,
 				requestId ?? undefined,
+				isSubscriptionEndpoint,
+				passthrough,
 			);
+
+			// Only custom (non-function) tools can produce custom_tool_call output;
+			// let processResponse skip buffering when none were declared. Responses
+			// Lite can also declare custom tools via an "additional_tools" input
+			// item instead of codexBody.tools.
+			const hasCustomTools =
+				(codexBody.tools?.some(
+					(t) => (t as { type?: string }).type !== "function",
+				) ??
+					false) ||
+				codexBody.input.some(
+					(item) => (item as { type?: string }).type === "additional_tools",
+				);
+
+			if (requestId) {
+				this.requestStreamById.set(requestId, {
+					stream: body.stream === true,
+					hasCustomTools,
+					ts: Date.now(),
+				});
+			}
 
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
@@ -390,12 +699,18 @@ export class CodexProvider extends BaseProvider {
 				"x-better-ccflare-request-stream",
 				body.stream === true ? "true" : "false",
 			);
+			newHeaders.set(
+				"x-better-ccflare-codex-custom-tools",
+				hasCustomTools ? "true" : "false",
+			);
 			newHeaders.delete("content-length");
+
+			const serializedBody = JSON.stringify(codexBody);
 
 			return new Request(request.url, {
 				method: request.method,
 				headers: newHeaders,
-				body: JSON.stringify(codexBody),
+				body: serializedBody,
 			});
 		} catch (error) {
 			if (error instanceof ValidationError) {
@@ -417,9 +732,29 @@ export class CodexProvider extends BaseProvider {
 	async processResponse(
 		response: Response,
 		_account: Account | null,
+		_requestHeaders?: Headers,
+		drainAbort?: AbortController,
 	): Promise<Response> {
+		// /v1/models responses: translate Codex format → OpenAI /v1/models format
+		// with full capability fields preserved for the CLI.
+		const requestPath = response.headers.get("x-better-ccflare-request-path");
+		if (requestPath === "/v1/models") {
+			return this.transformModelsListResponse(response);
+		}
+
 		const contentType = response.headers.get("content-type");
 		const requestId = response.headers.get("x-better-ccflare-request-id");
+		const fallbackEntry = requestId
+			? this.requestStreamById.get(requestId)
+			: undefined;
+		// Sliding TTL: refresh on read so a still-retrying request survives the
+		// 30s sweep instead of expiring mid-backoff.
+		if (requestId && fallbackEntry) {
+			this.requestStreamById.set(requestId, {
+				...fallbackEntry,
+				ts: Date.now(),
+			});
+		}
 		const headerRequestedStream = response.headers.get(
 			"x-better-ccflare-request-stream",
 		);
@@ -428,18 +763,55 @@ export class CodexProvider extends BaseProvider {
 				? true
 				: headerRequestedStream === "false"
 					? false
-					: requestId
-						? (this.requestStreamById.get(requestId)?.stream ?? true)
-						: true;
-		if (requestId) {
-			this.requestStreamById.delete(requestId);
-		}
+					: (fallbackEntry?.stream ?? true);
+		const headerCustomTools = response.headers.get(
+			"x-better-ccflare-codex-custom-tools",
+		);
+		const mightHaveCustomToolCalls =
+			headerCustomTools === "true"
+				? true
+				: headerCustomTools === "false"
+					? false
+					: (fallbackEntry?.hasCustomTools ?? false);
+		// Not deleted: an in-place 529 retry re-invokes processResponse and needs
+		// this entry too. sweepRequestStreamById reclaims it after 30s instead.
 		const isEventStream = contentType?.includes("text/event-stream") ?? false;
 		if (isEventStream) {
-			if (requestedStream) {
-				return this.transformStreamingResponse(response);
+			// No custom tools declared, so no custom_tool_call is possible: skip
+			// buffering and stream straight through.
+			if (!mightHaveCustomToolCalls) {
+				if (requestedStream) {
+					return this.transformStreamingResponse(response, drainAbort);
+				}
+				return this.transformSseResponseToJson(response);
 			}
-			return this.transformSseResponseToJson(response);
+			// A custom_tool_call can appear at any point in the stream, and the
+			// passthrough-vs-transform choice must be made before the first byte
+			// is returned, so sniffing for one would buffer the whole stream and
+			// withhold deltas and keepalives until upstream EOF. Custom tools only
+			// originate from the /v1/responses adapter, whose client speaks
+			// Responses SSE natively — pass the live stream through untouched.
+			if (requestedStream) {
+				return this.buildCustomToolCallPassthroughResponse(
+					response.body,
+					response,
+				);
+			}
+			// Non-streaming clients block on the full body anyway, so sniffing
+			// here costs nothing extra.
+			const streamBody = await response.text();
+			if (hasCustomToolCallEvent(streamBody)) {
+				return this.buildCustomToolCallPassthroughResponse(
+					streamBody,
+					response,
+				);
+			}
+			const streamResponse = new Response(streamBody, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: response.headers,
+			});
+			return this.transformSseResponseToJson(streamResponse);
 		}
 
 		if (response.ok && response.body !== null) {
@@ -451,6 +823,16 @@ export class CodexProvider extends BaseProvider {
 				log.warn(
 					`Codex returned successful response without SSE content-type (${contentType ?? "<missing>"}); transforming as ${requestedStream ? "SSE" : "JSON"}`,
 				);
+				// Preserve Responses Lite custom tool calls.
+				if (hasCustomToolCallEvent(probeText)) {
+					log.info(
+						"[codex:passthrough] Custom tool call events detected, bypassing Anthropic conversion",
+					);
+					return this.buildCustomToolCallPassthroughResponse(
+						probeText,
+						response,
+					);
+				}
 				const headers = sanitizeResponseHeaders(response.headers);
 				headers.set("content-type", "text/event-stream");
 				const sseResponse = new Response(probeText, {
@@ -459,7 +841,7 @@ export class CodexProvider extends BaseProvider {
 					headers,
 				});
 				if (requestedStream) {
-					return this.transformStreamingResponse(sseResponse);
+					return this.transformStreamingResponse(sseResponse, drainAbort);
 				}
 				return this.transformSseResponseToJson(sseResponse);
 			}
@@ -474,6 +856,20 @@ export class CodexProvider extends BaseProvider {
 
 		const headers = sanitizeResponseHeaders(response.headers);
 		return new Response(response.body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
+	}
+
+	private buildCustomToolCallPassthroughResponse(
+		body: BodyInit | null,
+		response: Response,
+	): Response {
+		const headers = sanitizeResponseHeaders(response.headers);
+		headers.set("content-type", "text/event-stream");
+		headers.set("x-better-ccflare-codex-response-format", "responses-api");
+		return new Response(body, {
 			status: response.status,
 			statusText: response.statusText,
 			headers,
@@ -518,19 +914,43 @@ export class CodexProvider extends BaseProvider {
 
 	// ── Private helpers ──────────────────────────────────────────────────────
 
-	private mapModel(anthropicModel: string, account?: Account): string {
+	// isExplicitMapping: true only for a per-account model_mappings hit, not
+	// a family-tier default — callers use it to decide precedence.
+	private mapModel(
+		anthropicModel: string,
+		account?: Account,
+	): { model: string; isExplicitMapping: boolean } {
+		// "Force account model" forbids every substitution below, including the
+		// family defaults derived from the account's own listing: those answer
+		// "which model should a Claude family become here", a question nobody
+		// asked when the client named the model outright.
+		if (isForceAccountModelEnabled()) {
+			return { model: anthropicModel, isExplicitMapping: false };
+		}
+
 		if (account) {
 			const mapped = mapModelName(anthropicModel, account);
 			if (mapped !== anthropicModel) {
-				return mapped;
+				return { model: mapped, isExplicitMapping: true };
 			}
 		}
 
 		const lower = anthropicModel.toLowerCase();
-		if (lower.includes("haiku")) return DEFAULT_MODEL_MAP.haiku;
-		if (lower.includes("sonnet")) return DEFAULT_MODEL_MAP.sonnet;
-		if (lower.includes("opus")) return DEFAULT_MODEL_MAP.opus;
-		return anthropicModel;
+		// Precedence: combo slot -> account.model_mappings -> global override -> factory map.
+		// Resolved per account: the account's own listing is what decides, and
+		// two accounts of this provider can be on different plans.
+		const id = account?.id;
+		let model = anthropicModel;
+		if (lower.includes("fable")) {
+			model = resolveProviderModelDefault("codex", "fable", id) ?? model;
+		} else if (lower.includes("haiku")) {
+			model = resolveProviderModelDefault("codex", "haiku", id) ?? model;
+		} else if (lower.includes("sonnet")) {
+			model = resolveProviderModelDefault("codex", "sonnet", id) ?? model;
+		} else if (lower.includes("opus")) {
+			model = resolveProviderModelDefault("codex", "opus", id) ?? model;
+		}
+		return { model, isExplicitMapping: false };
 	}
 
 	private extractSystemPrompt(
@@ -543,6 +963,72 @@ export class CodexProvider extends BaseProvider {
 			.filter((b) => b.type === "text")
 			.map((b) => b.text)
 			.join("\n\n");
+	}
+
+	private convertToolChoice(
+		choice: AnthropicToolChoice | undefined,
+		tools: readonly CodexTool[],
+	): CodexRequest["tool_choice"] | undefined {
+		if (!choice) return undefined;
+		if (typeof choice !== "object") {
+			throw new ValidationError("tool_choice must be an object");
+		}
+		if (choice.type === "auto") return "auto";
+		if (choice.type === "any") return "required";
+		if (choice.type === "none") return "none";
+		if (choice.type === "tool") {
+			if (
+				typeof choice.name !== "string" ||
+				!tools.some((tool) => tool.name === choice.name)
+			) {
+				throw new ValidationError(
+					`tool_choice references unknown tool: ${choice.name}`,
+				);
+			}
+			return { type: "function", name: choice.name };
+		}
+		throw new ValidationError(
+			`tool_choice has unsupported type: ${String(
+				(choice as { type?: unknown }).type,
+			)}`,
+		);
+	}
+
+	private serializeToolResultContent(
+		content: AnthropicToolResult["content"],
+	): string {
+		if (typeof content === "string") return content;
+		// External input can violate the declared type (missing, null, object);
+		// degrade to an empty output rather than throwing, because a throw here
+		// is swallowed by transformRequestBody and forwards the untranslated
+		// Anthropic body upstream.
+		if (!Array.isArray(content)) return "";
+		const parts: string[] = [];
+		for (const block of content) {
+			if (!block || typeof block !== "object") continue;
+			if (block.type === "text" && typeof block.text === "string") {
+				parts.push(block.text);
+				continue;
+			}
+			if (block.type === "image") {
+				parts.push("[image content not supported in Codex tool results]");
+				continue;
+			}
+			let serialized: string;
+			try {
+				serialized = JSON.stringify(block);
+			} catch {
+				continue;
+			}
+			if (serialized.length > CODEX_MAX_STRUCTURED_BLOCK_CHARS) {
+				parts.push(
+					`[${String(block.type ?? "unknown")} content omitted: ${serialized.length} chars]`,
+				);
+				continue;
+			}
+			parts.push(serialized);
+		}
+		return parts.join("\n");
 	}
 
 	private convertMessage(
@@ -567,56 +1053,50 @@ export class CodexProvider extends BaseProvider {
 			return items;
 		}
 
-		// Complex content array — may contain tool_use, tool_result, text
-		const textBlocks: CodexContentItem[] = [];
-		const functionCalls: CodexFunctionCallItem[] = [];
-		const functionCallOutputs: CodexFunctionCallOutputItem[] = [];
+		// Complex content array: may contain tool_use, tool_result, text.
+		// Preserve source order so Codex sees the same block chronology the
+		// client sent: outputs stay adjacent to their calls, and follow-up text
+		// stays after the results it refers to. Consecutive text blocks batch
+		// into one message wrapper; function_call* are top-level items.
+		let pendingText: CodexContentItem[] = [];
+		const flushText = () => {
+			if (pendingText.length === 0) return;
+			items.push({ role, content: pendingText } as CodexMessage);
+			pendingText = [];
+		};
 
 		for (const block of msg.content) {
+			if (!block || typeof block !== "object") continue;
 			if (block.type === "text") {
 				const contentType = role === "assistant" ? "output_text" : "input_text";
-				textBlocks.push({
+				pendingText.push({
 					type: contentType,
 					text: block.text,
 				} as CodexContentItem);
 			} else if (block.type === "tool_use") {
-				functionCalls.push({
+				flushText();
+				items.push({
 					type: "function_call",
 					call_id: block.id,
 					name: block.name,
 					arguments: JSON.stringify(
 						this.sanitizeToolUseInput(block.name, block.input),
 					),
+					status: "completed",
 				});
 			} else if (block.type === "tool_result") {
-				const outputText =
-					typeof block.content === "string"
-						? block.content
-						: Array.isArray(block.content)
-							? block.content
-									.filter((b) => b.type === "text")
-									.map((b) => b.text)
-									.join("\n")
-							: "";
-				functionCallOutputs.push({
+				flushText();
+				const serialized = this.serializeToolResultContent(block.content);
+				items.push({
 					type: "function_call_output",
 					call_id: block.tool_use_id,
-					output: outputText,
+					output:
+						block.is_error === true ? `[tool error] ${serialized}` : serialized,
 					status: "completed",
 				});
 			}
 		}
-
-		// Text content goes in a message wrapper; function_call* are top-level items
-		if (textBlocks.length > 0) {
-			items.push({ role, content: textBlocks } as CodexMessage);
-		}
-		for (const fc of functionCalls) {
-			items.push({ ...fc, status: "completed" });
-		}
-		for (const fco of functionCallOutputs) {
-			items.push(fco);
-		}
+		flushText();
 
 		return items;
 	}
@@ -690,7 +1170,7 @@ export class CodexProvider extends BaseProvider {
 	): ContextWindow | null {
 		const model = response?.model;
 		if (typeof model !== "string") return null;
-		const contextWindowSize = MODEL_CONTEXT_WINDOWS[model];
+		const contextWindowSize = lookupContextWindow(model);
 		if (!contextWindowSize) return null;
 
 		const inputTokens = usage?.input_tokens;
@@ -705,17 +1185,15 @@ export class CodexProvider extends BaseProvider {
 		const inputTokenDetails = usageRecord?.input_tokens_details as
 			| Record<string, unknown>
 			| undefined;
-		const cachedTokens = inputTokenDetails?.cached_tokens;
+		const normalizedInput = normalizeCodexInputUsage(
+			inputTokens,
+			inputTokenDetails?.cached_tokens,
+		);
 
 		return {
 			current_usage: {
-				input_tokens: inputTokens,
-				cache_read_input_tokens:
-					typeof cachedTokens === "number" &&
-					Number.isFinite(cachedTokens) &&
-					cachedTokens >= 0
-						? cachedTokens
-						: 0,
+				input_tokens: normalizedInput.inputTokens,
+				cache_read_input_tokens: normalizedInput.cacheReadInputTokens,
 				cache_creation_input_tokens:
 					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
 					Number.isFinite(inputTokenDetails.cache_creation_input_tokens) &&
@@ -729,6 +1207,63 @@ export class CodexProvider extends BaseProvider {
 
 	private isSyntheticCountTokensRequest(url: string): boolean {
 		return url === CODEX_SYNTHETIC_COUNT_TOKENS_URL;
+	}
+
+	private async transformModelsListResponse(
+		response: Response,
+	): Promise<Response> {
+		if (!response.ok) {
+			return response;
+		}
+		try {
+			const raw = (await response.clone().json()) as {
+				models?: Array<
+					Record<string, unknown> & {
+						slug?: string;
+						visibility?: string;
+					}
+				>;
+			};
+			const data = (raw.models ?? [])
+				.filter(
+					(m) =>
+						typeof m.slug === "string" &&
+						m.slug.length > 0 &&
+						(!m.visibility || m.visibility === "list"),
+				)
+				.map((m) => ({
+					...m,
+					id: m.slug as string,
+					object: "model" as const,
+					created: Math.floor(Date.now() / 1000),
+					owned_by: "openai",
+				}));
+			return new Response(
+				JSON.stringify({ object: "list", data, models: data }),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		} catch (err) {
+			log.warn(`Failed to transform Codex models response: ${err}`);
+			// The upstream body was malformed JSON despite a 200 status — passing
+			// the original response through would present it to the client as a
+			// successful (if empty) model list. Surface it as a failure instead.
+			return new Response(
+				JSON.stringify({
+					error: {
+						type: "api_error",
+						message: "Codex models response could not be parsed",
+					},
+				}),
+				{
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		}
 	}
 
 	private createSyntheticJsonResponse(
@@ -848,12 +1383,99 @@ export class CodexProvider extends BaseProvider {
 		}
 	}
 
+	private extractSessionId(body: AnthropicRequest): string | undefined {
+		const rawUserId = body.metadata?.user_id;
+		if (typeof rawUserId !== "string") return undefined;
+		try {
+			const metadata = JSON.parse(rawUserId) as unknown;
+			if (!metadata || typeof metadata !== "object") return undefined;
+			const sessionId = (metadata as Record<string, unknown>).session_id;
+			if (
+				typeof sessionId !== "string" ||
+				!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+					sessionId,
+				)
+			) {
+				return undefined;
+			}
+			return sessionId.toLowerCase();
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * OpenAI routes each request to a cache machine by hashing the prompt's
+	 * initial tokens together with prompt_cache_key, and documents that one key
+	 * should stay under ~15 requests/minute or "some requests may miss the
+	 * cache". A Claude Code session multiplexes the main loop plus every
+	 * subagent conversation over one session id, so keying on the session
+	 * alone funnels an entire fan-out burst onto one cache machine and
+	 * thrashes it (measured in production traces: turns 1-8 of subagent
+	 * conversations cached no better than cold starts while one session key
+	 * carried 170+ conversations in five minutes).
+	 *
+	 * Default "conversation" mode therefore partitions the key by conversation
+	 * identity: session id + instructions + first input item, all stable
+	 * across the turns of one conversation and distinct across concurrent
+	 * subagents. Each conversation is sequential, so per-key traffic stays far
+	 * below the documented rate bound. CCFLARE_CODEX_CACHE_KEY_MODE=session
+	 * restores the coarse per-session key.
+	 */
+	private derivePromptCacheKey(
+		body: AnthropicRequest,
+		instructions: string,
+		input: readonly unknown[],
+		account?: Account,
+	): string | undefined {
+		if (process.env[CODEX_PROMPT_CACHE_KEY_ENV] === "0") return undefined;
+		if (!isOpenAiPromptCacheEndpoint(account)) return undefined;
+		const sessionId = this.extractSessionId(body);
+		if (!sessionId) return undefined;
+		// Digests are truncated to 48 hex chars so the full key fits the API's
+		// 64-char key bound. Session ids and content never appear in the key.
+		if (
+			process.env[CODEX_CACHE_KEY_MODE_ENV] === "session" ||
+			input.length === 0
+		) {
+			return `ccflare-session-${createHash("sha256")
+				.update(sessionId)
+				.digest("hex")
+				.slice(0, 48)}`;
+		}
+		let firstItem = "";
+		try {
+			firstItem = JSON.stringify(input[0]) ?? "";
+		} catch {
+			// Non-serializable first item: fall back to instructions-only identity.
+		}
+		return `ccflare-convo-${createHash("sha256")
+			.update(sessionId)
+			.update("\0")
+			.update(instructions)
+			.update("\0")
+			.update(firstItem)
+			.digest("hex")
+			.slice(0, 48)}`;
+	}
+
 	private convertToCodexFormat(
 		body: AnthropicRequest,
 		account?: Account,
 		requestId?: string,
+		isSubscriptionEndpoint = isCodexSubscriptionEndpoint(account),
+		passthrough?: Record<string, unknown>,
 	): CodexRequest {
-		const model = this.mapModel(body.model, account);
+		const { model: mappedModel, isExplicitMapping } = this.mapModel(
+			body.model,
+			account,
+		);
+		// Explicit account mapping wins; otherwise prefer the raw Codex model
+		// over a family-tier default, since the alias can't distinguish variants.
+		const model =
+			!isExplicitMapping && typeof passthrough?.model === "string"
+				? passthrough.model
+				: mappedModel;
 		if (process.env.DEBUG?.includes("model") || process.env.DEBUG === "true") {
 			log.info(
 				`[codex:model-debug] request_id=${requestId ?? "unknown"} request_model=${body.model} mapped_model=${model} account=${account?.name ?? "unknown"}`,
@@ -864,9 +1486,9 @@ export class CodexProvider extends BaseProvider {
 		// Convert messages
 		const input: CodexRequest["input"] = [];
 		const skillCallIds = new Set<string>();
+		let skillCompletedInFinalMessage = false;
 		for (const [msgIndex, msg] of body.messages.entries()) {
-			const items = this.convertMessage(msg);
-			for (const [itemIndex, item] of items.entries()) {
+			for (const item of this.convertMessage(msg)) {
 				input.push(item);
 				if ("type" in item && item.type === "function_call") {
 					if (item.name === "Skill") {
@@ -878,23 +1500,27 @@ export class CodexProvider extends BaseProvider {
 					skillCallIds.has(item.call_id)
 				) {
 					skillCallIds.delete(item.call_id);
-					if (
-						msgIndex !== body.messages.length - 1 ||
-						itemIndex !== items.length - 1
-					) {
-						continue;
+					if (msgIndex === body.messages.length - 1) {
+						skillCompletedInFinalMessage = true;
 					}
-					input.push({
-						role: "user",
-						content: [
-							{
-								type: "input_text",
-								text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
-							},
-						],
-					});
 				}
 			}
+		}
+		// A Skill result in the active turn means new instructions just loaded.
+		// Native Claude continues on its own; Codex often stops, so append one
+		// nudge. Tail placement keeps the cached prefix stable, and firing on
+		// any final-turn Skill result (not only a trailing one) covers parallel
+		// fan-out turns that mix Skill and other tool results.
+		if (skillCompletedInFinalMessage) {
+			input.push({
+				role: "user",
+				content: [
+					{
+						type: "input_text",
+						text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+					},
+				],
+			});
 		}
 
 		// Convert tools
@@ -904,11 +1530,19 @@ export class CodexProvider extends BaseProvider {
 				type: "function" as const,
 				name: t.name,
 				description: t.description,
-				parameters: t.input_schema,
+				parameters: sanitizeSchemaForOpenAI(t.input_schema) as
+					| Record<string, unknown>
+					| undefined,
 			}));
 		}
 
-		const reasoningResolution = resolveReasoningEffort(body.reasoning?.effort, {
+		// Preserve original reasoning settings.
+		const passthroughReasoning = passthrough?.reasoning as
+			| { effort?: string; context?: string }
+			| undefined;
+		const reasoningEffort =
+			passthroughReasoning?.effort ?? body.reasoning?.effort;
+		const reasoningResolution = resolveReasoningEffort(reasoningEffort, {
 			sourceModel: body.model,
 			targetModel: model,
 		});
@@ -926,12 +1560,85 @@ export class CodexProvider extends BaseProvider {
 			model,
 			input,
 			stream: true,
-			store: false,
-			reasoning: { effort: reasoningResolution.effort ?? "medium" },
+			// Responses Lite may request store: true explicitly; default false otherwise.
+			store:
+				typeof passthrough?.store === "boolean" ? passthrough.store : false,
+			reasoning: {
+				effort: reasoningResolution.effort ?? "medium",
+				context: "all_turns",
+			},
 		};
 
+		// Restore Responses Lite tools first.
+		const passthroughAdditionalTools = passthrough?.additional_tools;
+		if (
+			Array.isArray(passthroughAdditionalTools) &&
+			passthroughAdditionalTools.length > 0
+		) {
+			codexRequest.input.unshift(
+				...(passthroughAdditionalTools as (
+					| CodexMessage
+					| CodexFunctionCallItem
+					| CodexFunctionCallOutputItem
+				)[]),
+			);
+		}
+		if (
+			!isSubscriptionEndpoint &&
+			typeof body.max_tokens === "number" &&
+			Number.isFinite(body.max_tokens)
+		) {
+			if (body.max_tokens > 0) {
+				codexRequest.max_output_tokens = Math.floor(body.max_tokens);
+			} else if (body.max_tokens === 0) {
+				codexRequest.max_output_tokens = 1;
+			}
+		}
+
 		codexRequest.instructions = instructions || "You are a helpful assistant.";
-		if (tools) {
+		// Prefer the original cache key, then use the derived key.
+		const originalCacheKey =
+			typeof passthrough?.prompt_cache_key === "string"
+				? passthrough.prompt_cache_key
+				: undefined;
+		const derivedCacheKey = this.derivePromptCacheKey(
+			body,
+			codexRequest.instructions,
+			input,
+			account,
+		);
+		const promptCacheKey = originalCacheKey ?? derivedCacheKey;
+		if (promptCacheKey) {
+			codexRequest.prompt_cache_key = promptCacheKey;
+		}
+		const explicitToolChoice = this.convertToolChoice(
+			body.tool_choice,
+			tools ?? [],
+		);
+		if (explicitToolChoice) {
+			codexRequest.tool_choice = explicitToolChoice;
+		} else if (tools?.some((t) => t.name === "StructuredOutput")) {
+			// Claude Code schema agents provide a StructuredOutput tool but do not set
+			// Anthropic tool_choice. Native Claude reliably follows the hidden schema
+			// instruction; Codex models often end_turn with text instead. Force the
+			// function when this sentinel tool is present to preserve workflow semantics.
+			codexRequest.tool_choice = {
+				type: "function",
+				name: "StructuredOutput",
+			};
+		}
+		if (body.tool_choice?.disable_parallel_tool_use === true) {
+			codexRequest.parallel_tool_calls = false;
+		}
+		// Responses Lite requires explicit false.
+		if (passthrough?.parallel_tool_calls === false) {
+			codexRequest.parallel_tool_calls = false;
+		}
+		// Preserve the original tool list.
+		const passthroughTools = passthrough?.tools;
+		if (Array.isArray(passthroughTools) && passthroughTools.length > 0) {
+			codexRequest.tools = passthroughTools as CodexTool[];
+		} else if (tools && tools.length > 0) {
 			codexRequest.tools = tools;
 		}
 
@@ -1037,6 +1744,12 @@ export class CodexProvider extends BaseProvider {
 					}
 				}
 				if (pending) processLine(pending);
+			} catch (readError) {
+				// releaseLock() alone doesn't free the native buffer backing the
+				// stream on Bun (#382) — drain to `done` first, which also
+				// releases the lock.
+				await drainReader(reader);
+				throw readError;
 			} finally {
 				reader.releaseLock();
 			}
@@ -1136,7 +1849,10 @@ export class CodexProvider extends BaseProvider {
 		});
 	}
 
-	private transformStreamingResponse(response: Response): Response {
+	private transformStreamingResponse(
+		response: Response,
+		drainAbort?: AbortController,
+	): Response {
 		const requestId =
 			response.headers.get("x-better-ccflare-request-id") ?? "unknown";
 		if (process.env.DEBUG?.includes("model") || process.env.DEBUG === "true") {
@@ -1171,6 +1887,7 @@ export class CodexProvider extends BaseProvider {
 		const writer = writable.getWriter();
 		const encoder = new TextEncoder();
 		const decoder = new TextDecoder();
+		const streamLiveness = new CodexStreamLiveness(this.streamLivenessOptions);
 
 		const writeSSE = async (event: string, data: unknown) => {
 			const payload =
@@ -1214,6 +1931,7 @@ export class CodexProvider extends BaseProvider {
 			}
 			const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 			await writer.write(encoder.encode(line));
+			streamLiveness.recordDownstreamWrite();
 		};
 		const ensureMessageStart = async () => {
 			if (state.hasSentMessageStart) return;
@@ -1245,12 +1963,95 @@ export class CodexProvider extends BaseProvider {
 		};
 
 		const processEvents = async () => {
+			const reader = response.body?.getReader();
+			let upstreamCancelStarted = false;
+			let upstreamDrainPromise: Promise<void> | null = null;
+
+			// `reader.cancel()` is a documented no-op on every released Bun
+			// version (oven-sh/bun#35093): it never releases the native off-heap
+			// buffer backing the upstream fetch Response body, leaking RSS while
+			// JS heap stays flat (issue #382). Draining the reader to `done`
+			// instead actually releases the buffer.
+			//
+			// CodexStreamLiveness never issues concurrent reads (ensurePendingRead
+			// allows at most one outstanding reader.read() at a time), so before
+			// this helper can take exclusive ownership of the reader it must first
+			// reconcile with any read `streamLiveness` still has outstanding —
+			// racing settlePendingReadForCleanup() itself (rather than peeking at
+			// the private pendingRead) against the same deadline. Once `stop()`
+			// has been called — guaranteed by the time cancelUpstreamOnce fires on
+			// every call site — streamLiveness never issues another read, so once
+			// reconciled this helper owns the reader for the rest of its life.
+			//
+			// Bounded by CODEX_STREAM_DRAIN_DEADLINE_MS, shared with Anthropic's
+			// equivalent drain in `anthropic-terminal-recovery.ts` via
+			// `drainReaderWithDeadline()` in
+			// `packages/providers/src/utils/stream-drain.ts` — see that helper
+			// for the deadline-race-then-drain-loop implementation, including
+			// the `beforeDrain` reconciliation step used below. Errors are
+			// swallowed (`swallowErrors: true`) since this drain is purely
+			// best-effort cleanup running detached from `cancelUpstreamOnce`'s
+			// fire-and-forget caller.
+			const drainUpstream = async (): Promise<void> => {
+				if (!reader) return;
+				await drainReaderWithDeadline(reader, {
+					deadlineMs: this.streamDrainDeadlineMs,
+					drainAbort,
+					beforeDrain: () => streamLiveness.settlePendingReadForCleanup(),
+					swallowErrors: true,
+				});
+			};
+			const cancelUpstreamOnce = (_reason: unknown): void => {
+				if (upstreamCancelStarted || !reader) return;
+				upstreamCancelStarted = true;
+				upstreamDrainPromise = drainUpstream();
+				upstreamDrainPromise.catch(() => undefined);
+			};
 			try {
-				const reader = response.body?.getReader();
 				if (!reader) throw new Error("Response body is not readable");
 
 				while (true) {
-					const { value, done } = await reader.read();
+					const outcome = await streamLiveness.next(reader);
+					if (outcome.type === "stopped") break;
+					if (outcome.type === "heartbeat_due") {
+						// A silent Codex stream (long reasoning turns) must still look
+						// alive to the Anthropic client and to any intermediary idle
+						// timeout. A ping carries no content and cannot disturb the
+						// message/content-block sequence.
+						if (state.hasSentTerminalEvents) break;
+						if (streamLiveness.canEmitHeartbeat()) {
+							await writeSSE("ping", { type: "ping" });
+							streamLiveness.recordDownstreamWrite();
+						}
+						continue;
+					}
+					if (outcome.type === "raw_silence_timeout") {
+						// Synthetic pings must never keep a byte-silent upstream alive
+						// forever: surface a terminal error instead of hanging.
+						const timeoutMessage =
+							"Codex upstream timed out while waiting for response data.";
+						cancelUpstreamOnce(new Error(timeoutMessage));
+						if (!state.hasSentTerminalEvents) {
+							await ensureMessageStart();
+							if (state.hasSentContentBlockStart) {
+								await writeSSE("content_block_stop", {
+									type: "content_block_stop",
+									index: state.contentBlockIndex,
+								});
+								state.contentBlockIndex++;
+								state.hasSentContentBlockStart = false;
+							}
+							await writeSSE("error", {
+								type: "error",
+								error: { type: "api_error", message: timeoutMessage },
+							});
+							state.hasSentTerminalEvents = true;
+						}
+						return;
+					}
+					if (outcome.type === "upstream_error") throw outcome.error;
+
+					const { value, done } = outcome.result;
 					if (done) break;
 
 					state.buffer += decoder.decode(value, { stream: true });
@@ -1291,6 +2092,11 @@ export class CodexProvider extends BaseProvider {
 							writeSSE,
 							ensureMessageStart,
 						);
+						if (state.hasSentTerminalEvents) {
+							streamLiveness.stop();
+							cancelUpstreamOnce("Codex terminal response received");
+							break;
+						}
 					}
 				}
 
@@ -1323,7 +2129,20 @@ export class CodexProvider extends BaseProvider {
 				}
 			} catch (error) {
 				log.error("Error processing Codex SSE stream:", error);
+				cancelUpstreamOnce(error);
 			} finally {
+				streamLiveness.stop();
+				if (!upstreamCancelStarted) {
+					await streamLiveness.settlePendingReadForCleanup();
+				}
+				// Do NOT await upstreamDrainPromise here: draining exists to free the
+				// native off-heap buffer behind the upstream response (issue #382),
+				// not to gate client-visible stream completion. cancelUpstreamOnce
+				// already attaches a .catch(() => undefined) at assignment, so the
+				// drain runs detached in the background — bounded by
+				// streamDrainDeadlineMs / drainAbort — while writer.close() proceeds
+				// immediately, matching the fire-and-forget pattern used by
+				// cancelAfterForcedClose in anthropic-terminal-recovery.ts.
 				await writer.close();
 			}
 		};
@@ -1382,9 +2201,12 @@ export class CodexProvider extends BaseProvider {
 		const status = error?.status === "rate_limited" ? error.status : undefined;
 		const rawType = error?.type;
 		let type = "api_error";
-		if (code === "context_length_exceeded") {
-			type = "invalid_request_error";
-		} else if (code === "rate_limit_exceeded" || status === "rate_limited") {
+		const mappedFromCode = code
+			? CODEX_ERROR_TYPE_BY_CODE[code.toLowerCase()]
+			: undefined;
+		if (mappedFromCode) {
+			type = mappedFromCode;
+		} else if (status === "rate_limited") {
 			type = "rate_limit_error";
 		} else if (
 			rawType === "invalid_request_error" ||
@@ -1397,11 +2219,26 @@ export class CodexProvider extends BaseProvider {
 		) {
 			type = rawType;
 		}
+		const upstreamMessage = error?.message || "Codex upstream failed.";
+		const normalizedCode = code?.toLowerCase();
+		// Some Codex endpoints report context overflow without the
+		// context_length_exceeded code, only a "your input exceeds the context
+		// window..." message. Match that message shape too so the client still
+		// gets the friendlier, prefixed error text.
+		const isContextOverflow =
+			normalizedCode === "context_length_exceeded" ||
+			/^your input exceeds the context window\b/i.test(upstreamMessage);
+		if (isContextOverflow) {
+			type = "invalid_request_error";
+		}
+		const message = isContextOverflow
+			? `Prompt is too long. Codex reported: ${upstreamMessage}`
+			: upstreamMessage;
 		return {
 			type: "error",
 			error: {
 				type,
-				message: error?.message || "Codex upstream failed.",
+				message,
 				...(code ? { code } : {}),
 				...(status ? { status } : {}),
 			},
@@ -1639,6 +2476,7 @@ export class CodexProvider extends BaseProvider {
 				break;
 			}
 
+			case "response.incomplete":
 			case "response.completed": {
 				if (state.upstreamError || state.hasSentTerminalEvents) break;
 				const resp = data.response as Record<string, unknown> | undefined;
@@ -1653,22 +2491,29 @@ export class CodexProvider extends BaseProvider {
 					  }
 					| undefined;
 
-				// Extract cache fields from input_tokens_details (Codex format)
+				// Extract cache fields from input_tokens_details (Codex format).
+				// OpenAI's input_tokens is cache-inclusive; normalize to Anthropic's
+				// additive semantics so input_tokens excludes cache reads instead of
+				// double-counting them.
 				const inputTokenDetails = usage?.input_tokens_details;
-				const cacheRead =
-					typeof inputTokenDetails?.cached_tokens === "number" &&
-					inputTokenDetails.cached_tokens >= 0
-						? inputTokenDetails.cached_tokens
-						: 0;
+				const normalizedInput = normalizeCodexInputUsage(
+					usage?.input_tokens,
+					inputTokenDetails?.cached_tokens,
+				);
 				const cacheCreation =
 					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
 					inputTokenDetails.cache_creation_input_tokens >= 0
 						? inputTokenDetails.cache_creation_input_tokens
 						: 0;
 
-				state.inputTokens = usage?.input_tokens || state.inputTokens;
-				state.outputTokens = usage?.output_tokens || state.outputTokens;
-				state.cacheReadInputTokens = cacheRead;
+				state.inputTokens = normalizedInput.inputTokens;
+				state.outputTokens =
+					typeof usage?.output_tokens === "number" &&
+					Number.isFinite(usage.output_tokens) &&
+					usage.output_tokens >= 0
+						? usage.output_tokens
+						: state.outputTokens;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens = cacheCreation;
 				state.contextWindow = this.extractContextWindow(resp, usage);
 				// Close any lingering content block
@@ -1680,9 +2525,31 @@ export class CodexProvider extends BaseProvider {
 					state.hasSentContentBlockStart = false;
 				}
 
+				const incompleteDetails = resp?.incomplete_details as
+					| { reason?: string }
+					| undefined;
+				const isIncomplete =
+					eventName === "response.incomplete" || resp?.status === "incomplete";
+				// An incomplete response never resolves to a success stop_reason:
+				// content_filter -> refusal (client discards partial output); every
+				// other reason, including unknown future ones, -> max_tokens (generic
+				// truncation, mirroring real Anthropic mid-tool-input truncation
+				// semantics: partial blocks are framed, stop_reason forbids execution).
+				const stopReason: "end_turn" | "tool_use" | "max_tokens" | "refusal" =
+					isIncomplete
+						? incompleteDetails?.reason === "content_filter"
+							? "refusal"
+							: "max_tokens"
+						: state.sawToolUse
+							? "tool_use"
+							: "end_turn";
+
 				const messageDelta: {
 					type: "message_delta";
-					delta: { stop_reason: "end_turn" | "tool_use"; stop_sequence: null };
+					delta: {
+						stop_reason: "end_turn" | "tool_use" | "max_tokens" | "refusal";
+						stop_sequence: null;
+					};
 					usage: {
 						input_tokens: number;
 						output_tokens: number;
@@ -1693,7 +2560,7 @@ export class CodexProvider extends BaseProvider {
 				} = {
 					type: "message_delta",
 					delta: {
-						stop_reason: state.sawToolUse ? "tool_use" : "end_turn",
+						stop_reason: stopReason,
 						stop_sequence: null,
 					},
 					usage: {

@@ -3,11 +3,12 @@ import type {
 	BunSqlAdapter,
 	DatabaseOperations,
 } from "@better-ccflare/database";
+import type { CircuitBreaker } from "@better-ccflare/proxy";
 import type { Account } from "./account";
 import type { AlertEvent } from "./alerts";
 import type { RequestMeta } from "./api";
 import type { ApiKey } from "./api-key";
-import type { IntegrityStatus } from "./stats";
+import type { IntegrityStatus, RetentionStatus } from "./stats";
 import type { StrategyStore } from "./strategy";
 
 // API context for HTTP handlers
@@ -47,7 +48,77 @@ export interface APIContext {
 		state: string;
 	};
 	getIntegrityStatus?: () => IntegrityStatus;
+	getRetentionStatus?: () => RetentionStatus;
 	getStrategy?: () => LoadBalancingStrategy | null;
+	/**
+	 * Live circuit breaker exposed by the proxy path. Optional so older
+	 * entrypoints that don't wire the breaker can still construct an
+	 * APIRouter; the capacity-state handler takes its own copy from this
+	 * field when present.
+	 */
+	circuitBreaker?: CircuitBreaker;
+	/**
+	 * Live Anthropic model catalog access, injected by the server entrypoint
+	 * (avoids a direct http-api -> proxy type dependency here). Absent when
+	 * the catalog has not been wired up (e.g. in narrower test contexts).
+	 */
+	modelCatalog?: {
+		get: () => Promise<{
+			models: Array<{
+				id: string;
+				displayName: string;
+				createdAt: string | null;
+			}>;
+			fetchedAt: number;
+			source: "live" | "fallback";
+		}>;
+		refresh: () => Promise<{ success: boolean; error?: string }>;
+		/**
+		 * Models one account can actually call, from the provider's own
+		 * per-account listing. Null when the account is unknown, is not of a
+		 * provider with such a listing, or none has ever been read.
+		 */
+		codexModels?: (accountId: string) => Promise<{
+			models: Array<{
+				id: string;
+				displayName: string;
+				description: string | null;
+				contextWindow: number | null;
+				supersededBy: string | null;
+			}>;
+			fetchedAt: number;
+			/** "shared" = read from another account of the same provider. */
+			source: "live" | "cached" | "shared";
+			borrowedFrom?: string;
+		} | null>;
+		/**
+		 * Models one openai-compatible account can actually call, read from that
+		 * account's own endpoint. Null when the account is unknown, is not an
+		 * openai-compatible account, or none has ever been read. Unlike
+		 * `codexModels`, never borrowed between accounts — each points at an
+		 * arbitrary, operator-chosen endpoint.
+		 */
+		openaiCompatibleModels?: (accountId: string) => Promise<{
+			models: Array<{ id: string; displayName: string }>;
+			fetchedAt: number;
+			source: "live" | "cached";
+		} | null>;
+	};
+	/**
+	 * Process-local secret gating internal-probe requests (auto-refresh /
+	 * cache-keepalive self-loops) at the AuthService HTTP auth gate (#216).
+	 * Optional so older entrypoints/tests that don't wire it still construct
+	 * an APIRouter; AuthService fails closed (no exemption) when absent.
+	 */
+	internalProbeSecret?: string;
+	/**
+	 * Persisted secret (shared with the CLI via the on-disk config file)
+	 * allowing the user's own CLI to notify their own locally-running server
+	 * of DB-side changes (token reload, force-reset-rate-limit) even when
+	 * API-key auth is enabled (#216). Optional for the same reason as
+	 * internalProbeSecret above.
+	 */
+	localControlSecret?: string;
 }
 
 // Load balancing strategy interface

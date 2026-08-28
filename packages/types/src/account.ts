@@ -15,7 +15,22 @@ export type RateLimitReason =
 	/** Anthropic 429 with `overage-disabled-reason: out_of_credits` — credits/overage
 	 *  depleted for a specific model/beta (e.g. context-1m); account is NOT benched,
 	 *  request fails over. */
-	| "out_of_credits";
+	| "out_of_credits"
+	/** Anthropic 400 `invalid_request_error` for extra-usage credit depletion on
+	 *  OAuth accounts used by third-party apps (e.g. OpenCode). NOT account-wide/
+	 *  model-scoped in the rate-limit sense — the account is not benched, and by
+	 *  the time this is detected the response has typically already been passed
+	 *  through to the client. */
+	| "extra_usage_exhausted"
+	/** Anthropic 429 that reports no rate-limit window at all — `x-should-retry:
+	 *  true` and not a single `anthropic-ratelimit-*` / `x-ratelimit-*` header or
+	 *  `retry-after`. Live measurement showed this to be request-scoped rather
+	 *  than account-wide: the same account served 200s seconds either side of the
+	 *  rejection on the same model, while every other account rejected the same
+	 *  request identically, and retries spanning 11s never once cleared it. The
+	 *  account is NOT benched — the request fails over and the account stays in
+	 *  rotation. */
+	| "windowless_429";
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
@@ -23,11 +38,45 @@ export interface UsageWindowData {
 	resets_at: string | null;
 }
 
+// Anthropic's generic per-limit representation (2026 usage API). Session and
+// all-models weekly come as kind "session" / "weekly_all"; per-model weekly caps
+// (Fable/Opus/Sonnet) come ONLY as kind "weekly_scoped" with scope.model.
+export interface UsageLimit {
+	kind: string;
+	group?: string;
+	percent: number | null;
+	severity?: "normal" | "warning" | "critical" | string;
+	resets_at: string | null;
+	scope?: {
+		model?: { id: string | null; display_name: string } | null;
+		surface?: string | null;
+	} | null;
+	is_active?: boolean;
+}
+
+// Overage / pay-as-you-go credit spend block.
+export interface UsageSpend {
+	used?: { amount_minor: number; currency: string; exponent: number } | null;
+	limit?: unknown;
+	percent?: number | null;
+	severity?: string;
+	enabled?: boolean;
+	currency?: string | null;
+	disabled_reason?: string | null;
+}
+
 export interface AnthropicUsageData {
 	five_hour?: UsageWindowData;
 	seven_day?: UsageWindowData;
 	seven_day_oauth_apps?: UsageWindowData;
 	seven_day_opus?: UsageWindowData;
+	seven_day_sonnet?: UsageWindowData;
+	seven_day_fable?: UsageWindowData;
+	// Generic limits[] (2026 API) — authoritative source for per-model weekly
+	// caps. NOTE: NanoGPTUsageData.limits is a different (object) shape; ALWAYS
+	// disambiguate with Array.isArray(usageData.limits).
+	limits?: UsageLimit[];
+	spend?: UsageSpend;
 }
 
 // Usage data types for NanoGPT accounts
@@ -100,6 +149,22 @@ export interface XaiUsageData {
 	credits: XaiUsageWindow;
 }
 
+// Usage data types for MiniMax Token Plan accounts. Mirrors
+// MinimaxUsageWindow/MinimaxUsageData in
+// packages/providers/src/minimax-usage-fetcher.ts — camelCase `resetAt`
+// (epoch ms), distinct from the Anthropic-style snake_case `resets_at`.
+export interface MinimaxUsageWindow {
+	utilization: number; // 0-100. 0 = fully available, 100 = exhausted.
+	remainingPercent: number; // 0-100, straight from the API.
+	resetAt: number | null; // Epoch milliseconds.
+	intervalMs: number | null; // Window length in ms.
+}
+
+export interface MinimaxUsageData {
+	five_hour: MinimaxUsageWindow | null;
+	seven_day: MinimaxUsageWindow | null;
+}
+
 // Combined usage data type that supports all providers
 export type FullUsageData =
 	| AnthropicUsageData
@@ -107,7 +172,8 @@ export type FullUsageData =
 	| ZaiUsageData
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData
-	| XaiUsageData;
+	| XaiUsageData
+	| MinimaxUsageData;
 
 // Database row types that match the actual database schema
 export interface AccountRow {
@@ -128,6 +194,7 @@ export interface AccountRow {
 	session_start?: number | null;
 	session_request_count?: number;
 	paused?: boolean | number | null;
+	requires_reauth?: boolean | number | null;
 	rate_limit_reset?: number | null;
 	rate_limit_status?: string | null;
 	rate_limit_remaining?: number | null;
@@ -165,6 +232,7 @@ export interface Account {
 	session_start: number | null;
 	session_request_count: number;
 	paused: boolean;
+	requires_reauth: boolean;
 	rate_limit_reset: number | null;
 	rate_limit_status: string | null;
 	rate_limit_remaining: number | null;
@@ -204,6 +272,8 @@ export interface AccountResponse {
 	lastUsed: string | null;
 	created: string;
 	paused: boolean;
+	requiresReauth: boolean;
+	pauseReason: string | null;
 	tokenStatus: "valid" | "expired";
 	tokenExpiresAt: string | null; // ISO timestamp of token expiration
 	rateLimitStatus: string;
@@ -268,6 +338,7 @@ export interface AccountListItem {
 	requestCount: number;
 	totalRequests: number;
 	paused: boolean;
+	requiresReauth: boolean;
 	tokenStatus: "valid" | "expired";
 	rateLimitStatus: string;
 	sessionInfo: string;
@@ -278,6 +349,7 @@ export interface AccountListItem {
 		| "console"
 		| "zai"
 		| "minimax"
+		| "deepseek"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -290,7 +362,8 @@ export interface AccountListItem {
 		| "qwen"
 		| "xai"
 		| "ollama"
-		| "ollama-cloud";
+		| "ollama-cloud"
+		| "meta";
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
@@ -306,6 +379,7 @@ export interface AddAccountOptions {
 		| "console"
 		| "zai"
 		| "minimax"
+		| "deepseek"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "bedrock"
@@ -348,6 +422,7 @@ export function toAccount(row: AccountRow): Account {
 		session_start: toNumOrNull(row.session_start),
 		session_request_count: toNum(row.session_request_count),
 		paused: !!row.paused,
+		requires_reauth: !!row.requires_reauth,
 		rate_limit_reset: toNumOrNull(row.rate_limit_reset),
 		rate_limit_status: row.rate_limit_status || null,
 		rate_limit_remaining: toNumOrNull(row.rate_limit_remaining),
@@ -426,6 +501,8 @@ export function toAccountResponse(account: Account): AccountResponse {
 			: null,
 		created: new Date(account.created_at).toISOString(),
 		paused: account.paused,
+		requiresReauth: account.requires_reauth,
+		pauseReason: account.pause_reason,
 		tokenStatus,
 		tokenExpiresAt: account.expires_at
 			? new Date(account.expires_at).toISOString()

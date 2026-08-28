@@ -3,6 +3,11 @@
  * Handles both streaming and non-streaming responses
  */
 
+import type {
+	AgentAttributionSource,
+	ProjectAttributionSource,
+} from "@better-ccflare/types";
+
 // ===== MAIN THREAD → WORKER =====
 
 export interface StartMessage {
@@ -42,6 +47,22 @@ export interface StartMessage {
 
 	// Agent info
 	agentUsed: string | null;
+	projectAttributionSource?: ProjectAttributionSource | null;
+	agentAttributionSource?: AgentAttributionSource | null;
+
+	// Client session id (from body `metadata.user_id`). Already used for
+	// session-affinity routing; carried through here so the stored row can say
+	// which client session produced it — otherwise requests from a session and
+	// from its own subagents are indistinguishable after the fact.
+	clientSessionId?: string | null;
+
+	// Model rewrite observability: the model the client originally requested
+	// and the model actually forwarded upstream. Both null unless an
+	// agent-preference rewrite (agent-interceptor.ts) changed the model —
+	// gate every write through isModelRewrite() so "agent detected but
+	// nothing rewritten" never records a pair of equal values.
+	originalModel: string | null;
+	appliedModel: string | null;
 
 	// Combo info
 	comboName: string | null;
@@ -53,6 +74,20 @@ export interface StartMessage {
 	// Retry info
 	retryAttempt: number;
 	failoverAttempts: number;
+}
+
+/**
+ * True only when an agent-preference rewrite actually swapped the model:
+ * both values present and different. The single source of truth for every
+ * consumer that persists or surfaces the originalModel/appliedModel pair
+ * (StartMessage construction, request-row persistence, response header) —
+ * keeping them in agreement so a no-rewrite request never looks like one.
+ */
+export function isModelRewrite(
+	originalModel: string | null | undefined,
+	appliedModel: string | null | undefined,
+): boolean {
+	return !!originalModel && !!appliedModel && originalModel !== appliedModel;
 }
 
 export interface ChunkMessage {
@@ -67,6 +102,23 @@ export interface EndMessage {
 	responseBody?: string | null; // base64 encoded, for non-streaming
 	success: boolean;
 	error?: string;
+	/**
+	 * Real observed SSE termination state for Anthropic-Messages-shaped
+	 * streaming responses. Null when the wrapper did not observe the stream
+	 * (non-streaming responses, non-Anthropic-Messages paths). One of:
+	 * "complete" | "recovered" | "error" | "truncated" | "client_cancelled".
+	 * Distinct from `success`: a recovered stream has `success:true` but a
+	 * non-null terminal state so operators can count synthetically-terminated
+	 * requests, and client_cancelled preserves the prior header-based success
+	 * bit to avoid regressing routine Esc / tool-interrupt success metrics.
+	 */
+	streamTerminalState?:
+		| "complete"
+		| "recovered"
+		| "error"
+		| "truncated"
+		| "client_cancelled"
+		| null;
 }
 
 export interface ControlMessage {

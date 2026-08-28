@@ -21,6 +21,39 @@ export function providerSupportsAutoFeatures(provider: string): boolean {
 }
 
 /**
+ * Providers whose upstream answers by the SAME model ids the client asks for.
+ *
+ * This is the one and only definition of the passthrough rule. An empty model
+ * field means "forward whatever model the client sent, untouched" — which is
+ * only meaningful when the upstream natively accepts Claude model ids, i.e.
+ * Anthropic OAuth accounts and Claude Console API accounts.
+ *
+ * On every other provider the Claude id sent by the client lands on a foreign
+ * catalog and gets coerced by an embedded default map. That is the exact path
+ * that produced `400 The 'gpt-5.3-codex' model is not supported...` on a codex
+ * account. So outside this list, choosing a model is mandatory.
+ *
+ * Never compare `provider === "anthropic"` at a call site: use the helper
+ * below, so the criterion stays in a single place.
+ */
+export const PASSTHROUGH_PROVIDERS: readonly string[] = [
+	PROVIDER_NAMES.ANTHROPIC,
+	PROVIDER_NAMES.CLAUDE_CONSOLE_API,
+];
+
+/**
+ * True when the model field may be left empty (passthrough) for this provider.
+ *
+ * An absent/unknown provider (no account picked yet) is NOT passthrough: we
+ * cannot promise a behaviour we do not know the upstream supports.
+ */
+export function providerAllowsClientModelPassthrough(
+	provider?: string | null,
+): boolean {
+	return PASSTHROUGH_PROVIDERS.includes((provider ?? "").trim());
+}
+
+/**
  * Check if a provider supports custom billing type configuration
  * (anthropic-compatible and openai-compatible providers)
  */
@@ -50,7 +83,18 @@ export function providerShowsWeeklyUsage(provider: string): boolean {
 		provider === PROVIDER_NAMES.CODEX ||
 		provider === PROVIDER_NAMES.NANOGPT ||
 		provider === PROVIDER_NAMES.ZAI ||
-		provider === PROVIDER_NAMES.XAI
+		provider === PROVIDER_NAMES.XAI ||
+		// Alibaba Coding Plan emits its own five_hour/weekly/monthly shape
+		// (see AlibabaCodingPlanUsageData + alibaba-coding-plan-usage-fetcher).
+		// Without this entry the isAlibabaData branch in RateLimitProgress and
+		// the pool-usage eligibility set both silently never render.
+		provider === PROVIDER_NAMES.ALIBABA_CODING_PLAN ||
+		// MiniMax Token Plan normalizes its native weekly window to the
+		// canonical `seven_day` key (see minimax-usage-fetcher.ts). Without
+		// this entry AccountListItem passes showWeekly=false and both 5h
+		// and 7d windows collapse to a single fallback bar — the bug
+		// fixed in this branch.
+		provider === PROVIDER_NAMES.MINIMAX
 	);
 }
 

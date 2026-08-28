@@ -586,11 +586,15 @@ export function validatePath(
 	const result = { isValid: true, decodedPath, resolvedPath };
 	validationCache.set(cacheKey, result);
 
-	// PERFORMANCE: Log successful validation at debug level in production
-	if (IS_PRODUCTION) {
-		log.debug(`Path validation successful: ${description} → ${resolvedPath}`);
-	} else {
-		log.info(`Path validation successful: ${description} → ${resolvedPath}`);
+	// The resolved path is only ever logged at debug level. A validated path can
+	// be sensitive in its own right — TLS key/cert locations are the motivating
+	// case — and this runs on paths supplied by CLI flags, so emitting it at info
+	// would put it in default output and defeat the redaction applied to the
+	// corresponding failure messages. Debug keeps it retrievable behind an
+	// explicit LOG_LEVEL opt-in.
+	log.debug(`Path validation successful: ${description} → ${resolvedPath}`);
+	if (!IS_PRODUCTION) {
+		log.info(`Path validation successful: ${description}`);
 	}
 
 	return result;

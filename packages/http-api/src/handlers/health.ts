@@ -2,8 +2,47 @@ import type { Config } from "@better-ccflare/config";
 import { isAccountAvailable, TtlCache } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { jsonResponse } from "@better-ccflare/http-common";
+import {
+	getRepresentativeUtilizationForProvider,
+	usageCache,
+} from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
-import type { HealthResponse, IntegrityStatus, PoolStatus } from "../types";
+import type {
+	HealthResponse,
+	IntegrityStatus,
+	PoolStatus,
+	RetentionStatus,
+} from "../types";
+import {
+	getRepresentativeUsageResetMs,
+	isUsageExhausted,
+} from "./rate-limit-status";
+
+/**
+ * Usage snapshot for exhaustion accounting: representative utilization
+ * (0-100) plus the representative window's reset time when known.
+ */
+export interface AccountUsageInfo {
+	utilization: number;
+	resetMs: number | null;
+}
+export type AccountUsageInfoFn = (account: Account) => AccountUsageInfo | null;
+
+const usageCacheUsageInfo: AccountUsageInfoFn = (account) => {
+	const data = usageCache.get(account.id);
+	if (!data) return null;
+	const provider = account.provider ?? "anthropic";
+	const utilization = getRepresentativeUtilizationForProvider(data, provider);
+	if (utilization === null) return null;
+	// Same provider-aware reset derivation as the accounts handler, so the
+	// staleness guard sees identical inputs on both surfaces (PR #299 review
+	// finding: guarding only anthropic-shaped payloads recreated the /health
+	// vs accounts split-brain for the other providers).
+	return {
+		utilization,
+		resetMs: getRepresentativeUsageResetMs(data, provider),
+	};
+};
 
 type AsyncWriterHealthFn = () => {
 	healthy: boolean;
@@ -23,10 +62,12 @@ type UsageWorkerHealthFn = () => {
 	state: string;
 };
 type IntegrityStatusFn = () => IntegrityStatus;
+type RetentionStatusFn = () => RetentionStatus;
 
 export function computePoolStatus(
 	accounts: Account[],
 	now: number,
+	getUsageInfo: AccountUsageInfoFn = () => null,
 ): PoolStatus {
 	const configured = accounts.length;
 	const paused = accounts.filter((a) => a.paused).length;
@@ -34,7 +75,32 @@ export function computePoolStatus(
 		(a) => !a.paused && a.rate_limited_until && a.rate_limited_until >= now,
 	);
 	const rate_limited = rateLimitedAccounts.length;
-	const routable = accounts.filter((a) => isAccountAvailable(a, now)).length;
+	// `routable` reflects what ccflare will actually attempt to route, i.e.
+	// unpaused + no active cooldown + NOT usage-exhausted. Passing the usage
+	// snapshot here is load-bearing: without it, an account at 100% utilization
+	// with no `rate_limited_until` was counted as routable while upstream
+	// rejected every request — masking the effective outage from the dashboard
+	// and from clients polling /health (incident 2026-07-30T20:24-22:20Z:
+	// every 503 came back with a default 60s Retry-After that compounded with
+	// CLAUDE_CODE_MAX_RETRIES=5 to kill clients in 300s). The relationship
+	// between `routable` and `usage_exhausted` changed because `routable` now
+	// honors usage telemetry — see commit message for details.
+	const routable = accounts.filter((a) =>
+		isAccountAvailable(a, now, getUsageInfo(a) ?? undefined),
+	).length;
+	// `usage_exhausted` is the diagnostic overlay: accounts whose cached
+	// telemetry shows 100% utilization with a future reset, AND that have no
+	// other reason to be unavailable (no pause, no active cooldown). The
+	// pre-usage-aware isAccountAvailable gate is preserved on purpose so this
+	// counter keeps its PR #299 semantics (no double-counting with paused or
+	// rate_limited accounts).
+	const usage_exhausted = accounts.filter((a) => {
+		if (!isAccountAvailable(a, now)) return false;
+		const usage = getUsageInfo(a);
+		return (
+			usage !== null && isUsageExhausted(usage.utilization, usage.resetMs, now)
+		);
+	}).length;
 
 	const earliestRateLimit = rateLimitedAccounts.reduce<number | null>(
 		(min, account) => {
@@ -55,6 +121,7 @@ export function computePoolStatus(
 		paused,
 		rate_limited,
 		routable,
+		usage_exhausted,
 		next_available_at,
 	};
 }
@@ -85,12 +152,47 @@ function toHttpStatus(status: HealthResponse["status"]): 200 | 503 {
 	return status === "ok" ? 200 : 503;
 }
 
+/**
+ * Build-time provenance for the /health response. Populated from env vars
+ * injected by the Dockerfile at build time:
+ *   - CCFLARE_VERSION: optional override; normally reads from
+ *     `npm_package_version` which is set automatically by `bun run` /
+ *     npm scripts.
+ *   - CCFLARE_GIT_SHA: full 40-char commit SHA the image was built from.
+ *   - CCFLARE_GIT_REF: branch / tag name (e.g. "main", "deploy/2026-07-30").
+ *   - CCFLARE_BUILD_DATE: RFC 3339 timestamp the image was built.
+ *
+ * Each field reports "unknown" when unset so the shape is stable and the
+ * canary can detect "field present but empty" vs "field missing" without
+ * guessing. The canary expects this four-tuple and uses it to compare
+ * against the deploy branch HEAD.
+ */
+function readBuildProvenance(): {
+	version: string;
+	git_sha: string;
+	git_ref: string;
+	build_date: string;
+} {
+	return {
+		version:
+			process.env.CCFLARE_VERSION ??
+			process.env.BETTER_CCFLARE_VERSION ??
+			process.env.npm_package_version ??
+			"unknown",
+		git_sha: process.env.CCFLARE_GIT_SHA ?? "unknown",
+		git_ref: process.env.CCFLARE_GIT_REF ?? "unknown",
+		build_date: process.env.CCFLARE_BUILD_DATE ?? "unknown",
+	};
+}
+
 export function createHealthHandler(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getAsyncWriterHealth?: AsyncWriterHealthFn,
 	getUsageWorkerHealth?: UsageWorkerHealthFn,
 	getIntegrityStatus?: IntegrityStatusFn,
+	getAccountUsageInfo: AccountUsageInfoFn = usageCacheUsageInfo,
+	getRetentionStatus?: RetentionStatusFn,
 ) {
 	const normalCache = new TtlCache<HealthResponse>(2000);
 	const detailCache = new TtlCache<HealthResponse>(2000);
@@ -106,7 +208,7 @@ export function createHealthHandler(
 
 		const accounts = await dbOps.getAllAccounts();
 		const now = Date.now();
-		const pool = computePoolStatus(accounts, now);
+		const pool = computePoolStatus(accounts, now, getAccountUsageInfo);
 
 		// Call each health function once and store results
 		const asyncWriterHealth = getAsyncWriterHealth
@@ -132,6 +234,7 @@ export function createHealthHandler(
 			accounts: pool.configured,
 			timestamp: new Date().toISOString(),
 			strategy: config.getStrategy(),
+			...readBuildProvenance(),
 			pool,
 		};
 
@@ -145,11 +248,11 @@ export function createHealthHandler(
 
 		// Add storage integrity independently — orthogonal to asyncWriter/usageWorker
 		if (getIntegrityStatus) {
-			if (!response.runtime) {
-				response.runtime = {};
-			}
+			const runtime = response.runtime ?? {};
+			response.runtime = runtime;
 			const integrity = getIntegrityStatus();
-			response.runtime!.storage = {
+			runtime.storage = {
+				...runtime.storage,
 				integrity: {
 					status: integrity.status,
 					runningKind: integrity.runningKind,
@@ -165,6 +268,27 @@ export function createHealthHandler(
 						? new Date(integrity.lastFullCheckAt).toISOString()
 						: null,
 					lastFullResult: integrity.lastFullResult,
+				},
+			};
+		}
+
+		// Add data-retention job telemetry independently — orthogonal to the
+		// blocks above. Lets operators dead-man-alert on lastSuccessAt instead
+		// of only finding out via a swallowed log line (#384).
+		if (getRetentionStatus) {
+			const runtime = response.runtime ?? {};
+			response.runtime = runtime;
+			const retention = getRetentionStatus();
+			runtime.storage = {
+				...runtime.storage,
+				retention: {
+					lastSuccessAt: retention.lastSuccessAt
+						? new Date(retention.lastSuccessAt).toISOString()
+						: null,
+					lastError: retention.lastError,
+					lastErrorAt: retention.lastErrorAt
+						? new Date(retention.lastErrorAt).toISOString()
+						: null,
 				},
 			};
 		}

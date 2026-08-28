@@ -128,6 +128,33 @@ describe("XaiProvider", () => {
 		expect(body.stream_options).toEqual({ include_usage: true });
 	});
 
+	it("advertises 500k only for streams from official xAI endpoints", async () => {
+		const provider = new XaiProvider();
+		const makeResponse = () =>
+			new Response(
+				[
+					`data: ${JSON.stringify({
+						model: "grok-4.6",
+						choices: [
+							{ index: 0, delta: { content: "Hi" }, finish_reason: null },
+						],
+						usage: { prompt_tokens: 20, completion_tokens: 5 },
+					})}\n\n`,
+					"data: [DONE]\n\n",
+				].join(""),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+
+		const official = await provider.processResponse(makeResponse(), account());
+		expect(await official.text()).toContain('"context_window_size":500000');
+
+		const custom = await provider.processResponse(
+			makeResponse(),
+			account({ custom_endpoint: "https://proxy.example.com/v1" }),
+		);
+		expect(await custom.text()).not.toContain("context_window");
+	});
+
 	it("refreshes xAI OAuth tokens with the Grok client id", async () => {
 		const provider = new XaiProvider();
 		const fetchMock = mock(
@@ -155,5 +182,30 @@ describe("XaiProvider", () => {
 		expect(result.accessToken).toBe("new-access-token");
 		expect(result.refreshToken).toBe("new-refresh-token");
 		expect(result.expiresAt).toBeGreaterThan(Date.now());
+	});
+
+	it("preserves the machine-readable OAuth error code on a failed refresh", async () => {
+		const provider = new XaiProvider();
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: "invalid_grant",
+						error_description: "Refresh token is invalid or has been revoked.",
+					}),
+					{ status: 401, headers: { "content-type": "application/json" } },
+				),
+		) as unknown as typeof fetch;
+
+		let thrown: Error | null = null;
+		try {
+			await provider.refreshToken(account(), "unused");
+		} catch (error) {
+			thrown = error as Error;
+		}
+
+		// The code must survive alongside the description so the token-manager's
+		// requires_reauth detection can classify a dead xAI refresh token.
+		expect(thrown?.message).toContain("invalid_grant");
 	});
 });

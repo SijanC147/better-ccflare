@@ -1,21 +1,33 @@
 import {
+	type AccountUsageSnapshot,
 	requestEvents,
+	runForceAccountModelExempt,
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@better-ccflare/core";
 import { DatabaseFactory } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
-import { usageCache } from "@better-ccflare/providers";
+import {
+	deriveXaiConvId,
+	getRepresentativeUsageSnapshotForProvider,
+	isOfficialXaiEndpoint,
+	usageCache,
+} from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
+	createModelFamilyExhaustedResponse,
 	createPoolExhaustedResponse,
 	createRequestMetadata,
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
 	getComboSlotInfo,
+	getModelFamilyExhaustionInfo,
 	getUsageThrottleUntil,
 	interceptAndModifyRequest,
+	isComboSessionFallbackDisabled,
+	isForceAccountModelEnabled,
+	isInternalProbe,
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
@@ -23,9 +35,26 @@ import {
 	proxyWithAccount,
 	RequestBodyContext,
 	type RequestJsonBody,
+	recordSelectedOrder,
+	recordXaiAffinitySuccess,
+	resolveEffectiveModel,
 	selectAccountsForRequest,
+	setXaiConvId,
 	validateProviderPath,
 } from "./handlers";
+import {
+	completeRateLimitProbe,
+	getRateLimitProbeAdmission,
+	wouldSuppressProbe,
+} from "./handlers/rate-limit-cooldown";
+import {
+	extractProjectAttribution,
+	extractSystemPromptFromJson,
+} from "./project-attribution";
+import {
+	buildSessionRejectResponse,
+	recordSessionRequest,
+} from "./session-governor";
 import {
 	getUsageCollector,
 	initUsageCollector,
@@ -37,79 +66,51 @@ export type { ProxyContext } from "./handlers";
 
 const log = new Logger("Proxy");
 
-const PROJECT_NAME_MAX_LEN = 64;
-
-function sanitizeProjectName(raw: string | undefined | null): string | null {
-	if (!raw) return null;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-	const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
-	if (!cleaned) return null;
-	return cleaned.length > PROJECT_NAME_MAX_LEN
-		? cleaned.slice(0, PROJECT_NAME_MAX_LEN)
-		: cleaned;
-}
-
-function extractSystemPrompt(body: RequestJsonBody | null): string | null {
-	if (!body) return null;
-	const system = body.system;
-
-	if (typeof system === "string") {
-		return system;
-	}
-
-	if (Array.isArray(system)) {
-		return system
-			.filter(
-				(item): item is { type?: string; text: string } =>
-					typeof item === "object" &&
-					item !== null &&
-					(item as { type?: string }).type === "text" &&
-					typeof (item as { text?: unknown }).text === "string",
-			)
-			.map((item) => item.text)
-			.join("\n");
-	}
-
-	return null;
+function createComboSessionFallbackDisabledResponse(
+	comboName: string,
+): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "service_unavailable_error",
+				message: "Service temporarily unavailable. Please try again later.",
+				code: "combo_session_fallback_disabled",
+				combo: comboName,
+			},
+		}),
+		{
+			status: 503,
+			headers: { "Content-Type": "application/json" },
+		},
+	);
 }
 
 /**
- * Extract a project name from a Claude API request.
+ * No account can serve the model that was asked for, and "force account model"
+ * forbids serving a different one.
  *
- * Resolution order:
- *  1. `x-ccflare-project` / `X-CCFlare-Project` header (fork-specific project
- *     tracking header — `Headers.get()` is already case-insensitive)
- *  2. `x-project` header (upstream's header name)
- *  3. Workspace path embedded in the system prompt
- *  4. First Markdown H1 heading in the system prompt (if reasonable)
+ * 503 rather than 400: the request is well formed, and the same model may well
+ * be servable in a minute — an account may be rate-limited right now, or its
+ * model listing not yet read. The model is named in the body because that is
+ * the one thing the caller can act on.
  */
-function extractProjectFromRequest(
-	headers: Headers,
-	body: RequestJsonBody | null,
-): string | null {
-	const headerProject =
-		headers.get("x-ccflare-project") ?? headers.get("x-project");
-	const sanitizedHeader = sanitizeProjectName(headerProject);
-	if (sanitizedHeader) return sanitizedHeader;
-
-	const systemPrompt = extractSystemPrompt(body);
-	if (!systemPrompt) return null;
-
-	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+function createForceAccountModelResponse(model: string): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "service_unavailable_error",
+				message: `No available account can serve "${model}", and forcing the account model is enabled so no substitute was used.`,
+				code: "force_account_model_no_account",
+				model,
+			},
+		}),
+		{
+			status: 503,
+			headers: { "Content-Type": "application/json" },
+		},
 	);
-	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
-	if (sanitizedPath) return sanitizedPath;
-
-	const headingMatch = systemPrompt.match(/^#\s+([^\n\r]{1,100})/m);
-	if (headingMatch) {
-		const heading = sanitizeProjectName(headingMatch[1]);
-		if (heading && !heading.toLowerCase().startsWith("claude")) {
-			return heading;
-		}
-	}
-
-	return null;
 }
 
 // ===== USAGE COLLECTOR MANAGEMENT =====
@@ -170,7 +171,39 @@ export function getUsageCollectorHealth(): UsageCollectorHealth {
  * @throws {ServiceUnavailableError} If all accounts fail to proxy the request
  * @throws {ProviderError} If unauthenticated proxy fails
  */
-export async function handleProxy(
+/**
+ * A verified internal probe runs with `force_account_model` treated as off for
+ * its whole lifetime.
+ *
+ * The switch promises to serve the model the *client* named or nothing, and a
+ * probe is not a client: the schedulers send a compiled-in list of Claude ids
+ * to whatever account they are probing, because the point is to touch the
+ * endpoint and read the answer. Mapping is what makes that land on a non-Claude
+ * account, so leaving the switch on here would not honour the promise — it
+ * would send `claude-haiku-4-5` to Codex, take the rejection as a refresh
+ * failure, and pause a healthy account after five of them.
+ *
+ * `isInternalProbe` verifies the process-local probe secret, so a client that
+ * copies the marker header out of a log gets nothing. Sibling of the exemptions
+ * probes already have in usage throttling and in the forced-account model
+ * check.
+ */
+export function handleProxy(
+	req: Request,
+	url: URL,
+	ctx: ProxyContext,
+	apiKeyId?: string | null,
+	apiKeyName?: string | null,
+): Promise<Response> {
+	if (isInternalProbe(req.headers, ctx)) {
+		return runForceAccountModelExempt(() =>
+			handleProxyRequest(req, url, ctx, apiKeyId, apiKeyName),
+		);
+	}
+	return handleProxyRequest(req, url, ctx, apiKeyId, apiKeyName);
+}
+
+async function handleProxyRequest(
 	req: Request,
 	url: URL,
 	ctx: ProxyContext,
@@ -207,7 +240,20 @@ export async function handleProxy(
 	// and reuse parsed body for /v1/messages validation (consolidate parses)
 	const parsedBody = requestBodyContext.getParsedJson();
 	const requestModel = requestBodyContext.getModel();
-	const project = extractProjectFromRequest(req.headers, parsedBody);
+	// Fork header alias: upstream's extractor recognises `x-better-ccflare-project`
+	// and the legacy `x-project`, but this fork also ships `X-CCFlare-Project`
+	// (see createRequestMetadata, which reads it into requestMeta.project — a
+	// value this block would otherwise overwrite with null). Aliasing it onto
+	// the namespaced name at the accessor keeps it at the same precedence as
+	// upstream's own header AND runs it through upstream's slug/secret
+	// validation, which a separate bypass path would skip (#373).
+	const { project, projectAttributionSource } = extractProjectAttribution(
+		(name) =>
+			name === "x-better-ccflare-project"
+				? (req.headers.get(name) ?? req.headers.get("x-ccflare-project"))
+				: req.headers.get(name),
+		extractSystemPromptFromJson(parsedBody),
+	);
 
 	// 3a. Validate request body for /v1/messages endpoint
 	if (url.pathname === "/v1/messages" && requestBodyBuffer) {
@@ -245,8 +291,21 @@ export async function handleProxy(
 	}
 
 	// 4. Intercept and modify request for agent model preferences
-	const { modifiedBody, agentUsed, originalModel, appliedModel } =
-		await interceptAndModifyRequest(requestBodyContext, ctx.dbOps, req.headers);
+	const {
+		modifiedBody,
+		agentUsed,
+		originalModel,
+		appliedModel,
+		agentAttributionSource,
+	} = await interceptAndModifyRequest(
+		requestBodyContext,
+		ctx.dbOps,
+		req.headers,
+		{
+			frontmatterModelFallback: ctx.config.getAgentFrontmatterModelFallback(),
+			forceAccountModel: isForceAccountModelEnabled(ctx),
+		},
+	);
 
 	// Use modified body if available
 	const finalBodyBuffer = modifiedBody || requestBodyContext.getBuffer();
@@ -264,17 +323,49 @@ export async function handleProxy(
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
 	requestMeta.agentUsed = agentUsed;
+	requestMeta.agentAttributionSource = agentAttributionSource;
 	requestMeta.project = project;
+	requestMeta.projectAttributionSource = projectAttributionSource;
 	requestMeta.clientSessionId = requestBodyContext.getClientId();
+	requestMeta.originalModel = originalModel;
+	requestMeta.appliedModel = appliedModel;
 
-	// 6. Select accounts — use the post-intercept model so combo selection
-	// reflects any agent-driven rewrite of the request body (Codex P2). If
-	// `appliedModel` is undefined (no agent matched), fall back to the
-	// originally-extracted requestModel.
+	// xAI cache-native conversation identity (issue #319 minimal slice):
+	// derive once per request and stash on the RequestMeta-keyed side channel
+	// (see account-selector.ts) rather than widening RequestMeta's shape.
+	// deriveXaiConvId is a no-op (returns null) unless CCFLARE_XAI_CACHE_NATIVE
+	// is exactly "1" and clientSessionId is a valid session UUID, so this is
+	// byte-for-byte a no-op when the feature is disabled.
+	const xaiConvId = deriveXaiConvId(requestMeta.clientSessionId);
+	if (xaiConvId) {
+		setXaiConvId(requestMeta, xaiConvId);
+	}
+
+	// 5b. Session volume circuit breaker: a runaway subagent storm shows up as
+	// one client session hammering /v1/messages. Count it here and, when
+	// enforcement is enabled, reject before account selection burns upstream
+	// quota. All identified traffic is counted: header-based exemptions would
+	// be client-forgeable, and internal synthetic requests either carry no
+	// client session (refresh probes, anonymous and thus ungoverned) or spend
+	// upstream quota like any other request (keepalive replays) and belong in
+	// the budget. This is a runaway-loop breaker, not an authentication
+	// boundary: a client that omits session metadata entirely is out of scope.
+	if (url.pathname === "/v1/messages") {
+		const verdict = recordSessionRequest(requestMeta.clientSessionId);
+		if (verdict?.rejected) {
+			return buildSessionRejectResponse(verdict);
+		}
+	}
+
+	// 6. Select accounts. Route on the model that will actually be sent
+	// upstream (post-interceptor-rewrite), not the model the client asked
+	// for — otherwise combo routing and family-based selection see a model
+	// that no longer matches the outgoing request.
+	const effectiveModel = resolveEffectiveModel(appliedModel, requestModel);
 	const selectedAccounts = await selectAccountsForRequest(
 		requestMeta,
 		ctx,
-		appliedModel ?? requestModel ?? undefined,
+		effectiveModel ?? undefined,
 	);
 
 	const applyUsageThrottling = (accounts: Account[]) => {
@@ -286,15 +377,46 @@ export async function handleProxy(
 			return { available: accounts, throttled: [] as Account[] };
 		}
 
+		// Internal synthetic probes (auto-refresh window-reset checks, cache
+		// keepalive replays) must never be usage-throttled. They exist
+		// specifically to hit the real endpoint and observe state changes
+		// (window resets, recovered accounts) — the same reason
+		// selectAccountsForRequest already lets them bypass pause/rate-limit
+		// checks (see account-selector.ts's isAutoRefreshBypass). Without this
+		// exemption, a throttled-but-healthy account's own synthetic probe gets
+		// our own 529 back; the auto-refresh scheduler then misreads that as an
+		// endpoint failure and counts it toward its consecutive-failure pause
+		// threshold (recordRefreshFailure), auto-pausing a healthy account the
+		// instant its usage window resets and the scheduler re-probes it.
+		const isSyntheticProbe = isInternalProbe(req.headers, ctx);
+		if (isSyntheticProbe) {
+			return { available: accounts, throttled: [] as Account[] };
+		}
+
 		const now = Date.now();
 		const available: Account[] = [];
 		const throttled: Account[] = [];
+
+		// Model-aware throttling: a per-model weekly cap should only throttle
+		// requests for that model. Use the effective (post-intercept) request
+		// model; combo-routed requests assign per-slot models later, so skip
+		// scoped caps (null) and rely on the flat windows + reactive out_of_credits.
+		// combo routing sets meta.comboName during selection and CLEARS it on the
+		// step-10 fallback; use it (not the stale comboSlotInfo WeakMap, which the
+		// fallback does not clear) so fallback routing still applies per-model scoped
+		// throttling for its now-known single model.
+		const comboRouted = requestMeta.comboName != null;
+		const effectiveModel = appliedModel ?? requestModel ?? null;
 
 		for (const account of accounts) {
 			const throttleUntil = getUsageThrottleUntil(
 				usageCache.get(account.id),
 				settings,
 				now,
+				{
+					requestModel: comboRouted ? null : effectiveModel,
+					scopedMode: "match",
+				},
 			);
 			if (throttleUntil && throttleUntil > now) {
 				throttled.push(account);
@@ -312,13 +434,156 @@ export async function handleProxy(
 		return { available, throttled };
 	};
 
+	// xAI cache-native affinity must be recorded only once a response is
+	// actually served, never at selection time — see recordXaiAffinitySuccess.
+	// A no-op for any non-xai / non-official-endpoint account, or when the
+	// feature is disabled (getXaiConvId returns null and the callee no-ops).
+	const recordXaiAffinityIfServed = (account: Account) => {
+		if (account.provider === "xai" && isOfficialXaiEndpoint(account)) {
+			recordXaiAffinitySuccess(requestMeta, account.id);
+		}
+	};
+
+	/**
+	 * Return a refusal that was decided before any upstream was contacted, and
+	 * record it as a request all the same.
+	 *
+	 * Recording matters: a routing rule that silently drops requests would make
+	 * the dashboard show a quiet, healthy proxy while clients get 503s. Shared
+	 * by every deliberate refusal so they cannot drift in what they report.
+	 */
+	const returnRefusal = async (
+		refusalResponse: Response,
+		errorCode: string,
+		failoverAttempts: number,
+		comboName: string | null,
+	): Promise<Response> => {
+		const disabledFallbackResponse = refusalResponse;
+		const collector = tryGetUsageCollector();
+		if (collector) {
+			// Fork path-based attribution, resolved the same way forwardToClient
+			// does (see response-handler.ts): prefer the explicit cwd hint, fall
+			// back to the heuristic project string. A refusal is recorded as a
+			// real request, so it has to carry the same project/worktree
+			// attribution — otherwise refused traffic would be the one class of
+			// request missing from the dashboard's per-project view.
+			let refusalProjectId: string | null = null;
+			let refusalWorktreePath: string | null = null;
+			try {
+				const resolved = ctx.dbOps.resolverManager
+					.current()
+					.resolve(requestMeta.cwdHint ?? project ?? null);
+				refusalProjectId = resolved.projectId;
+				refusalWorktreePath = resolved.worktreePath;
+			} catch {
+				// Non-fatal — attribution is best-effort; proceed without it
+			}
+			collector.handleStart({
+				type: "start",
+				messageId: crypto.randomUUID(),
+				requestId: requestMeta.id,
+				accountId: null,
+				method: req.method,
+				path: url.pathname,
+				timestamp: requestMeta.timestamp,
+				requestHeaders: Object.fromEntries(req.headers.entries()),
+				requestBody: null,
+				project: project ?? null,
+				projectId: refusalProjectId,
+				worktreePath: refusalWorktreePath,
+				projectAttributionSource: projectAttributionSource ?? "none",
+				agentAttributionSource: agentAttributionSource ?? "none",
+				responseStatus: 503,
+				responseHeaders: Object.fromEntries(
+					disabledFallbackResponse.headers.entries(),
+				),
+				isStream: false,
+				providerName: ctx.provider.name,
+				accountBillingType: null,
+				accountAutoPauseOnOverageEnabled: 0,
+				accountName: null,
+				agentUsed: agentUsed || null,
+				clientSessionId: requestMeta.clientSessionId ?? null,
+				originalModel: originalModel || null,
+				appliedModel: appliedModel || null,
+				comboName,
+				apiKeyId: apiKeyId || null,
+				apiKeyName: apiKeyName || null,
+				retryAttempt: 0,
+				failoverAttempts,
+			});
+			try {
+				await collector.handleEnd({
+					type: "end",
+					requestId: requestMeta.id,
+					success: false,
+					error: errorCode,
+				});
+			} catch (err) {
+				log.error(
+					`handleEnd failed for refused request ${requestMeta.id} (${errorCode})`,
+					err,
+				);
+			}
+		}
+		cacheBodyStore.discardStaged(requestMeta.id);
+		return disabledFallbackResponse;
+	};
+
+	const returnComboSessionFallbackDisabled = (
+		comboName: string,
+		failoverAttempts: number,
+	): Promise<Response> =>
+		returnRefusal(
+			createComboSessionFallbackDisabledResponse(comboName),
+			"combo_session_fallback_disabled",
+			failoverAttempts,
+			comboName,
+		);
+
 	const { available: accounts, throttled: throttledAccounts } =
 		applyUsageThrottling(selectedAccounts);
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
+		if (requestMeta.comboName && isComboSessionFallbackDisabled(ctx)) {
+			return await returnComboSessionFallbackDisabled(requestMeta.comboName, 0);
+		}
+
+		// Model-scoped capacity filter (account-selector.ts) emptied the
+		// candidate pool because every account is exhausted for this request's
+		// model family — a structured, actionable response instead of the
+		// generic pool_exhausted 503 or exhausting failover against accounts
+		// already known to reject this model family.
+		const exhaustionInfo = getModelFamilyExhaustionInfo(requestMeta);
+		if (exhaustionInfo) {
+			return createModelFamilyExhaustedResponse(exhaustionInfo);
+		}
+
 		if (throttledAccounts.length > 0) {
 			return createUsageThrottledResponse(throttledAccounts);
+		}
+
+		// Nothing can serve the model that was asked for, and substituting one
+		// is exactly what this setting forbids. Answering here — rather than
+		// letting the generic pool_exhausted 503 answer — is what tells the
+		// caller which model went unserved.
+		//
+		// This comes *after* the exhaustion and throttling branches on purpose.
+		// An account that speaks the requested model but is out of quota right
+		// now is a temporary, actionable state, and those branches carry the
+		// `resetAt`/`Retry-After` that says when to come back. Answering
+		// "nothing can serve this model" over them would replace a fact with a
+		// falsehood and drop the retry time on the floor. What is left here is
+		// the case this setting is actually about: the pool emptied because the
+		// compatibility filter removed every candidate.
+		if (effectiveModel && isForceAccountModelEnabled(ctx)) {
+			return await returnRefusal(
+				createForceAccountModelResponse(effectiveModel),
+				"force_account_model_no_account",
+				0,
+				null,
+			);
 		}
 
 		// Check feature flag for backwards compatibility
@@ -347,7 +612,35 @@ export async function handleProxy(
 			(a) => a.provider === ctx.provider.name,
 		);
 
-		const poolExhaustedResponse = createPoolExhaustedResponse(allAccounts);
+		// Build a usage snapshot map (id → snapshot) so createPoolExhaustedResponse
+		// can surface `usage_exhausted` reasons and derive next_available_at /
+		// Retry-After from the same telemetry the strategy just consulted.
+		// Without this, accounts at 100% utilization with no rate_limited_until
+		// fall through to the catch-all `unavailable` branch with a default
+		// Retry-After of 60s — see incident 2026-07-30T20:24-22:20Z.
+		//
+		// The snapshot MUST pair utilization with the reset belonging to the SAME
+		// window that produced the max — picking them independently (as the
+		// pre-fix code did) pairs e.g. Zai's time_limit.max with tokens_limit's
+		// reset and lies to clients about when capacity returns (Greptile review
+		// on PR #365). The paired helper returns null when no telemetry exists.
+		const usageSnapshots = new Map<string, AccountUsageSnapshot>();
+		for (const account of allAccounts) {
+			const cached = usageCache.get(account.id);
+			if (!cached) continue;
+			const provider = account.provider ?? "anthropic";
+			const snapshot = getRepresentativeUsageSnapshotForProvider(
+				cached,
+				provider,
+			);
+			if (snapshot === null) continue;
+			usageSnapshots.set(account.id, snapshot);
+		}
+
+		const poolExhaustedResponse = createPoolExhaustedResponse(
+			allAccounts,
+			usageSnapshots,
+		);
 
 		// Skip request-log staging for synthetic auto-refresh probes that
 		// 503 because their target account is on a known cooldown. Logging
@@ -355,8 +648,11 @@ export async function handleProxy(
 		// reflecting any real client impact (issue #199, bug 2). The keepalive
 		// scheduler already gets the equivalent treatment via its loop-prevention
 		// header path; this brings auto-refresh in line.
-		const isAutoRefreshProbe =
-			req.headers.get("x-better-ccflare-auto-refresh") === "true";
+		const isAutoRefreshProbe = isInternalProbe(
+			req.headers,
+			ctx,
+			"auto-refresh",
+		);
 		if (!isAutoRefreshProbe) {
 			// Log to request history via usage collector
 			getUsageCollector().handleStart({
@@ -370,6 +666,8 @@ export async function handleProxy(
 				requestHeaders: Object.fromEntries(req.headers.entries()),
 				requestBody: null,
 				project: project ?? null,
+				projectAttributionSource: projectAttributionSource ?? "none",
+				agentAttributionSource: agentAttributionSource ?? "none",
 				responseStatus: 503,
 				responseHeaders: Object.fromEntries(
 					poolExhaustedResponse.headers.entries(),
@@ -383,6 +681,9 @@ export async function handleProxy(
 				accountAutoPauseOnOverageEnabled: 0,
 				accountName: null,
 				agentUsed: agentUsed || null,
+				clientSessionId: requestMeta.clientSessionId ?? null,
+				originalModel: originalModel || null,
+				appliedModel: appliedModel || null,
 				comboName: null,
 				apiKeyId: apiKeyId || null,
 				apiKeyName: apiKeyName || null,
@@ -412,6 +713,17 @@ export async function handleProxy(
 	log.info(
 		`Selected ${accounts.length} accounts: ${accounts.map((a) => a.name).join(", ")}`,
 	);
+	// Record the routing decision the proxy just made for the dashboard's
+	// "observed routing order" display -- display-only telemetry, never fed
+	// back into selection (see routing-observations.ts). Uses the same
+	// effectiveModel the capacity filter (selectAccountsForRequest ->
+	// getModelFamily) already routed on, so the family attribution can't
+	// drift from what actually happened. Not the final word, though: the
+	// combo-fallback re-selection below calls recordSelectedOrder again for
+	// the same family when it actually runs, and that later call wins
+	// (last-write-wins) since it reflects the accounts that really served
+	// the request.
+	recordSelectedOrder(effectiveModel, accounts, Date.now());
 	if (
 		process.env.DEBUG?.includes("proxy") ||
 		process.env.DEBUG === "true" ||
@@ -432,6 +744,7 @@ export async function handleProxy(
 			}
 		: null;
 	let response: Response | null = null;
+	let anyAccountAttempted = false;
 
 	for (let i = 0; i < accounts.length; i++) {
 		// For combo routing: enrich metadata with slot index and look up model override
@@ -451,6 +764,80 @@ export async function handleProxy(
 			);
 		}
 
+		const probeAdmission = getRateLimitProbeAdmission(accounts[i]);
+		if (probeAdmission === "suppressed") {
+			// A mature cooldown just expired for this account and another
+			// concurrent request is already probing it. Skip straight to the
+			// next account instead of stampeding the recovering account.
+			continue;
+		}
+
+		anyAccountAttempted = true;
+		// The last actually-attempted candidate is not always the last pool
+		// index: a probe-suppressed tail account gets skipped via `continue`
+		// above rather than attempted. Look ahead at the remaining candidates'
+		// CURRENT suppression state (without taking a lease) to find out
+		// whether any of them would still be attempted after this one.
+		const isLastAttemptedCandidate = accounts
+			.slice(i + 1)
+			.every((candidate) => wouldSuppressProbe(candidate));
+		try {
+			response = await proxyWithAccount(
+				req,
+				url,
+				accounts[i],
+				requestMeta,
+				finalBodyBuffer,
+				finalCreateBodyStream,
+				i,
+				ctx,
+				modelOverride,
+				apiKeyId,
+				apiKeyName,
+				requestBodyContext,
+				!filteredComboInfo?.comboName && isLastAttemptedCandidate,
+			);
+		} finally {
+			if (probeAdmission === "admitted") {
+				completeRateLimitProbe(accounts[i], "abandoned");
+			}
+		}
+
+		if (response) {
+			recordXaiAffinityIfServed(accounts[i]);
+			return response;
+		}
+
+		// Log combo slot failure
+		if (filteredComboInfo) {
+			log.info(
+				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
+			);
+		}
+	}
+
+	// Every candidate was single-flight probe-gate suppressed — no account was
+	// ever actually attempted. The gate's purpose is to prefer another account
+	// over stampeding one that just recovered, not to drop the request when
+	// there is no other account to prefer: retry the highest-priority
+	// candidate once, bypassing the gate, instead of falling through to a hard
+	// 503 against what may be a perfectly healthy account.
+	if (!anyAccountAttempted && accounts.length > 0) {
+		const i = 0;
+		let modelOverride: string | null = null;
+		if (filteredComboInfo?.slots[i]?.accountId === accounts[i].id) {
+			modelOverride = filteredComboInfo.slots[i].modelOverride;
+		}
+		log.info(
+			`All ${accounts.length} candidate account(s) were probe-gate suppressed; retrying account ${accounts[i].name} ungated`,
+		);
+		// This retry IS the request's terminal attempt by construction — the
+		// loop above already exhausted every candidate before falling through
+		// here. Unlike the loop's own `i === accounts.length - 1` check (which
+		// tracks whether the CURRENT iteration is the last one), `i` is always
+		// 0 in this block regardless of pool size, so that comparison would be
+		// a constant `false` for any pool with more than one candidate — the
+		// flag must instead depend only on whether this is combo routing.
 		response = await proxyWithAccount(
 			req,
 			url,
@@ -464,18 +851,12 @@ export async function handleProxy(
 			apiKeyId,
 			apiKeyName,
 			requestBodyContext,
-			!filteredComboInfo?.comboName && i === accounts.length - 1,
+			!filteredComboInfo?.comboName,
 		);
 
 		if (response) {
+			recordXaiAffinityIfServed(accounts[i]);
 			return response;
-		}
-
-		// Log combo slot failure
-		if (filteredComboInfo) {
-			log.info(
-				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
-			);
 		}
 	}
 
@@ -483,35 +864,106 @@ export async function handleProxy(
 	//     fall back to normal SessionStrategy routing (REQ-14)
 	let fallbackAccounts: Account[] | null = null;
 	if (filteredComboInfo?.comboName) {
+		if (isComboSessionFallbackDisabled(ctx)) {
+			log.warn(
+				`All combo slots failed for combo "${filteredComboInfo.comboName}", session fallback disabled by the Combo Session Fallback setting (Settings → Advanced)`,
+			);
+			return await returnComboSessionFallbackDisabled(
+				filteredComboInfo.comboName,
+				accounts.length,
+			);
+		}
+
 		log.warn(
 			`All combo slots failed for combo "${filteredComboInfo.comboName}", falling back to SessionStrategy routing`,
 		);
-		// Clear combo info and retry with normal routing. We intentionally
-		// omit the `model` argument: selectAccountsForRequest only consults
-		// the active combo when a model is provided (see account-selector.ts),
-		// so leaving it undefined here guarantees the fallback skips combo
-		// lookup entirely and uses SessionStrategy ordering against healthy
-		// non-combo accounts (Codex P2 — this defends the no-model invariant
-		// at the call site so a future change that re-introduces a model
-		// argument doesn't silently re-enter the exhausted combo).
+		// Clear combo info and retry with normal routing. Pass the effective
+		// model + skipCombo:true so this re-selection (a) applies the same
+		// model-scoped capacity filter as the initial selection instead of
+		// blindly re-attempting the just-failed combo accounts unfiltered, and
+		// (b) does not re-trigger the same combo lookup — the combo lookup is
+		// keyed on the model's family, not on requestMeta.comboName, so clearing
+		// comboName alone would not make it inert.
 		requestMeta.comboName = null;
 		requestMeta.comboSlotIndex = null;
 		const selectedFallbackAccounts = await selectAccountsForRequest(
 			requestMeta,
 			ctx,
-			/* model */ undefined,
+			effectiveModel ?? undefined,
+			{ skipCombo: true },
 		);
 		const {
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
 		} = applyUsageThrottling(selectedFallbackAccounts);
 		fallbackAccounts = filteredFallbackAccounts;
+		// This re-selection is what actually serves the request when a combo
+		// falls back to SessionStrategy routing, so it must overwrite the
+		// dashboard's "observed routing order" entry the initial selection
+		// recorded above -- otherwise the table would keep showing the failed
+		// combo order as the (stale, never-served) last decision for this
+		// family. recordSelectedOrder's last-write-wins semantics make this
+		// safe to call unconditionally.
+		recordSelectedOrder(effectiveModel, fallbackAccounts, Date.now());
 
 		if (fallbackAccounts.length > 0) {
 			log.info(
 				`Fallback: trying ${fallbackAccounts.length} SessionStrategy accounts`,
 			);
+			let anyFallbackAttempted = false;
 			for (let i = 0; i < fallbackAccounts.length; i++) {
+				const probeAdmission = getRateLimitProbeAdmission(fallbackAccounts[i]);
+				if (probeAdmission === "suppressed") {
+					continue;
+				}
+
+				anyFallbackAttempted = true;
+				// Same rationale as the main loop above: a probe-suppressed tail
+				// candidate is skipped via `continue`, so the last pool index is
+				// not necessarily the last one actually attempted.
+				const isLastAttemptedFallback = fallbackAccounts
+					.slice(i + 1)
+					.every((candidate) => wouldSuppressProbe(candidate));
+				try {
+					response = await proxyWithAccount(
+						req,
+						url,
+						fallbackAccounts[i],
+						requestMeta,
+						finalBodyBuffer,
+						finalCreateBodyStream,
+						i,
+						ctx,
+						undefined, // No model override for fallback path
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						isLastAttemptedFallback,
+					);
+				} finally {
+					if (probeAdmission === "admitted") {
+						completeRateLimitProbe(fallbackAccounts[i], "abandoned");
+					}
+				}
+
+				if (response) {
+					recordXaiAffinityIfServed(fallbackAccounts[i]);
+					return response;
+				}
+			}
+
+			// Same rationale as the main account loop above: an entirely
+			// suppressed fallback pool must not fall through to a hard failure.
+			if (!anyFallbackAttempted && fallbackAccounts.length > 0) {
+				const i = 0;
+				log.info(
+					`All ${fallbackAccounts.length} fallback candidate(s) were probe-gate suppressed; retrying account ${fallbackAccounts[i].name} ungated`,
+				);
+				// Same rationale as the main-loop block above: this retry is the
+				// terminal attempt by construction (the fallback loop already
+				// exhausted every candidate), and the fallback path is never
+				// combo-routed (comboName was cleared before re-selection), so the
+				// flag is unconditionally true here.
 				response = await proxyWithAccount(
 					req,
 					url,
@@ -521,20 +973,31 @@ export async function handleProxy(
 					finalCreateBodyStream,
 					i,
 					ctx,
-					undefined, // No model override for fallback path
+					undefined,
 					apiKeyId,
 					apiKeyName,
 					requestBodyContext,
-					i === fallbackAccounts.length - 1,
+					true,
 				);
 
 				if (response) {
+					recordXaiAffinityIfServed(fallbackAccounts[i]);
 					return response;
 				}
 			}
-		} else if (throttledFallbackAccounts.length > 0) {
-			cacheBodyStore.discardStaged(requestMeta.id);
-			return createUsageThrottledResponse(throttledFallbackAccounts);
+		} else {
+			// Same no-accounts resolver order as the initial selection (Step 7):
+			// capacity-exhaustion first (structured, actionable response instead
+			// of falling through to a generic failure), then usage-throttling.
+			const fallbackExhaustionInfo = getModelFamilyExhaustionInfo(requestMeta);
+			if (fallbackExhaustionInfo) {
+				cacheBodyStore.discardStaged(requestMeta.id);
+				return createModelFamilyExhaustedResponse(fallbackExhaustionInfo);
+			}
+			if (throttledFallbackAccounts.length > 0) {
+				cacheBodyStore.discardStaged(requestMeta.id);
+				return createUsageThrottledResponse(throttledFallbackAccounts);
+			}
 		}
 	}
 

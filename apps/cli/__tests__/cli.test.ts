@@ -6,6 +6,13 @@ import { join } from "node:path";
 
 const CLI_PATH = join(process.cwd(), "apps/cli/src/main.ts");
 
+// Tracks per-invocation temp databases so afterEach can remove them along
+// with their SQLite WAL/SHM siblings. Each runCLI() below pushes one path
+// here; the suite's afterEach() drains the set after the existing
+// tempDir/Ssl-fixture rmSync. Without this the runCLI-routed BETTER_CCFLARE_DB_PATH
+// files accumulate across repeated suite invocations under $TMPDIR.
+const createdDbPaths = new Set<string>();
+
 /**
  * Helper function to run CLI command and get output
  * Available to all test suites
@@ -19,9 +26,23 @@ function runCLI(
 	exitCode: number;
 }> {
 	return new Promise((resolve) => {
+		// Route the spawned CLI's database through the environment's temp dir so
+		// tests pass under any sandbox that blocks writes to ~/.config/. The
+		// CLI honours BETTER_CCFLARE_DB_PATH (see packages/database/src/factory.ts)
+		// — honouring it here keeps each test run hermetic and removes a
+		// ~/.config/better-ccflare/better-ccflare.db dependency the test never
+		// asked for. Falls back to ~/.config in the unlikely event neither
+		// TMPDIR nor HOME is writable.
+		const cliDbPath = `${process.env.TMPDIR || "/tmp"}/better-ccflare-cli-test-${process.pid}-${Date.now()}.db`;
+		createdDbPaths.add(cliDbPath);
 		const proc = spawn("bun", ["--no-orphans", "run", CLI_PATH, ...args], {
 			cwd: options.cwd,
-			env: { ...process.env, ...options.env, NODE_ENV: "test" },
+			env: {
+				...process.env,
+				...options.env,
+				NODE_ENV: "test",
+				BETTER_CCFLARE_DB_PATH: cliDbPath,
+			},
 		});
 
 		let stdout = "";
@@ -153,13 +174,30 @@ describe("CLI Integration Tests", () => {
 			expect(result.stdout).toContain("--compact");
 		});
 
-		it("should show account mode options", async () => {
+		it("should show every accepted account mode", async () => {
 			const result = await runCLI(["--help"]);
 
-			expect(result.stdout).toContain("claude-oauth");
-			expect(result.stdout).toContain("console");
-			expect(result.stdout).toContain("zai");
-			expect(result.stdout).toContain("openai-compatible");
+			// Every mode accepted by --mode validation must be discoverable here.
+			// Looping over the full list (instead of asserting a subset) prevents
+			// the help surface from drifting silently when a mode is added/removed.
+			const acceptedModes = [
+				"claude-oauth",
+				"console",
+				"zai",
+				"minimax",
+				"nanogpt",
+				"anthropic-compatible",
+				"openai-compatible",
+				"bedrock",
+				"kilo",
+				"alibaba-coding-plan",
+				"codex",
+				"xai",
+				"ollama",
+			];
+			for (const mode of acceptedModes) {
+				expect(result.stdout).toContain(mode);
+			}
 		});
 
 		it("should exit quickly for help command", async () => {
@@ -231,6 +269,7 @@ describe("CLI Integration Tests", () => {
 			expect(output).toContain("Please provide --mode to specify account type");
 			expect(output).toContain("--mode");
 			expect(output).toContain("--priority");
+			expect(output).toContain("ollama");
 		});
 
 		it("should show example usage for add account", async () => {
@@ -340,6 +379,26 @@ describe("CLI Integration Tests", () => {
 			expect(duration).toBeLessThan(1000);
 		});
 	});
+});
+
+// File-scope afterEach: cleans up the per-invocation CLI databases (and
+// their SQLite WAL/SHM siblings) registered by every runCLI() call in this
+// file — including the sibling describe blocks at the bottom of this file
+// ("CLI Security Tests" and the parse-logic describe) that don't have their
+// own afterEach. Without this, repeated suite runs accumulate *.db /
+// *.db-wal / *.db-shm under $TMPDIR (verified: +7 of each per run on
+// upstream's pre-fix version; this hook drops that to +0).
+afterEach(() => {
+	for (const dbPath of createdDbPaths) {
+		try {
+			rmSync(dbPath, { force: true });
+			rmSync(`${dbPath}-wal`, { force: true });
+			rmSync(`${dbPath}-shm`, { force: true });
+		} catch (_e) {
+			// Ignore cleanup errors
+		}
+	}
+	createdDbPaths.clear();
 });
 
 /**

@@ -6,8 +6,14 @@ import {
 	usageCache,
 } from "@better-ccflare/providers";
 import type { Account, RateLimitReason } from "@better-ccflare/types";
-import type { ProxyContext } from "./proxy-types";
-import { applyRateLimitCooldown } from "./rate-limit-cooldown";
+import { circuitKeyFor, recordSuccess } from "../circuit-breaker";
+import { recordCodexUsageSnapshot } from "../codex-usage-history";
+import { drainBody } from "./discard-body-cancel";
+import { isInternalProbe, type ProxyContext } from "./proxy-types";
+import {
+	applyRateLimitCooldown,
+	completeRateLimitProbe,
+} from "./rate-limit-cooldown";
 
 const log = new Logger("ResponseProcessor");
 
@@ -106,10 +112,24 @@ export function updateAccountMetadata(
 		});
 		if (codexUsage) {
 			const prevUsage = usageCache.get(account.id);
+			// Which window this session is riding. Both sides of the comparison
+			// below must read the same slot: a 5-hour boundary held against a
+			// weekly one would fabricate a rollover. With
+			// CODEX_FIVE_HOUR_WINDOW_ENABLED the slot stays pinned to the 5-hour
+			// window, as it was before OpenAI withdrew that window; otherwise it
+			// follows the shortest window this payload actually reports.
+			const windowSlot: "five_hour" | "seven_day" =
+				ctx.config.getCodexFiveHourWindowEnabled() ||
+				codexUsage.five_hour?.resets_at != null
+					? "five_hour"
+					: "seven_day";
 			const prevResetAt = (
-				prevUsage as { five_hour?: { resets_at: string | null } } | null
-			)?.five_hour?.resets_at;
-			const newResetAt = codexUsage.five_hour?.resets_at;
+				prevUsage as {
+					five_hour?: { resets_at: string | null };
+					seven_day?: { resets_at: string | null };
+				} | null
+			)?.[windowSlot]?.resets_at;
+			const newResetAt = codexUsage[windowSlot]?.resets_at;
 			const windowRolledOver =
 				prevResetAt != null &&
 				newResetAt != null &&
@@ -118,7 +138,21 @@ export function updateAccountMetadata(
 
 			usageCache.set(account.id, codexUsage);
 			log.debug(
-				`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour.utilization}%, 7d=${codexUsage.seven_day.utilization}%`,
+				`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour?.utilization ?? "?"}%, 7d=${codexUsage.seven_day?.utilization ?? "?"}%`,
+			);
+
+			// The cache above expires in 10 minutes and dies with the process, so
+			// also persist the windows into usage_snapshots — the only place a Codex
+			// weekly percentage survives a restart. Throttled per account inside the
+			// helper (recordSnapshot has no dedup by design).
+			ctx.asyncWriter.enqueue(() =>
+				recordCodexUsageSnapshot(
+					ctx.dbOps,
+					account.id,
+					account.name,
+					codexUsage as unknown as Record<string, unknown>,
+					Date.now(),
+				).then(() => undefined),
 			);
 
 			// Update rate_limit_reset from usage headers so auto-refresh can track windows
@@ -142,7 +176,7 @@ export function updateAccountMetadata(
 
 			if (windowRolledOver) {
 				log.info(
-					`Codex window rolled over for ${account.name}: ${prevResetAt} → ${newResetAt}, resetting session`,
+					`Codex ${windowSlot} window rolled over for ${account.name}: ${prevResetAt} → ${newResetAt}, resetting session`,
 				);
 				ctx.dbOps
 					.resetAccountSession(account.id, Date.now())
@@ -164,8 +198,16 @@ export function updateAccountMetadata(
 		if (isStream && ctx.provider.parseUsage) {
 			const parseUsage = ctx.provider.parseUsage.bind(ctx.provider);
 			(async () => {
+				// Hold the clone in a local so its body can be released once the
+				// await resolves — a provider whose parseUsage returns early
+				// (unsupported content-type, no body reader available) leaves
+				// this tee branch open, and the client-facing twin pays for it
+				// in retained memory. See the extractUsageInfo branch below for
+				// why drainBody, not body.cancel(). See issue #354.
+				let usageClone: Response | null = null;
 				try {
-					const usageInfo = await parseUsage(response.clone() as Response);
+					usageClone = response.clone();
+					const usageInfo = await parseUsage(usageClone);
 					if (usageInfo) {
 						log.debug(
 							`Extracted streaming usage for account ${account.name}: ${JSON.stringify(usageInfo)}`,
@@ -184,15 +226,27 @@ export function updateAccountMetadata(
 						`Failed to extract streaming usage for account ${account.name}:`,
 						error,
 					);
+				} finally {
+					if (usageClone) {
+						const body = usageClone.body;
+						if (body && !body.locked) {
+							drainBody(body).catch(() => {});
+						}
+					}
 				}
 			})();
 		} else if (ctx.provider.extractUsageInfo) {
 			const extractUsageInfo = ctx.provider.extractUsageInfo.bind(ctx.provider);
 			(async () => {
+				// Hold the clone in a local so we can release its body once the
+				// await resolves. The clone is consumed by extractUsageInfo
+				// (which itself clones again internally — see
+				// providers/anthropic/provider.ts:645); cancelling before that
+				// await completes would truncate usage extraction.
+				let usageClone: Response | null = null;
 				try {
-					const usageInfo = await extractUsageInfo(
-						response.clone() as Response,
-					);
+					usageClone = response.clone();
+					const usageInfo = await extractUsageInfo(usageClone);
 					if (usageInfo) {
 						log.debug(
 							`Extracted usage info for account ${account.name}: ${JSON.stringify(usageInfo)}`,
@@ -211,6 +265,31 @@ export function updateAccountMetadata(
 						`Failed to extract usage info for account ${account.name}:`,
 						error,
 					);
+				} finally {
+					// After the await, the body is either fully consumed or the
+					// provider's reader was cancelled mid-stream. Either way the
+					// local has no further consumer; release its body if it is
+					// still unlocked. This bounds transient, concurrency-scaled
+					// off-heap retention per in-flight request — sequential
+					// requests are flat (no per-request growth), but under
+					// concurrent load the held clone compounds.
+					//
+					// Uses drainBody, NOT body.cancel(): this repo's own
+					// benchmark (bench/drain-strategy-harness.ts, same PR)
+					// measured body.cancel() as a no-op on every released Bun
+					// (Bun 1.3.2 ~83 KB/req leak, 1.3.14 ~78 KB/req — both
+					// indistinguishable from never calling it at all). Only
+					// draining the body to done actually releases the native
+					// backing store on stock Bun.
+					if (usageClone) {
+						const body = usageClone.body;
+						if (body && !body.locked) {
+							// Fire and forget — extracting usage must not block on
+							// releasing the buffer, and a drain that throws must
+							// not surface into the response path.
+							drainBody(body).catch(() => {});
+						}
+					}
 				}
 			})();
 		}
@@ -277,6 +356,19 @@ export async function processProxyResponse(
 	// errors, would silently bypass marking and failover. The mid-stream case
 	// (status 200 with an SSE `event: error` frame partway through the body)
 	// is handled separately by the streaming forwarder — see issue #114.
+
+	// Hoisted out of the rate-limit branch below so the success branch can
+	// gate the new circuit-breaker `recordSuccess` call symmetrically with
+	// the existing `recordFailure` exclusion in applyRateLimitCooldown:
+	// without this guard, the keepalive scheduler (which fires parallel
+	// requests across every cached account simultaneously) becomes a
+	// timer-driven circuit-eraser — every keepalive tick that returns 200
+	// closes a circuit regardless of whether the upstream has actually
+	// recovered. The header is set by cache-keepalive-scheduler.ts and only
+	// synthetic replays carry it, so it cannot be confused for a real
+	// user-driven request.
+	const isKeepalive = isInternalProbe(requestMeta?.headers, ctx, "keepalive");
+
 	if (rateLimitInfo.isRateLimited) {
 		// Skip cooldown application on synthetic cache-keepalive replays. The
 		// keepalive scheduler fires parallel requests across every cached
@@ -286,8 +378,6 @@ export async function processProxyResponse(
 		// pool to zero routable accounts even though no user-visible quota
 		// was actually exhausted. Loop-prevention header set by
 		// cache-keepalive-scheduler.ts; only synthetic replays carry it.
-		const isKeepalive =
-			requestMeta?.headers?.get("x-better-ccflare-keepalive") === "true";
 		if (isKeepalive) {
 			log.warn(
 				`Keepalive replay for ${account.name} got ${response.status} — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
@@ -296,8 +386,9 @@ export async function processProxyResponse(
 			handleRateLimitResponse(account, rateLimitInfo, ctx, response.status);
 		} else {
 			// Mark as rate-limited even without reset time. Route through
-			// applyRateLimitCooldown so the consecutive counter ramps correctly
-			// even for reset-less 429s.
+			// applyRateLimitCooldown, which ramps the consecutive counter for
+			// reset-less 429s but applies a fixed overload cooldown for 529s
+			// and leaves the streak untouched there — see rate-limit-cooldown.ts.
 			const reason: RateLimitReason =
 				response.status === 529
 					? "upstream_529_overloaded_no_reset"
@@ -320,6 +411,40 @@ export async function processProxyResponse(
 	}
 
 	if (!rateLimitInfo.isRateLimited && !skipAccountMetadata) {
+		completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned");
+
+		// Notify the circuit breaker of the successful request — the
+		// request-path success call that fixes PR #349's
+		// "half-open probe can never close" defect (PR #349 audit,
+		// Risk 2: HIGH). Without this call the breaker's only success
+		// side-effect is `forceClose` from clearExpiredRateLimits, which
+		// cannot transition a `half-open` entry to `closed` (that is the
+		// half-open-only branch in `CircuitBreaker.recordSuccess`). The
+		// gate must survive three filters to fire:
+		//
+		//   1. response.ok — a 5xx against an open upstream is not
+		//      evidence of recovery; calling recordSuccess on a 500 would
+		//      close a circuit the upstream has not actually healed.
+		//   2. !isKeepalive — symmetric with the cooldown-skip above; see
+		//      comment on the hoisted constant.
+		//   3. !isInternalProbe(requestMeta?.headers, ctx, "auto-refresh")
+		//      — auto-refresh probes run on an internal cadence and
+		//      bypass user-quota state; treating one of their 200s as a
+		//      recovery signal would erase an open circuit any time the
+		//      auto-refresh scheduler happens to land successfully.
+		//
+		// The half-open close is the only mutation that matters here;
+		// `recordSuccess` on a `closed` entry with `failureCount > 0`
+		// clears the streak, which is also the right behaviour for a
+		// healthy stream of successful requests.
+		if (
+			response.ok &&
+			!isKeepalive &&
+			!isInternalProbe(requestMeta?.headers, ctx, "auto-refresh")
+		) {
+			recordSuccess(circuitKeyFor(account));
+		}
+
 		// (a) Stability reset — gated only on rate_limited_at.
 		// clearExpiredRateLimits nulls rate_limited_until without touching rate_limited_at,
 		// so we must not gate on rate_limited_until or we'd miss accounts already cleared

@@ -9,7 +9,16 @@ const DEVELOPMENT_COMMIT = "0000000000000000000000000000000000000000";
 
 await prepareDashboardBuild(packageJson.version, DEVELOPMENT_COMMIT);
 await prepareEmbeddedWorkers();
+const skip = (process.env.CCFLARE_SKIP_PLATFORMS ?? "")
+	.split(",")
+	.map((entry) => entry.trim())
+	.filter(Boolean);
+
 for (const target of getAllHextapTargets()) {
+	if (skip.includes(target.bunTarget) || skip.includes(target.releaseBinary)) {
+		console.log(`Skipping ${target.os}/${target.arch}...`);
+		continue;
+	}
 	console.log(`Building ${target.os}/${target.arch}...`);
 	await compileStandalone({
 		target,

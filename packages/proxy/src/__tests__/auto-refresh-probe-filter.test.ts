@@ -145,6 +145,7 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 				isStreamingResponse: () => false,
 			} as never,
 			config: { getStorePayloads: () => false } as never,
+			internalProbeSecret: "test-secret",
 		};
 
 		const response = new Response(JSON.stringify({ type: "message" }), {
@@ -154,6 +155,7 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 
 		const requestHeaders = new Headers({
 			"x-better-ccflare-auto-refresh": "true",
+			"x-better-ccflare-internal-probe-secret": "test-secret",
 		});
 
 		await forwardToClient(
@@ -268,6 +270,7 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,
+				getAgentFrontmatterModelFallback: () => false,
 			} as never,
 			provider: {
 				name: "anthropic",
@@ -275,6 +278,7 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 			} as never,
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) } as never,
+			internalProbeSecret: "test-secret",
 		};
 
 		const probeRequest = new Request("https://proxy.local/v1/messages", {
@@ -282,6 +286,7 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 			headers: {
 				"Content-Type": "application/json",
 				"x-better-ccflare-auto-refresh": "true",
+				"x-better-ccflare-internal-probe-secret": "test-secret",
 			},
 			body: JSON.stringify({
 				model: "claude-haiku-4-5",
@@ -321,6 +326,7 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,
+				getAgentFrontmatterModelFallback: () => false,
 			} as never,
 			provider: {
 				name: "anthropic",

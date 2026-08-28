@@ -15,9 +15,30 @@ if (existsSync(outdir)) {
 }
 
 const start = performance.now();
-const buildVersion =
-	process.env.BETTER_CCFLARE_BUILD_VERSION ?? packageJson.version;
-const buildCommit = process.env.BETTER_CCFLARE_BUILD_COMMIT ?? "development";
+
+// Release identity precedence. Hextap supplies BETTER_CCFLARE_BUILD_VERSION /
+// BETTER_CCFLARE_BUILD_COMMIT from the tagged git tag and source commit; those are
+// exact and must win. CCFLARE_BUILD_SUFFIX (upstream) appends SemVer build metadata
+// (e.g. "3.5.44+zp2"), which Hextap's version normalization rejects — so it is only
+// valid for non-Hextap developer builds. Supplying both is a contradiction, not a
+// precedence question, so fail closed rather than silently picking one.
+const releaseBuildVersion = process.env.BETTER_CCFLARE_BUILD_VERSION;
+const releaseBuildCommit = process.env.BETTER_CCFLARE_BUILD_COMMIT;
+const buildSuffix = process.env.CCFLARE_BUILD_SUFFIX;
+
+if (releaseBuildVersion && buildSuffix) {
+	throw new Error(
+		"CCFLARE_BUILD_SUFFIX cannot be combined with Hextap build identity " +
+			"(BETTER_CCFLARE_BUILD_VERSION). Hextap rejects SemVer build metadata.",
+	);
+}
+
+const buildVersion = releaseBuildVersion
+	? releaseBuildVersion
+	: buildSuffix
+		? `${packageJson.version}+${buildSuffix}`
+		: packageJson.version;
+const buildCommit = releaseBuildCommit ?? "development";
 
 const entrypoints = ["src/index.html"];
 console.log(`📄 Building dashboard from ${entrypoints[0]}\n`);

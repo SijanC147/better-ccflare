@@ -358,6 +358,81 @@ describe("Database Migrations - Tier Column Removal", () => {
 		});
 	});
 
+	describe("Agent Model Rewrite Observability (original_model/applied_model)", () => {
+		it("ensureSchema creates original_model and applied_model TEXT columns on requests", () => {
+			ensureSchema(db);
+
+			const columns = db.prepare("PRAGMA table_info(requests)").all() as Array<{
+				name: string;
+				type: string;
+			}>;
+			const original = columns.find((c) => c.name === "original_model");
+			const applied = columns.find((c) => c.name === "applied_model");
+
+			expect(original).toBeDefined();
+			expect(original?.type.toUpperCase()).toBe("TEXT");
+			expect(applied).toBeDefined();
+			expect(applied?.type.toUpperCase()).toBe("TEXT");
+		});
+
+		it("runMigrations adds original_model/applied_model columns idempotently to a pre-existing requests table", () => {
+			// Simulate a legacy DB without the new columns by building the requests
+			// table manually (mirrors ensureSchema's pre-migration shape) instead of
+			// calling ensureSchema, which already includes the columns under test.
+			db.run(`
+				CREATE TABLE requests (
+					id TEXT PRIMARY KEY,
+					timestamp INTEGER NOT NULL,
+					method TEXT NOT NULL,
+					path TEXT NOT NULL,
+					account_used TEXT,
+					status_code INTEGER,
+					success BOOLEAN,
+					error_message TEXT,
+					response_time_ms INTEGER,
+					failover_attempts INTEGER DEFAULT 0
+				)
+			`);
+
+			expect(() => {
+				runMigrations(db);
+			}).not.toThrow();
+
+			const columns = db.prepare("PRAGMA table_info(requests)").all() as Array<{
+				name: string;
+			}>;
+			const columnNames = columns.map((c) => c.name);
+			expect(columnNames).toContain("original_model");
+			expect(columnNames).toContain("applied_model");
+
+			// Re-running migrations must not throw or duplicate the column.
+			expect(() => {
+				runMigrations(db);
+			}).not.toThrow();
+		});
+
+		it("new columns default to NULL for existing rows", () => {
+			ensureSchema(db);
+			db.prepare(
+				`INSERT INTO requests (id, timestamp, method, path) VALUES (?, ?, ?, ?)`,
+			).run("existing-request", Date.now(), "POST", "/v1/messages");
+
+			runMigrations(db);
+
+			const row = db
+				.prepare(
+					"SELECT original_model, applied_model FROM requests WHERE id = ?",
+				)
+				.get("existing-request") as {
+				original_model: string | null;
+				applied_model: string | null;
+			};
+
+			expect(row.original_model).toBeNull();
+			expect(row.applied_model).toBeNull();
+		});
+	});
+
 	describe("API Key Storage Migration", () => {
 		it("should migrate API keys from refresh_token to api_key field for API-key providers", () => {
 			// Initialize the schema
@@ -1094,5 +1169,209 @@ describe("Database Backup Behavior", () => {
 		db3.close();
 		expect(cols).toContain("rate_limited_until");
 		expect(cols).toContain("paused");
+	});
+});
+
+describe("Attribution source columns (project_attribution_source / agent_attribution_source)", () => {
+	let db: Database;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("fresh SQLite DB has both attribution source columns after schema init + migrations", () => {
+		ensureSchema(db);
+		runMigrations(db);
+
+		const columns = db.prepare("PRAGMA table_info(requests)").all() as Array<{
+			name: string;
+			type: string;
+			notnull: number;
+		}>;
+		const columnNames = columns.map((c) => c.name);
+
+		expect(columnNames).toContain("project_attribution_source");
+		expect(columnNames).toContain("agent_attribution_source");
+
+		const projectSourceCol = columns.find(
+			(c) => c.name === "project_attribution_source",
+		);
+		const agentSourceCol = columns.find(
+			(c) => c.name === "agent_attribution_source",
+		);
+		expect(projectSourceCol?.notnull).toBe(0);
+		expect(agentSourceCol?.notnull).toBe(0);
+	});
+
+	it("old SQLite DB without the columns gets them added by runMigrations, nullable, with existing rows intact", () => {
+		// Simulate a pre-U5 requests table (no project_attribution_source /
+		// agent_attribution_source columns), mirroring the shape ensureSchema()
+		// produced before this migration was added.
+		db.exec(`
+			CREATE TABLE requests (
+				id TEXT PRIMARY KEY,
+				timestamp INTEGER NOT NULL,
+				method TEXT NOT NULL,
+				path TEXT NOT NULL,
+				account_used TEXT,
+				status_code INTEGER,
+				success BOOLEAN,
+				error_message TEXT,
+				response_time_ms INTEGER,
+				failover_attempts INTEGER DEFAULT 0,
+				model TEXT,
+				prompt_tokens INTEGER DEFAULT 0,
+				completion_tokens INTEGER DEFAULT 0,
+				total_tokens INTEGER DEFAULT 0,
+				cost_usd REAL DEFAULT 0,
+				output_tokens_per_second REAL,
+				input_tokens INTEGER DEFAULT 0,
+				cache_read_input_tokens INTEGER DEFAULT 0,
+				cache_creation_input_tokens INTEGER DEFAULT 0,
+				output_tokens INTEGER DEFAULT 0,
+				agent_used TEXT,
+				project TEXT,
+				billing_type TEXT DEFAULT 'api',
+				combo_name TEXT
+			)
+		`);
+		db.exec(`
+			CREATE TABLE accounts (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				provider TEXT DEFAULT 'anthropic',
+				api_key TEXT,
+				refresh_token TEXT,
+				access_token TEXT,
+				expires_at INTEGER,
+				created_at INTEGER NOT NULL,
+				last_used INTEGER,
+				request_count INTEGER DEFAULT 0,
+				total_requests INTEGER DEFAULT 0,
+				priority INTEGER DEFAULT 0
+			)
+		`);
+		db.exec(`
+			CREATE TABLE request_payloads (
+				id TEXT PRIMARY KEY,
+				json TEXT NOT NULL
+			)
+		`);
+		db.exec(`
+			CREATE TABLE oauth_sessions (
+				id TEXT PRIMARY KEY,
+				account_name TEXT NOT NULL,
+				verifier TEXT NOT NULL,
+				mode TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL
+			)
+		`);
+		db.exec(`
+			CREATE TABLE api_keys (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL UNIQUE,
+				hashed_key TEXT NOT NULL UNIQUE,
+				prefix_last_8 TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				last_used INTEGER,
+				usage_count INTEGER DEFAULT 0,
+				is_active INTEGER DEFAULT 1
+			)
+		`);
+
+		db.prepare(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, response_time_ms, failover_attempts, project, combo_name)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			"pre-existing-req",
+			1_700_000_000_000,
+			"POST",
+			"/v1/messages",
+			200,
+			1,
+			123,
+			0,
+			"legacy-project",
+			"legacy-combo",
+		);
+
+		runMigrations(db);
+
+		const columns = db.prepare("PRAGMA table_info(requests)").all() as Array<{
+			name: string;
+			notnull: number;
+		}>;
+		const columnNames = columns.map((c) => c.name);
+		expect(columnNames).toContain("project_attribution_source");
+		expect(columnNames).toContain("agent_attribution_source");
+		expect(
+			columns.find((c) => c.name === "project_attribution_source")?.notnull,
+		).toBe(0);
+		expect(
+			columns.find((c) => c.name === "agent_attribution_source")?.notnull,
+		).toBe(0);
+
+		// Pre-existing row must survive the migration untouched, with the new
+		// columns defaulting to NULL (no DEFAULT clause specified).
+		const row = db
+			.prepare(
+				"SELECT id, project, combo_name, project_attribution_source, agent_attribution_source FROM requests WHERE id = ?",
+			)
+			.get("pre-existing-req") as {
+			id: string;
+			project: string | null;
+			combo_name: string | null;
+			project_attribution_source: string | null;
+			agent_attribution_source: string | null;
+		};
+		expect(row.id).toBe("pre-existing-req");
+		expect(row.project).toBe("legacy-project");
+		expect(row.combo_name).toBe("legacy-combo");
+		expect(row.project_attribution_source).toBeNull();
+		expect(row.agent_attribution_source).toBeNull();
+	});
+});
+
+describe("PostgreSQL migration parity — attribution source columns", () => {
+	// A live PostgreSQL server is not available in this environment, so this
+	// is a static-parity check: read migrations-pg.ts as text and assert both
+	// new columns are wired into ensureSchemaPg's CREATE TABLE and into the
+	// columnsToAdd list consumed by runMigrationsPg, mirroring the SQLite
+	// migration added above. See repo CLAUDE.md "Database Migrations — Port
+	// to PostgreSQL" checklist.
+	it("ensureSchemaPg's requests CREATE TABLE includes both attribution source columns", () => {
+		const source = fs.readFileSync(
+			path.join(__dirname, "../src/migrations-pg.ts"),
+			"utf8",
+		);
+		const ensureSchemaPgMatch = source.match(
+			/export async function ensureSchemaPg[\s\S]*?\n}\n/,
+		);
+		expect(ensureSchemaPgMatch).not.toBeNull();
+		const ensureSchemaPgBody = ensureSchemaPgMatch?.[0] ?? "";
+		expect(ensureSchemaPgBody).toContain("project_attribution_source TEXT");
+		expect(ensureSchemaPgBody).toContain("agent_attribution_source TEXT");
+	});
+
+	it("runMigrationsPg's columnsToAdd includes both attribution source columns for the requests table", () => {
+		const source = fs.readFileSync(
+			path.join(__dirname, "../src/migrations-pg.ts"),
+			"utf8",
+		);
+		const columnsToAddMatch = source.match(/const columnsToAdd[\s\S]*?\n\t\];/);
+		expect(columnsToAddMatch).not.toBeNull();
+		const columnsToAddBody = columnsToAddMatch?.[0] ?? "";
+
+		expect(columnsToAddBody).toContain(
+			'"ALTER TABLE requests ADD COLUMN project_attribution_source TEXT"',
+		);
+		expect(columnsToAddBody).toContain(
+			'"ALTER TABLE requests ADD COLUMN agent_attribution_source TEXT"',
+		);
 	});
 });

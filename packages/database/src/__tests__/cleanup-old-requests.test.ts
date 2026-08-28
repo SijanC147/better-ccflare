@@ -6,7 +6,10 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
+import {
+	BunSqlAdapter,
+	getCleanupBatchSize,
+} from "../adapters/bun-sql-adapter";
 import { ensureSchema, runMigrations } from "../migrations";
 
 // ---------------------------------------------------------------------------
@@ -150,6 +153,35 @@ describe("cleanupOldRequests", () => {
 
 			// The orphaned payload should be captured in removedPayloads
 			expect(result.removedPayloads).toBeGreaterThanOrEqual(1);
+		});
+
+		it("removes ALL orphaned payloads even when there are more than one batch's worth (regression for #384)", async () => {
+			const old = Date.now() - 95 * 24 * 60 * 60 * 1000; // 95 days ago
+			const orphanCount = getCleanupBatchSize() + 500; // exceeds one batch
+
+			for (let i = 0; i < orphanCount; i++) {
+				insertRequest(db, `orphan-${i}`, old, true);
+			}
+
+			// Delete all the request rows directly, leaving orphaned payloads behind
+			db.run("DELETE FROM requests");
+
+			const before = db
+				.query("SELECT COUNT(*) as n FROM request_payloads")
+				.get() as { n: number };
+			expect(before.n).toBe(orphanCount);
+
+			const result = await runCleanup(
+				db,
+				7 * 24 * 60 * 60 * 1000,
+				90 * 24 * 60 * 60 * 1000,
+			);
+
+			expect(result.removedPayloads).toBe(orphanCount);
+			const remaining = db
+				.query("SELECT COUNT(*) as n FROM request_payloads")
+				.get() as { n: number };
+			expect(remaining.n).toBe(0);
 		});
 	});
 

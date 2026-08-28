@@ -1,15 +1,33 @@
 import {
+	authFailureEvents,
 	CLAUDE_MODEL_IDS,
+	clearProbeBackoff,
 	getClientVersion,
+	PROBE_BACKOFF_PENALTY_THRESHOLD_MS,
 	registerHeartbeat,
 	requestEvents,
+	setProbeBackoff,
 } from "@better-ccflare/core";
 import type { BunSqlAdapter } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import { fetchUsageData, getProvider } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
+import {
+	AUTO_REFRESH_PROMPTS,
+	claimAutoRefreshPrompt,
+	releaseAutoRefreshPrompt,
+} from "./auto-refresh-prompt-pool";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
-import { getValidAccessToken } from "./handlers";
+import {
+	extractAuthFailureReason,
+	getValidAccessToken,
+	INTERNAL_PROBE_SECRET_HEADER,
+} from "./handlers";
+import {
+	flushPendingRotation,
+	getPendingRotation,
+	recordPendingRotation,
+} from "./handlers/pending-rotation-registry";
 import type { ProxyContext } from "./proxy";
 
 const log = new Logger("AutoRefreshScheduler");
@@ -45,6 +63,42 @@ export class AutoRefreshScheduler {
 	// self-recover automatically instead of getting stuck in API ERROR (#262).
 	private lastFailureProbeAt: Map<string, number> = new Map();
 	private readonly FAILURE_PROBE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+	// Escalating backoff for a probe that failed in a way this scheduler
+	// deliberately does not count toward FAILURE_THRESHOLD: a 529 overload, or a
+	// network error that never produced a response. Those outcomes never pause
+	// the account, so on their own they leave it eligible again on the very next
+	// 60s tick, for as long as the condition lasts. That matters beyond the
+	// wasted request: every probe spends a prompt from the pool shared by all
+	// accounts, and a prompt that has been sent cannot be handed back — so an
+	// account stuck in a 529 loop would drain the whole pool in a little over
+	// eight hours and stop every other account from refreshing.
+	//
+	// A ladder rather than one flat wait, because the two ends want opposite
+	// things. A single blip should cost a minute, not ten — the account is
+	// probably fine and the next window rollover should be caught quickly. An
+	// account that has been failing all day should be asked twice a day, not six
+	// times an hour. Consecutive failures climb one rung and then stay on the
+	// last one; the first successful probe drops back to the bottom.
+	private readonly UNCOUNTED_FAILURE_BACKOFF_MS: readonly number[] = [
+		60 * 1000, // 1 minute
+		5 * 60 * 1000, // 5 minutes
+		10 * 60 * 1000, // 10 minutes
+		30 * 60 * 1000, // 30 minutes
+		60 * 60 * 1000, // 1 hour
+		6 * 60 * 60 * 1000, // 6 hours
+		12 * 60 * 60 * 1000, // 12 hours
+	];
+	// When the last uncounted failure happened, and how many in a row. Separate
+	// from lastFailureProbeAt on purpose: that map answers "when did we last poke
+	// this dead-paused account", this one answers "how long has this account been
+	// failing in a way nothing else reacts to", which applies to healthy,
+	// unpaused accounts too.
+	private uncountedProbeFailures: Map<string, { at: number; streak: number }> =
+		new Map();
+	// The release time already reported for an exhausted prompt pool. While the
+	// pool stays dry that time does not move, so comparing against it turns the
+	// per-minute retry into one log line per episode.
+	private promptPoolExhaustedReportedFor: number | null = null;
 
 	constructor(db: BunSqlAdapter, proxyContext: ProxyContext) {
 		this.db = db;
@@ -85,6 +139,32 @@ export class AutoRefreshScheduler {
 		this.lastRefreshResetTime.clear();
 		this.consecutiveFailures.clear();
 		this.lastFailureProbeAt.clear();
+		for (const accountId of this.uncountedProbeFailures.keys()) {
+			clearProbeBackoff(accountId);
+		}
+		this.uncountedProbeFailures.clear();
+		this.promptPoolExhaustedReportedFor = null;
+	}
+
+	/**
+	 * Report a dry prompt pool once per episode rather than once per minute.
+	 *
+	 * Reaching this means 500 probes went out inside 24 hours, which no healthy
+	 * install does — so it is written as the alarm it is, and it names the moment
+	 * the first prompt is free again so the wait is a fact rather than a guess.
+	 */
+	private notePromptPoolExhausted(retryAt: number, accountName: string): void {
+		const at = new Date(retryAt).toISOString();
+		if (this.promptPoolExhaustedReportedFor === retryAt) {
+			log.debug(
+				`Auto-refresh still holding off on ${accountName} until ${at} — every probe prompt is on cooldown`,
+			);
+			return;
+		}
+		this.promptPoolExhaustedReportedFor = retryAt;
+		log.warn(
+			`Auto-refresh is sending nothing for ${accountName}: all ${AUTO_REFRESH_PROMPTS.length} probe prompts are inside their 24h cooldown, which takes ${AUTO_REFRESH_PROMPTS.length} refreshes in a day and should not happen. The first prompt frees up at ${at}.`,
+		);
 	}
 
 	/**
@@ -145,6 +225,7 @@ export class AutoRefreshScheduler {
 				WHERE
 					auto_refresh_enabled = 1
 					AND provider IN ('anthropic', 'codex', 'zai')
+					AND COALESCE(requires_reauth, 0) = 0
 					AND (
 						(rate_limit_reset IS NOT NULL AND rate_limit_reset <= ?)
 						OR rate_limit_reset IS NULL
@@ -264,8 +345,26 @@ export class AutoRefreshScheduler {
 		auto_pause_on_overage_enabled: number;
 		pause_reason: string | null;
 	}): Promise<boolean> {
+		// Hoisted out of the try so the catch below can hand the prompt back when
+		// the throw happened before the request was ever issued.
+		let claimIndex: number | null = null;
+		let probeSent = false;
+
 		try {
-			log.info(`Sending auto-refresh message to account: ${accountRow.name}`);
+			// Claim a prompt before anything else happens. Each prompt is locked for
+			// 24 hours once it is sent, so this is the one step that can call the
+			// whole refresh off — and it has to do that before the method announces
+			// a request, emits an analytics event or spends a token.
+			const claim = claimAutoRefreshPrompt();
+			if (!claim.ok) {
+				this.notePromptPoolExhausted(claim.retryAt, accountRow.name);
+				return false;
+			}
+
+			log.info(
+				`Sending auto-refresh message to account: ${accountRow.name} (prompt #${claim.index})`,
+			);
+			claimIndex = claim.index;
 
 			// Record the probe timestamp for failure_threshold accounts so the
 			// cooldown in shouldRefreshAccount suppresses re-probes for the next
@@ -279,6 +378,9 @@ export class AutoRefreshScheduler {
 				log.error(
 					`No provider found for ${accountRow.provider} (account: ${accountRow.name})`,
 				);
+				// Nothing was sent, so the prompt was never spoken. Give it back
+				// instead of locking it out of the pool for a day.
+				releaseAutoRefreshPrompt(claim.index);
 				return false;
 			}
 
@@ -310,6 +412,7 @@ export class AutoRefreshScheduler {
 				session_start: null,
 				session_request_count: 0,
 				paused: false,
+				requires_reauth: false,
 				rate_limit_reset: accountRow.rate_limit_reset
 					? Number(accountRow.rate_limit_reset)
 					: null,
@@ -343,18 +446,6 @@ export class AutoRefreshScheduler {
 				statusCode: 0, // Will be updated later
 				agentUsed: null,
 			});
-
-			// Prepare dummy message request
-			const dummyMessages = [
-				"Write a hello world program in Python",
-				"What is 2+2?",
-				"Tell me a programmer joke",
-				"What is the capital of France?",
-				"Explain recursion in one sentence",
-			];
-
-			const randomMessage =
-				dummyMessages[Math.floor(Math.random() * dummyMessages.length)];
 
 			// Send request through proxy with special header to force specific account usage
 			// This ensures proper request handling and analytics while using the correct account
@@ -399,6 +490,8 @@ export class AutoRefreshScheduler {
 				// bug 2). Mirrors the existing x-better-ccflare-keepalive
 				// pattern used by cache-keepalive-scheduler.ts.
 				"x-better-ccflare-auto-refresh": "true",
+				[INTERNAL_PROBE_SECRET_HEADER]:
+					this.proxyContext.internalProbeSecret ?? "",
 			});
 
 			// Try sending with multiple models if needed
@@ -424,7 +517,7 @@ export class AutoRefreshScheduler {
 						messages: [
 							{
 								role: "user",
-								content: randomMessage,
+								content: claim.prompt,
 							},
 						],
 					};
@@ -436,6 +529,9 @@ export class AutoRefreshScheduler {
 						`Auto-refresh headers: ${JSON.stringify(Object.fromEntries(headers.entries()), null, 2)}`,
 					);
 
+					// Past this line the text may already be on the wire, so the
+					// prompt stays claimed however the request ends.
+					probeSent = true;
 					response = await fetch(endpoint, {
 						method: "POST",
 						headers,
@@ -473,6 +569,10 @@ export class AutoRefreshScheduler {
 				log.error(
 					`Failed to send auto-refresh message to ${accountRow.name} with any model: ${errorMsg}`,
 				);
+				// Nothing here counts toward FAILURE_THRESHOLD, so nothing here
+				// pauses the account. Hold it off for a cooldown anyway: a request
+				// went out for every model tried, and each one spent a prompt.
+				this.recordUncountedProbeFailure(accountRow.id, accountRow.name);
 				return false;
 			}
 
@@ -497,7 +597,7 @@ export class AutoRefreshScheduler {
 
 				// Mark account as needing attention in database (disable auto-refresh to prevent repeated failures)
 				await this.db.run(
-					`UPDATE accounts SET auto_refresh_enabled = 0 WHERE id = ?`,
+					`UPDATE accounts SET auto_refresh_enabled = 0, expires_at = 0 WHERE id = ?`,
 					[accountRow.id],
 				);
 
@@ -515,6 +615,14 @@ export class AutoRefreshScheduler {
 				log.info(
 					`Auto-refresh message sent successfully for account: ${accountRow.name}`,
 				);
+
+				// Whatever held this account off, it answers now: the next window
+				// rollover should be picked up on the tick it happens, and a later
+				// blip should cost a minute again rather than resuming the climb
+				// from wherever the last bad spell ended. The queue penalty goes
+				// with it: one good probe is enough to stop deprioritising it.
+				this.uncountedProbeFailures.delete(accountRow.id);
+				clearProbeBackoff(accountRow.id);
 
 				// Log the response for debugging
 				let responseText = "";
@@ -620,8 +728,15 @@ export class AutoRefreshScheduler {
 						const { data: usageData } = await fetchUsageData(accessToken);
 						if (usageData) {
 							log.info(
-								`Fetched usage data for ${accountRow.name}: 5h=${usageData.five_hour.utilization}%, 7d=${usageData.seven_day.utilization}%`,
+								`Fetched usage data for ${accountRow.name}: 5h=${usageData.five_hour?.utilization ?? "?"}%, 7d=${usageData.seven_day?.utilization ?? "?"}%`,
 							);
+							this.proxyContext.dbOps
+								.recordUsageSnapshot(accountRow.id, usageData, Date.now())
+								.catch((err) =>
+									log.warn(
+										`Failed to record usage snapshot for ${accountRow.name}: ${err}`,
+									),
+								);
 						} else {
 							log.warn(
 								`Failed to fetch usage data for ${accountRow.name} after auto-refresh`,
@@ -653,6 +768,26 @@ export class AutoRefreshScheduler {
 				// Ignore error reading body
 			}
 
+			// A 529 (overloaded_error) is a deliberate throttle/overload signal —
+			// either better-ccflare's own usage-throttling (should no longer reach
+			// here now that the probe is exempted in applyUsageThrottling, but kept
+			// as defense in depth) or a transient upstream overload from the
+			// provider itself. Neither indicates the endpoint is broken, so it must
+			// NOT count toward the consecutive-failure pause threshold: doing so
+			// previously auto-paused a healthy-but-throttled account the instant
+			// its usage window reset and the scheduler re-probed it.
+			if (response.status === 529) {
+				log.warn(
+					`Auto-refresh probe for ${accountRow.name} received 529 (overloaded/throttled) — not counting toward the ${this.FAILURE_THRESHOLD}-failure pause threshold`,
+				);
+				// Not counted means never paused, which means eligible again on the
+				// next 60s tick. Record the failure so shouldRefreshAccount waits a
+				// cooldown instead: the prompt this probe just spent is locked for
+				// 24 hours whether the account was overloaded or not.
+				this.recordUncountedProbeFailure(accountRow.id, accountRow.name);
+				return false;
+			}
+
 			// Track consecutive failures for this account (for non-401 errors too)
 			await this.recordRefreshFailure(
 				accountRow.id,
@@ -679,6 +814,12 @@ export class AutoRefreshScheduler {
 				log.error(
 					`Error sending auto-refresh message to account ${accountRow.name}: Unknown error (possibly undefined or null)`,
 				);
+			}
+
+			// A throw before the request was issued means the prompt was never
+			// spoken — hand it back instead of locking it out for a day.
+			if (!probeSent && claimIndex !== null) {
+				releaseAutoRefreshPrompt(claimIndex);
 			}
 
 			// Track consecutive failures for this account (for exceptions too)
@@ -757,6 +898,10 @@ export class AutoRefreshScheduler {
 			WHERE
 				provider IN ('qwen', 'xai')
 				AND refresh_token IS NOT NULL
+				-- Never probe an account already flagged for manual re-auth: its
+				-- refresh token is known dead, so the probe is a guaranteed fail and
+				-- recovery is only the manual re-auth clear-site.
+				AND COALESCE(requires_reauth, 0) = 0
 				AND (
 					access_token IS NULL
 					OR expires_at IS NULL
@@ -773,6 +918,23 @@ export class AutoRefreshScheduler {
 		);
 
 		for (const row of accounts) {
+			// (round-3 item 2; hardened in round-3 final review, I1) Flush any
+			// rotation from an earlier cycle before touching this row again. Any
+			// outcome other than "none" means this row's snapshot predates that
+			// flush: "failed" means the registry's unpersisted rotation is still
+			// the account's live credentials; "persisted"/"superseded" both mean
+			// the refresh_token this row shows was just consumed (by the flush
+			// itself or by whatever superseded it) — refreshing with it now
+			// would replay an already-consumed token. Skip this row for this
+			// cycle either way; the next cycle re-reads it fresh.
+			const flush = await flushPendingRotation(row.id, this.proxyContext.dbOps);
+			if (flush !== "none") {
+				log.warn(
+					`Skipping proactive ${row.provider} refresh for ${row.name} this cycle: row snapshot predates a pending-rotation flush (${flush})`,
+				);
+				continue;
+			}
+
 			// Skip if a refresh is already in-flight for this account (deduplication)
 			if (this.proxyContext.refreshInFlight.has(row.id)) {
 				log.debug(
@@ -810,6 +972,7 @@ export class AutoRefreshScheduler {
 					session_start: null,
 					session_request_count: 0,
 					paused: false,
+					requires_reauth: false,
 					rate_limit_reset: null,
 					rate_limit_status: null,
 					rate_limit_remaining: null,
@@ -833,23 +996,60 @@ export class AutoRefreshScheduler {
 					.refreshToken(account, this.proxyContext.runtime.clientId)
 					.then(async (result) => {
 						const newRefreshToken = result.refreshToken ?? row.refresh_token;
-						await this.db.run(
-							`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
-							[
-								result.accessToken,
-								result.expiresAt,
-								newRefreshToken,
-								Date.now(),
-								row.id,
-							],
-						);
-						log.info(
-							`${row.provider} token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
-						);
+						// CAS: only persist if the row still holds the refresh token this
+						// attempt used — a rotation that landed underneath (manual re-auth,
+						// or a request-triggered refresh joining the same account) must not
+						// be overwritten with the tokens from this now-superseded attempt.
+						// Routed through the retry-wrapped dbOps helper instead of raw SQL
+						// so this write benefits from the same transient-failure retries on
+						// Postgres as the token-manager funnel.
+						try {
+							const persisted =
+								await this.proxyContext.dbOps.updateAccountTokensIfRefreshTokenMatches(
+									row.id,
+									row.refresh_token,
+									result.accessToken,
+									result.expiresAt,
+									newRefreshToken,
+								);
+							if (!persisted) {
+								log.warn(
+									`Skipped persisting refreshed ${row.provider} token for ${row.name}: refresh token changed underneath (superseded by a newer rotation or manual re-auth)`,
+								);
+							} else {
+								log.info(
+									`${row.provider} token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
+								);
+							}
+						} catch (persistError) {
+							// (round-3 item 2) A rotation the provider has already
+							// committed must never be silently dropped: the DB still
+							// holds the consumed token, and a later stale consumer would
+							// replay it, get invalid_grant, and CAS-flag a healthy
+							// account. Record it so every subsequent touchpoint retries
+							// the persist and suppresses flagging meanwhile.
+							recordPendingRotation(row.id, {
+								accessToken: result.accessToken,
+								expiresAt: result.expiresAt,
+								refreshToken: newRefreshToken,
+								attemptedRefreshToken: row.refresh_token,
+							});
+							log.error(
+								`Failed to persist refreshed ${row.provider} token for ${row.name} — rotation queued for re-persist`,
+								persistError,
+							);
+						}
 						return result.accessToken;
 					})
 					.finally(() => {
-						this.proxyContext.refreshInFlight.delete(row.id);
+						// Identity-safe: never delete a newer entry installed by a manual
+						// reauth or a concurrent request-triggered refresh that ran while
+						// this promise was still settling.
+						if (
+							this.proxyContext.refreshInFlight.get(row.id) === refreshPromise
+						) {
+							this.proxyContext.refreshInFlight.delete(row.id);
+						}
 					});
 
 				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);
@@ -859,6 +1059,7 @@ export class AutoRefreshScheduler {
 					`Failed to proactively refresh ${row.provider} token for ${row.name}:`,
 					error,
 				);
+				await this.flagIfDefinitiveAuthFailure(error, row);
 			}
 		}
 	}
@@ -888,6 +1089,10 @@ export class AutoRefreshScheduler {
 			WHERE
 				provider = 'codex'
 				AND refresh_token IS NOT NULL
+				-- Never probe an account already flagged for manual re-auth: its
+				-- refresh token is known dead, so the probe is a guaranteed fail and
+				-- recovery is only the manual re-auth clear-site.
+				AND COALESCE(requires_reauth, 0) = 0
 				AND (
 					access_token IS NULL
 					OR expires_at IS NULL
@@ -904,6 +1109,24 @@ export class AutoRefreshScheduler {
 		);
 
 		for (const row of accounts) {
+			// (round-3 item 2; hardened in round-3 final review, I1) Flush any
+			// rotation from an earlier cycle before touching this row again. Any
+			// outcome other than "none" means this row's snapshot predates that
+			// flush: "failed" means the registry's unpersisted rotation is still
+			// the account's live credentials; "persisted"/"superseded" both mean
+			// the refresh_token this row shows was just consumed (by the flush
+			// itself or by whatever superseded it) — refreshing with it now
+			// would replay an already-consumed token, and on Codex specifically
+			// reuse-detection can invalidate the whole token family. Skip this
+			// row for this cycle either way; the next cycle re-reads it fresh.
+			const flush = await flushPendingRotation(row.id, this.proxyContext.dbOps);
+			if (flush !== "none") {
+				log.warn(
+					`Skipping proactive Codex refresh for ${row.name} this cycle: row snapshot predates a pending-rotation flush (${flush})`,
+				);
+				continue;
+			}
+
 			// Skip if a refresh is already in-flight for this account (deduplication)
 			if (this.proxyContext.refreshInFlight.has(row.id)) {
 				log.debug(
@@ -939,6 +1162,7 @@ export class AutoRefreshScheduler {
 					session_start: null,
 					session_request_count: 0,
 					paused: false,
+					requires_reauth: false,
 					rate_limit_reset: null,
 					rate_limit_status: null,
 					rate_limit_remaining: null,
@@ -962,23 +1186,60 @@ export class AutoRefreshScheduler {
 					.refreshToken(account, this.proxyContext.runtime.clientId)
 					.then(async (result) => {
 						const newRefreshToken = result.refreshToken ?? row.refresh_token;
-						await this.db.run(
-							`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
-							[
-								result.accessToken,
-								result.expiresAt,
-								newRefreshToken,
-								Date.now(),
-								row.id,
-							],
-						);
-						log.info(
-							`Codex token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
-						);
+						// CAS: only persist if the row still holds the refresh token this
+						// attempt used — a rotation that landed underneath (manual re-auth,
+						// or a request-triggered refresh joining the same account) must not
+						// be overwritten with the tokens from this now-superseded attempt.
+						// Routed through the retry-wrapped dbOps helper instead of raw SQL
+						// so this write benefits from the same transient-failure retries on
+						// Postgres as the token-manager funnel.
+						try {
+							const persisted =
+								await this.proxyContext.dbOps.updateAccountTokensIfRefreshTokenMatches(
+									row.id,
+									row.refresh_token,
+									result.accessToken,
+									result.expiresAt,
+									newRefreshToken,
+								);
+							if (!persisted) {
+								log.warn(
+									`Skipped persisting refreshed Codex token for ${row.name}: refresh token changed underneath (superseded by a newer rotation or manual re-auth)`,
+								);
+							} else {
+								log.info(
+									`Codex token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
+								);
+							}
+						} catch (persistError) {
+							// (round-3 item 2) A rotation the provider has already
+							// committed must never be silently dropped: the DB still
+							// holds the consumed token, and a later stale consumer would
+							// replay it, get invalid_grant, and CAS-flag a healthy
+							// account. Record it so every subsequent touchpoint retries
+							// the persist and suppresses flagging meanwhile.
+							recordPendingRotation(row.id, {
+								accessToken: result.accessToken,
+								expiresAt: result.expiresAt,
+								refreshToken: newRefreshToken,
+								attemptedRefreshToken: row.refresh_token,
+							});
+							log.error(
+								`Failed to persist refreshed Codex token for ${row.name} — rotation queued for re-persist`,
+								persistError,
+							);
+						}
 						return result.accessToken;
 					})
 					.finally(() => {
-						this.proxyContext.refreshInFlight.delete(row.id);
+						// Identity-safe: never delete a newer entry installed by a manual
+						// reauth or a concurrent request-triggered refresh that ran while
+						// this promise was still settling.
+						if (
+							this.proxyContext.refreshInFlight.get(row.id) === refreshPromise
+						) {
+							this.proxyContext.refreshInFlight.delete(row.id);
+						}
 					});
 
 				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);
@@ -988,7 +1249,90 @@ export class AutoRefreshScheduler {
 					`Failed to proactively refresh Codex token for ${row.name}:`,
 					error,
 				);
+				await this.flagIfDefinitiveAuthFailure(error, row);
 			}
+		}
+	}
+
+	/**
+	 * Persist requires_reauth and emit an auth-failure alert when a proactive
+	 * refresh fails with a DEFINITIVE dead-refresh-token signal (invalid_grant /
+	 * invalid_refresh_token / refresh_token_reused).
+	 *
+	 * These proactive paths refresh via provider.refreshToken() directly, bypassing
+	 * the token-manager funnel, so without this a qwen/xai/codex token that dies
+	 * while only the scheduler touches it would evaporate silently — logged but
+	 * never flagged, never pulled from routing, never alerted. Transient failures
+	 * (network / 5xx / timeout) do not carry these codes and are left untouched so
+	 * the account keeps retrying.
+	 */
+	private async flagIfDefinitiveAuthFailure(
+		error: unknown,
+		row: { id: string; name: string; provider: string; refresh_token: string },
+	): Promise<void> {
+		const message = error instanceof Error ? error.message : String(error);
+		const reason = extractAuthFailureReason(message, row.name);
+		if (!reason) return;
+
+		// (round-3 item 2) A pending unpersisted rotation means WE rotated
+		// successfully moments ago — this failure is a replay of the consumed
+		// token, not a dead account.
+		if (getPendingRotation(row.id)) {
+			log.warn(
+				`Skipping requires_reauth for ${row.name}: a successful rotation is awaiting persist (replayed a consumed token)`,
+			);
+			return;
+		}
+
+		// Atomic rotation-race guard (CAS): condemn the account only if it still
+		// holds the exact refresh token this attempt used. A rotation that landed
+		// after our snapshot makes the write a no-op — no flag, no alert. A DB
+		// error leaves the flag unset: "unable to verify" is not evidence of a
+		// dead token; the next scheduler pass retries with the live row. Routed
+		// through the retry-wrapped dbOps helper (shared with the token-manager
+		// funnel) instead of raw SQL so this write benefits from the same
+		// transient-failure retries on Postgres.
+		let flagged = false;
+		try {
+			flagged = await this.proxyContext.dbOps.flagRequiresReauthIfTokenMatches(
+				row.id,
+				row.refresh_token,
+			);
+		} catch (writeError) {
+			log.warn(
+				`Could not verify-and-flag requires_reauth for ${row.name} — leaving unset (unverified ${reason})`,
+				writeError,
+			);
+			return;
+		}
+		if (!flagged) {
+			log.warn(
+				`Skipping requires_reauth for ${row.name}: the failed ${row.provider} refresh used a superseded refresh token (rotation race)`,
+			);
+			return;
+		}
+		log.error(
+			`Account ${row.name} requires re-authentication — proactive ${row.provider} refresh returned ${reason}`,
+		);
+		authFailureEvents.emit("event", {
+			accountId: row.id,
+			accountName: row.name,
+			provider: row.provider,
+			reason,
+		});
+	}
+
+	/**
+	 * Remove all tracking state for a single account. Used when an account is
+	 * deleted so its entries don't linger until the next `cleanupTracking()`
+	 * sweep (up to 60s later) or server shutdown.
+	 */
+	clearAccountTracking(accountId: string): void {
+		this.lastRefreshResetTime.delete(accountId);
+		this.consecutiveFailures.delete(accountId);
+		this.lastFailureProbeAt.delete(accountId);
+		if (this.uncountedProbeFailures.delete(accountId)) {
+			clearProbeBackoff(accountId);
 		}
 	}
 
@@ -1038,6 +1382,17 @@ export class AutoRefreshScheduler {
 					this.lastFailureProbeAt.delete(accountId);
 					log.debug(
 						`Removed failure-probe cooldown tracking for account ${accountId} (no longer exists or auto-refresh disabled)`,
+					);
+				}
+			}
+
+			// And the uncounted-failure backoff, for the same reason
+			for (const accountId of this.uncountedProbeFailures.keys()) {
+				if (!activeAccountIdSet.has(accountId)) {
+					this.uncountedProbeFailures.delete(accountId);
+					clearProbeBackoff(accountId);
+					log.debug(
+						`Removed uncounted-failure cooldown tracking for account ${accountId} (no longer exists or auto-refresh disabled)`,
 					);
 				}
 			}
@@ -1111,6 +1466,42 @@ export class AutoRefreshScheduler {
 	 * @param now - The current timestamp
 	 * @returns true if the account should be refreshed, false otherwise
 	 */
+	/**
+	 * How long an account waits after its nth consecutive uncounted failure.
+	 * Climbs one rung per failure and stays on the last one, so a chronic
+	 * failure settles at twice a day instead of compounding forever.
+	 */
+	private uncountedFailureCooldownMs(streak: number): number {
+		const ladder = this.UNCOUNTED_FAILURE_BACKOFF_MS;
+		const rung = Math.min(Math.max(streak, 1), ladder.length) - 1;
+		return ladder[rung];
+	}
+
+	/** Advance an account one rung up the uncounted-failure ladder. */
+	private recordUncountedProbeFailure(
+		accountId: string,
+		accountName: string,
+	): void {
+		const streak =
+			(this.uncountedProbeFailures.get(accountId)?.streak ?? 0) + 1;
+		const at = Date.now();
+		this.uncountedProbeFailures.set(accountId, { at, streak });
+
+		// From the 1-hour rung up, the provider has been refusing this account for
+		// a sustained stretch, which is evidence about live traffic too — so the
+		// load balancer starts sorting it behind accounts with no such history.
+		// The short rungs are noise and must not move anything in the queue.
+		const cooldown = this.uncountedFailureCooldownMs(streak);
+		const penalised = cooldown >= PROBE_BACKOFF_PENALTY_THRESHOLD_MS;
+		if (penalised) {
+			setProbeBackoff(accountId, at + cooldown);
+		}
+
+		log.debug(
+			`Uncounted probe failure #${streak} for account ${accountName} — next probe held off for ${cooldown / 60000}m${penalised ? ", and deprioritised in the queue until then" : ""}`,
+		);
+	}
+
 	private shouldRefreshAccount(
 		account: {
 			id: string;
@@ -1126,6 +1517,22 @@ export class AutoRefreshScheduler {
 		},
 		now: number,
 	): boolean {
+		// A probe whose failure was deliberately not counted (529, or no response
+		// at all) leaves the account unpaused and therefore eligible again on the
+		// next tick. Hold it off for as long as its streak has earned, so a
+		// provider-side overload cannot turn into one probe per minute — each of
+		// which spends a prompt from the shared pool for good.
+		const uncounted = this.uncountedProbeFailures.get(account.id);
+		if (uncounted) {
+			const cooldown = this.uncountedFailureCooldownMs(uncounted.streak);
+			if (now - uncounted.at < cooldown) {
+				log.debug(
+					`Skipping probe for account ${account.name} — ${uncounted.streak} uncounted failure(s) in a row, last one ${Math.round((now - uncounted.at) / 1000)}s ago, backoff ${cooldown / 1000}s`,
+				);
+				return false;
+			}
+		}
+
 		// Throttle re-probes of failure_threshold-paused accounts to once per
 		// cooldown — avoids burning quota on a dead endpoint every 60s (#199)
 		// while still letting it recover automatically (#262).

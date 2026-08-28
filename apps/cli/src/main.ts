@@ -79,6 +79,7 @@ import {
 	CLAUDE_MODEL_IDS,
 	getBuildIdentitySync,
 	getVersionSync,
+	installOutboundProxy,
 	levenshteinDistance,
 	NETWORK,
 	shutdown,
@@ -104,6 +105,7 @@ interface ParsedArgs {
 		| "console"
 		| "zai"
 		| "minimax"
+		| "deepseek"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -147,6 +149,13 @@ interface ParsedArgs {
 	admin: boolean;
 }
 
+// When the long-running server starts, its own SIGINT/SIGTERM handlers
+// (apps/server) own shutdown: they drain in-flight requests before exit.
+// The CLI-level handlers must then stand down; otherwise exitGracefully()
+// races the server's drain, disposes the same resources concurrently, and
+// its process.exit() severs active streams mid-response.
+let serverOwnsShutdown = false;
+
 /**
  * Helper function to start server with unified environment variable handling
  */
@@ -154,6 +163,7 @@ async function startServerWithConfig(
 	args: ParsedArgs,
 	config: Config,
 ): Promise<void> {
+	serverOwnsShutdown = true;
 	const runtime = config.getRuntime();
 
 	// Proper precedence: command line args > environment variables > config defaults
@@ -571,6 +581,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "console"
 					| "zai"
 					| "minimax"
+					| "deepseek"
 					| "anthropic-compatible"
 					| "openai-compatible"
 					| "nanogpt"
@@ -595,6 +606,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "console"
 					| "zai"
 					| "minimax"
+					| "deepseek"
 					| "nanogpt"
 					| "anthropic-compatible"
 					| "openai-compatible"
@@ -613,6 +625,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "console"
 					| "zai"
 					| "minimax"
+					| "deepseek"
 					| "nanogpt"
 					| "anthropic-compatible"
 					| "openai-compatible"
@@ -631,6 +644,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					"console",
 					"zai",
 					"minimax",
+					"deepseek",
 					"nanogpt",
 					"anthropic-compatible",
 					"openai-compatible",
@@ -667,6 +681,9 @@ function parseArgs(args: string[]): ParsedArgs {
 					);
 					console.error(
 						"  bun run cli --add-account minimax-account --mode minimax --priority 30",
+					);
+					console.error(
+						"  bun run cli --add-account deepseek-account --mode deepseek --priority 35",
 					);
 					console.error(
 						"  bun run cli --add-account openai-account --mode openai-compatible --priority 40",
@@ -891,11 +908,12 @@ Options:
   --ssl-cert <path>    Path to SSL certificate file (enables HTTPS)
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
-    --mode <claude-oauth|console|zai|minimax|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|xai>  Account mode (default: claude-oauth)
+    --mode <claude-oauth|console|zai|minimax|deepseek|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|xai|ollama>  Account mode (default: claude-oauth)
       claude-oauth: Claude CLI account (OAuth)
       console: Claude API account (OAuth)
       zai: z.ai account (API key)
       minimax: Minimax account (API key)
+      deepseek: DeepSeek account (API key)
       nanogpt: NanoGPT provider (API key)
       anthropic-compatible: Anthropic-compatible provider (API key)
       openai-compatible: OpenAI-compatible provider (API key)
@@ -906,6 +924,7 @@ Options:
       alibaba-coding-plan: Alibaba Coding Plan International provider (API key)
       codex: Codex (OpenAI OAuth) provider
       xai: xAI/Grok provider (imports local Grok CLI OAuth credentials)
+      ollama: Ollama local provider (no API key required)
     --priority <number>   Account priority (default: 0)
   --list               List all accounts
   --remove <name>      Remove an account
@@ -995,8 +1014,13 @@ Examples:
 	}
 
 	// Initialize DI container and services for commands that need them
-	container.registerInstance(SERVICE_KEYS.Config, new Config());
+	const cliConfig = new Config();
+	container.registerInstance(SERVICE_KEYS.Config, cliConfig);
 	container.registerInstance(SERVICE_KEYS.Logger, new Logger("CLI"));
+
+	// Route CLI outbound fetches (OAuth exchange, API key validation, etc.)
+	// through the configured forward proxy, same as the server process.
+	installOutboundProxy(() => cliConfig.getOutboundProxy());
 
 	// Initialize database factory with minimal configuration for CLI commands.
 	// CLI commands don't need expensive integrity checks. Use the async
@@ -1031,7 +1055,8 @@ Examples:
 		const stats = {
 			totalAccounts: accounts.length,
 			activeAccounts: accounts.filter(
-				(acc) => !acc.paused && acc.tokenStatus === "valid",
+				(acc) =>
+					!acc.paused && !acc.requiresReauth && acc.tokenStatus === "valid",
 			).length,
 			pausedAccounts: accounts.filter((acc) => acc.paused).length,
 			expiredAccounts: accounts.filter((acc) => acc.tokenStatus === "expired")
@@ -1063,6 +1088,7 @@ Examples:
 			console.error("  --mode console         Claude API account (OAuth)");
 			console.error("  --mode zai             z.ai account (API key)");
 			console.error("  --mode minimax         Minimax account (API key)");
+			console.error("  --mode deepseek        DeepSeek account (API key)");
 			console.error("  --mode nanogpt         NanoGPT account (API key)");
 			console.error(
 				"  --mode anthropic-compatible  Anthropic-compatible provider",
@@ -1080,6 +1106,9 @@ Examples:
 			);
 			console.error(
 				"  --mode xai                 xAI/Grok (Grok CLI OAuth) provider",
+			);
+			console.error(
+				"  --mode ollama              Ollama local provider (no API key required)",
 			);
 			console.error("\nExample:");
 			console.error(
@@ -1456,11 +1485,14 @@ main().catch(async (error) => {
 	await exitGracefully(1);
 });
 
-// Handle process termination
+// Handle process termination. When the server is running it owns shutdown
+// (see serverOwnsShutdown); these handlers cover short-lived CLI commands.
 process.on("SIGINT", async () => {
+	if (serverOwnsShutdown) return;
 	await exitGracefully(0);
 });
 
 process.on("SIGTERM", async () => {
+	if (serverOwnsShutdown) return;
 	await exitGracefully(0);
 });

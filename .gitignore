@@ -1,4 +1,5 @@
 node_modules/
+.bun-cache/
 .env
 .env.local
 .claude/
@@ -51,3 +52,5 @@ docs/superpowers/
 
 _archive.worktrees/
 _archive
+docs/plans/
+.tmp/

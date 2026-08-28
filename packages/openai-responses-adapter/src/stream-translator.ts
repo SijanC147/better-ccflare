@@ -280,6 +280,7 @@ function processEvent(
 				state,
 			);
 		} else if (state.toolByBlock.has(blockIndex)) {
+			// biome-ignore lint/style/noNonNullAssertion: guarded by the has() check above — TS can't narrow Map.get() from a prior has() call.
 			const tool = state.toolByBlock.get(blockIndex)!;
 			emitSse(
 				controller,
@@ -359,6 +360,14 @@ function processEvent(
 			},
 			state,
 		);
+		return;
+	}
+
+	// Codex provider emits Anthropic `ping` events as keepalives during
+	// long-running requests.  Forward as an SSE comment so the reverse
+	// proxy's idle timeout does not kill the connection.
+	if (eventType === "ping") {
+		controller.enqueue(encoder.encode(": keepalive\n\n"));
 		return;
 	}
 }

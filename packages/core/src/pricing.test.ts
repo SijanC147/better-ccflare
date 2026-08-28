@@ -1,6 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-// Import vi from vitest for mocking utilities
-import { vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	estimateCostUSD,
 	fetchNanoGPTPricingData,
@@ -24,8 +22,103 @@ const mockAccountRepository = {
 	hasAccountsForProvider: vi.fn(),
 };
 
-describe("NanoGPT Pricing", () => {
+describe("models.dev pricing", () => {
+	let originalFetch: typeof global.fetch;
+	let originalOffline: string | undefined;
+
 	beforeEach(() => {
+		originalFetch = global.fetch;
+		originalOffline = process.env.CF_PRICING_OFFLINE;
+		delete process.env.CF_PRICING_OFFLINE;
+		resetNanoGPTPricingCacheForTest();
+		vi.clearAllMocks();
+	});
+
+	afterEach(() => {
+		global.fetch = originalFetch;
+		if (originalOffline === undefined) {
+			delete process.env.CF_PRICING_OFFLINE;
+		} else {
+			process.env.CF_PRICING_OFFLINE = originalOffline;
+		}
+		resetNanoGPTPricingCacheForTest();
+		vi.restoreAllMocks();
+	});
+
+	it("shares one cold models.dev fetch across concurrent estimates", async () => {
+		let resolveModelsDev!: (response: Response) => void;
+		const modelsDevResponse = new Promise<Response>((resolve) => {
+			resolveModelsDev = resolve;
+		});
+		const fetchMock = vi.fn((input: string | URL | Request) => {
+			if (String(input) === "https://models.dev/api.json") {
+				return modelsDevResponse;
+			}
+			return Promise.resolve({
+				ok: true,
+				json: async () => ({ object: "list", data: [] }),
+			} as Response);
+		});
+		global.fetch = fetchMock as typeof global.fetch;
+
+		const estimates = [
+			estimateCostUSD("claude-sonnet-4-20250514", { outputTokens: 1 }),
+			estimateCostUSD("claude-sonnet-4-20250514", { outputTokens: 2 }),
+		];
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const modelsDevCalls = fetchMock.mock.calls.filter(
+			([input]) => String(input) === "https://models.dev/api.json",
+		).length;
+		resolveModelsDev({
+			ok: true,
+			json: async () => ({}),
+		} as Response);
+		await Promise.all(estimates);
+
+		expect(modelsDevCalls).toBe(1);
+	});
+
+	it("passes an AbortSignal to the models.dev fetch and falls back to bundled pricing on abort", async () => {
+		let modelsDevSignal: AbortSignal | undefined;
+		const fetchMock = vi.fn(
+			(input: string | URL | Request, init?: RequestInit) => {
+				if (String(input) !== "https://models.dev/api.json") {
+					return Promise.resolve({
+						ok: true,
+						json: async () => ({ object: "list", data: [] }),
+					} as Response);
+				}
+
+				modelsDevSignal = init?.signal ?? undefined;
+				// Simulate the fetch being aborted (as the real 10s timeout would
+				// trigger via AbortController.abort()) without waiting on a real timer.
+				return Promise.reject(new DOMException("aborted", "AbortError"));
+			},
+		);
+		global.fetch = fetchMock as typeof global.fetch;
+
+		const cost = await estimateCostUSD("claude-sonnet-4-20250514", {
+			outputTokens: 1_000_000,
+		});
+
+		expect(modelsDevSignal).toBeInstanceOf(AbortSignal);
+		expect(cost).toBe(15);
+	});
+});
+
+describe("NanoGPT Pricing", () => {
+	// Several tests below assign global.fetch a vi.fn() mock and never hand it
+	// back. Bun shares globals across test files in a run, so the mock outlives
+	// this file and every later suite that calls fetch receives it instead of
+	// the real implementation — surfacing as `response.status === undefined`
+	// in the proxy abort-semantics suites. The sibling "models.dev pricing"
+	// describe above already does this correctly; this block did not.
+	let originalFetch: typeof global.fetch;
+
+	beforeEach(() => {
+		originalFetch = global.fetch;
 		// Clear any existing intervals
 		stopNanoGPTPricingRefresh();
 		// Reset the global cache state to ensure test isolation
@@ -33,6 +126,10 @@ describe("NanoGPT Pricing", () => {
 
 		// Clear mocks
 		vi.clearAllMocks();
+	});
+
+	afterEach(() => {
+		global.fetch = originalFetch;
 	});
 
 	afterEach(() => {

@@ -13,18 +13,51 @@ export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export { DiscoveryScheduler, type ScanResult } from "./discovery-scheduler";
 export {
+	CircuitBreaker,
+	type CircuitKey,
+	type CircuitSnapshotEntry,
+	type CircuitState,
+	circuitKeyFor,
+	type FailureKind,
+	forceClose as forceCloseCircuit,
+	getDefaultCircuitBreaker as getDefaultCircuitBreakerProxy,
+	recordSuccess as recordCircuitSuccess,
+	resetDefaultCircuitBreaker as resetDefaultCircuitBreakerProxy,
+	shouldCountAsCircuitFailure,
+} from "./circuit-breaker";
+export type {
+	CodexModelEntry,
+	CodexModelListing,
+} from "./codex-model-catalog";
+export {
+	clearCodexModelCacheForAccount,
+	getCodexModels,
+	lowestTierCodexModel,
+} from "./codex-model-catalog";
+export {
+	recordCodexUsageSnapshot,
+	resetCodexUsageHistoryThrottle,
+} from "./codex-usage-history";
+export {
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
 	checkRefreshTokenHealth,
 	clearAccountRefreshCache,
+	clearAutoRefreshTrackingForAccount,
+	clearFamilyExhaustionForAccount,
+	clearPendingRotation,
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
+	getRoutingObservations,
 	getUsageThrottleStatus,
 	getUsageThrottleUntil,
 	getValidAccessToken,
 	isRefreshTokenLikelyExpired,
+	type RoutingObservation,
+	type RoutingObservationAccount,
 	refreshCodexUsageForAccount,
+	registerAutoRefreshTrackingClearer,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
@@ -33,13 +66,33 @@ export {
 	stopGlobalTokenHealthChecks,
 	type TokenHealthReport,
 	type TokenHealthStatus,
+	unregisterAutoRefreshTrackingClearer,
 	unregisterCodexUsageRefresher,
+	unregisterPollingRestarter,
+	unregisterRefreshClearer,
 } from "./handlers";
 export {
 	runIntegrityCheckOnDemand,
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
+export {
+	fetchLiveModels,
+	getModelCatalog,
+	initModelCatalogRefresh,
+	type ModelCatalog,
+	type ModelCatalogEntry,
+	type ModelCatalogRefreshResult,
+	refreshModelCatalog,
+} from "./model-catalog";
+export type {
+	OpenAICompatibleModelEntry,
+	OpenAICompatibleModelListing,
+} from "./openai-compatible-model-catalog";
+export {
+	clearOpenAICompatibleModelCacheForAccount,
+	getOpenAICompatibleModels,
+} from "./openai-compatible-model-catalog";
 export {
 	drainUsageCollector,
 	getUsageCollectorHealth,

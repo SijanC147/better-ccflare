@@ -1,15 +1,22 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { Config, type RuntimeConfig } from "@better-ccflare/config";
+import {
+	Config,
+	filterEnabledProviderModelDefaultOverrides,
+	type RuntimeConfig,
+} from "@better-ccflare/config";
 import {
 	CACHE,
 	DEFAULT_STRATEGY,
 	getVersion,
 	HTTP_STATUS,
 	initializeNanoGPTPricingIfAccountsExist,
+	installOutboundProxy,
+	intervalManager,
 	NETWORK,
 	registerCleanup,
 	registerDisposable,
+	setForceAccountModel,
 	setPricingLogger,
 	shutdown,
 	TIME_CONSTANTS,
@@ -25,15 +32,19 @@ import { AlertService, APIRouter, AuthService } from "@better-ccflare/http-api";
 import {
 	LeastUsedStrategy,
 	SessionAffinityStrategy,
+	SessionDrainSoonestStrategy,
 	SessionStrategy,
 } from "@better-ccflare/load-balancer";
-import { Logger } from "@better-ccflare/logger";
+import { Logger, setConsoleLogging } from "@better-ccflare/logger";
 import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
+	CODEX_PING_MODEL,
+	extractWeeklyResetTime,
 	fetchCodexUsageOnDemand,
 	getProvider,
-	getRepresentativeUtilizationForProvider,
+	getRankingUtilizationForProvider,
+	setProviderModelDefaultOverrides,
 	usageCache,
 } from "@better-ccflare/providers";
 import {
@@ -46,23 +57,36 @@ import {
 	CacheKeepaliveScheduler,
 	DiscoveryScheduler,
 	drainUsageCollector,
+	forceCloseCircuit,
+	getCodexModels,
+	getModelCatalog,
+	getOpenAICompatibleModels,
 	getUsageCollectorHealth,
 	getValidAccessToken,
 	handleProxy,
+	initModelCatalogRefresh,
 	initProxy,
+	lowestTierCodexModel,
 	type ProxyContext,
+	recordCodexUsageSnapshot,
+	refreshModelCatalog,
+	registerAutoRefreshTrackingClearer,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
 	stopGlobalTokenHealthChecks,
+	unregisterAutoRefreshTrackingClearer,
 	unregisterCodexUsageRefresher,
+	unregisterPollingRestarter,
+	unregisterRefreshClearer,
 } from "@better-ccflare/proxy";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
 	type LoadBalancingStrategy,
+	type RetentionStatus,
 	StrategyName,
 	type StrategyStore,
 } from "@better-ccflare/types";
@@ -81,6 +105,10 @@ function buildStrategy(
 			return new LeastUsedStrategy();
 		case StrategyName.SessionAffinity:
 			return new SessionAffinityStrategy(sessionDurationMs);
+		case StrategyName.SessionDrainSoonest:
+			return new SessionDrainSoonestStrategy(sessionDurationMs);
+		case StrategyName.SessionDrainSoonestStrict:
+			return new SessionDrainSoonestStrategy(sessionDurationMs, "strict");
 		default:
 			return new SessionStrategy(sessionDurationMs);
 	}
@@ -125,6 +153,99 @@ export function supportsRefreshBackedUsagePolling(
 	provider: string | null | undefined,
 ): boolean {
 	return provider === "anthropic" || provider === "xai";
+}
+
+/**
+ * Minimal interface satisfied by the `usageCache` singleton in
+ * `@better-ccflare/providers`. Declared locally so the bootstrap helper
+ * can be unit-tested with a mock without dragging the full UsageCache
+ * class (which is not exported) into the public type surface.
+ */
+export interface UsageCacheRegistrar {
+	startPolling(
+		accountId: string,
+		tokenProvider: () => Promise<string>,
+		provider: string,
+		intervalMs: number,
+	): void;
+}
+
+/**
+ * Register usage polling for a single Minimax account. The Minimax fetcher
+ * hits the Token Plan `remains` endpoint with a Bearer API key; no OAuth
+ * refresh is required. Mirrors the surrounding nanogpt/zai/kilo pattern:
+ * pay-as-you-go, API-key authentication, no window reset callback
+ * (Minimax has `requiresSessionTracking: false` in provider-config.ts).
+ *
+ * Returns true if polling was registered, false if the account is not
+ * a Minimax account or has no API key. Extracted from the bootstrap
+ * loop so the registration contract is unit-testable.
+ *
+ * When `logger` is provided AND the account is a Minimax account missing a
+ * non-empty API key, emits a `WARN` naming the account. Matches the
+ * sibling nanogpt/zai/kilo blocks (Greptile #350 P2): "X account <name> has
+ * no API key, skipping usage polling". The account name is the only
+ * identifier in the message — never the key value or any part of it.
+ */
+export function registerMinimaxUsagePolling(
+	account: Account,
+	usageCache: UsageCacheRegistrar,
+	intervalMs: number,
+	logger?: Logger,
+): boolean {
+	if (account.provider !== "minimax") return false;
+	if (!account.api_key) {
+		logger?.warn(
+			`Minimax account ${account.name ?? account.id} has no API key, skipping usage polling`,
+		);
+		return false;
+	}
+	const apiKeyProvider = async () => account.api_key || "";
+	usageCache.startPolling(
+		account.id,
+		apiKeyProvider,
+		account.provider,
+		intervalMs,
+	);
+	return true;
+}
+
+/**
+ * Run the Minimax usage-polling bootstrap over a list of accounts. This is the
+ * shape of the wiring block `startServer()` runs for every Minimax account at
+ * startup — filter for provider === "minimax", then delegate each one to
+ * {@link registerMinimaxUsagePolling} which decides whether polling should
+ * actually start.
+ *
+ * Returns the account IDs that were registered (i.e. had a usable API key).
+ * Returning the registered IDs rather than a bare count lets callers log the
+ * affected accounts and gives tests a stable handle to assert against.
+ *
+ * `logger` is forwarded to {@link registerMinimaxUsagePolling} so per-account
+ * "no API key" warnings surface from the unit-testable helper, keeping
+ * behavior consistent with the sibling nanogpt/zai/kilo bootstrap blocks.
+ *
+ * Extracted from the inline bootstrap block so a regression test can exercise
+ * the exact wiring path (filter → forEach → registerMinimaxUsagePolling) with
+ * a mixed-provider account list. If the inline block in `startServer()` is
+ * removed but this helper still exists and is unit-tested in isolation, the
+ * startup-time wiring has no test coverage — that is the gap this function
+ * exists to close. Keep the bootstrap block in `startServer()` calling this.
+ */
+export function bootstrapMinimaxUsagePolling(
+	accounts: readonly Account[],
+	usageCache: UsageCacheRegistrar,
+	intervalMs: number,
+	logger?: Logger,
+): string[] {
+	const minimaxAccounts = accounts.filter((a) => a.provider === "minimax");
+	const registered: string[] = [];
+	for (const account of minimaxAccounts) {
+		if (registerMinimaxUsagePolling(account, usageCache, intervalMs, logger)) {
+			registered.push(account.id);
+		}
+	}
+	return registered;
 }
 
 // Helper function to resolve dashboard assets with fallback
@@ -226,6 +347,7 @@ let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
+let stopModelCatalogRefreshJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let discoveryScheduler: DiscoveryScheduler | null = null;
@@ -236,24 +358,56 @@ const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
 // SSL/TLS configuration
 let tlsEnabled = false;
 
-// Startup maintenance (one-shot): cleanup only (compaction available via API endpoint)
-async function runStartupMaintenance(
+/**
+ * Adopt, once, what the combo environment variables used to decide.
+ *
+ * The switches for combo routing and its session fallback now live in the
+ * dashboard and are read from the config file only — an environment variable
+ * that could override them would force the UI to draw a control that accepts a
+ * click and does nothing. So the old variables are read here, at boot, written
+ * into the file, and never consulted again.
+ *
+ * The same pass covers an install that has combos but never set the variable:
+ * it was routing through them, and an upgrade must not stop that in silence.
+ *
+ * Failure is not fatal: the settings stay at their defaults and the operator
+ * can set them in the dashboard, which is the whole point of moving them there.
+ */
+async function adoptLegacyRoutingSettings(
 	config: Config,
 	dbOps: DatabaseOperations,
 ) {
-	const log = new Logger("StartupMaintenance");
+	const log = new Logger("Startup");
 	try {
-		const payloadDays = config.getDataRetentionDays();
-		const requestDays = config.getRequestRetentionDays();
-		const { removedRequests, removedPayloads } = await dbOps.cleanupOldRequests(
-			payloadDays * 24 * 60 * 60 * 1000,
-			requestDays * 24 * 60 * 60 * 1000,
-		);
-		log.info(
-			`Startup cleanup removed ${removedRequests} requests and ${removedPayloads} payloads (payload=${payloadDays}d, requests=${requestDays}d)`,
-		);
+		const combos = await dbOps.listCombos();
+		for (const note of config.adoptLegacyRoutingSettings(combos.length > 0)) {
+			log.info(note);
+		}
 	} catch (err) {
-		log.error(`Startup cleanup error: ${err}`);
+		log.warn(
+			`Could not adopt the legacy combo settings: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+}
+
+// Startup maintenance (one-shot): cleanup only (compaction available via API endpoint)
+async function runStartupMaintenance(dbOps: DatabaseOperations) {
+	const log = new Logger("StartupMaintenance");
+	// Runs the "data-retention-cleanup" interval's own callback via
+	// intervalManager.runNow() instead of duplicating its retention logic
+	// here. Two independent code paths writing retentionState could race — a
+	// startup run that outlives the first hourly tick would overwrite that
+	// tick's newer result — because only the periodic registration's
+	// isRunning flag guarded against overlap. runNow() shares that exact flag
+	// (registered with maxConcurrent: 1), so at most one retention run is
+	// ever in flight regardless of whether startup or the interval triggered
+	// it, closing the race entirely (Greptile, PR #390). The interval must
+	// already be registered before this runs — see the call site.
+	const ran = await intervalManager.runNow("data-retention-cleanup");
+	if (!ran) {
+		log.warn(
+			"Skipped startup retention cleanup - periodic run already in progress",
+		);
 	}
 	try {
 		// Clean up expired OAuth sessions
@@ -267,11 +421,20 @@ async function runStartupMaintenance(
 		log.error(`OAuth session cleanup error: ${err}`);
 	}
 	try {
-		// Clear expired rate_limited_until values
+		// Clear expired rate_limited_until values. Each cleared row is fed to
+		// the circuit breaker via recordSuccess — the active-clear path from
+		// the circuit-breaker integration design §3. Without this, the breaker
+		// would keep an account failed-fast AFTER the upstream recovered
+		// (Risk 2, HIGH).
 		const now = Date.now();
-		const clearedCount = await dbOps.clearExpiredRateLimits(now);
-		if (clearedCount > 0) {
-			log.info(`Cleared ${clearedCount} expired rate_limited_until entries`);
+		const clearedRows = await dbOps.clearExpiredRateLimits(now);
+		for (const row of clearedRows) {
+			forceCloseCircuit({ provider: row.provider, accountId: row.id }, now);
+		}
+		if (clearedRows.length > 0) {
+			log.info(
+				`Cleared ${clearedRows.length} expired rate_limited_until entries`,
+			);
 		} else {
 			log.info("No expired rate_limited_until entries found to clear");
 		}
@@ -415,6 +578,15 @@ function startUsagePollingWithRefresh(
 							),
 						);
 				},
+				(accountId, data) => {
+					proxyContext.dbOps
+						.recordUsageSnapshot(accountId, data, Date.now())
+						.catch((err) =>
+							logger.warn(
+								`Failed to record usage snapshot for account ${accountId}: ${err}`,
+							),
+						);
+				},
 			);
 
 			// Reset retry count on success
@@ -526,12 +698,20 @@ function startUsagePollingWithRefresh(
 }
 
 // Export for programmatic use
+let serverLifecycleOwned = false;
+
 export default async function startServer(options?: {
 	port?: number;
 	withDashboard?: boolean;
 	sslKeyPath?: string;
 	sslCertPath?: string;
 }) {
+	// From here on, this process owns a server lifecycle: the module-scope
+	// signal handlers below act, and the CLI's own handlers stand down.
+	serverLifecycleOwned = true;
+	// Headless serve mode has no TUI to protect: route WARN/ERROR (and any
+	// enabled level) to the console so journald/terminal actually see them.
+	setConsoleLogging(true);
 	// Return existing server if already running
 	if (serverInstance) {
 		const existingPort = serverInstance.port;
@@ -604,6 +784,24 @@ export default async function startServer(options?: {
 
 	// Initialize components
 	const config = container.resolve<Config>(SERVICE_KEYS.Config);
+	setProviderModelDefaultOverrides(
+		filterEnabledProviderModelDefaultOverrides(
+			config.getEnabledProviderModelDefaultProviders(),
+			config.getProviderModelDefaultOverrides(),
+		),
+	);
+	// The code that renames models lives in core and providers, neither of
+	// which may depend on config; mirror the setting there before anything can
+	// route. The config POST handler mirrors it again after a write.
+	setForceAccountModel(config.getForceAccountModel());
+	installOutboundProxy(() => config.getOutboundProxy());
+	const outboundProxyUrl = config.getOutboundProxy();
+	if (outboundProxyUrl) {
+		const { protocol, host } = new URL(outboundProxyUrl);
+		new Logger("OutboundProxy").info(
+			`Outbound proxy enabled: ${protocol}//${host}`,
+		);
+	}
 	const runtime = config.getRuntime();
 	// Override port if provided
 	if (port !== runtime.port) {
@@ -616,8 +814,26 @@ export default async function startServer(options?: {
 		const pgUrl = config.buildPgConnectionUrl();
 		if (pgUrl) process.env.DATABASE_URL = pgUrl;
 	}
+
+	// Process-local secret gating internal-probe markers (auto-refresh /
+	// cache-keepalive self-loop requests) — see proxy-types.ts isInternalProbe
+	// and AuthService#isInternalProbeRequest. Intentionally re-minted every
+	// process start (not persisted): these self-loops originate from the same
+	// process that mints the secret, so nothing outside this process ever
+	// needs to know it across restarts.
+	const internalProbeSecret = crypto.randomUUID();
+	// Persisted secret shared with the CLI (via the same on-disk config file)
+	// so `bun run cli --reauthenticate` / `--force-reset-rate-limit` can
+	// notify this locally-running server of DB-side changes even when
+	// API-key auth is enabled (issue #216). See AuthService#isLocalControlRequest.
+	const localControlSecret = config.getLocalControlSecret();
+
 	DatabaseFactory.initialize(undefined, runtime);
 	const dbOps = await DatabaseFactory.getInstanceAsync();
+
+	// Before anything can route: adopt the combo behaviour this install was
+	// already running, so upgrading is never a silent routing change.
+	await adoptLegacyRoutingSettings(config, dbOps);
 
 	// Propagate filesystem case-sensitivity into the resolver manager before
 	// the first scan so projects are matched correctly.
@@ -705,72 +921,32 @@ export default async function startServer(options?: {
 	// accepts a getter so it can read the live (post-hot-reload) instance.
 	let currentStrategy: LoadBalancingStrategy | null = null;
 
-	const apiRouter = new APIRouter({
-		db,
-		config,
-		dbOps,
-		alertService,
-		runtime: {
-			port,
-			tlsEnabled,
-		},
-		getAsyncWriterHealth: () => asyncWriter.getHealth(),
-		getUsageWorkerHealth: () => getUsageCollectorHealth(),
-		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
-		getStrategy: () => currentStrategy,
-	});
+	// The model catalog needs a ProxyContext (account credentials, provider)
+	// that is only constructed later in this function. The router is built
+	// eagerly, so route through a mutable reference assigned once the
+	// ProxyContext exists — mirrors the getStrategy() lazy-getter pattern above.
+	let modelCatalogProxyContext: ProxyContext | null = null;
 
-	// Initialize AuthService for proxy authentication
-	const authService = new AuthService(dbOps);
+	// Minimal retention-job telemetry (#384): the periodic data-retention
+	// cleanup below silently swallowed failures into a log line with no way
+	// to tell "retention healthy" from "retention dead for weeks" apart from
+	// tailing logs. Declared here (mirrors the currentStrategy /
+	// modelCatalogProxyContext mutable-ref pattern above) so the router,
+	// constructed eagerly below, can read it via a getter; the cleanup
+	// callback mutates it in place once defined further down.
+	const retentionState: RetentionStatus = {
+		lastSuccessAt: null,
+		lastError: null,
+		lastErrorAt: null,
+	};
+	const getRetentionStatus = (): RetentionStatus => ({ ...retentionState });
 
-	// Run startup maintenance once (cleanup only) - fire and forget
-	runStartupMaintenance(config, dbOps).catch((err) => {
-		log.error("Startup maintenance failed:", err);
-	});
-	stopRetentionJob = () => {}; // No-op stopper
-
-	// Set up periodic OAuth session cleanup (every hour)
-	const unregisterOAuthCleanup = registerCleanup({
-		id: "oauth-session-cleanup",
-		callback: async () => {
-			try {
-				const removedSessions = await dbOps.cleanupExpiredOAuthSessions();
-				if (removedSessions > 0) {
-					log.debug(`Cleaned up ${removedSessions} expired OAuth sessions`);
-				}
-			} catch (err) {
-				log.error(`OAuth session cleanup error: ${err}`);
-			}
-		},
-		minutes: 60,
-		description: "OAuth session cleanup",
-	});
-
-	stopOAuthCleanupJob = unregisterOAuthCleanup;
-
-	// Set up periodic rate limit cleanup (every hour)
-	const unregisterRateLimitCleanup = registerCleanup({
-		id: "rate-limit-cleanup",
-		callback: async () => {
-			try {
-				const now = Date.now();
-				const clearedCount = await dbOps.clearExpiredRateLimits(now);
-				if (clearedCount > 0) {
-					log.debug(
-						`Cleared ${clearedCount} expired rate_limited_until entries`,
-					);
-				}
-			} catch (err) {
-				log.error(`Rate limit cleanup error: ${err}`);
-			}
-		},
-		minutes: 60,
-		description: "Rate limit cleanup",
-	});
-
-	stopRateLimitCleanupJob = unregisterRateLimitCleanup;
-
-	// Set up periodic data retention cleanup every 1 hour
+	// Registered here (before runStartupMaintenance() below) so intervalManager
+	// has "data-retention-cleanup" on record and runNow() can find it — startup
+	// maintenance triggers the very same callback via runNow() instead of
+	// duplicating this logic, so both the boot-time run and the hourly tick
+	// share one isRunning guard (maxConcurrent: 1) and can never race on
+	// retentionState (Greptile, PR #390).
 	const dataRetentionCleanup = async () => {
 		const startTime = Date.now();
 		try {
@@ -810,23 +986,140 @@ export default async function startServer(options?: {
 						log.error(`Incremental vacuum error: ${err}`);
 					});
 			}
+			const usageHistoryDays = config.getUsageHistoryRetentionDays();
+			const removedSnapshots = await dbOps.pruneUsageSnapshots(
+				Date.now() - usageHistoryDays * TIME_CONSTANTS.DAY,
+			);
+			if (removedSnapshots > 0) {
+				log.info(`Pruned ${removedSnapshots} old usage snapshots`);
+			}
+			retentionState.lastSuccessAt = Date.now();
+			retentionState.lastError = null;
+			retentionState.lastErrorAt = null;
 		} catch (err) {
 			log.error(`Periodic data retention cleanup error: ${err}`);
+			retentionState.lastError =
+				err instanceof Error ? err.message : String(err);
+			retentionState.lastErrorAt = Date.now();
 		}
 	};
 
 	// Periodic data retention cleanup every 1 hour (reduced from 6 hours for more aggressive cleanup).
-	// runStartupMaintenance() (called above) handles the initial cleanup on boot,
-	// so we don't fire dataRetentionCleanup() immediately to avoid concurrent
-	// large deletes that can spike WAL size and wedge the service.
+	// Registered with immediate: false (default) — runStartupMaintenance()
+	// below fires the first run via intervalManager.runNow() instead, so we
+	// don't double-run at boot.
 	const unregisterDataCleanup = registerCleanup({
 		id: "data-retention-cleanup",
 		callback: dataRetentionCleanup,
 		minutes: 60, // every 1 hour
+		// A batched cleanup can run long on a large backlog (#384) — long enough
+		// to still be in flight when the next hourly tick fires, or when
+		// runStartupMaintenance's runNow() call races a tick. Without this,
+		// IntervalManager would allow overlapping runs, and the two completing
+		// out of order could overwrite retentionState with a stale result (e.g.
+		// an older failure clobbering a newer success in /health).
+		maxConcurrent: 1,
 		description: "Periodic data retention cleanup and incremental vacuum",
 	});
-
 	stopDataCleanupJob = unregisterDataCleanup;
+
+	const apiRouter = new APIRouter({
+		db,
+		config,
+		dbOps,
+		alertService,
+		modelCatalog: {
+			get: () => getModelCatalog(),
+			codexModels: async (accountId: string) => {
+				if (!modelCatalogProxyContext) return null;
+				return getCodexModels(accountId, modelCatalogProxyContext);
+			},
+			openaiCompatibleModels: async (accountId: string) => {
+				if (!modelCatalogProxyContext) return null;
+				return getOpenAICompatibleModels(accountId, modelCatalogProxyContext);
+			},
+			refresh: async () => {
+				if (!modelCatalogProxyContext) {
+					return {
+						success: false,
+						error: "Model catalog is not initialized yet",
+					};
+				}
+				const result = await refreshModelCatalog(modelCatalogProxyContext, {
+					trigger: "manual",
+				});
+				return { success: result.success, error: result.error };
+			},
+		},
+		runtime: {
+			port,
+			tlsEnabled,
+		},
+		getAsyncWriterHealth: () => asyncWriter.getHealth(),
+		getUsageWorkerHealth: () => getUsageCollectorHealth(),
+		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
+		getRetentionStatus,
+		getStrategy: () => currentStrategy,
+		internalProbeSecret,
+		localControlSecret,
+	});
+
+	// Initialize AuthService for proxy authentication
+	const authService = new AuthService(
+		dbOps,
+		internalProbeSecret,
+		localControlSecret,
+	);
+
+	// Run startup maintenance once (cleanup only) - fire and forget
+	runStartupMaintenance(dbOps).catch((err) => {
+		log.error("Startup maintenance failed:", err);
+	});
+	stopRetentionJob = () => {}; // No-op stopper
+
+	// Set up periodic OAuth session cleanup (every hour)
+	const unregisterOAuthCleanup = registerCleanup({
+		id: "oauth-session-cleanup",
+		callback: async () => {
+			try {
+				const removedSessions = await dbOps.cleanupExpiredOAuthSessions();
+				if (removedSessions > 0) {
+					log.debug(`Cleaned up ${removedSessions} expired OAuth sessions`);
+				}
+			} catch (err) {
+				log.error(`OAuth session cleanup error: ${err}`);
+			}
+		},
+		minutes: 60,
+		description: "OAuth session cleanup",
+	});
+
+	stopOAuthCleanupJob = unregisterOAuthCleanup;
+
+	// Set up periodic rate limit cleanup (every hour)
+	const unregisterRateLimitCleanup = registerCleanup({
+		id: "rate-limit-cleanup",
+		callback: async () => {
+			try {
+				const now = Date.now();
+				const clearedRows = await dbOps.clearExpiredRateLimits(now);
+				for (const row of clearedRows) {
+					forceCloseCircuit({ provider: row.provider, accountId: row.id }, now);
+				}
+				if (clearedRows.length > 0) {
+					log.debug(
+						`Cleared ${clearedRows.length} expired rate_limited_until entries`,
+					);
+				}
+			} catch (err) {
+				log.error(`Rate limit cleanup error: ${err}`);
+			}
+		},
+		minutes: 60,
+		description: "Rate limit cleanup",
+	});
+
+	stopRateLimitCleanupJob = unregisterRateLimitCleanup;
 
 	// Set up periodic WAL checkpoint every 5 minutes to prevent unbounded WAL growth
 	const unregisterWalCheckpoint = registerCleanup({
@@ -880,7 +1173,17 @@ export default async function startServer(options?: {
 		getAccountUtilization(accountId: string, provider: string): number | null {
 			const data = usageCache.get(accountId);
 			if (!data) return null;
-			return getRepresentativeUtilizationForProvider(data, provider);
+			// Ranking, not gating: this feeds SessionStrategy's water-filling sort
+			// across same-priority accounts, where a spent extra_usage pool is a
+			// legitimate reason to prefer another account.
+			return getRankingUtilizationForProvider(data, provider);
+		},
+		getAccountWeeklyReset(accountId: string, provider: string): number | null {
+			const data = usageCache.get(accountId);
+			if (!data) return null;
+			const resetAt = extractWeeklyResetTime(data, provider);
+			if (resetAt == null || resetAt <= Date.now()) return null;
+			return resetAt;
 		},
 	});
 
@@ -901,7 +1204,9 @@ export default async function startServer(options?: {
 		provider,
 		refreshInFlight: new Map(),
 		asyncWriter,
+		internalProbeSecret,
 	};
+	modelCatalogProxyContext = proxyContext;
 
 	// Register this server's refresh clearing capability
 	const serverId = `server-${runtime.port}`;
@@ -950,8 +1255,8 @@ export default async function startServer(options?: {
 	// Register this server's codex on-demand usage refresher. Codex does not
 	// expose a free usage endpoint (unlike Anthropic's /api/oauth/usage), so
 	// each call sends a tiny upstream request and parses the x-codex-* headers
-	// from the response. Cost is bounded by `max_output_tokens: 1` plus the
-	// abort-after-headers cancel inside fetchCodexUsageOnDemand.
+	// from the response. The subscription endpoint rejects output-token caps,
+	// so fetchCodexUsageOnDemand aborts and cancels immediately after headers.
 	registerCodexUsageRefresher(serverId, async (accountId: string) => {
 		const account = await dbOps.getAccount(accountId);
 		if (!account) {
@@ -989,9 +1294,34 @@ export default async function startServer(options?: {
 
 		const endpoint = account.custom_endpoint ?? CODEX_DEFAULT_ENDPOINT;
 
+		// Ping with a model this account can actually address, and with the
+		// cheapest one of those. A hardcoded name goes stale silently and fatally:
+		// the subscription endpoint rejects an unknown model before it accounts for
+		// quota, so the 400 carries no `x-codex-*` headers and the refresh fails
+		// with nothing to show. The account's own listing already answers the
+		// "which models exist" half for the family mapping — reuse it, and take the
+		// tail rather than the head, because the reply is discarded as soon as the
+		// headers arrive and the headers describe the subscription, not the model.
+		// `CODEX_PING_MODEL` is only reached when that listing has never been
+		// readable.
+		let pingModel = CODEX_PING_MODEL;
+		try {
+			pingModel =
+				lowestTierCodexModel(await getCodexModels(accountId, proxyContext)) ??
+				CODEX_PING_MODEL;
+		} catch (error) {
+			log.debug(
+				`Codex usage refresh: could not resolve the model list for ${account.name}, pinging ${pingModel}: ${error}`,
+			);
+		}
+
 		let fetchResult: Awaited<ReturnType<typeof fetchCodexUsageOnDemand>>;
 		try {
-			fetchResult = await fetchCodexUsageOnDemand(accessToken, endpoint);
+			fetchResult = await fetchCodexUsageOnDemand(
+				accessToken,
+				endpoint,
+				pingModel,
+			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			log.error(
@@ -1025,19 +1355,33 @@ export default async function startServer(options?: {
 		}
 
 		if (!fetchResult.data) {
+			// Naming the model matters here: this is the shape a rejected model
+			// takes, and without it the message says nothing actionable.
 			return {
 				success: false,
-				message: `Codex returned no usage headers (status ${fetchResult.response.status}) for '${account.name}'`,
+				message: `Codex returned no usage headers (status ${fetchResult.response.status}) for '${account.name}' when pinging model '${pingModel}'`,
 			};
 		}
 
 		usageCache.set(accountId, fetchResult.data);
 
+		// Persist alongside the cache: this on-demand read costs quota, so it must
+		// outlive the 10-minute cache. `force` skips the traffic throttle — the
+		// operator asked for this read explicitly.
+		await recordCodexUsageSnapshot(
+			dbOps,
+			accountId,
+			account.name,
+			fetchResult.data as unknown as Record<string, unknown>,
+			Date.now(),
+			true,
+		);
+
 		const fiveHour = fetchResult.data.five_hour?.utilization ?? 0;
 		const sevenDay = fetchResult.data.seven_day?.utilization ?? 0;
 		const isRateLimited = fetchResult.response.status === 429;
 		log.info(
-			`Codex usage refreshed for '${account.name}': 5h=${fiveHour}%, 7d=${sevenDay}%${
+			`Codex usage refreshed for '${account.name}' via ${pingModel}: 5h=${fiveHour}%, 7d=${sevenDay}%${
 				isRateLimited ? " (rate-limited)" : ""
 			}`,
 		);
@@ -1059,6 +1403,9 @@ export default async function startServer(options?: {
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
 	autoRefreshScheduler = new AutoRefreshScheduler(db, proxyContext);
 	autoRefreshScheduler.start();
+	registerAutoRefreshTrackingClearer(serverId, (accountId: string) => {
+		autoRefreshScheduler?.clearAccountTracking(accountId);
+	});
 
 	// Initialize cache keepalive scheduler
 	cacheKeepaliveScheduler = new CacheKeepaliveScheduler(proxyContext, config);
@@ -1235,12 +1582,14 @@ export default async function startServer(options?: {
 								authResult.apiKeyName,
 							);
 						}
-						return await handleProxy(
-							req,
-							url,
-							proxyContext,
-							authResult.apiKeyId,
-							authResult.apiKeyName,
+						return trackStreamForShutdown(
+							await handleProxy(
+								req,
+								url,
+								proxyContext,
+								authResult.apiKeyId,
+								authResult.apiKeyName,
+							),
 						);
 					} catch (proxyError) {
 						const statusCode =
@@ -1558,6 +1907,37 @@ Available endpoints:
 		log.info(`No Kilo Gateway accounts found, usage polling will not start`);
 	}
 
+	// Start usage polling for Minimax accounts (Token Plan `remains` endpoint)
+	const minimaxAccounts = accounts.filter((a) => a.provider === "minimax");
+	const registeredMinimaxAccountIds = bootstrapMinimaxUsagePolling(
+		accounts,
+		usageCache,
+		config.getUsagePollIntervalMs(),
+		log,
+	);
+	if (minimaxAccounts.length === 0) {
+		log.info(`No Minimax accounts found, usage polling will not start`);
+	} else if (registeredMinimaxAccountIds.length > 0) {
+		log.info(
+			`Found ${minimaxAccounts.length} Minimax accounts, starting usage polling...`,
+		);
+		for (const accountId of registeredMinimaxAccountIds) {
+			const account = accounts.find((a) => a.id === accountId);
+			log.info(
+				`Started usage polling for Minimax account ${account?.name ?? accountId}`,
+			);
+		}
+	} else {
+		// All Minimax accounts exist but lack API keys. Per-account WARN logs
+		// already fired inside registerMinimaxUsagePolling; this summary
+		// makes the diagnosis unambiguous: the reason polling did not start
+		// is missing credentials, not a missing account. Matches the
+		// nanogpt/zai/kilo phrasing style (Greptile #350 P2).
+		log.info(
+			`Found ${minimaxAccounts.length} Minimax account(s) but all lack API keys, usage polling will not start`,
+		);
+	}
+
 	// Pre-warm Bedrock model and inference profile caches
 	const bedrockAccounts = accounts.filter((a) => a.provider === "bedrock");
 	if (bedrockAccounts.length > 0) {
@@ -1591,6 +1971,13 @@ Available endpoints:
 	// Initialize NanoGPT pricing refresh if there are NanoGPT accounts (non-blocking)
 	void initializeNanoGPTPricingIfAccountsExist(dbOps, pricingLogger);
 
+	// Initialize the live Anthropic model catalog refresh scheduler (weekly by
+	// default, configurable via BETTER_CCFLARE_MODELS_REFRESH_HOURS; a
+	// "tick-and-check" scheduler that fires an initial check after a random
+	// 30-120s delay, then re-checks every 15 minutes whether a refresh is due,
+	// rather than a single long-lived interval timer).
+	stopModelCatalogRefreshJob = initModelCatalogRefresh(proxyContext);
+
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {
 		throw new Error("Server instance has no valid port");
@@ -1607,9 +1994,141 @@ Available endpoints:
 	};
 }
 
-// most in-flight streaming responses complete; short enough that systemd's
-// default TimeoutStopSec (90s) doesn't have to escalate to SIGKILL.
-const SHUTDOWN_WATCHDOG_MS = 30_000;
+/**
+ * How long shutdown waits for in-flight requests to complete before
+ * force-closing them. Agent SSE streams can run for minutes, and a
+ * mid-stream close is unrecoverable for the client (tokens were already
+ * streamed), so this defaults generously. Supervisors must keep their stop
+ * timeout (systemd TimeoutStopSec, wrapper SIGKILL delays) above this value
+ * plus the watchdog margin or the drain gets SIGKILLed out from under us.
+ */
+// ── In-flight stream registry for shutdown ─────────────────────────────────
+// Bun 1.x cannot escalate a graceful stop(): once stop() has removed the
+// listener, a later stop(true) no longer terminates active connections
+// (verified empirically on Bun 1.3.5). To force-close still-streaming
+// responses at the drain deadline, every proxied response is wrapped in a
+// pass-through whose controller can be errored explicitly.
+//
+// Each tracked stream also exposes a settlement promise. Force-close must
+// await those settlements before usage-collector drain / DB disposal, or
+// close/error finalizers that record the last usage events can still be
+// racing the shutdown path.
+type TrackedInflightStream = {
+	abort: () => void;
+	settled: Promise<void>;
+};
+
+const inflightStreams = new Set<TrackedInflightStream>();
+
+export function trackStreamForShutdown(response: Response): Response {
+	const body = response.body;
+	if (!body) return response;
+	const reader = body.getReader();
+	let tracked: TrackedInflightStream | null = null;
+	let settle!: () => void;
+	const settled = new Promise<void>((resolve) => {
+		settle = resolve;
+	});
+	const finish = () => {
+		if (!tracked) return;
+		inflightStreams.delete(tracked);
+		tracked = null;
+		settle();
+	};
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			const abort = () => {
+				try {
+					controller.error(new Error("server shutdown: drain deadline"));
+				} catch {
+					// already closed or errored
+				}
+				// Settlement waits for source cancellation so shutdown can
+				// observe the terminal path even when no pull is scheduled.
+				void reader.cancel().finally(() => finish());
+			};
+			tracked = { abort, settled };
+			inflightStreams.add(tracked);
+		},
+		async pull(controller) {
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					finish();
+					controller.close();
+				} else {
+					controller.enqueue(value);
+				}
+			} catch (error) {
+				finish();
+				try {
+					controller.error(error);
+				} catch {
+					// already errored by abort
+				}
+			}
+		},
+		cancel(reason) {
+			return reader
+				.cancel(reason)
+				.catch(() => {})
+				.finally(() => finish());
+		},
+	});
+	return new Response(stream, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: response.headers,
+	});
+}
+
+/**
+ * Error every tracked in-flight stream and return both the abort count and a
+ * promise that settles once every aborted stream has finished its terminal
+ * close/error path.
+ */
+export function abortInflightStreams(): {
+	aborted: number;
+	settled: Promise<void>;
+} {
+	const streams = [...inflightStreams];
+	inflightStreams.clear();
+	for (const stream of streams) stream.abort();
+	return {
+		aborted: streams.length,
+		settled: Promise.allSettled(streams.map((stream) => stream.settled)).then(
+			() => undefined,
+		),
+	};
+}
+
+export const SHUTDOWN_DRAIN_MS_ENV = "CCFLARE_SHUTDOWN_DRAIN_MS";
+const DEFAULT_SHUTDOWN_DRAIN_MS = 60_000;
+/**
+ * Upper clamp for the drain budget: keeps the watchdog setTimeout well
+ * inside its 32-bit millisecond range (an overflowed delay fires
+ * immediately, which would cut off the very streams being drained) and
+ * keeps shutdown inside any sane service-manager stop timeout.
+ */
+export const MAX_SHUTDOWN_DRAIN_MS = 15 * 60 * 1000;
+/** Budget for post-drain cleanup (DB writer, disposables) before force exit. */
+const SHUTDOWN_WATCHDOG_MARGIN_MS = 15_000;
+
+export function readShutdownDrainMs(): number {
+	const raw = process.env[SHUTDOWN_DRAIN_MS_ENV];
+	if (raw === undefined || raw === "") return DEFAULT_SHUTDOWN_DRAIN_MS;
+	// Strict digits only: parseInt accepts numeric prefixes like "1abc" as 1,
+	// which would silently shrink the drain budget to a millisecond.
+	if (!/^\d+$/.test(raw)) return DEFAULT_SHUTDOWN_DRAIN_MS;
+	// Number (not parseInt) so digit strings beyond MAX_SAFE_INTEGER still
+	// compare correctly and clamp to the maximum instead of falling back to
+	// the shorter default the operator did not ask for.
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) {
+		return DEFAULT_SHUTDOWN_DRAIN_MS;
+	}
+	return Math.min(parsed, MAX_SHUTDOWN_DRAIN_MS);
+}
 
 // Deduplicates concurrent shutdown invocations (e.g. SIGINT arriving while
 // SIGTERM is still awaiting serverInstance.stop()). Without this, the second
@@ -1626,17 +2145,20 @@ async function handleGracefulShutdown(signal: string) {
 
 	console.log(`\n👋 Received ${signal}, shutting down gracefully...`);
 
-	// Hard upper bound on shutdown duration. unref'd so it doesn't itself
-	// prevent a clean exit if everything else finishes first. Exits with 0
-	// because the watchdog only fires on an expected SIGTERM that ran long,
-	// not on a failure — code 1 would make systemd Restart=on-failure
-	// auto-restart the unit instead of treating it as a normal stop.
+	// Hard upper bound on shutdown duration: the drain budget plus a margin
+	// for the remaining cleanup. unref'd so it doesn't itself prevent a clean
+	// exit if everything else finishes first. Exits with 0 because the
+	// watchdog only fires on an expected SIGTERM that ran long, not on a
+	// failure — code 1 would make systemd Restart=on-failure auto-restart
+	// the unit instead of treating it as a normal stop.
+	const drainMs = readShutdownDrainMs();
+	const watchdogMs = drainMs + SHUTDOWN_WATCHDOG_MARGIN_MS;
 	const watchdog = setTimeout(() => {
 		console.error(
-			`⚠️ Shutdown watchdog (${SHUTDOWN_WATCHDOG_MS}ms) expired, forcing exit`,
+			`⚠️ Shutdown watchdog (${watchdogMs}ms) expired, forcing exit`,
 		);
 		process.exit(0);
-	}, SHUTDOWN_WATCHDOG_MS);
+	}, watchdogMs);
 	watchdog.unref();
 
 	try {
@@ -1667,6 +2189,10 @@ async function handleGracefulShutdown(signal: string) {
 			stopIntegritySchedulerJob();
 			stopIntegritySchedulerJob = null;
 		}
+		if (stopModelCatalogRefreshJob) {
+			stopModelCatalogRefreshJob();
+			stopModelCatalogRefreshJob = null;
+		}
 		if (autoRefreshScheduler) {
 			autoRefreshScheduler.stop();
 			autoRefreshScheduler = null;
@@ -1689,11 +2215,15 @@ async function handleGracefulShutdown(signal: string) {
 		// Stop token health monitoring
 		stopGlobalTokenHealthChecks();
 
-		// Unregister this server's Codex on-demand usage refresher so the
-		// module-level registry doesn't keep a stale callback after restart.
-		// Mirrors the cleanup pattern used by the schedulers above.
+		// Unregister this server's Codex usage refresher, polling restarter,
+		// and refresh clearer so the module-level registries don't keep stale
+		// callbacks after restart. Mirrors the cleanup pattern used by the
+		// schedulers above.
 		if (registeredServerId) {
 			unregisterCodexUsageRefresher(registeredServerId);
+			unregisterPollingRestarter(registeredServerId);
+			unregisterRefreshClearer(registeredServerId);
+			unregisterAutoRefreshTrackingClearer(registeredServerId);
 			registeredServerId = null;
 		}
 
@@ -1709,6 +2239,56 @@ async function handleGracefulShutdown(signal: string) {
 				clearTimeout(timeoutId);
 			}
 			usagePollingRetryTimeouts.clear();
+		}
+
+		// Drain in-flight requests before tearing down shared resources.
+		// stop() without arguments stops accepting new connections while
+		// letting active ones (including agent SSE streams) run to
+		// completion; wait for pendingRequests to reach zero within the
+		// drain budget, then force-close whatever remains.
+		if (serverInstance) {
+			serverInstance.stop();
+			const deadline = Date.now() + drainMs;
+			const initialPending = serverInstance.pendingRequests;
+			if (initialPending > 0) {
+				console.log(
+					`Draining ${initialPending} in-flight request(s) (budget ${drainMs}ms)...`,
+				);
+			}
+			while (serverInstance.pendingRequests > 0 && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+			const remaining = serverInstance.pendingRequests;
+			if (remaining > 0) {
+				console.error(
+					`Drain budget exhausted; force-closing ${remaining} in-flight request(s)`,
+				);
+				// stop(true) cannot escalate an earlier graceful stop() on Bun 1.x
+				// (verified on 1.3.5), so error the tracked response streams
+				// directly; the call stays as belt-and-braces for Bun versions
+				// where escalation works.
+				serverInstance.stop(true);
+				const { aborted, settled } = abortInflightStreams();
+				if (aborted > 0) {
+					console.error(`Errored ${aborted} tracked response stream(s)`);
+				}
+				// Force-cancelled streams still have close/error handlers that
+				// record final usage. Await tracked stream settlements, then
+				// wait for Bun's pending request counter to clear so those
+				// finalizers can register before usage-collector drain and DB
+				// disposal. Bounded by the remaining drain budget so a source
+				// stream whose cancel() handler hangs can't silently consume
+				// the watchdog margin reserved for DB/usage cleanup.
+				await Promise.race([
+					settled,
+					new Promise<void>((resolve) =>
+						setTimeout(resolve, Math.max(0, deadline - Date.now())),
+					),
+				]);
+				while (serverInstance.pendingRequests > 0 && Date.now() < deadline) {
+					await new Promise((resolve) => setTimeout(resolve, 50));
+				}
+			}
 		}
 
 		usageCache.clear(); // Stop all usage polling
@@ -1741,8 +2321,18 @@ async function handleGracefulShutdown(signal: string) {
 }
 
 // Register signal handlers
-process.on("SIGINT", () => handleGracefulShutdown("SIGINT"));
-process.on("SIGTERM", () => handleGracefulShutdown("SIGTERM"));
+// Only act once this process actually owns a server lifecycle: for
+// short-lived CLI commands (which import this module without starting a
+// server) the CLI's own handlers own shutdown, and a second concurrent
+// shutdown path could exit while the first is still disposing resources.
+process.on("SIGINT", () => {
+	if (!serverLifecycleOwned) return;
+	handleGracefulShutdown("SIGINT");
+});
+process.on("SIGTERM", () => {
+	if (!serverLifecycleOwned) return;
+	handleGracefulShutdown("SIGTERM");
+});
 
 // Export helper to get the current protocol
 export function getProtocol(): string {

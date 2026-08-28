@@ -14,6 +14,10 @@ export type LogFormat = "pretty" | "json";
 // Event emitter for log streaming
 export const logBus = new EventEmitter();
 
+// Set a more generous max listeners limit for SSE connections
+// This allows for more concurrent SSE connections while still providing protection
+logBus.setMaxListeners(200);
+
 // Error's name/message/stack are non-enumerable, so JSON.stringify(err) returns "{}".
 // Convert Errors to plain objects before they flow into formatMessage / LogEvent /
 // the file writer, which all use JSON.stringify downstream.
@@ -33,6 +37,32 @@ function normalizeLogData(data: any): any {
 		return out;
 	}
 	return data;
+}
+
+// String(e) can itself throw (e.g. an object with a throwing
+// Symbol.toPrimitive, or Object.create(null)), which would defeat the
+// purpose of the catch block calling this. Never let this throw.
+function safeErrorReason(e: unknown): string {
+	if (e instanceof Error) return e.message;
+	try {
+		return String(e);
+	} catch {
+		return "unknown error";
+	}
+}
+
+let consoleLoggingOverride: boolean | null = null;
+
+/**
+ * Force console output on (or off) for every logger, regardless of debug
+ * mode. The interactive TUI silences console logging so log lines do not
+ * corrupt the screen, but headless serve mode has no TUI: journald or the
+ * operator's terminal is exactly where WARN/ERROR lines belong. Without
+ * this, production warnings (runaway fan-out, session budgets) are
+ * invisible outside the dashboard log bus.
+ */
+export function setConsoleLogging(enabled: boolean | null): void {
+	consoleLoggingOverride = enabled;
 }
 
 export class Logger {
@@ -94,10 +124,32 @@ export class Logger {
 				msg: message,
 				...(data && { data }),
 			};
-			return JSON.stringify(logEntry);
+			try {
+				return JSON.stringify(logEntry);
+			} catch (e: unknown) {
+				// data is caller-supplied and may be circular or contain a
+				// BigInt, both of which make JSON.stringify throw. A logging
+				// call must never crash its caller, so fall back to a
+				// sanitized entry that preserves ts/level/msg.
+				const reason = safeErrorReason(e);
+				return JSON.stringify({
+					ts: timestamp,
+					level,
+					prefix: this.prefix || undefined,
+					msg: message,
+					data: `[unserializable: ${reason}]`,
+				});
+			}
 		} else {
 			const prefix = this.prefix ? `[${this.prefix}] ` : "";
-			const dataStr = data ? ` ${JSON.stringify(data)}` : "";
+			let dataStr = "";
+			if (data) {
+				try {
+					dataStr = ` ${JSON.stringify(data)}`;
+				} catch (e: unknown) {
+					dataStr = ` [unserializable: ${safeErrorReason(e)}]`;
+				}
+			}
 			return `[${timestamp}] ${level}: ${prefix}${message}${dataStr}`;
 		}
 	}
@@ -115,7 +167,7 @@ export class Logger {
 			};
 			logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (!this.silentConsole) console.log(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) console.log(msg);
 		}
 	}
 
@@ -132,7 +184,7 @@ export class Logger {
 			};
 			logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (!this.silentConsole) console.log(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) console.log(msg);
 		}
 	}
 
@@ -149,7 +201,7 @@ export class Logger {
 			};
 			logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (!this.silentConsole) console.warn(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) console.warn(msg);
 		}
 	}
 
@@ -166,7 +218,7 @@ export class Logger {
 			};
 			logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (!this.silentConsole) console.error(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) console.error(msg);
 		}
 	}
 

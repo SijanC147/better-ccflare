@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -9,6 +10,7 @@ import {
 	type StrategyName,
 	TIME_CONSTANTS,
 	ValidationError,
+	validateEndpointUrl,
 	validateNumber,
 	validateString,
 } from "@better-ccflare/core";
@@ -21,6 +23,21 @@ const log = new Logger("Config");
 function parseEnabledEnvFlag(value: string | undefined): boolean | undefined {
 	if (value === undefined) return undefined;
 	return value === "true" || value === "1";
+}
+
+/**
+ * "off": never skip an account on account-scoped (weekly_scoped) exhaustion.
+ * "exhausted": skip an account for a request's model family when its
+ * weekly_scoped cap for that family is at/above 100% with a future reset
+ * (see model-capacity.ts). Defaults to "off" — the filter must be
+ * explicitly opted into.
+ */
+export type ModelScopedCapacityRoutingMode = "off" | "exhausted";
+
+function isValidModelScopedCapacityRoutingMode(
+	value: unknown,
+): value is ModelScopedCapacityRoutingMode {
+	return value === "off" || value === "exhausted";
 }
 
 export interface RuntimeConfig {
@@ -44,6 +61,47 @@ export interface RuntimeConfig {
 	};
 }
 
+export type ProviderModelDefaultOverrides = Record<
+	string,
+	Record<string, string>
+>;
+
+/**
+ * Env var that expands which providers accept editable model-default
+ * overrides (via the config file, the API, and the dashboard tab).
+ * Absent or empty => only "codex" is editable. This gates only the
+ * override SURFACE (listing, accepting POSTs, showing a dashboard
+ * tab) — the built-in factory maps for every provider (xai, qwen,
+ * ...) keep translating models exactly as before; nothing here
+ * touches model resolution itself.
+ */
+export const PROVIDER_MODEL_DEFAULTS_ENV_VAR =
+	"CCFLARE_MODEL_DEFAULTS_PROVIDERS";
+
+const DEFAULT_PROVIDER_MODEL_DEFAULTS_PROVIDERS: readonly string[] = ["codex"];
+
+/**
+ * Drops overrides for providers outside `enabledProviders` without
+ * mutating the input. Callers pass in the full, persisted overrides
+ * map and push the filtered result into the in-memory registry (see
+ * setProviderModelDefaultOverrides in @better-ccflare/providers) at
+ * boot and after a successful POST. The persisted file always keeps
+ * the full map — a disabled provider's stored override is never
+ * erased, just excluded here, so it re-applies automatically once
+ * CCFLARE_MODEL_DEFAULTS_PROVIDERS re-enables that provider.
+ */
+export function filterEnabledProviderModelDefaultOverrides(
+	enabledProviders: Iterable<string>,
+	overrides: ProviderModelDefaultOverrides,
+): ProviderModelDefaultOverrides {
+	const enabled = new Set(enabledProviders);
+	const filtered: ProviderModelDefaultOverrides = {};
+	for (const [provider, families] of Object.entries(overrides)) {
+		if (enabled.has(provider)) filtered[provider] = families;
+	}
+	return filtered;
+}
+
 export interface ConfigData {
 	lb_strategy?: StrategyName;
 	client_id?: string;
@@ -55,6 +113,7 @@ export interface ConfigData {
 	default_agent_model?: string;
 	data_retention_days?: number;
 	request_retention_days?: number;
+	usage_history_retention_days?: number;
 	store_payloads?: boolean;
 	request_storage_headers_only?: boolean;
 	usage_poll_interval_ms?: number;
@@ -62,6 +121,14 @@ export interface ConfigData {
 	system_prompt_cache_ttl_1h?: boolean;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
+	codex_five_hour_window_enabled?: boolean;
+	model_scoped_capacity_routing?: ModelScopedCapacityRoutingMode;
+	combos_enabled?: boolean;
+	combo_session_fallback?: boolean;
+	force_account_model?: boolean;
+	provider_model_default_overrides?: ProviderModelDefaultOverrides;
+	agent_frontmatter_model_fallback?: boolean;
+	model_catalog_oauth_refresh_enabled?: boolean;
 	health_detail_enabled?: boolean;
 	// PostgreSQL backend configuration
 	pg_enabled?: boolean;
@@ -76,8 +143,18 @@ export interface ConfigData {
 	alert_request_tokens?: number;
 	alert_anomaly_enabled?: boolean;
 	alert_anomaly_interval_minutes?: number;
+	alert_anomaly_baseline_window_minutes?: number;
+	alert_anomaly_loop_min_requests?: number;
 	alert_cooldown_minutes?: number;
 	alert_webhook_url?: string;
+	outbound_proxy?: string;
+	// Local-control secret: shared between the CLI and the server process it
+	// controls, used to authorize a small set of idempotent CLI->server
+	// notify calls (token reload, force-reset-rate-limit) when API-key auth
+	// is enabled. See AuthService#isLocalControlRequest. Generated once on
+	// first access and persisted — unlike ProxyContext.internalProbeSecret,
+	// which is intentionally re-minted every server process start.
+	local_control_secret?: string;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -92,7 +169,12 @@ export interface ConfigData {
 	// Discovery configuration
 	claude_projects_dir?: string;
 	projects_case_sensitive?: boolean;
-	[key: string]: string | number | boolean | undefined;
+	[key: string]:
+		| string
+		| number
+		| boolean
+		| ProviderModelDefaultOverrides
+		| undefined;
 }
 
 /**
@@ -232,7 +314,12 @@ export class Config extends EventEmitter {
 		defaultValue?: string | number | boolean,
 	): string | number | boolean | undefined {
 		if (key in this.data) {
-			return this.data[key];
+			const value = this.data[key];
+			// Settings with an object value (e.g.
+			// provider_model_default_overrides) have their own typed getter.
+			// This generic accessor serves scalars only — returning the object
+			// here would misrepresent the declared type.
+			return typeof value === "object" ? undefined : value;
 		}
 
 		if (defaultValue !== undefined) {
@@ -253,19 +340,19 @@ export class Config extends EventEmitter {
 	}
 
 	getStrategy(): StrategyName {
-		// First check environment variable
-		const envStrategy = process.env.LB_STRATEGY;
-		if (envStrategy && isValidStrategy(envStrategy)) {
-			return envStrategy;
-		}
+		return this.resolveStrategy().value;
+	}
 
-		// Then check config file
-		const configStrategy = this.data.lb_strategy;
-		if (configStrategy && isValidStrategy(configStrategy)) {
-			return configStrategy;
-		}
-
-		return DEFAULT_STRATEGY;
+	/**
+	 * Report where the effective load-balancing strategy comes from, mirroring
+	 * the precedence in getStrategy(): a valid LB_STRATEGY env value wins
+	 * ("env"), else a valid config-file field ("file"), else the built-in
+	 * default ("default"). The dashboard uses "env" to lock the strategy
+	 * control, because a POST that writes the file field is ineffective while
+	 * the env var overrides it.
+	 */
+	getStrategySource(): "env" | "file" | "default" {
+		return this.resolveStrategy().source;
 	}
 
 	setStrategy(strategy: StrategyName): void {
@@ -294,6 +381,20 @@ export class Config extends EventEmitter {
 
 	setDefaultAgentModel(model: string): void {
 		this.set("default_agent_model", model);
+	}
+
+	getOutboundProxy(): string | undefined {
+		const candidate =
+			process.env.BETTER_CCFLARE_OUTBOUND_PROXY ?? this.data.outbound_proxy;
+		if (!candidate) {
+			return undefined;
+		}
+		try {
+			return validateEndpointUrl(candidate, "outbound_proxy");
+		} catch (error) {
+			log.warn("Invalid outbound proxy URL. Ignoring.", error);
+			return undefined;
+		}
 	}
 
 	private clamp(n: number, min: number, max: number): number {
@@ -334,6 +435,22 @@ export class Config extends EventEmitter {
 	setRequestRetentionDays(days: number): void {
 		const clamped = this.clamp(days, 1, 3650);
 		this.set("request_retention_days", clamped);
+	}
+
+	getUsageHistoryRetentionDays(): number {
+		const fromEnv = process.env.USAGE_HISTORY_RETENTION_DAYS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
+		}
+		const fromFile = this.data.usage_history_retention_days;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
+		return 90; // default: keep 90 days of usage-window history
+	}
+
+	setUsageHistoryRetentionDays(days: number): void {
+		const clamped = this.clamp(days, 1, 3650);
+		this.set("usage_history_retention_days", clamped);
 	}
 
 	getStorePayloads(): boolean {
@@ -397,6 +514,63 @@ export class Config extends EventEmitter {
 		this.set("cache_keepalive_ttl_minutes", clamped);
 	}
 
+	/**
+	 * Returns the persisted local-control secret, generating and persisting
+	 * one on first access. Both the server (via AuthService) and the CLI
+	 * (via this same Config, backed by the same on-disk config file) resolve
+	 * to the identical value, so the CLI can authorize its own notify calls
+	 * to its own locally-running server without ever handling a real API
+	 * key (issue #216).
+	 */
+	getLocalControlSecret(): string {
+		const existing = this.data.local_control_secret;
+		if (typeof existing === "string" && existing.length > 0) {
+			return existing;
+		}
+
+		// Re-check the on-disk file before generating a new secret: another
+		// process (e.g. a CLI invocation racing the server's first-ever boot)
+		// may have already generated and persisted one after this instance's
+		// `this.data` was loaded into memory. Adopting that value instead of
+		// overwriting it avoids the two processes permanently disagreeing on
+		// the secret for the lifetime of this server process (see comment on
+		// the local_control_secret field above).
+		const fromDisk = this.readLocalControlSecretFromDisk();
+		if (typeof fromDisk === "string" && fromDisk.length > 0) {
+			this.data.local_control_secret = fromDisk;
+			return fromDisk;
+		}
+
+		const secret = randomUUID();
+		this.set("local_control_secret", secret);
+		return secret;
+	}
+
+	/**
+	 * Best-effort fresh read of just the local_control_secret field from the
+	 * on-disk config file, bypassing the in-memory `this.data` snapshot.
+	 * Mirrors the existsSync/readFileSync/JSON.parse pattern used by
+	 * loadConfig(), but never mutates `this.data` or writes to disk itself —
+	 * callers decide what to do with the result. Returns undefined on any
+	 * read/parse failure (matching loadConfig()'s log-and-continue behavior).
+	 */
+	private readLocalControlSecretFromDisk(): string | undefined {
+		if (!existsSync(this.configPath)) {
+			return undefined;
+		}
+		try {
+			const content = readFileSync(this.configPath, "utf8");
+			const parsed = JSON.parse(content) as ConfigData;
+			const value = parsed.local_control_secret;
+			return typeof value === "string" && value.length > 0 ? value : undefined;
+		} catch (error) {
+			log.error(
+				`Failed to re-read config file for local_control_secret: ${error}`,
+			);
+			return undefined;
+		}
+	}
+
 	getSystemPromptCacheTtl1h(): boolean {
 		const fromEnv = process.env.SYSTEM_PROMPT_CACHE_TTL_1H;
 		if (fromEnv) {
@@ -435,12 +609,359 @@ export class Config extends EventEmitter {
 		return false;
 	}
 
+	/**
+	 * Whether Codex accounts reachable by this install still report a 5-hour
+	 * usage window. Defaults to false because OpenAI removed that window for
+	 * Plus, Business, and Pro on 2026-07-12, announced only on X
+	 * (https://x.com/thsottiaux/status/2076365965915467978) and never in the
+	 * changelog, so the headers carry the weekly window alone; see
+	 * https://github.com/openai/codex/issues/32791. The removal was framed as
+	 * temporary, which is exactly why this is a flag rather than a new hardcoded
+	 * assumption. Setting it to true restores the previous behavior of treating
+	 * the 5-hour window as the one a session rides.
+	 *
+	 * Scope: this flag selects the window the rollover detector in
+	 * response-processor watches. It does not reach the load-balancer's
+	 * session expiry, which reads the single `rate_limit_reset` column and
+	 * cannot tell which window wrote it — so with the flag on and no 5-hour
+	 * window reported, a session still ends at the weekly boundary. Closing
+	 * that gap needs the per-window data persisted, which is deliberately out
+	 * of scope here.
+	 */
+	getCodexFiveHourWindowEnabled(): boolean {
+		const fromEnv = parseEnabledEnvFlag(
+			process.env.CODEX_FIVE_HOUR_WINDOW_ENABLED,
+		);
+		if (fromEnv !== undefined) {
+			return fromEnv;
+		}
+		const fromFile = this.data.codex_five_hour_window_enabled;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false;
+	}
+
+	/**
+	 * Whether an agent's frontmatter `model` field should be used as a
+	 * substitution fallback when no explicit DB preference is configured for
+	 * that agent. Defaults to false: Claude Code already resolves frontmatter
+	 * model aliases client-side, so the registry's copy of `agent.model` can
+	 * go stale relative to what the client actually resolved and sent. With
+	 * the flag off, only an explicit DB preference (set via the dashboard/CLI)
+	 * triggers a rewrite; the frontmatter value is opt-in.
+	 */
+	getAgentFrontmatterModelFallback(): boolean {
+		const fromEnv = parseEnabledEnvFlag(
+			process.env.AGENT_FRONTMATTER_MODEL_FALLBACK,
+		);
+		if (fromEnv !== undefined) {
+			return fromEnv;
+		}
+		const fromFile = this.data.agent_frontmatter_model_fallback;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false;
+	}
+
+	/**
+	 * Whether the automatic (non-manual) model catalog refresh is allowed to
+	 * fall back to an OAuth account when no eligible API-key account exists.
+	 * Defaults to false: recurring background traffic — and the proactive
+	 * OAuth token refreshes it can trigger — on a consumer OAuth account is an
+	 * atypical automation pattern that risks an account flag/ban, whereas
+	 * API-key accounts are the sanctioned programmatic surface. A manual,
+	 * human-triggered refresh always allows the OAuth fallback regardless of
+	 * this flag.
+	 */
+	getModelCatalogOAuthRefreshEnabled(): boolean {
+		const fromEnv = parseEnabledEnvFlag(
+			process.env.BETTER_CCFLARE_MODELS_OAUTH_REFRESH,
+		);
+		if (fromEnv !== undefined) {
+			return fromEnv;
+		}
+		const fromFile = this.data.model_catalog_oauth_refresh_enabled;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false;
+	}
+
 	setUsageThrottlingFiveHourEnabled(value: boolean): void {
 		this.set("usage_throttling_five_hour_enabled", value);
 	}
 
 	setUsageThrottlingWeeklyEnabled(value: boolean): void {
 		this.set("usage_throttling_weekly_enabled", value);
+	}
+
+	setCodexFiveHourWindowEnabled(value: boolean): void {
+		this.set("codex_five_hour_window_enabled", value);
+	}
+
+	/**
+	 * Shared env > file > default precedence resolver: a valid environment
+	 * value wins ("env"), else a valid config-file value ("file"), else
+	 * `defaultValue` ("default"). Used by getModelScopedCapacityRouting() /
+	 * getModelScopedCapacityRoutingSource() so the two can never drift, and
+	 * is reusable for other env+file-backed string settings (e.g. a future
+	 * getStrategySource() for LB_STRATEGY).
+	 */
+	private resolveEnvFileSetting<T extends string>(
+		envValue: string | undefined,
+		fileValue: T | undefined,
+		isValid: (value: string) => value is T,
+		defaultValue: T,
+	): { value: T; source: "env" | "file" | "default" } {
+		if (envValue !== undefined && isValid(envValue)) {
+			return { value: envValue, source: "env" };
+		}
+		if (fileValue !== undefined && isValid(fileValue)) {
+			return { value: fileValue, source: "file" };
+		}
+		return { value: defaultValue, source: "default" };
+	}
+
+	/**
+	 * Resolves the routing switches the dashboard owns: file > default, with
+	 * no environment layer at all.
+	 *
+	 * A switch on screen that an
+	 * environment variable can override has to be drawn disabled, with an
+	 * explanation, or it accepts a click and silently does nothing — and a
+	 * control that lies is worse than no control. The legacy variables are
+	 * still honoured, but once, as a migration into this file (see
+	 * adoptLegacyRoutingSettings) rather than as a permanent veto.
+	 */
+	private resolveFlag(
+		fileValue: boolean | undefined,
+		defaultValue: boolean,
+	): { value: boolean; source: "file" | "default" } {
+		if (typeof fileValue === "boolean") {
+			return { value: fileValue, source: "file" };
+		}
+		return { value: defaultValue, source: "default" };
+	}
+
+	/**
+	 * One-time adoption of legacy combo routing behavior and the remaining
+	 * disable-fallback variable, so upgrades preserve existing behavior.
+	 *
+	 * Runs at boot, only for fields absent from the config file, and writes
+	 * what it decides — so it happens once and a later deliberate change is
+	 * never undone. Returns one line per adoption for the caller to log:
+	 * silently rewriting someone's routing config, even faithfully, is the
+	 * kind of help nobody asked for.
+	 *
+	 * @param hasCombos whether any combo exists in the database
+	 */
+	adoptLegacyRoutingSettings(hasCombos: boolean): string[] {
+		const notes: string[] = [];
+
+		if (this.getCombosEnabledSource() === "default" && hasCombos) {
+			this.setCombosEnabled(true);
+			notes.push(
+				"combos enabled: this install already has combos, so the routing it was already doing is kept. Turn it off in the dashboard Combos tab",
+			);
+		}
+
+		if (this.getComboSessionFallbackSource() === "default") {
+			const raw = process.env.CCFLARE_DISABLE_COMBO_SESSION_FALLBACK;
+			if (raw !== undefined && raw !== "") {
+				// The old variable is a DISABLE flag, so it inverts into the
+				// positively-stored setting. Its permissive spelling is kept:
+				// narrowing it here would misread a `yes` that someone is
+				// relying on at the exact moment it is read for the last time.
+				const allowed = !/^(1|true|yes|on)$/i.test(raw);
+				this.setComboSessionFallback(allowed);
+				notes.push(
+					`combo session fallback ${allowed ? "allowed" : "blocked"}: adopted from CCFLARE_DISABLE_COMBO_SESSION_FALLBACK, which no longer takes effect on its own — the switch now lives in Settings → Advanced`,
+				);
+			} else if (hasCombos) {
+				this.setComboSessionFallback(true);
+				notes.push(
+					"combo session fallback allowed: this install already has combos, so its historical fallthrough to the normal account pool is kept. Block it in Settings → Advanced if the combo must be exclusive",
+				);
+			}
+		}
+
+		return notes;
+	}
+
+	/**
+	 * Resolve the effective load-balancing strategy plus its source, using the
+	 * same env > file > default precedence getStrategy() has always used.
+	 * Backs both getStrategy() and getStrategySource() so they cannot drift.
+	 */
+	private resolveStrategy(): {
+		value: StrategyName;
+		source: "env" | "file" | "default";
+	} {
+		return this.resolveEnvFileSetting(
+			process.env.LB_STRATEGY,
+			this.data.lb_strategy,
+			isValidStrategy,
+			DEFAULT_STRATEGY,
+		);
+	}
+
+	private resolveModelScopedCapacityRouting(): {
+		value: ModelScopedCapacityRoutingMode;
+		source: "env" | "file" | "default";
+	} {
+		return this.resolveEnvFileSetting(
+			process.env.MODEL_SCOPED_CAPACITY_ROUTING,
+			this.data.model_scoped_capacity_routing,
+			isValidModelScopedCapacityRoutingMode,
+			"off",
+		);
+	}
+
+	getModelScopedCapacityRouting(): ModelScopedCapacityRoutingMode {
+		return this.resolveModelScopedCapacityRouting().value;
+	}
+
+	/**
+	 * Report where the effective model-scoped capacity routing mode comes from,
+	 * mirroring the precedence in getModelScopedCapacityRouting():
+	 * a valid MODEL_SCOPED_CAPACITY_ROUTING env value wins ("env"), else a valid
+	 * config-file field ("file"), else the built-in default ("default"). The
+	 * dashboard uses "env" to lock the control, because a POST that writes the
+	 * file field is ineffective while the env var overrides it.
+	 */
+	getModelScopedCapacityRoutingSource(): "env" | "file" | "default" {
+		return this.resolveModelScopedCapacityRouting().source;
+	}
+
+	setModelScopedCapacityRouting(mode: ModelScopedCapacityRoutingMode): void {
+		if (!isValidModelScopedCapacityRoutingMode(mode)) {
+			throw new ValidationError(
+				`Invalid model_scoped_capacity_routing mode: ${mode}`,
+				"model_scoped_capacity_routing",
+			);
+		}
+		this.set("model_scoped_capacity_routing", mode);
+	}
+
+	/**
+	 * Whether combos take part in routing at all.
+	 *
+	 * The account selector reads this setting, while the dashboard keeps the
+	 * Combos tab permanently visible so the operator can always change it.
+	 *
+	 * Defaults to false: combos are opt-in. An install that already has combos
+	 * adopts true on boot, because upgrading must not silently change anyone's
+	 * routing.
+	 */
+	getCombosEnabled(): boolean {
+		return this.resolveFlag(this.data.combos_enabled, false).value;
+	}
+
+	/** "file" once anyone has set it, "default" while nobody has. */
+	getCombosEnabledSource(): "file" | "default" {
+		return this.resolveFlag(this.data.combos_enabled, false).source;
+	}
+
+	setCombosEnabled(value: boolean): void {
+		this.set("combos_enabled", value);
+	}
+
+	/**
+	 * Whether a combo-routed request may fall through to normal SessionStrategy
+	 * routing once every slot in its combo has failed.
+	 *
+	 * Defaults to false — the fallthrough is blocked. Someone who built a combo
+	 * named the accounts that may serve a family; spilling out of that list when
+	 * they are all busy answers a question nobody asked, and it is how a request
+	 * for one provider ends up served by another. Allowing it stays one click
+	 * away for whoever wants the older, looser behaviour.
+	 *
+	 * Stored positively — the switch says whether the fallthrough is allowed —
+	 * because a control labelled by what it permits beats a double negative on
+	 * screen. The old CCFLARE_DISABLE_COMBO_SESSION_FALLBACK inverts into it,
+	 * once, at boot (adoptLegacyRoutingSettings).
+	 */
+	getComboSessionFallback(): boolean {
+		return this.resolveFlag(this.data.combo_session_fallback, false).value;
+	}
+
+	/** "file" once anyone has set it, "default" while nobody has. */
+	getComboSessionFallbackSource(): "file" | "default" {
+		return this.resolveFlag(this.data.combo_session_fallback, false).source;
+	}
+
+	setComboSessionFallback(value: boolean): void {
+		this.set("combo_session_fallback", value);
+	}
+
+	/**
+	 * Whether the model a client asked for must be the model that is sent.
+	 *
+	 * On, nothing renames the request on its way out: combos are skipped, so no
+	 * slot model is applied, and every mapping — the account's own, the global
+	 * override and the provider's built-in default — is inert. Account
+	 * selection instead keeps only accounts that can serve the requested model,
+	 * and a request with no such account gets an error rather than a different
+	 * model.
+	 *
+	 * Off by default: this changes what a Claude family name means for anyone
+	 * who relies on mapping (asking for a Claude model no longer reaches an
+	 * OpenAI account), so it must be chosen deliberately.
+	 */
+	getForceAccountModel(): boolean {
+		return this.resolveFlag(this.data.force_account_model, false).value;
+	}
+
+	/** "file" once anyone has set it, "default" while nobody has. */
+	getForceAccountModelSource(): "file" | "default" {
+		return this.resolveFlag(this.data.force_account_model, false).source;
+	}
+
+	setForceAccountModel(value: boolean): void {
+		this.set("force_account_model", value);
+	}
+
+	getProviderModelDefaultOverrides(): ProviderModelDefaultOverrides {
+		const raw = this.data.provider_model_default_overrides;
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+		const overrides: ProviderModelDefaultOverrides = {};
+		for (const [provider, families] of Object.entries(raw)) {
+			if (!families || typeof families !== "object" || Array.isArray(families))
+				continue;
+			const values: Record<string, string> = {};
+			for (const [family, model] of Object.entries(families)) {
+				if (typeof model === "string" && model.trim())
+					values[family] = model.trim();
+			}
+			if (Object.keys(values).length > 0) overrides[provider] = values;
+		}
+		return overrides;
+	}
+
+	setProviderModelDefaultOverrides(
+		overrides: ProviderModelDefaultOverrides,
+	): void {
+		this.data.provider_model_default_overrides = overrides;
+		this.saveConfig();
+		this.emit("change", {
+			key: "provider_model_default_overrides",
+			newValue: overrides,
+		});
+	}
+
+	/**
+	 * Providers currently allowed to edit their model-default overrides:
+	 * "codex" by default, or the exact CCFLARE_MODEL_DEFAULTS_PROVIDERS
+	 * list when that env var is set (comma-separated, trimmed). Never
+	 * affects which providers HAVE a built-in factory map — only which
+	 * of them expose that map for override via the API/dashboard.
+	 */
+	getEnabledProviderModelDefaultProviders(): string[] {
+		const fromEnv = process.env.CCFLARE_MODEL_DEFAULTS_PROVIDERS;
+		if (fromEnv) {
+			const parsed = fromEnv
+				.split(",")
+				.map((provider) => provider.trim())
+				.filter(Boolean);
+			if (parsed.length > 0) return parsed;
+		}
+		return [...DEFAULT_PROVIDER_MODEL_DEFAULTS_PROVIDERS];
 	}
 
 	getHealthDetailEnabled(): boolean {
@@ -642,6 +1163,42 @@ export class Config extends EventEmitter {
 		this.set("alert_anomaly_interval_minutes", this.clamp(value, 5, 1440));
 	}
 
+	getAlertAnomalyBaselineWindowMinutes(): number {
+		const fromEnv = process.env.ALERT_ANOMALY_BASELINE_WINDOW_MINUTES;
+		if (fromEnv) {
+			const n = Number.parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 60, 43200);
+		}
+		const fromFile = this.data.alert_anomaly_baseline_window_minutes;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 60, 43200);
+		return 1440;
+	}
+
+	setAlertAnomalyBaselineWindowMinutes(value: number): void {
+		this.set(
+			"alert_anomaly_baseline_window_minutes",
+			this.clamp(value, 60, 43200),
+		);
+	}
+
+	getAlertAnomalyLoopMinRequests(): number {
+		const fromEnv = process.env.ALERT_ANOMALY_LOOP_MIN_REQUESTS;
+		if (fromEnv) {
+			const n = Number.parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 5, 1000);
+		}
+		const fromFile = this.data.alert_anomaly_loop_min_requests;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 5, 1000);
+		// Default 25 — above the per-agent request rate we expect from any
+		// single legitimate worker in a 5-minute window, while still well
+		// below the rate a true runaway loop reaches (50+ req/min).
+		return 25;
+	}
+
+	setAlertAnomalyLoopMinRequests(value: number): void {
+		this.set("alert_anomaly_loop_min_requests", this.clamp(value, 5, 1000));
+	}
+
 	getAlertCooldownMinutes(): number {
 		const fromEnv = process.env.ALERT_COOLDOWN_MINUTES;
 		if (fromEnv) {
@@ -686,7 +1243,10 @@ export class Config extends EventEmitter {
 		this.set("alert_webhook_url", value);
 	}
 
-	getAllSettings(): Record<string, string | number | boolean | undefined> {
+	getAllSettings(): Record<
+		string,
+		string | number | boolean | ProviderModelDefaultOverrides | undefined
+	> {
 		// Include current strategy (which might come from env)
 		return {
 			...this.data,
@@ -694,6 +1254,7 @@ export class Config extends EventEmitter {
 			default_agent_model: this.getDefaultAgentModel(),
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
+			usage_history_retention_days: this.getUsageHistoryRetentionDays(),
 			store_payloads: this.getStorePayloads(),
 			request_storage_headers_only: this.getRequestStorageHeadersOnly(),
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
@@ -702,12 +1263,23 @@ export class Config extends EventEmitter {
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
+			codex_five_hour_window_enabled: this.getCodexFiveHourWindowEnabled(),
+			model_scoped_capacity_routing: this.getModelScopedCapacityRouting(),
+			combos_enabled: this.getCombosEnabled(),
+			combo_session_fallback: this.getComboSessionFallback(),
+			force_account_model: this.getForceAccountModel(),
+			agent_frontmatter_model_fallback: this.getAgentFrontmatterModelFallback(),
+			model_catalog_oauth_refresh_enabled:
+				this.getModelCatalogOAuthRefreshEnabled(),
 			health_detail_enabled: this.getHealthDetailEnabled(),
 			alert_daily_spend_usd: this.getAlertDailySpendUsd(),
 			alert_tokens_per_hour: this.getAlertTokensPerHour(),
 			alert_request_tokens: this.getAlertRequestTokens(),
 			alert_anomaly_enabled: this.getAlertAnomalyEnabled(),
 			alert_anomaly_interval_minutes: this.getAlertAnomalyIntervalMinutes(),
+			alert_anomaly_baseline_window_minutes:
+				this.getAlertAnomalyBaselineWindowMinutes(),
+			alert_anomaly_loop_min_requests: this.getAlertAnomalyLoopMinRequests(),
 			alert_cooldown_minutes: this.getAlertCooldownMinutes(),
 			alert_webhook_url: this.getAlertWebhookUrl(),
 		};

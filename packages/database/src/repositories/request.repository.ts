@@ -1,8 +1,70 @@
 import { Logger } from "@better-ccflare/logger";
+import type {
+	AgentAttributionSource,
+	ProjectAttributionSource,
+} from "@better-ccflare/types";
+import { getCleanupBatchSize } from "../adapters/bun-sql-adapter";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 
 const log = new Logger("RequestRepository");
+
+/** Upper bound for a stored client session id. Generous for real ids
+ * (`user_<hash>_account_<hash>_session_<uuid>` is well under 200), tight
+ * enough that a hostile or buggy client cannot grow every row without limit. */
+const CLIENT_SESSION_ID_MAX_LEN = 200;
+
+/**
+ * The client session id comes straight from the request body
+ * (`metadata.user_id`) and is only checked for non-emptiness upstream, because
+ * it was previously used for in-memory routing only. Persisting it makes the
+ * absent bounds matter: an oversized or control-character-laden value would
+ * otherwise be written to every row, bloat the database and break log and CSV
+ * output. Mirrors what `sanitizeProjectName` already does for the other
+ * client-supplied string this table stores.
+ *
+ * Sanitizing on WRITE rather than at the source is deliberate: session-affinity
+ * routing keys on the raw value, and truncating there could collide two
+ * distinct sessions onto one account.
+ */
+function sanitizeClientSessionId(
+	raw: string | null | undefined,
+): string | null {
+	if (!raw) return null;
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+	const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
+	if (!cleaned) return null;
+	return cleaned.length > CLIENT_SESSION_ID_MAX_LEN
+		? cleaned.slice(0, CLIENT_SESSION_ID_MAX_LEN)
+		: cleaned;
+}
+
+// Source-authority ranks for the UPSERT conflict resolution below. Higher
+// number = higher authority. NULL and "none" both fall through to the ELSE
+// branch (rank 0) since neither is an explicit attribution.
+//
+// Project: header (explicit client header) > path (workspace path in the
+// system prompt) > heading (inferred from an H1 heading) > none.
+const PROJECT_SOURCE_RANK_SQL = `CASE %COL%
+	WHEN 'header_project' THEN 3
+	WHEN 'path_project' THEN 2
+	WHEN 'heading_project' THEN 1
+	ELSE 0
+END`;
+// Agent: header (explicit client header) > prompt (inferred from the prompt) > none.
+const AGENT_SOURCE_RANK_SQL = `CASE %COL%
+	WHEN 'header_agent' THEN 2
+	WHEN 'prompt_agent' THEN 1
+	ELSE 0
+END`;
+
+function projectRank(col: string): string {
+	return PROJECT_SOURCE_RANK_SQL.replace("%COL%", col);
+}
+
+function agentRank(col: string): string {
+	return AGENT_SOURCE_RANK_SQL.replace("%COL%", col);
+}
 
 /**
  * Decrypt a stored payload for a list endpoint, swallowing per-row errors
@@ -42,6 +104,35 @@ export interface RequestData {
 	project?: string | null;
 	billingType?: string;
 	comboName?: string | null;
+	/**
+	 * Model the client originally requested and the model actually sent
+	 * upstream, when an agent-preference rewrite (`isRewriteTargetServable`
+	 * guard notwithstanding) changed it. Both are only populated when a swap
+	 * actually occurred; leave both `undefined`/null when no rewrite happened
+	 * so the columns stay unpopulated rather than duplicating the `model`
+	 * column with an unchanged value.
+	 */
+	originalModel?: string | null;
+	appliedModel?: string | null;
+	projectAttributionSource?: ProjectAttributionSource | null;
+	agentAttributionSource?: AgentAttributionSource | null;
+	/** Client-supplied session id (body `metadata.user_id`), used for attribution. */
+	clientSessionId?: string | null;
+	// (sanitized on write — see sanitizeClientSessionId)
+	/**
+	 * Real SSE termination state for Anthropic-Messages-shaped streams. One of
+	 * "complete" | "recovered" | "error" | "truncated" | "client_cancelled" |
+	 * null/undefined. Undefined/null for non-streaming responses or streams
+	 * not wrapped by the terminal-recovery observer. See
+	 * packages/proxy/src/anthropic-terminal-recovery.ts for the producer.
+	 */
+	streamTerminalState?:
+		| "complete"
+		| "recovered"
+		| "error"
+		| "truncated"
+		| "client_cancelled"
+		| null;
 	/** Resolved project UUID from worktree path attribution (Phase 3) */
 	projectId?: string | null;
 	/** Resolved worktree path matched during attribution (Phase 3) */
@@ -63,6 +154,23 @@ export interface RequestData {
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
+		const projectRankIncoming = projectRank(
+			"EXCLUDED.project_attribution_source",
+		);
+		const projectRankExisting = projectRank(
+			"requests.project_attribution_source",
+		);
+		const agentRankIncoming = agentRank("EXCLUDED.agent_attribution_source");
+		const agentRankExisting = agentRank("requests.agent_attribution_source");
+		// An incoming project/agent pair wins the conflict only when it carries a
+		// non-null value AND its source is at least as authoritative as the
+		// existing one. Equal rank still wins (keeps legacy no-source callers,
+		// where both sides rank 0, overwriting as before; and lets a fresh
+		// same-authority re-derivation replace a stale one). Strictly lower rank
+		// never wins, so an omitted/`none`/lower-authority source can no longer
+		// erase or downgrade a higher-authority attribution (e.g. header_*).
+		const projectWinsIncoming = `EXCLUDED.project IS NOT NULL AND ${projectRankIncoming} >= ${projectRankExisting}`;
+		const agentWinsIncoming = `EXCLUDED.agent_used IS NOT NULL AND ${agentRankIncoming} >= ${agentRankExisting}`;
 		await this.run(
 			`
 			INSERT INTO requests (
@@ -71,9 +179,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				model, prompt_tokens, completion_tokens, total_tokens, cost_usd,
 				input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
 				agent_used, output_tokens_per_second, api_key_id, api_key_name, project,
-				billing_type, combo_name, project_id, worktree_path
+				billing_type, combo_name, original_model, applied_model,
+				project_attribution_source, agent_attribution_source,
+				stream_terminal_state, client_session_id,
+				project_id, worktree_path
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -93,13 +204,36 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				cache_read_input_tokens = EXCLUDED.cache_read_input_tokens,
 				cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
 				output_tokens = EXCLUDED.output_tokens,
-				agent_used = EXCLUDED.agent_used,
 				output_tokens_per_second = EXCLUDED.output_tokens_per_second,
 				api_key_id = EXCLUDED.api_key_id,
 				api_key_name = EXCLUDED.api_key_name,
-				project = COALESCE(EXCLUDED.project, requests.project),
 				billing_type = COALESCE(EXCLUDED.billing_type, requests.billing_type),
 				combo_name = COALESCE(EXCLUDED.combo_name, requests.combo_name),
+				original_model = COALESCE(EXCLUDED.original_model, requests.original_model),
+				applied_model = COALESCE(EXCLUDED.applied_model, requests.applied_model),
+				-- (project, project_attribution_source) and (agent_used, agent_attribution_source)
+				-- move in LOCKSTEP and are resolved by SOURCE AUTHORITY, not preserve-first or
+				-- unconditional-overwrite (see projectRank/agentRank above). The incoming pair
+				-- replaces the existing pair only when it has a non-null value AND a source rank
+				-- >= the existing source rank; otherwise the existing pair is kept verbatim. This
+				-- stops a re-save with an omitted/none/lower-authority source (e.g. a heading
+				-- re-derived on a later request) from erasing or downgrading a higher-authority
+				-- attribution (e.g. header_project) recorded earlier for the same request id.
+				project = CASE WHEN ${projectWinsIncoming} THEN EXCLUDED.project ELSE requests.project END,
+				project_attribution_source = CASE WHEN ${projectWinsIncoming} THEN EXCLUDED.project_attribution_source ELSE requests.project_attribution_source END,
+				agent_used = CASE WHEN ${agentWinsIncoming} THEN EXCLUDED.agent_used ELSE requests.agent_used END,
+				agent_attribution_source = CASE WHEN ${agentWinsIncoming} THEN EXCLUDED.agent_attribution_source ELSE requests.agent_attribution_source END,
+				-- stream_terminal_state uses preserve-first (COALESCE) — a later
+				-- re-finalization (e.g. updateUsage after handleEnd) shouldn't
+				-- blank out the real SSE termination state the handleEnd path
+				-- recorded. A null incoming value means "I have nothing new",
+				-- not "the stream was clean".
+				stream_terminal_state = COALESCE(EXCLUDED.stream_terminal_state, requests.stream_terminal_state),
+				-- The client session id is fixed for a given request id, and the
+				-- error paths that re-save a row do not carry it. Preserve-first,
+				-- so a later save without it cannot blank out what the main path
+				-- recorded.
+				client_session_id = COALESCE(EXCLUDED.client_session_id, requests.client_session_id),
 				project_id = COALESCE(EXCLUDED.project_id, requests.project_id),
 				worktree_path = COALESCE(EXCLUDED.worktree_path, requests.worktree_path)
 		`,
@@ -130,6 +264,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.project || null,
 				data.billingType || null,
 				data.comboName || null,
+				data.originalModel || null,
+				data.appliedModel || null,
+				data.projectAttributionSource || null,
+				data.agentAttributionSource || null,
+				data.streamTerminalState ?? null,
+				sanitizeClientSessionId(data.clientSessionId),
 				data.projectId ?? null,
 				data.worktreePath ?? null,
 			],
@@ -334,10 +474,18 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		);
 
 		return {
-			totalRequests: result?.total_requests || 0,
-			successfulRequests: result?.successful_requests || 0,
-			failedRequests: result?.failed_requests || 0,
-			avgResponseTime: result?.avg_response_time || null,
+			// Bun.SQL returns COUNT()/SUM() as JavaScript strings on PostgreSQL
+			// (BIGINT is stringified, see Bun#22188). Coerce to Number so the
+			// public return type stays a plain number and downstream `toBe(N)`
+			// assertions on this method hold on both dialects. avg() already
+			// returns numeric/Number on both.
+			totalRequests: Number(result?.total_requests) || 0,
+			successfulRequests: Number(result?.successful_requests) || 0,
+			failedRequests: Number(result?.failed_requests) || 0,
+			avgResponseTime:
+				result?.avg_response_time == null
+					? null
+					: Number(result.avg_response_time),
 		};
 	}
 
@@ -480,9 +628,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	async deleteOlderThan(cutoffTs: number): Promise<number> {
-		// Increased from 500 to 2000 for more aggressive cleanup of large databases.
 		// The covering index idx_requests_cleanup makes each batch faster.
-		const BATCH_SIZE = 2000;
+		// Batch size is configurable via BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE
+		// (default 200) — lower it if rows are large and batches are timing
+		// out against statement_timeout (#412).
+		const BATCH_SIZE = getCleanupBatchSize();
 		let total = 0;
 		let deleted: number;
 		do {
@@ -498,15 +648,36 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	async deleteOrphanedPayloads(): Promise<number> {
-		return this.runWithChanges(
-			`DELETE FROM request_payloads WHERE id NOT IN (SELECT id FROM requests)`,
-		);
+		// Batched like deleteOlderThan/deletePayloadsOlderThan above — an unbounded
+		// DELETE here can exceed the PG statement_timeout once the table is large.
+		// LEFT JOIN instead of NOT IN (SELECT ...) avoids the slow anti-join plan
+		// NOT IN produces against a large subquery on both SQLite and PostgreSQL.
+		// Batch size is configurable via BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE
+		// (default 200) — lower it if rows are large (#412).
+		const BATCH_SIZE = getCleanupBatchSize();
+		let total = 0;
+		let deleted: number;
+		do {
+			deleted = await this.runWithChanges(
+				`DELETE FROM request_payloads WHERE id IN (
+					SELECT rp.id FROM request_payloads rp
+					LEFT JOIN requests r ON r.id = rp.id
+					WHERE r.id IS NULL
+					LIMIT ?
+				)`,
+				[BATCH_SIZE],
+			);
+			total += deleted;
+		} while (deleted === BATCH_SIZE);
+		return total;
 	}
 
 	async deletePayloadsOlderThan(cutoffTs: number): Promise<number> {
-		// Increased from 500 to 2000 for more aggressive cleanup of large databases.
 		// The covering index idx_request_payloads_cleanup makes each batch faster.
-		const BATCH_SIZE = 2000;
+		// Batch size is configurable via BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE
+		// (default 200) — lower it if rows are large (e.g. TOASTed payload JSON)
+		// and batches are timing out against statement_timeout (#412).
+		const BATCH_SIZE = getCleanupBatchSize();
 		let total = 0;
 		let deleted: number;
 		do {

@@ -26,6 +26,8 @@ Combos let you define named, ordered fallback chains of (account, model) pairs. 
 
 When no combo is assigned to a model family (or the family toggle is disabled), normal session-based routing applies unchanged. Combos are completely optional — they don't affect default load balancing behavior.
 
+The same is true when combos are switched off entirely, on the Combos tab: the combos you configured stay saved but take no part in routing. That switch is off by default; see [FEATURE_COMBOS.md](../FEATURE_COMBOS.md).
+
 ## Core Concepts
 
 ### Combo
@@ -182,6 +184,15 @@ All combo and family management endpoints are available via the REST API.
 | ------ | -------- | ----------- |
 | `GET` | `/api/families` | Get all family → combo assignments |
 | `PUT` | `/api/families/:family` | Assign or unassign a combo to a family |
+
+### Routing Switch
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| `GET` | `/api/config/combos-enabled` | Whether saved combos currently take part in routing |
+| `POST` | `/api/config/combos-enabled` | Enable or disable combo routing (combos and slots are unaffected) |
+
+See [FEATURE_COMBOS.md](../FEATURE_COMBOS.md) and [api-http.md](api-http.md#get-apiconfigcombos-enabled) for details.
 
 ### Example: Create and Activate a Combo
 

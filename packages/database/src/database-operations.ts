@@ -4,9 +4,15 @@ import { stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RuntimeConfig } from "@better-ccflare/config";
 import type { Disposable } from "@better-ccflare/core";
-import { TIME_CONSTANTS } from "@better-ccflare/core";
+import {
+	ResolverManager,
+	type ResolverProjectInput,
+	type ResolverRuleInput,
+	TIME_CONSTANTS,
+} from "@better-ccflare/core";
 import type {
 	Account,
+	AgentAttributionSource,
 	Combo,
 	ComboFamily,
 	ComboFamilyAssignment,
@@ -14,16 +20,12 @@ import type {
 	ComboWithSlots,
 	IntegrityStatus,
 	Project,
+	ProjectAttributionSource,
 	RateLimitReason,
 	StrategyStore,
 	WorktreeRule,
 	WorktreeRuleKind,
 } from "@better-ccflare/types";
-import {
-	ResolverManager,
-	type ResolverProjectInput,
-	type ResolverRuleInput,
-} from "@better-ccflare/core";
 import {
 	BunSqlAdapter,
 	PG_CLIENT_QUERY_TIMEOUT_MS,
@@ -32,20 +34,30 @@ import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-va
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { ensureSchema, runMigrations } from "./migrations";
 import { ensureSchemaPg, runMigrationsPg } from "./migrations-pg";
+import {
+	readMultiInstanceMode,
+	runStartupGuard,
+	startHeartbeatLoop,
+} from "./multi-instance-guard";
 import { resolveDbPath } from "./paths";
-import { AccountRepository } from "./repositories/account.repository";
+import {
+	AccountRepository,
+	type ClearedRateLimit,
+	type MarkAccountRateLimitedResult,
+} from "./repositories/account.repository";
 import { AgentPreferenceRepository } from "./repositories/agent-preference.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import { ProjectRepository } from "./repositories/project.repository";
-import { WorktreeRuleRepository } from "./repositories/worktree-rule.repository";
 import {
 	type RequestData,
 	RequestRepository,
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UsageHistoryRepository } from "./repositories/usage-history.repository";
+import { WorktreeRuleRepository } from "./repositories/worktree-rule.repository";
 import { withDatabaseRetry } from "./retry";
 
 export interface DatabaseConfig {
@@ -216,6 +228,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private originalAutoVacuumMode?: number;
 	/** Prevents concurrent compact() calls from spawning multiple vacuum workers */
 	private compacting = false;
+	/** Stop function returned by the multi-instance guard's heartbeat loop. */
+	private heartbeatStop: (() => Promise<void>) | null = null;
 	/**
 	 * Hourly `incrementalVacuum()` ticks that bailed because the worker
 	 * couldn't claim the writer slot (SQLITE_BUSY). Bumped on every failure,
@@ -264,6 +278,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private _caseSensitive = process.platform !== "darwin";
 	/** Injected by DiscoveryScheduler to break the circular-import cycle. */
 	private _discoveryRunner: (() => Promise<unknown>) | null = null;
+	private usageHistory: UsageHistoryRepository;
 
 	constructor(
 		dbPath?: string,
@@ -327,6 +342,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			// zero/negative (PG treats 0 as "disabled"), or too-large override is
 			// silently clamped rather than trusted, since an unbounded value here
 			// reopens the exact connection-leak bug this timeout exists to close.
+			// PG_CLIENT_QUERY_TIMEOUT_MS itself is configurable via
+			// BETTER_CCFLARE_DB_CLIENT_TIMEOUT (default 8000ms), so raising that
+			// env var also raises this clamp's ceiling (#412).
 			const requestedPgStatementTimeout = Number(
 				process.env.BETTER_CCFLARE_DB_STATEMENT_TIMEOUT,
 			);
@@ -404,6 +422,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.combo = new ComboRepository(this.adapter);
 		this.projects = new ProjectRepository(this.adapter);
 		this.worktreeRules = new WorktreeRuleRepository(this.adapter);
+		this.usageHistory = new UsageHistoryRepository(this.adapter);
 	}
 
 	/**
@@ -414,6 +433,15 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			await ensureSchemaPg(this.adapter);
 			await runMigrationsPg(this.adapter);
 		}
+		// Run the multi-instance guard after migrations so the heartbeat table
+		// exists before we probe it. SQLite migrations are synchronous so they
+		// were applied inside the constructor; for PG we just ran them above.
+		// Default mode is "warn" — see #351.
+		const mode = readMultiInstanceMode();
+		await runStartupGuard(this.adapter, { mode });
+		// Start the heartbeat loop so this instance's row is refreshed
+		// while it lives. The stopper is invoked from close().
+		this.heartbeatStop = startHeartbeatLoop(this.adapter);
 	}
 
 	setRuntimeConfig(runtime: RuntimeConfig): void {
@@ -797,6 +825,84 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async setRequiresReauth(accountId: string, value: boolean): Promise<void> {
+		await withDatabaseRetry(
+			() => this.accounts.setRequiresReauth(accountId, value),
+			this.retryConfig,
+			"setRequiresReauth",
+		);
+	}
+
+	/**
+	 * Compare-and-set variant of {@link updateAccountTokens} guarded on the
+	 * expected refresh token — see
+	 * {@link AccountRepository.updateTokensIfRefreshTokenMatches}.
+	 */
+	async updateAccountTokensIfRefreshTokenMatches(
+		accountId: string,
+		expectedRefreshToken: string,
+		accessToken: string,
+		expiresAt: number,
+		refreshToken?: string,
+	): Promise<boolean> {
+		return withDatabaseRetry(
+			() =>
+				this.accounts.updateTokensIfRefreshTokenMatches(
+					accountId,
+					expectedRefreshToken,
+					accessToken,
+					expiresAt,
+					refreshToken,
+				),
+			this.retryConfig,
+			"updateAccountTokensIfRefreshTokenMatches",
+		);
+	}
+
+	/**
+	 * Compare-and-set variant of {@link updateAccountTokens} guarded on the
+	 * account currently having no refresh token — see
+	 * {@link AccountRepository.updateTokensIfRefreshTokenAbsent}.
+	 */
+	async updateAccountTokensIfRefreshTokenAbsent(
+		accountId: string,
+		accessToken: string,
+		expiresAt: number,
+		refreshToken?: string,
+	): Promise<boolean> {
+		return withDatabaseRetry(
+			() =>
+				this.accounts.updateTokensIfRefreshTokenAbsent(
+					accountId,
+					accessToken,
+					expiresAt,
+					refreshToken,
+				),
+			this.retryConfig,
+			"updateAccountTokensIfRefreshTokenAbsent",
+		);
+	}
+
+	/**
+	 * Compare-and-set variant of {@link setRequiresReauth}(accountId, true)
+	 * guarded on the expected refresh token — see
+	 * {@link AccountRepository.flagRequiresReauthIfTokenMatches}.
+	 */
+	async flagRequiresReauthIfTokenMatches(
+		accountId: string,
+		expectedRefreshToken: string,
+	): Promise<boolean> {
+		return withDatabaseRetry(
+			() =>
+				this.accounts.flagRequiresReauthIfTokenMatches(
+					accountId,
+					expectedRefreshToken,
+				),
+			this.retryConfig,
+			"flagRequiresReauthIfTokenMatches",
+		);
+	}
+
 	async updateAccountUsage(accountId: string): Promise<void> {
 		const sessionDuration =
 			this.runtime?.sessionDurationMs || 5 * 60 * 60 * 1000;
@@ -811,9 +917,16 @@ OAuth tokens will need to be re-authenticated.
 		accountId: string,
 		until: number,
 		reason: RateLimitReason,
-	): Promise<number> {
+		incrementStreak = true,
+	): Promise<MarkAccountRateLimitedResult> {
 		return withDatabaseRetry(
-			() => this.accounts.markAccountRateLimited(accountId, until, reason),
+			() =>
+				this.accounts.markAccountRateLimited(
+					accountId,
+					until,
+					reason,
+					incrementStreak,
+				),
 			this.retryConfig,
 			"markAccountRateLimited",
 		);
@@ -828,11 +941,15 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
-	 * Clear expired rate_limited_until values from all accounts
+	 * Clear expired rate_limited_until values from all accounts and return
+	 * the `(id, provider)` pairs that were cleared. The caller (server.ts)
+	 * feeds each cleared entry to the circuit breaker via `recordSuccess` —
+	 * the active-clear path from the circuit-breaker integration design §3.
+	 *
 	 * @param now The current timestamp to compare against
-	 * @returns Number of accounts that had their rate_limited_until cleared
+	 * @returns The accounts whose `rate_limited_until` was cleared
 	 */
-	async clearExpiredRateLimits(now: number): Promise<number> {
+	async clearExpiredRateLimits(now: number): Promise<ClearedRateLimit[]> {
 		return withDatabaseRetry(
 			() => this.accounts.clearExpiredRateLimits(now),
 			this.retryConfig,
@@ -852,6 +969,36 @@ OAuth tokens will need to be re-authenticated.
 			reset,
 			remaining,
 		);
+	}
+
+	// Usage-history operations delegated to repository
+	getUsageHistoryRepository(): UsageHistoryRepository {
+		return this.usageHistory;
+	}
+
+	async recordUsageSnapshot(
+		accountId: string,
+		usage: Record<string, unknown>,
+		now: number,
+	): Promise<void> {
+		await this.usageHistory.recordSnapshot(accountId, usage, now);
+	}
+
+	async getUsageHistory(opts: {
+		accountId: string;
+		windowKey?: string;
+		since?: number;
+		until?: number;
+	}) {
+		return this.usageHistory.getSeries(opts);
+	}
+
+	async getLatestUsageSnapshot(accountId: string, windowKey: string) {
+		return this.usageHistory.getLatestSnapshot(accountId, windowKey);
+	}
+
+	async pruneUsageSnapshots(cutoffTs: number): Promise<number> {
+		return this.usageHistory.deleteOlderThan(cutoffTs);
 	}
 
 	async forceResetAccountRateLimit(accountId: string): Promise<boolean> {
@@ -952,6 +1099,18 @@ OAuth tokens will need to be re-authenticated.
 		project?: string | null,
 		billingType?: string,
 		comboName?: string | null,
+		originalModel?: string | null,
+		appliedModel?: string | null,
+		projectAttributionSource?: ProjectAttributionSource | null,
+		agentAttributionSource?: AgentAttributionSource | null,
+		streamTerminalState?:
+			| "complete"
+			| "recovered"
+			| "error"
+			| "truncated"
+			| "client_cancelled"
+			| null,
+		clientSessionId?: string | null,
 		projectId?: string | null,
 		worktreePath?: string | null,
 	): Promise<void> {
@@ -974,6 +1133,12 @@ OAuth tokens will need to be re-authenticated.
 					project,
 					billingType,
 					comboName,
+					originalModel,
+					appliedModel,
+					projectAttributionSource,
+					agentAttributionSource,
+					streamTerminalState,
+					clientSessionId,
 					projectId,
 					worktreePath,
 				}),
@@ -1263,6 +1428,16 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	async close(): Promise<void> {
+		// Stop the multi-instance heartbeat loop and remove this instance's
+		// row before closing the adapter. Best-effort — errors here are
+		// logged inside the stopper, not rethrown.
+		if (this.heartbeatStop) {
+			try {
+				await this.heartbeatStop();
+			} finally {
+				this.heartbeatStop = null;
+			}
+		}
 		await this.adapter.close();
 	}
 

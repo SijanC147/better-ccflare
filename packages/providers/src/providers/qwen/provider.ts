@@ -1,6 +1,10 @@
 import { Logger } from "@better-ccflare/logger";
 import type { OpenAIRequest } from "@better-ccflare/openai-formats";
 import type { Account } from "@better-ccflare/types";
+import {
+	registerProviderModelDefaultFactory,
+	resolveProviderModelDefault,
+} from "../../provider-model-defaults";
 import type { RateLimitInfo } from "../../types";
 import { OpenAICompatibleProvider } from "../openai/provider";
 
@@ -23,10 +27,22 @@ const STAINLESS_HEADERS: Record<string, string> = {
 
 // All Anthropic model tiers map to coder-model (Qwen's unified coding model)
 const QWEN_MODEL_MAPPINGS = {
+	fable: "coder-model",
 	opus: "coder-model",
 	sonnet: "coder-model",
 	haiku: "coder-model",
 };
+
+registerProviderModelDefaultFactory("qwen", QWEN_MODEL_MAPPINGS);
+
+function resolvedQwenModelMappings(): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(QWEN_MODEL_MAPPINGS).map(([family, factory]) => [
+			family,
+			resolveProviderModelDefault("qwen", family) ?? factory,
+		]),
+	);
+}
 
 // Lines in the Claude Code system prompt that are environment/model-specific
 // and should be dropped entirely when proxying to Qwen.
@@ -154,7 +170,7 @@ export class QwenProvider extends OpenAICompatibleProvider {
 		return {
 			...account,
 			model_mappings:
-				account.model_mappings ?? JSON.stringify(QWEN_MODEL_MAPPINGS),
+				account.model_mappings ?? JSON.stringify(resolvedQwenModelMappings()),
 		};
 	}
 

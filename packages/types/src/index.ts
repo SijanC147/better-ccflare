@@ -13,6 +13,8 @@ export * from "./conversation";
 export * from "./insights";
 export * from "./logging";
 export * from "./project";
+export * from "./rate-limit-reason";
 export * from "./request";
 export * from "./stats";
 export * from "./strategy";
+export * from "./usage-history";

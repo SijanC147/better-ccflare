@@ -30,6 +30,20 @@ For a specific upstream tag, namespace it:
 All `gh` commands must pass `--repo SijanC147/better-ccflare` — in a fork, `gh` may
 otherwise target tombii's repository.
 
+## Never contact upstream
+
+Outbound communication to `tombii/better-ccflare` is forbidden by default: no pushes, PRs,
+issues, comments, or bug reports. This is a standing instruction, not a per-sync judgement
+call. It applies even when a sync surfaces a real upstream defect — and syncs routinely do,
+since the 2026-08 sync found three genuine `fetch`-restore bugs in upstream's test suite.
+
+Record such findings locally (MERGELOG entry, Linear issue) and stop there. **A confirmed
+upstream bug is not authorisation to report it.** Only Sean, saying so explicitly in the
+session, is — and then confirm twice before sending anything.
+
+Upstream remotes stay fetch-only (`no_push`); verify with `git remote get-url --push upstream`
+before any push in this repo.
+
 ## Branch protection
 
 `refs/heads/main` is protected by ruleset `hextap/main` (ID `21627513`): **PR-only**, no

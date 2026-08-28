@@ -22,10 +22,11 @@ import {
 	useRemoveComboSlot,
 	useReorderComboSlots,
 } from "../../hooks/queries";
+import { providerAllowsClientModelPassthrough } from "../../utils/provider-utils";
+import { ModelCombobox } from "../models/ModelCombobox";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
-import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import {
 	Select,
@@ -94,7 +95,11 @@ function SortableSlotRow({
 			</div>
 
 			<span className="shrink-0 font-mono text-xs text-muted-foreground">
-				{slot.model}
+				{slot.model?.trim() ? (
+					slot.model
+				) : (
+					<span className="italic">client model</span>
+				)}
 			</span>
 
 			<Button
@@ -108,6 +113,24 @@ function SortableSlotRow({
 			</Button>
 		</div>
 	);
+}
+
+/**
+ * Help line under the model field — must state the rule that applies TO THE
+ * SELECTED ACCOUNT, not a universal "Empty = passthrough" that only holds
+ * on the Anthropic provider.
+ */
+function modelFieldHint(
+	provider: string | null,
+	passthroughAllowed: boolean,
+): string {
+	if (!provider) {
+		return "Pick an account first: whether the model is required depends on the provider.";
+	}
+	if (passthroughAllowed) {
+		return "Empty = passthrough: the model sent by the client goes upstream untouched.";
+	}
+	return `Required for ${provider}: this provider does not serve Claude model ids, so there is no passthrough.`;
 }
 
 interface ComboSlotBuilderProps {
@@ -128,6 +151,19 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 	const accounts = accountsQuery.data ?? [];
 	const families = familiesQuery.data?.families ?? [];
 	const assignedFamily = families.find((f) => f.combo_id === combo.id);
+	// The combobox needs the provider of the chosen account: without it the
+	// list suggested a Claude model for an OpenAI account.
+	const selectedProvider =
+		accounts.find((a) => a.id === newAccountId)?.provider ?? null;
+	// DERIVED on every render from (selected account + field text). None of
+	// this is copied into useState or synced via useEffect — that is what
+	// guarantees coherence when the user types first and switches the account
+	// afterward: label, hint, and the Add button's disabled state are all
+	// recomputed in the same render, so no click order lets an invalid slot through.
+	const passthroughAllowed =
+		providerAllowsClientModelPassthrough(selectedProvider);
+	const modelRequired = Boolean(selectedProvider) && !passthroughAllowed;
+	const missingRequiredModel = modelRequired && newModel.trim().length === 0;
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -160,7 +196,11 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 	};
 
 	const handleAddSlot = () => {
-		if (!newAccountId || !newModel.trim()) return;
+		// The model is only optional on a passthrough provider (the rule lives in
+		// utils/provider-utils). Outside those, an empty field means an invalid
+		// slot: the button is already disabled, this guard is the seatbelt against
+		// any code path that calls this anyway.
+		if (!newAccountId || missingRequiredModel) return;
 		addSlot.mutate(
 			{
 				comboId: combo.id,
@@ -230,14 +270,28 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 							</Select>
 						</div>
 						<div className="space-y-1.5">
-							<Label>Model</Label>
-							<Input
-								value={newModel}
-								onChange={(e) => setNewModel(e.target.value)}
-								placeholder="claude-3-opus"
-							/>
+							<Label>{passthroughAllowed ? "Model (optional)" : "Model"}</Label>
+							<div className="flex items-center gap-1.5">
+								<ModelCombobox
+									provider={selectedProvider}
+									accountId={newAccountId || null}
+									value={newModel}
+									onChange={setNewModel}
+									placeholder="Model id"
+									className="flex-1"
+								/>
+							</div>
+							<p className="text-[11px] text-muted-foreground">
+								{modelFieldHint(selectedProvider, passthroughAllowed)} Test
+								sends one real request to the provider and consumes quota.
+							</p>
 						</div>
-						<div className="flex justify-end gap-2">
+						<div className="flex items-center justify-end gap-2">
+							{missingRequiredModel && (
+								<p className="mr-auto text-[11px] text-destructive">
+									Pick a model: {selectedProvider} does not accept passthrough.
+								</p>
+							)}
 							<Button
 								variant="outline"
 								size="sm"
@@ -253,7 +307,12 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 								size="sm"
 								onClick={handleAddSlot}
 								disabled={
-									!newAccountId || !newModel.trim() || addSlot.isPending
+									!newAccountId || missingRequiredModel || addSlot.isPending
+								}
+								title={
+									missingRequiredModel
+										? `A model is required for ${selectedProvider}: this provider does not serve Claude model ids, so there is no passthrough.`
+										: undefined
 								}
 							>
 								{addSlot.isPending ? "Adding..." : "Add"}

@@ -27,3 +27,14 @@ const identity = dashboardBuildIdentity(
 
 export const version = identity.version;
 export const commit = identity.commit;
+
+/**
+ * Compatibility alias for upstream callers. Prefer the `version` export.
+ * Kept additive during the 2026-08 upstream sync: upstream replaced the
+ * `version`/`commit` exports with a `getVersion()` function, but navigation.tsx
+ * and the Hextap dashboard-identity contract both rely on the exports, and the
+ * commit half has no upstream equivalent.
+ */
+export function getVersion(): string {
+	return version;
+}
