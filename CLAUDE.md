@@ -106,6 +106,7 @@ A release is a pushed annotated tag on protected main — nothing else starts on
 ## More Details
 
 - **Releases & publishing**: `docs/release.md` (tracked)
+- **Rollback & recovery**: `docs/rollback.md` (tracked) — `hextap rollback` is package-only; the DB is not rolled back and `#340` dedup deletions are unrecoverable without a backup taken first
 - **Upstream sync calibration**: `docs/upstream-sync.md` (tracked)
 - **CLI & account setup**: `.claude/docs/cli-commands.md` *(gitignored — absent in fresh clones)*
 - **Database configuration**: `.claude/docs/database.md` *(gitignored)*
