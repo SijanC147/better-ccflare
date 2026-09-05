@@ -17,6 +17,10 @@ import { resolveProviderModelDefault } from "../../provider-model-defaults";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { drainReader, drainReaderWithDeadline } from "../../utils/stream-drain";
 import {
+	CODEX_CACHE_DIAGNOSTICS_ENV,
+	CodexCacheDiagnostics,
+} from "./cache-diagnostics";
+import {
 	CodexStreamLiveness,
 	type CodexStreamLivenessOptions,
 } from "./stream-liveness";
@@ -416,6 +420,7 @@ interface ContextWindow {
 }
 
 interface StreamState {
+	cacheDiagnosticRequestId?: string;
 	buffer: string;
 	messageId: string;
 	model: string;
@@ -513,6 +518,9 @@ const CODEX_CONTINUATION_MAX_LANES = 2_048;
 
 export class CodexProvider extends BaseProvider {
 	name = "codex";
+	private readonly cacheDiagnostics = new CodexCacheDiagnostics((facts) =>
+		log.info("Codex outgoing cache diagnostics", facts),
+	);
 	private readonly streamLivenessOptions: CodexStreamLivenessOptions;
 	private readonly streamDrainDeadlineMs: number;
 	private readonly continuationTtlMs: number;
@@ -745,7 +753,15 @@ export class CodexProvider extends BaseProvider {
 			const suppliedPassthrough = body.__better_ccflare_codex_passthrough as
 				| Record<string, unknown>
 				| undefined;
-			const passthrough = nativeResponses ? suppliedPassthrough : undefined;
+			// The legacy gateway bridge has supported an explicit cache routing
+			// hint since 3.5.71. Preserve that one non-executing field, including
+			// an empty opt-out, while keeping native input, continuation identity,
+			// response IDs, model, and every other execution control trust-gated.
+			const passthrough = nativeResponses
+				? suppliedPassthrough
+				: typeof suppliedPassthrough?.prompt_cache_key === "string"
+					? { prompt_cache_key: suppliedPassthrough.prompt_cache_key }
+					: undefined;
 			if (
 				isSubscriptionEndpoint &&
 				typeof body.max_tokens === "number" &&
@@ -772,8 +788,8 @@ export class CodexProvider extends BaseProvider {
 			}
 			delete body.__better_ccflare_codex_passthrough;
 			// The passthrough object is part of the public JSON body and is therefore
-			// attacker-controlled. Honor it only when the proxy's in-process trust bit
-			// admitted this request through the authenticated Responses adapter.
+			// attacker-controlled. Native execution fields require the proxy's
+			// in-process trust bit; the legacy path admits only the cache hint above.
 			log.info("Codex native continuation admission diagnostics", {
 				nativeResponses,
 				requestIdPresent: typeof requestId === "string" && requestId.length > 0,
@@ -792,6 +808,18 @@ export class CodexProvider extends BaseProvider {
 				isSubscriptionEndpoint,
 				passthrough,
 			);
+			if (
+				!nativeResponses &&
+				requestId &&
+				process.env[CODEX_CACHE_DIAGNOSTICS_ENV] === "1"
+			) {
+				this.cacheDiagnostics.prepare(
+					requestId,
+					account?.id ?? "",
+					this.extractSessionId(body) ?? "",
+					codexBody as unknown as Record<string, unknown>,
+				);
+			}
 			if (
 				nativeResponses &&
 				passthrough?.continuation_strategy === "previous_response_id"
@@ -892,6 +920,7 @@ export class CodexProvider extends BaseProvider {
 
 		const contentType = response.headers.get("content-type")?.toLowerCase();
 		const requestId = response.headers.get("x-better-ccflare-request-id");
+		if (requestId && !response.ok) this.cacheDiagnostics.forget(requestId);
 		const fallbackEntry = requestId
 			? this.requestStreamById.get(requestId)
 			: undefined;
@@ -2265,44 +2294,36 @@ export class CodexProvider extends BaseProvider {
 			? (nativeInput as CodexRequest["input"])
 			: [];
 		const skillCallIds = new Set<string>();
-		let skillCompletedInFinalMessage = false;
-		for (const [msgIndex, msg] of (nativeInput
-			? []
-			: body.messages
-		).entries()) {
+		for (const msg of nativeInput ? [] : body.messages) {
+			let skillCompletedInMessage = false;
 			for (const item of this.convertMessage(msg)) {
 				input.push(item);
 				if ("type" in item && item.type === "function_call") {
-					if (item.name === "Skill") {
-						skillCallIds.add(item.call_id);
-					}
+					if (item.name === "Skill") skillCallIds.add(item.call_id);
 				} else if (
 					"type" in item &&
 					item.type === "function_call_output" &&
-					skillCallIds.has(item.call_id)
+					skillCallIds.delete(item.call_id)
 				) {
-					skillCallIds.delete(item.call_id);
-					if (msgIndex === body.messages.length - 1) {
-						skillCompletedInFinalMessage = true;
-					}
+					skillCompletedInMessage = true;
 				}
 			}
-		}
-		// A Skill result in the active turn means new instructions just loaded.
-		// Native Claude continues on its own; Codex often stops, so append one
-		// nudge. Tail placement keeps the cached prefix stable, and firing on
-		// any final-turn Skill result (not only a trailing one) covers parallel
-		// fan-out turns that mix Skill and other tool results.
-		if (!nativeInput && skillCompletedInFinalMessage) {
-			input.push({
-				role: "user",
-				content: [
-					{
-						type: "input_text",
-						text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
-					},
-				],
-			});
+			// Reconstruct the same guidance at the same historical boundary on
+			// every replay. Emitting it only for the final message removes a
+			// previously sent input item when the caller appends another turn,
+			// breaking the reusable prefix. One nudge per message also handles
+			// parallel Skill results without multiplying continuation requests.
+			if (skillCompletedInMessage) {
+				input.push({
+					role: "user",
+					content: [
+						{
+							type: "input_text",
+							text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+						},
+					],
+				});
+			}
 		}
 
 		// Convert tools
@@ -2689,6 +2710,7 @@ export class CodexProvider extends BaseProvider {
 			);
 		}
 		const state: StreamState = {
+			cacheDiagnosticRequestId: requestId,
 			buffer: "",
 			messageId: `msg_${crypto.randomUUID().replace(/-/g, "").substring(0, 24)}`,
 			model: "gpt-5.4",
@@ -2960,6 +2982,7 @@ export class CodexProvider extends BaseProvider {
 				cancelUpstreamOnce(error);
 			} finally {
 				streamLiveness.stop();
+				this.cacheDiagnostics.forget(requestId);
 				if (!upstreamCancelStarted) {
 					await streamLiveness.settlePendingReadForCleanup();
 				}
@@ -3320,6 +3343,13 @@ export class CodexProvider extends BaseProvider {
 					| undefined;
 
 				// Extract cache fields from input_tokens_details (Codex format).
+				if (state.cacheDiagnosticRequestId) {
+					this.cacheDiagnostics.finish(
+						state.cacheDiagnosticRequestId,
+						usage,
+						eventName === "response.completed" && resp?.status === "completed",
+					);
+				}
 				// OpenAI's input_tokens is cache-inclusive; normalize to Anthropic's
 				// additive semantics so input_tokens excludes cache reads instead of
 				// double-counting them.

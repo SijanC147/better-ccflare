@@ -385,7 +385,7 @@ describe("CodexProvider request conversion", () => {
 		);
 	});
 
-	it("does not inject a Skill continuation nudge into replayed mid-history", async () => {
+	it("preserves a Skill continuation nudge at its historical replay boundary", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -425,7 +425,7 @@ describe("CodexProvider request conversion", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(JSON.stringify(body.input)).not.toContain(
+		expect(JSON.stringify(body.input)).toContain(
 			"Continue the user's original request now",
 		);
 	});
