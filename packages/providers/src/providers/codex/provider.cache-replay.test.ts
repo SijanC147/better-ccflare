@@ -34,7 +34,12 @@ async function convert(
 }
 
 describe("Claude to Codex replay cache stability", () => {
-	test("diagnostics are opt-in and read raw terminal usage on the translated stream", async () => {
+	test.each([
+		[true, true],
+		[false, true],
+		[true, false],
+		[false, false],
+	])("diagnostics preserve raw terminal usage with content-type=%s streaming=%s", async (contentTypePresent, streaming) => {
 		const events: Record<string, unknown>[] = [];
 		const listener = (event: {
 			msg: string;
@@ -60,7 +65,7 @@ describe("Claude to Codex replay cache stability", () => {
 						},
 						body: JSON.stringify({
 							model: "gpt-6-astra",
-							stream: true,
+							stream: streaming,
 							metadata: {
 								user_id: JSON.stringify({
 									session_id: "11111111-1111-4111-8111-111111111111",
@@ -93,14 +98,17 @@ describe("Claude to Codex replay cache stability", () => {
 						`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
 						{
 							headers: {
-								"content-type": "text/event-stream",
+								...(contentTypePresent
+									? { "content-type": "text/event-stream" }
+									: {}),
 								"x-better-ccflare-request-id": requestId,
-								"x-better-ccflare-request-stream": "true",
+								"x-better-ccflare-request-stream": String(streaming),
 							},
 						},
 					),
 					null,
 				);
+				expect(response.headers.get("x-better-ccflare-request-id")).toBeNull();
 				const translated = await response.text();
 				expect(translated).toContain('"cache_read_input_tokens":900');
 				if (!enabled) expect(events).toHaveLength(0);

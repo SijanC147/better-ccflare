@@ -1046,7 +1046,9 @@ export class CodexProvider extends BaseProvider {
 						response,
 					);
 				}
-				const headers = sanitizeResponseHeaders(response.headers);
+				// Keep internal request correlation through the internal SSE rebuild.
+				// The final public response sanitizes these headers after conversion.
+				const headers = new Headers(response.headers);
 				headers.set("content-type", "text/event-stream");
 				const sseResponse = new Response(probeText, {
 					status: response.status,
