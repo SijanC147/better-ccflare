@@ -2,7 +2,11 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { EventEmitter } from "node:events";
 import type { Config } from "@better-ccflare/config";
-import { alertEvents, authFailureEvents } from "@better-ccflare/core";
+import {
+	alertEvents,
+	authFailureEvents,
+	requestEvents,
+} from "@better-ccflare/core";
 import type { BunSqlAdapter as BunSqlAdapterType } from "@better-ccflare/database";
 import { BunSqlAdapter, ensureSchema } from "@better-ccflare/database";
 import type { RequestResponse } from "@better-ccflare/types";
@@ -203,6 +207,150 @@ describe("AlertService persistAndEmit (issue #326)", () => {
 			await expect(
 				service.evaluateRequest(makeHighTokenRequest()),
 			).resolves.toBeUndefined();
+		} finally {
+			service.stop();
+		}
+	});
+});
+
+/**
+ * Fake adapter whose `.get()` rejects, simulating a PG statement-timeout on
+ * the aggregate-threshold query (e.g. the tokens-per-hour SUM query,
+ * issue #451, "PG query timeout after 8000ms").
+ */
+class TimingOutPgAdapter implements BunSqlAdapterType {
+	readonly isSQLite = false;
+
+	async get<T>(_sql: string, _params?: unknown[]): Promise<T | null> {
+		throw new Error("PG query timeout after 8000ms: SELECT SUM(...)");
+	}
+	async query<T>(_sql: string, _params?: unknown[]): Promise<T[]> {
+		throw new Error("PG query timeout after 8000ms: SELECT ...");
+	}
+	async run(_sql: string, _params?: unknown[]): Promise<void> {}
+}
+
+function makeAggregateConfig(
+	overrides: Partial<{ anomalyIntervalMinutes: number }> = {},
+): Config {
+	return Object.assign(new EventEmitter(), {
+		getAlertDailySpendUsd: () => 0,
+		getAlertTokensPerHour: () => 1,
+		getAlertRequestTokens: () => 0,
+		getAlertAnomalyEnabled: () => true,
+		getAlertAnomalyIntervalMinutes: () =>
+			overrides.anomalyIntervalMinutes ?? 15,
+		getAlertAnomalyBaselineWindowMinutes: () => 1440,
+		getAlertAnomalyLoopMinRequests: () => 25,
+		getAlertCooldownMinutes: () => 60,
+		getAlertWebhookUrl: () => "",
+	}) as unknown as Config;
+}
+
+describe("AlertService aggregate-query timeout (issue #451)", () => {
+	let originalUnhandledRejectionListeners: NodeJS.UnhandledRejectionListener[];
+	let unhandled: unknown[];
+
+	function makeHighTokenRequest(): RequestResponse {
+		return {
+			id: "req-timeout",
+			timestamp: new Date().toISOString(),
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: "account-1",
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTimeMs: 100,
+			failoverAttempts: 0,
+			model: "claude-3",
+			totalTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: 0,
+			outputTokens: 0,
+			costUsd: 0,
+			project: null,
+		};
+	}
+
+	beforeEach(() => {
+		originalUnhandledRejectionListeners = process.listeners(
+			"unhandledRejection",
+		) as NodeJS.UnhandledRejectionListener[];
+		process.removeAllListeners("unhandledRejection");
+		unhandled = [];
+		process.on("unhandledRejection", (reason) => {
+			unhandled.push(reason);
+		});
+	});
+
+	afterEach(() => {
+		process.removeAllListeners("unhandledRejection");
+		for (const listener of originalUnhandledRejectionListeners) {
+			process.on("unhandledRejection", listener);
+		}
+	});
+
+	it("does not leak an unhandled rejection when the request listener's aggregate query times out", async () => {
+		const adapter = new TimingOutPgAdapter();
+		const service = new AlertService(
+			adapter as unknown as BunSqlAdapterType,
+			makeAggregateConfig(),
+		);
+		service.start();
+		try {
+			requestEvents.emit("event", {
+				type: "summary",
+				payload: makeHighTokenRequest(),
+			});
+			await Bun.sleep(20);
+			expect(unhandled).toHaveLength(0);
+		} finally {
+			service.stop();
+		}
+	});
+
+	it("does not leak an unhandled rejection when the anomaly timer's query times out", async () => {
+		const adapter = new TimingOutPgAdapter();
+		// A sub-millisecond interval so the real setInterval callback in
+		// restartAnomalyTimer fires during the test wait below — this exercises
+		// the timer's own .catch() wrapper directly, rather than calling
+		// evaluateAnomalies() and catching it ourselves (which would still pass
+		// even if the production .catch() were removed).
+		const service = new AlertService(
+			adapter as unknown as BunSqlAdapterType,
+			makeAggregateConfig({ anomalyIntervalMinutes: 1 / 6_000_000 }),
+		);
+		service.start();
+		try {
+			await Bun.sleep(20);
+			expect(unhandled).toHaveLength(0);
+		} finally {
+			service.stop();
+		}
+	});
+
+	it("does not leak an unhandled rejection when the auth-failure listener's cooldown check times out", async () => {
+		// persistAndEmit's cooldown pre-check (`SELECT id FROM alerts`) runs
+		// outside its own try/catch, and handleAuthFailure awaits persistAndEmit
+		// with no catch of its own — so this exercises a third fire-and-forget
+		// call site (authFailureListener) distinct from the two above.
+		const adapter = new TimingOutPgAdapter();
+		const service = new AlertService(
+			adapter as unknown as BunSqlAdapterType,
+			makeAggregateConfig(),
+		);
+		service.start();
+		try {
+			authFailureEvents.emit("event", {
+				accountId: "account-1",
+				accountName: "Backup account",
+				provider: "anthropic",
+				reason: "invalid_grant",
+			});
+			await Bun.sleep(20);
+			expect(unhandled).toHaveLength(0);
 		} finally {
 			service.stop();
 		}
