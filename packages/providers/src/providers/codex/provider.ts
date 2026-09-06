@@ -3350,6 +3350,7 @@ export class CodexProvider extends BaseProvider {
 						state.cacheDiagnosticRequestId,
 						usage,
 						eventName === "response.completed" && resp?.status === "completed",
+						resp,
 					);
 				}
 				// OpenAI's input_tokens is cache-inclusive; normalize to Anthropic's

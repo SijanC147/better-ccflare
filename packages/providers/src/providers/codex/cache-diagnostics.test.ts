@@ -17,6 +17,91 @@ const usage = {
 };
 
 describe("payload-free outgoing cache diagnostics", () => {
+	test("observes an incident-sized history without modifying the request", () => {
+		const rows: Record<string, unknown>[] = [];
+		const observer = new CodexCacheDiagnostics((row) => rows.push(row));
+		const request = body(
+			Array.from({ length: 800 }, (_, index) => ({
+				role: "user",
+				content: `${index}:${"x".repeat(3500)}`,
+			})),
+		);
+		const original = JSON.stringify(request);
+		observer.prepare("large-first", "account", "session", request);
+		observer.finish("large-first", usage, true);
+		expect(JSON.stringify(request)).toBe(original);
+		observer.prepare(
+			"large-next",
+			"account",
+			"session",
+			body([...request.input, { role: "user", content: "next" }]),
+		);
+		observer.finish("large-next", usage, true);
+		expect(rows).toHaveLength(2);
+		expect(rows[1]).toMatchObject({
+			prior_input_prefix_preserved: true,
+			matched_input_items: 800,
+		});
+		expect(JSON.stringify(observer).length).toBeLessThan(150000);
+	});
+	test("observes upstream writes and bounded miss reasons without retaining provider payloads", () => {
+		const rows: Record<string, unknown>[] = [];
+		const observer = new CodexCacheDiagnostics((row) => rows.push(row));
+		observer.prepare("first", "account", "session", body());
+		observer.finish(
+			"first",
+			{
+				...usage,
+				input_tokens_details: { cached_tokens: 0, cache_write_tokens: 1000 },
+				output_tokens_details: { reasoning_tokens: 8 },
+			},
+			true,
+			{
+				id: "private-response-id",
+				output: "private-response-text",
+				prompt_cache_diagnostics: {
+					type: "cache_miss",
+					reason: "input_changed",
+					cache_missed_tokens: 1000,
+					comparison_reusable_tokens: 900,
+				},
+			},
+		);
+		expect(rows[0]).toMatchObject({
+			cached_tokens: 0,
+			cache_write_tokens: 1000,
+			reasoning_tokens: 8,
+			upstream_cache_diagnostic_type: "cache_miss",
+			upstream_cache_miss_reason: "input_changed",
+			upstream_cache_missed_tokens: 1000,
+			upstream_comparison_reusable_tokens: 900,
+			cache_counters_known: true,
+		});
+		observer.prepare("second", "account", "session", body());
+		observer.finish("second", usage, true, {
+			id: "x".repeat(257),
+			prompt_cache_diagnostics: {
+				type: "private-type",
+				reason: "private-reason",
+				cache_missed_tokens: 1000,
+			},
+		});
+		expect(rows[1]).toMatchObject({
+			prior_request_digest: rows[0].request_digest,
+			cache_write_tokens: null,
+			upstream_response_digest: null,
+			upstream_cache_diagnostic_type: null,
+			upstream_cache_miss_reason: null,
+			upstream_cache_missed_tokens: null,
+		});
+		for (const secret of [
+			"private-response-id",
+			"private-response-text",
+			"private-type",
+			"private-reason",
+		])
+			expect(JSON.stringify({ rows, observer })).not.toContain(secret);
+	});
 	test("finds the preserved prefix across interleaved subagent requests", () => {
 		const rows: Record<string, unknown>[] = [];
 		const observer = new CodexCacheDiagnostics((row) => rows.push(row));

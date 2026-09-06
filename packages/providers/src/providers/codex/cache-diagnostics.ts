@@ -8,6 +8,7 @@ const MAX_BYTES = 8 * 1024 * 1024;
 
 type Fingerprint = {
 	group: string;
+	requestDigest: string;
 	items: string[];
 	bytes: number[];
 	instructions: string;
@@ -83,6 +84,7 @@ export class CodexCacheDiagnostics {
 		} = body;
 		const fingerprint: Fingerprint = {
 			group: hash([account, session, body.model]),
+			requestDigest: hash(requestId),
 			items,
 			bytes,
 			at: now,
@@ -114,9 +116,11 @@ export class CodexCacheDiagnostics {
 			}
 		}
 		const facts: Facts = {
-			request_digest: hash(requestId),
+			request_digest: fingerprint.requestDigest,
 			session_digest: fingerprint.group,
 			prior_candidates: candidates,
+			prior_request_digest: best?.requestDigest ?? null,
+			prior_age_ms: best ? now - best.at : null,
 			input_items: items.length,
 			input_bytes: totalBytes,
 			matched_input_items: best ? matchedItems : null,
@@ -144,7 +148,12 @@ export class CodexCacheDiagnostics {
 		}
 	}
 
-	finish(requestId: string, usage: unknown, completed: boolean): void {
+	finish(
+		requestId: string,
+		usage: unknown,
+		completed: boolean,
+		response?: unknown,
+	): void {
 		const pending = this.pending.get(requestId);
 		this.pending.delete(requestId);
 		if (!pending || pending.fingerprint.at + TTL_MS <= this.now()) return;
@@ -158,12 +167,62 @@ export class CodexCacheDiagnostics {
 				: {};
 		const input = count(raw.input_tokens);
 		const cached = count(details.cached_tokens);
+		const outputDetails =
+			raw.output_tokens_details && typeof raw.output_tokens_details === "object"
+				? (raw.output_tokens_details as Record<string, unknown>)
+				: {};
+		const terminal =
+			response && typeof response === "object"
+				? (response as Record<string, unknown>)
+				: {};
+		const diagnostic =
+			terminal.prompt_cache_diagnostics &&
+			typeof terminal.prompt_cache_diagnostics === "object"
+				? (terminal.prompt_cache_diagnostics as Record<string, unknown>)
+				: {};
+		// Never forward arbitrary provider strings: they may contain payloads.
+		const diagnosticType =
+			[
+				"cache_miss",
+				"cache_hit",
+				"comparison_response_not_found",
+				"unavailable",
+			].find((value) => value === diagnostic.type) ?? null;
+		const reason =
+			[
+				"model_changed",
+				"prompt_cache_key_changed",
+				"tools_changed",
+				"text_format_changed",
+				"reasoning_effort_changed",
+				"verbosity_changed",
+				"context_compacted",
+				"input_changed",
+				"service_tier_changed",
+			].find((value) => value === diagnostic.reason) ?? null;
 		this.emit({
 			...pending.facts,
 			completed,
 			input_tokens: input,
 			cached_tokens: cached,
+			cache_write_tokens: count(details.cache_write_tokens),
 			output_tokens: count(raw.output_tokens),
+			reasoning_tokens: count(outputDetails.reasoning_tokens),
+			upstream_response_digest:
+				typeof terminal.id === "string" && terminal.id.length <= 256
+					? hash(terminal.id)
+					: null,
+			upstream_cache_diagnostic_type: diagnosticType,
+			upstream_cache_miss_reason:
+				diagnosticType === "cache_miss" ? reason : null,
+			upstream_cache_missed_tokens:
+				diagnosticType === "cache_miss"
+					? count(diagnostic.cache_missed_tokens)
+					: null,
+			upstream_comparison_reusable_tokens:
+				diagnosticType === "cache_miss"
+					? count(diagnostic.comparison_reusable_tokens)
+					: null,
 			cache_counters_known:
 				input !== null && cached !== null && cached <= input,
 		});

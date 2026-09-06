@@ -34,6 +34,103 @@ async function convert(
 }
 
 describe("Claude to Codex replay cache stability", () => {
+	test("mid-session fallback preserves the prior input prefix despite losing native reasoning state", async () => {
+		const history: Message[] = [
+			{ role: "user", content: "continue the existing Claude task" },
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "synthetic Claude thought",
+						signature: "claude-signature",
+					},
+					{ type: "text", text: "I checked the first file." },
+				],
+			},
+			{ role: "user", content: "check the next file" },
+		];
+		const first = await convert(history);
+		expect(first.prompt_cache_key).toBeTruthy();
+		const reasoning = {
+			type: "reasoning",
+			id: "rs_synthetic",
+			summary: [],
+			encrypted_content: "synthetic-opaque-gpt-state",
+		};
+		const call = {
+			type: "function_call",
+			id: "fc_synthetic",
+			call_id: "call_synthetic",
+			name: "Read",
+			arguments: '{"file_path":"fixture.txt"}',
+			status: "completed",
+		};
+		const events = [
+			{ type: "response.output_item.added", output_index: 0, item: reasoning },
+			{ type: "response.output_item.done", output_index: 0, item: reasoning },
+			{ type: "response.output_item.added", output_index: 1, item: call },
+			{
+				type: "response.function_call_arguments.delta",
+				output_index: 1,
+				delta: call.arguments,
+			},
+			{ type: "response.output_item.done", output_index: 1, item: call },
+			{
+				type: "response.completed",
+				response: {
+					id: "resp_synthetic",
+					model: "gpt-6-astra",
+					status: "completed",
+					output: [reasoning, call],
+					usage: { input_tokens: 100, output_tokens: 10 },
+				},
+			},
+		];
+		const response = await new CodexProvider().processResponse(
+			new Response(
+				events
+					.map(
+						(event) =>
+							`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+					)
+					.join(""),
+				{
+					headers: {
+						"content-type": "text/event-stream",
+						"x-better-ccflare-request-stream": "false",
+					},
+				},
+			),
+			null,
+		);
+		const reply = await response.json();
+		expect(reply.content).toContainEqual({
+			type: "tool_use",
+			id: call.call_id,
+			name: "Read",
+			input: { file_path: "fixture.txt" },
+		});
+		expect(JSON.stringify(reply)).not.toContain(reasoning.encrypted_content);
+		const second = await convert([
+			...history,
+			{ role: "assistant", content: reply.content },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: call.call_id,
+						content: "synthetic file contents",
+					},
+				],
+			},
+		]);
+		expect(second.input.slice(0, first.input.length)).toEqual(first.input);
+		expect(second.prompt_cache_key).toBe(first.prompt_cache_key);
+		expect(second.instructions).toBe(first.instructions);
+		expect(JSON.stringify(second)).not.toContain(reasoning.encrypted_content);
+	});
 	test.each([
 		[true, true],
 		[false, true],
@@ -83,13 +180,18 @@ describe("Claude to Codex replay cache stability", () => {
 				const event = {
 					type: "response.completed",
 					response: {
+						id: "synthetic-upstream-response",
 						status: "completed",
 						model: "gpt-6-astra",
 						output: [],
+						prompt_cache_diagnostics: { type: "cache_hit" },
 						usage: {
 							input_tokens: 1000,
 							output_tokens: 10,
-							input_tokens_details: { cached_tokens: 900 },
+							input_tokens_details: {
+								cached_tokens: 900,
+								cache_write_tokens: 100,
+							},
 						},
 					},
 				};
@@ -122,6 +224,8 @@ describe("Claude to Codex replay cache stability", () => {
 		expect(events[0]).toMatchObject({
 			input_tokens: 1000,
 			cached_tokens: 900,
+			cache_write_tokens: 100,
+			upstream_cache_diagnostic_type: "cache_hit",
 			cache_counters_known: true,
 			prior_candidates: 0,
 		});
