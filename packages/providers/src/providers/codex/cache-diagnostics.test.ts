@@ -246,7 +246,11 @@ describe("payload-free outgoing cache diagnostics", () => {
 			body(Array(2049).fill("x")),
 		);
 		observer.finish("oversize", usage, true);
-		expect(rows).toHaveLength(100);
+		expect(rows).toHaveLength(101);
+		expect(rows.at(-1)).toMatchObject({
+			fingerprint_complete: false,
+			cache_counters_known: true,
+		});
 		const retained = JSON.stringify(observer);
 		const emitted = JSON.stringify(rows);
 		for (const sentinel of [

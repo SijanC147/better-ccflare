@@ -153,30 +153,38 @@ describe("Claude to Codex replay cache stability", () => {
 				if (enabled) process.env[CODEX_CACHE_DIAGNOSTICS_ENV] = "1";
 				else delete process.env[CODEX_CACHE_DIAGNOSTICS_ENV];
 				const requestId = `synthetic-request-${events.length}-${enabled}`;
-				await provider.transformRequestBody(
-					new Request("https://example.com/v1/messages", {
-						method: "POST",
-						headers: {
-							"content-type": "application/json",
-							"x-better-ccflare-request-id": requestId,
+				const original = new Request("https://example.com/v1/messages", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": requestId,
+					},
+					body: JSON.stringify({
+						model: "gpt-6-astra",
+						stream: streaming,
+						metadata: {
+							user_id: JSON.stringify({
+								session_id: "11111111-1111-4111-8111-111111111111",
+							}),
 						},
-						body: JSON.stringify({
-							model: "gpt-6-astra",
-							stream: streaming,
-							metadata: {
-								user_id: JSON.stringify({
-									session_id: "11111111-1111-4111-8111-111111111111",
-								}),
-							},
-							messages: [{ role: "user", content: "synthetic private prompt" }],
-						}),
+						messages: [{ role: "user", content: "synthetic private prompt" }],
 					}),
-					{
-						id: "synthetic-account",
-						provider: "codex",
-						custom_endpoint: null,
-					} as Account,
-				);
+				});
+				const sourceBody = await original.clone().arrayBuffer();
+				const account = {
+					id: "synthetic-account",
+					provider: "codex",
+					custom_endpoint: null,
+				} as Account;
+				const wire = await provider.transformRequestBody(original, account);
+				const observer = await provider.observeUpstream(wire, {
+					requestId,
+					account,
+					sourceBody,
+					sourceHeaders: original.headers,
+					nativeResponses: false,
+					signal: original.signal,
+				});
 				const event = {
 					type: "response.completed",
 					response: {
@@ -195,19 +203,20 @@ describe("Claude to Codex replay cache stability", () => {
 						},
 					},
 				};
-				const response = await provider.processResponse(
-					new Response(
-						`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
-						{
-							headers: {
-								...(contentTypePresent
-									? { "content-type": "text/event-stream" }
-									: {}),
-								"x-better-ccflare-request-id": requestId,
-								"x-better-ccflare-request-stream": String(streaming),
-							},
+				const upstream = new Response(
+					`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
+					{
+						headers: {
+							...(contentTypePresent
+								? { "content-type": "text/event-stream" }
+								: {}),
+							"x-better-ccflare-request-id": requestId,
+							"x-better-ccflare-request-stream": String(streaming),
 						},
-					),
+					},
+				);
+				const response = await provider.processResponse(
+					observer?.response(upstream) ?? upstream,
 					null,
 				);
 				expect(response.headers.get("x-better-ccflare-request-id")).toBeNull();

@@ -7,6 +7,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import { logBus } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
@@ -350,4 +351,43 @@ describe("pool exhausted — CCFLARE_PASSTHROUGH_ON_EMPTY_POOL=1 escape hatch", 
 			// This is fine — it means we went through the passthrough path
 		}
 	});
+});
+
+it("records a joined local refusal without inventing an upstream attempt", async () => {
+	const saved = process.env.CCFLARE_CODEX_CACHE_DIAGNOSTICS;
+	const events: Record<string, unknown>[] = [];
+	const listener = (event: { msg: string; data?: Record<string, unknown> }) => {
+		if (event.msg === "Codex cache observation lifecycle" && event.data)
+			events.push(event.data);
+	};
+	logBus.on("log", listener);
+	process.env.CCFLARE_CODEX_CACHE_DIAGNOSTICS = "1";
+	try {
+		const ctx = makeContext([]);
+		ctx.provider = { name: "anthropic", canHandle: () => true } as never;
+		const request = makeRequest();
+		request.headers.set("x-lanetally-gateway-request-digest", "a".repeat(64));
+		request.headers.set("x-lanetally-gateway-attempt-digest", "b".repeat(64));
+		const response = await handleProxy(request, new URL(request.url), ctx);
+		expect(response.status).toBe(503);
+		expect((await response.json()).error.type).toBe("pool_exhausted");
+		expect(events.map((row) => row.event)).toEqual([
+			"request_received",
+			"request_identified",
+			"request_headers",
+		]);
+		expect(events.at(-1)).toMatchObject({
+			status_code: 503,
+			refusal_reason: "pool_exhausted",
+			gateway_request_digest: "a".repeat(64),
+			gateway_attempt_digest: "b".repeat(64),
+		});
+		expect(events.at(-1)?.request_digest).toMatch(/^[0-9a-f]{64}$/);
+		expect(events.at(-1)?.ingress_digest).toBe(events[0].ingress_digest);
+		expect(JSON.stringify(events)).not.toContain("hello");
+	} finally {
+		if (saved === undefined) delete process.env.CCFLARE_CODEX_CACHE_DIAGNOSTICS;
+		else process.env.CCFLARE_CODEX_CACHE_DIAGNOSTICS = saved;
+		logBus.off("log", listener);
+	}
 });

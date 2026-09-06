@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	isForceAccountModelEnabled,
 	mapModelName,
@@ -14,12 +14,23 @@ import {
 import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import { resolveProviderModelDefault } from "../../provider-model-defaults";
-import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import type {
+	RateLimitInfo,
+	TokenRefreshResult,
+	UpstreamObservationContext,
+} from "../../types";
 import { drainReader, drainReaderWithDeadline } from "../../utils/stream-drain";
 import {
 	CODEX_CACHE_DIAGNOSTICS_ENV,
 	CodexCacheDiagnostics,
 } from "./cache-diagnostics";
+import {
+	type CacheFacts,
+	cacheDigest,
+	persistCacheTelemetry,
+	sanitizeCacheFacts,
+} from "./cache-telemetry";
+import { observeCodexWire } from "./cache-wire";
 import {
 	CodexStreamLiveness,
 	type CodexStreamLivenessOptions,
@@ -27,6 +38,15 @@ import {
 import { normalizeCodexInputUsage } from "./usage";
 
 const log = new Logger("CodexProvider");
+
+function recordCacheLifecycle(facts: CacheFacts): void {
+	log.info("Codex cache observation lifecycle", sanitizeCacheFacts(facts));
+	persistCacheTelemetry(facts, (dropped) =>
+		log.warn("Codex cache telemetry persistence failure", {
+			dropped_events: dropped,
+		}),
+	);
+}
 
 /**
  * Enabled by default: attaches an OpenAI prompt_cache_key to converted
@@ -420,7 +440,6 @@ interface ContextWindow {
 }
 
 interface StreamState {
-	cacheDiagnosticRequestId?: string;
 	buffer: string;
 	messageId: string;
 	model: string;
@@ -518,8 +537,17 @@ const CODEX_CONTINUATION_MAX_LANES = 2_048;
 
 export class CodexProvider extends BaseProvider {
 	name = "codex";
-	private readonly cacheDiagnostics = new CodexCacheDiagnostics((facts) =>
-		log.info("Codex outgoing cache diagnostics", facts),
+	private readonly cacheDiagnostics = new CodexCacheDiagnostics(
+		(facts) => {
+			log.info("Codex outgoing cache diagnostics", sanitizeCacheFacts(facts));
+			persistCacheTelemetry(facts, (dropped) =>
+				log.warn("Codex cache telemetry persistence failure", {
+					dropped_events: dropped,
+				}),
+			);
+		},
+		Date.now,
+		recordCacheLifecycle,
 	);
 	private readonly streamLivenessOptions: CodexStreamLivenessOptions;
 	private readonly streamDrainDeadlineMs: number;
@@ -535,6 +563,8 @@ export class CodexProvider extends BaseProvider {
 
 	constructor(options: CodexProviderOptionsForTests = {}) {
 		super();
+		if (process.env[CODEX_CACHE_DIAGNOSTICS_ENV] === "1")
+			recordCacheLifecycle({ event: "observer_ready" });
 		this.streamLivenessOptions = {
 			heartbeatIntervalMs: options.streamHeartbeatIntervalMs,
 			rawSilenceTimeoutMs: options.streamRawSilenceTimeoutMs,
@@ -688,7 +718,18 @@ export class CodexProvider extends BaseProvider {
 
 		// Remove internal proxy headers.
 		for (const key of [...newHeaders.keys()]) {
-			if (key.startsWith("x-better-ccflare-")) {
+			if (
+				key.startsWith("x-better-ccflare-") ||
+				key.startsWith("x-lanetally-gateway-") ||
+				[
+					"x-lanetally-conversation-id",
+					"x-lanetally-agent-id",
+					"x-lanetally-parent-agent-id",
+					"x-lanetally-conversation-digest",
+					"x-lanetally-agent-digest",
+					"x-lanetally-parent-agent-digest",
+				].includes(key)
+			) {
 				newHeaders.delete(key);
 			}
 		}
@@ -703,6 +744,58 @@ export class CodexProvider extends BaseProvider {
 		newHeaders.set("originator", "codex_cli_rs");
 
 		return newHeaders;
+	}
+
+	observeRequest(headers: Headers, nativeResponses: boolean) {
+		if (process.env[CODEX_CACHE_DIAGNOSTICS_ENV] !== "1") return;
+		const facts: CacheFacts = {
+			ingress_digest: cacheDigest(randomUUID()),
+			path: nativeResponses ? "native" : "legacy",
+		};
+		for (const [header, field] of [
+			["x-lanetally-gateway-request-digest", "gateway_request_digest"],
+			["x-lanetally-gateway-attempt-digest", "gateway_attempt_digest"],
+		]) {
+			const value = headers.get(header);
+			facts[field] = value && /^[0-9a-f]{64}$/.test(value) ? value : null;
+		}
+		recordCacheLifecycle({ ...facts, event: "request_received" });
+		return {
+			bindRequestId(requestId: string) {
+				facts.request_digest = cacheDigest(requestId);
+				recordCacheLifecycle({ ...facts, event: "request_identified" });
+			},
+			response(response: Response) {
+				recordCacheLifecycle({
+					...facts,
+					event: "request_headers",
+					status_code: response.status,
+					refusal_reason:
+						response.headers.get("x-better-ccflare-pool-status") === "exhausted"
+							? "pool_exhausted"
+							: null,
+				});
+				return response;
+			},
+			error(_error: unknown) {
+				recordCacheLifecycle({ ...facts, event: "request_error" });
+			},
+		};
+	}
+
+	async observeUpstream(request: Request, context: UpstreamObservationContext) {
+		if (
+			process.env[CODEX_CACHE_DIAGNOSTICS_ENV] !== "1" ||
+			request.method === "GET"
+		)
+			return;
+		return observeCodexWire(
+			this.cacheDiagnostics,
+			request,
+			context,
+			(source) =>
+				this.extractSessionId(source as unknown as AnthropicRequest) ?? null,
+		);
 	}
 
 	async transformRequestBody(
@@ -809,18 +902,6 @@ export class CodexProvider extends BaseProvider {
 				passthrough,
 			);
 			if (
-				!nativeResponses &&
-				requestId &&
-				process.env[CODEX_CACHE_DIAGNOSTICS_ENV] === "1"
-			) {
-				this.cacheDiagnostics.prepare(
-					requestId,
-					account?.id ?? "",
-					this.extractSessionId(body) ?? "",
-					codexBody as unknown as Record<string, unknown>,
-				);
-			}
-			if (
 				nativeResponses &&
 				passthrough?.continuation_strategy === "previous_response_id"
 			) {
@@ -920,7 +1001,6 @@ export class CodexProvider extends BaseProvider {
 
 		const contentType = response.headers.get("content-type")?.toLowerCase();
 		const requestId = response.headers.get("x-better-ccflare-request-id");
-		if (requestId && !response.ok) this.cacheDiagnostics.forget(requestId);
 		const fallbackEntry = requestId
 			? this.requestStreamById.get(requestId)
 			: undefined;
@@ -2712,7 +2792,6 @@ export class CodexProvider extends BaseProvider {
 			);
 		}
 		const state: StreamState = {
-			cacheDiagnosticRequestId: requestId,
 			buffer: "",
 			messageId: `msg_${crypto.randomUUID().replace(/-/g, "").substring(0, 24)}`,
 			model: "gpt-5.4",
@@ -2984,7 +3063,6 @@ export class CodexProvider extends BaseProvider {
 				cancelUpstreamOnce(error);
 			} finally {
 				streamLiveness.stop();
-				this.cacheDiagnostics.forget(requestId);
 				if (!upstreamCancelStarted) {
 					await streamLiveness.settlePendingReadForCleanup();
 				}
@@ -3345,14 +3423,6 @@ export class CodexProvider extends BaseProvider {
 					| undefined;
 
 				// Extract cache fields from input_tokens_details (Codex format).
-				if (state.cacheDiagnosticRequestId) {
-					this.cacheDiagnostics.finish(
-						state.cacheDiagnosticRequestId,
-						usage,
-						eventName === "response.completed" && resp?.status === "completed",
-						resp,
-					);
-				}
 				// OpenAI's input_tokens is cache-inclusive; normalize to Anthropic's
 				// additive semantics so input_tokens excludes cache reads instead of
 				// double-counting them.
