@@ -330,4 +330,29 @@ describe("AlertService aggregate-query timeout (issue #451)", () => {
 			service.stop();
 		}
 	});
+
+	it("does not leak an unhandled rejection when the auth-failure listener's cooldown check times out", async () => {
+		// persistAndEmit's cooldown pre-check (`SELECT id FROM alerts`) runs
+		// outside its own try/catch, and handleAuthFailure awaits persistAndEmit
+		// with no catch of its own — so this exercises a third fire-and-forget
+		// call site (authFailureListener) distinct from the two above.
+		const adapter = new TimingOutPgAdapter();
+		const service = new AlertService(
+			adapter as unknown as BunSqlAdapterType,
+			makeAggregateConfig(),
+		);
+		service.start();
+		try {
+			authFailureEvents.emit("event", {
+				accountId: "account-1",
+				accountName: "Backup account",
+				provider: "anthropic",
+				reason: "invalid_grant",
+			});
+			await Bun.sleep(20);
+			expect(unhandled).toHaveLength(0);
+		} finally {
+			service.stop();
+		}
+	});
 });

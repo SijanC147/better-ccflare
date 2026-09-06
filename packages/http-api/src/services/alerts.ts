@@ -267,7 +267,17 @@ export class AlertService {
 			}
 		};
 		this.authFailureListener = (event) => {
-			void this.handleAuthFailure(event);
+			// Same rationale as the requestListener above: handleAuthFailure
+			// calls persistAndEmit, whose cooldown pre-check (`SELECT id FROM
+			// alerts`) runs outside persistAndEmit's own try/catch and can
+			// reject on a PG timeout (#451). This listener is invoked from an
+			// async event handler, so an unhandled rejection here would crash
+			// the proxy with exit code 1 — catch and log instead.
+			this.handleAuthFailure(event).catch((error) => {
+				log.error(
+					`Auth-failure alert evaluation failed for account ${event.accountId}: ${(error as Error).message}`,
+				);
+			});
 		};
 		this.configChangeListener = ({ key }: { key: string }) => {
 			if (
