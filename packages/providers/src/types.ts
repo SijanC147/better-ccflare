@@ -15,6 +15,18 @@ export interface RateLimitInfo {
 
 export interface Provider {
 	name: string;
+	/** Passive request coverage, including refusal before an upstream dispatch. */
+	observeRequest?(
+		headers: Headers,
+		nativeResponses: boolean,
+	): RequestObservation | undefined;
+
+	/** Passive metadata capture at the final dispatch boundary, once per actual
+	 * upstream attempt. Must not change the request, retry, or consume quota. */
+	observeUpstream?(
+		request: Request,
+		context: UpstreamObservationContext,
+	): Promise<UpstreamObservation | undefined>;
 
 	/**
 	 * Check if this provider can handle the given request path
@@ -117,6 +129,20 @@ export interface Provider {
 	isStreamingResponse?(response: Response): boolean;
 }
 
+export interface UpstreamObservationContext {
+	requestId: string;
+	account: Account | null;
+	sourceBody: ArrayBuffer | null;
+	sourceHeaders: Headers;
+	nativeResponses: boolean;
+	signal: AbortSignal;
+}
+
+export interface UpstreamObservation {
+	response(response: Response): Response;
+	error(error: unknown): void;
+}
+
 // OAuth-specific types
 export interface OAuthProviderConfig {
 	authorizeUrl: string;
@@ -146,4 +172,8 @@ export interface TokenResult {
 	refreshToken: string;
 	accessToken: string;
 	expiresAt: number;
+}
+
+export interface RequestObservation extends UpstreamObservation {
+	bindRequestId(requestId: string): void;
 }

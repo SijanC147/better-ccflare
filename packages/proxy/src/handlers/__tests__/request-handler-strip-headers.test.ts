@@ -32,6 +32,17 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			"x-better-ccflare-internal-probe-secret": "s3cr3t",
 			"x-better-ccflare-auto-refresh": "true",
 			"x-better-ccflare-keepalive": "true",
+			"x-better-ccflare-request-id": "internal-request-id",
+			"x-better-ccflare-request-stream": "true",
+			"x-better-ccflare-codex-custom-tools": "true",
+			"x-better-ccflare-native-responses": "true",
+			"x-better-ccflare-exclude-providers": "anthropic-oauth",
+			"x-better-ccflare-codex-continuation": "previous_response_id",
+			"x-better-ccflare-prompt-cache-mode": "implicit",
+			"x-better-ccflare-prompt-cache-ttl": "30m",
+			"x-better-ccflare-prompt-cache-breakpoint": "developer",
+			"x-better-ccflare-codex-path": "native_responses",
+			"x-better-ccflare-codex-transport": "sse",
 			authorization: "Bearer token",
 			"content-type": "application/json",
 		});
@@ -47,6 +58,21 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 		).toBeNull();
 		expect(sentHeaders?.get("x-better-ccflare-auto-refresh")).toBeNull();
 		expect(sentHeaders?.get("x-better-ccflare-keepalive")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-request-id")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-request-stream")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-codex-custom-tools")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-native-responses")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-exclude-providers")).toBeNull();
+		for (const header of [
+			"x-better-ccflare-codex-continuation",
+			"x-better-ccflare-prompt-cache-mode",
+			"x-better-ccflare-prompt-cache-ttl",
+			"x-better-ccflare-prompt-cache-breakpoint",
+			"x-better-ccflare-codex-path",
+			"x-better-ccflare-codex-transport",
+		]) {
+			expect(sentHeaders?.get(header)).toBeNull();
+		}
 		// unrelated headers still forwarded
 		expect(sentHeaders?.get("authorization")).toBe("Bearer token");
 		expect(sentHeaders?.get("content-type")).toBe("application/json");
@@ -58,6 +84,15 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			headers: {
 				"x-better-ccflare-internal-probe-secret": "s3cr3t",
 				"x-better-ccflare-keepalive": "true",
+				"x-better-ccflare-request-id": "internal-request-id",
+				"x-better-ccflare-native-responses": "true",
+				"x-better-ccflare-exclude-providers": "anthropic-oauth",
+				"x-better-ccflare-codex-continuation": "previous_response_id",
+				"x-better-ccflare-prompt-cache-mode": "implicit",
+				"x-better-ccflare-prompt-cache-ttl": "30m",
+				"x-better-ccflare-prompt-cache-breakpoint": "developer",
+				"x-better-ccflare-codex-path": "native_responses",
+				"x-better-ccflare-codex-transport": "sse",
 				authorization: "Bearer token",
 			},
 		});
@@ -66,6 +101,19 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			sentHeaders?.get("x-better-ccflare-internal-probe-secret"),
 		).toBeNull();
 		expect(sentHeaders?.get("x-better-ccflare-keepalive")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-request-id")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-native-responses")).toBeNull();
+		expect(sentHeaders?.get("x-better-ccflare-exclude-providers")).toBeNull();
+		for (const header of [
+			"x-better-ccflare-codex-continuation",
+			"x-better-ccflare-prompt-cache-mode",
+			"x-better-ccflare-prompt-cache-ttl",
+			"x-better-ccflare-prompt-cache-breakpoint",
+			"x-better-ccflare-codex-path",
+			"x-better-ccflare-codex-transport",
+		]) {
+			expect(sentHeaders?.get(header)).toBeNull();
+		}
 		expect(sentHeaders?.get("authorization")).toBe("Bearer token");
 	});
 });

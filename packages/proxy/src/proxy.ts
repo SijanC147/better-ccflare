@@ -9,8 +9,10 @@ import { DatabaseFactory } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import {
 	deriveXaiConvId,
+	getProvider,
 	getRepresentativeUsageSnapshotForProvider,
 	isOfficialXaiEndpoint,
+	type RequestObservation,
 	usageCache,
 } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
@@ -29,6 +31,7 @@ import {
 	isForceAccountModelEnabled,
 	isInternalProbe,
 	isRefreshTokenLikelyExpired,
+	markTrustedNativeResponses,
 	type ProxyContext,
 	prepareRequestBody,
 	proxyUnauthenticated,
@@ -178,13 +181,57 @@ export function handleProxy(
 	ctx: ProxyContext,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+	options?: { trustedNativeResponses?: boolean },
 ): Promise<Response> {
-	if (isInternalProbe(req.headers, ctx)) {
-		return runForceAccountModelExempt(() =>
-			handleProxyRequest(req, url, ctx, apiKeyId, apiKeyName),
-		);
+	let observation: RequestObservation | undefined;
+	try {
+		if (url.pathname === "/v1/messages" || url.pathname === "/v1/responses") {
+			// The protocol default can be Anthropic before account selection, even
+			// in a dedicated Codex process. The registered observer gates itself
+			// on the explicit process-wide diagnostics switch.
+			const observerProvider = ctx.provider.observeRequest
+				? ctx.provider
+				: getProvider("codex");
+			observation = observerProvider?.observeRequest?.(
+				req.headers,
+				options?.trustedNativeResponses === true,
+			);
+		}
+	} catch {
+		log.warn("Request observation failed", { capture_gap: true });
 	}
-	return handleProxyRequest(req, url, ctx, apiKeyId, apiKeyName);
+	const run = () =>
+		handleProxyRequest(
+			req,
+			url,
+			ctx,
+			apiKeyId,
+			apiKeyName,
+			options,
+			observation,
+		);
+	const result = isInternalProbe(req.headers, ctx)
+		? runForceAccountModelExempt(run)
+		: run();
+	if (!observation) return result;
+	return result.then(
+		(response) => {
+			try {
+				observation.response(response);
+			} catch {
+				log.warn("Request observation failed", { capture_gap: true });
+			}
+			return response;
+		},
+		(error) => {
+			try {
+				observation.error(error);
+			} catch {
+				log.warn("Request observation failed", { capture_gap: true });
+			}
+			throw error;
+		},
+	);
 }
 
 async function handleProxyRequest(
@@ -193,6 +240,8 @@ async function handleProxyRequest(
 	ctx: ProxyContext,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+	options?: { trustedNativeResponses?: boolean },
+	observation?: RequestObservation,
 ): Promise<Response> {
 	// 0. Silently ignore Claude Code internal endpoints (non-critical, not supported by all providers)
 	if (
@@ -294,6 +343,14 @@ async function handleProxyRequest(
 
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
+	try {
+		observation?.bindRequestId(requestMeta.id);
+	} catch {
+		log.warn("Request observation failed", { capture_gap: true });
+	}
+	if (options?.trustedNativeResponses === true) {
+		markTrustedNativeResponses(requestMeta);
+	}
 	requestMeta.agentUsed = agentUsed;
 	requestMeta.agentAttributionSource = agentAttributionSource;
 	requestMeta.project = project;

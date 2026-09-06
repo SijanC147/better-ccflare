@@ -31,9 +31,11 @@ import { forwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { getXaiConvId } from "./account-selector";
 import { markFamilyExhausted } from "./model-capacity";
+import { forwardObservedUpstream } from "./observed-upstream";
 import {
 	ERROR_MESSAGES,
 	isInternalProbe,
+	isTrustedNativeResponses,
 	type ProxyContext,
 } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
@@ -511,17 +513,35 @@ export async function proxyUnauthenticated(
 		// connection after the fact — a signal not part of `init.signal` at
 		// fetch-creation time cannot retroactively attach to it.
 		const drainAbortController = new AbortController();
-		const response = await makeProxyRequest(
-			targetUrl,
-			req.method,
+		const signal = AbortSignal.any([req.signal, drainAbortController.signal]);
+		// The opt-in empty-pool passthrough is still a real dispatch. Its
+		// missing account must be visible rather than silently skipping capture.
+		const wire = new Request(targetUrl, {
+			method: req.method,
 			headers,
-			createBodyStream,
-			!!req.body,
-			// Abort upstream when the client disconnects; this path builds no
-			// Request object, so the signal has to be passed explicitly. Merged
-			// with drainAbortController so the terminal-recovery drain deadline
-			// can also abort this same fetch later.
-			AbortSignal.any([req.signal, drainAbortController.signal]),
+			body: requestBodyBuffer ? new Uint8Array(requestBodyBuffer) : undefined,
+			signal,
+		});
+		const response = await forwardObservedUpstream(
+			ctx.provider,
+			wire,
+			{
+				requestId: requestMeta.id,
+				account: null,
+				sourceBody: requestBodyBuffer,
+				sourceHeaders: req.headers,
+				nativeResponses: isTrustedNativeResponses(requestMeta),
+				signal,
+			},
+			() =>
+				makeProxyRequest(
+					targetUrl,
+					req.method,
+					headers,
+					createBodyStream,
+					!!req.body,
+					signal,
+				),
 		);
 
 		return forwardToClient(
@@ -607,15 +627,30 @@ export async function proxyWithAccount(
 		// invariant that every provider has to remember. Merged with
 		// drainAbortController so the terminal-recovery drain deadline can also
 		// abort this same fetch later.
-		const forwardUpstream = (target: Request) =>
-			makeProxyRequest(
+		const forwardUpstream = (target: Request) => {
+			const signal = AbortSignal.any([req.signal, drainAbortController.signal]);
+			return forwardObservedUpstream(
+				provider,
 				target,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				AbortSignal.any([req.signal, drainAbortController.signal]),
+				{
+					requestId: requestMeta.id,
+					account,
+					sourceBody: effectiveBodyBuffer,
+					sourceHeaders: req.headers,
+					nativeResponses: isTrustedNativeResponses(requestMeta),
+					signal,
+				},
+				(wire) =>
+					makeProxyRequest(
+						wire,
+						undefined,
+						undefined,
+						undefined,
+						undefined,
+						signal,
+					),
 			);
+		};
 		if (
 			process.env.DEBUG?.includes("proxy") ||
 			process.env.DEBUG === "true" ||
@@ -702,6 +737,16 @@ export async function proxyWithAccount(
 			accessToken,
 			account.api_key || undefined,
 		);
+		// Codex continuation is prepared while transformRequestBody still has the
+		// native input. Make the proxy-owned correlation ID available at that seam;
+		// the provider consumes and strips it before the request leaves ccflare.
+		// Never trust or reuse a caller-supplied copy.
+		if (provider.name === "codex") {
+			headers.set("x-better-ccflare-request-id", requestMeta.id);
+			if (isTrustedNativeResponses(requestMeta)) {
+				headers.set("x-better-ccflare-native-responses", "true");
+			}
+		}
 		// Synthetic-response markers are internal provider-to-proxy signals. Strip
 		// client-supplied copies before providers transform the outbound request.
 		headers.delete(SYNTHETIC_RESPONSE_HEADER);
@@ -1366,6 +1411,18 @@ export async function proxyWithAccount(
 				internalCustomTools,
 			);
 		}
+		const internalNativeResponses = transformedRequest.headers.get(
+			"x-better-ccflare-native-responses",
+		);
+		if (
+			internalNativeResponses === "true" ||
+			internalNativeResponses === "false"
+		) {
+			responseHeaders.set(
+				"x-better-ccflare-native-responses",
+				internalNativeResponses,
+			);
+		}
 		// Inject the original request path so providers can identify the
 		// response type (e.g. /v1/models vs /v1/messages) in processResponse
 		// without needing the original request object.
@@ -1466,6 +1523,18 @@ export async function proxyWithAccount(
 							retryTaggedHeaders.set(
 								"x-better-ccflare-codex-custom-tools",
 								retryCustomTools,
+							);
+						}
+						const retryNativeResponses = transformedRequest.headers.get(
+							"x-better-ccflare-native-responses",
+						);
+						if (
+							retryNativeResponses === "true" ||
+							retryNativeResponses === "false"
+						) {
+							retryTaggedHeaders.set(
+								"x-better-ccflare-native-responses",
+								retryNativeResponses,
 							);
 						}
 						retryTaggedHeaders.set(
