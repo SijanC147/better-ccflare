@@ -398,8 +398,9 @@ Codex CLI requires an API key to start — use `dummy-key` if better-ccflare API
 
 Known limitations:
 
-- `previous_response_id` is accepted but ignored — Codex uses this only over WebSocket; for regular HTTP requests it always sends the full conversation history in `input`
-- Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are silently skipped; only `type: "function"` tools are forwarded to Anthropic
+- Regular HTTP does not trust an arbitrary caller-supplied `previous_response_id`. On the authenticated, native outbound Codex route, an operator-controlled gateway request can enable gateway-managed continuation: better-ccflare retains only the last upstream response ID and cryptographic input/configuration digests, resumes only after an exact ordered-prefix match, and otherwise sends the full input without a response ID. This bounded state is in memory, so a restart safely cold-starts. WebSocket transport is not implemented.
+- Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are preserved on the native outbound Codex route. Routes translated to Anthropic skip built-in tools and forward only `type: "function"` tools.
+- `/v1/responses` rejects unknown top-level request fields with `400 invalid_request_error` instead of silently dropping them. The canonical ChatGPT subscription endpoint also rejects an explicitly supplied `max_output_tokens`; omit it and let the served model choose its output limit. Custom OpenAI-compatible endpoints may accept it.
 - Claude OAuth accounts (Claude Pro/Team, `provider=anthropic` with OAuth tokens) are automatically excluded from Codex CLI traffic — Anthropic bans these when used outside Claude CLI. Anthropic API key accounts are fine and will be used normally.
 
 ### SSL/HTTPS Configuration
@@ -818,6 +819,8 @@ Inspired by [snipeship/ccflare](https://github.com/snipeship/ccflare) - thanks f
 - [@vansh2408](https://github.com/vansh2408) — [#359](https://github.com/tombii/better-ccflare/pull/359)
 - [@aaapl](https://github.com/aaapl) — [#433](https://github.com/tombii/better-ccflare/pull/433)
 - [@mjonuschat](https://github.com/mjonuschat) — [#436](https://github.com/tombii/better-ccflare/pull/436)
+- [@anony253](https://github.com/anony253) — [#452](https://github.com/tombii/better-ccflare/pull/452)
+- [@valentinyanakiev](https://github.com/valentinyanakiev) — [#450](https://github.com/tombii/better-ccflare/pull/450)
 
 ## Contributing
 
