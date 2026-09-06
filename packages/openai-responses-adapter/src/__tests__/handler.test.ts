@@ -232,7 +232,9 @@ describe("handleResponsesRequest", () => {
 			"client-request-123",
 		);
 		expect(forwardedHeaders?.get("x-better-ccflare-session-id")).toBeNull();
-		expect(forwardedHeaders?.get("x-better-ccflare-prompt-cache-mode")).toBeNull();
+		expect(
+			forwardedHeaders?.get("x-better-ccflare-prompt-cache-mode"),
+		).toBeNull();
 		expect(forwardedHeaders?.get("x-better-ccflare-native-responses")).toBe(
 			"true",
 		);
@@ -894,14 +896,18 @@ describe("handleResponsesRequest", () => {
 			{},
 		);
 		expect(await response.json()).toEqual(nativeJson);
-		expect(response.headers.get("x-better-ccflare-transport-used")).toBe("http");
+		expect(response.headers.get("x-better-ccflare-transport-used")).toBe(
+			"http",
+		);
 		expect(response.headers.get("x-better-ccflare-stable-prefix-digest")).toBe(
 			"a".repeat(64),
 		);
-		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe("hit");
-		expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
-			"true",
+		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe(
+			"hit",
 		);
+		expect(
+			response.headers.get("x-better-ccflare-cache-controls-applied"),
+		).toBe("true");
 		expect(
 			response.headers.get("x-better-ccflare-codex-response-format"),
 		).toBeNull();

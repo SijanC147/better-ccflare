@@ -217,10 +217,7 @@ function applyPromptCacheControls(
 			prompt_cache_options: options as ResponsesRequest["prompt_cache_options"],
 		};
 	}
-	if (
-		headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() ===
-		"developer"
-	) {
+	if (headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() === "developer") {
 		controlled = addDeveloperBreakpoint(controlled);
 	}
 	return controlled;
@@ -307,8 +304,7 @@ function exactPromptCacheControlsApplied(
 	return (
 		headers.get(CACHE_MODE_HEADER)?.toLowerCase() === "implicit" &&
 		headers.get(CACHE_TTL_HEADER)?.toLowerCase() === "30m" &&
-		headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() ===
-			"developer" &&
+		headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() === "developer" &&
 		exactOptions &&
 		hasExactlyOneExplicitPromptCacheBreakpoint(body.input)
 	);
@@ -536,7 +532,8 @@ export async function handleResponsesRequest(
 	messagesUrl.pathname = "/v1/messages";
 	const syntheticHeaders = new Headers(req.headers);
 	const forwardedSessionId =
-		req.headers.get("session-id") ?? req.headers.get("x-better-ccflare-session-id");
+		req.headers.get("session-id") ??
+		req.headers.get("x-better-ccflare-session-id");
 	const forwardedClientRequestId =
 		req.headers.get("x-client-request-id") ??
 		req.headers.get("x-better-ccflare-client-request-id");
@@ -585,9 +582,7 @@ export async function handleResponsesRequest(
 		codexPassthrough.prompt_cache_options = body.prompt_cache_options;
 	if (body.previous_response_id !== undefined)
 		codexPassthrough.previous_response_id = body.previous_response_id;
-	if (
-		req.headers.get(CONTINUATION_HEADER) === "previous_response_id"
-	) {
+	if (req.headers.get(CONTINUATION_HEADER) === "previous_response_id") {
 		codexPassthrough.continuation_strategy = "previous_response_id";
 	}
 	// Preserve the native item structure for Codex accounts. This retains

@@ -2659,7 +2659,7 @@ export class CodexProvider extends BaseProvider {
 					const { done, value } = await reader.read();
 					if (done) break;
 					pending += value;
-					const parts = pending.split("\n");
+					const parts = pending.split(/\r?\n/);
 					pending = parts.pop() ?? "";
 					for (const line of parts) {
 						processLine(line);
@@ -2980,17 +2980,19 @@ export class CodexProvider extends BaseProvider {
 
 					// Process complete SSE events in buffer
 					while (true) {
-						const newlineIdx = state.buffer.indexOf("\n\n");
-						if (newlineIdx === -1) break;
+						const boundary = state.buffer.match(/\r?\n\r?\n/);
+						if (!boundary || boundary.index === undefined) break;
 
-						const eventText = state.buffer.slice(0, newlineIdx);
-						state.buffer = state.buffer.slice(newlineIdx + 2);
+						const eventText = state.buffer.slice(0, boundary.index);
+						state.buffer = state.buffer.slice(
+							boundary.index + boundary[0].length,
+						);
 
 						const eventLine = eventText
-							.split("\n")
+							.split(/\r?\n/)
 							.find((l) => l.startsWith("event:"));
 						const dataLine = eventText
-							.split("\n")
+							.split(/\r?\n/)
 							.find((l) => l.startsWith("data:"));
 
 						if (!eventLine || !dataLine) continue;

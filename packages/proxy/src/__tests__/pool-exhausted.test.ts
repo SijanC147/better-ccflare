@@ -366,8 +366,14 @@ it("records a joined local refusal without inventing an upstream attempt", async
 		const ctx = makeContext([]);
 		ctx.provider = { name: "anthropic", canHandle: () => true } as never;
 		const request = makeRequest();
-		request.headers.set("x-better-ccflare-gateway-request-digest", "a".repeat(64));
-		request.headers.set("x-better-ccflare-gateway-attempt-digest", "b".repeat(64));
+		request.headers.set(
+			"x-better-ccflare-gateway-request-digest",
+			"a".repeat(64),
+		);
+		request.headers.set(
+			"x-better-ccflare-gateway-attempt-digest",
+			"b".repeat(64),
+		);
 		const response = await handleProxy(request, new URL(request.url), ctx);
 		expect(response.status).toBe(503);
 		expect((await response.json()).error.type).toBe("pool_exhausted");

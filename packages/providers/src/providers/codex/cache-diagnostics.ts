@@ -89,7 +89,9 @@ export class CodexCacheDiagnostics {
 		const conversation =
 			suppliedDigest("x-better-ccflare-conversation-digest") ??
 			callerIdentity("x-better-ccflare-conversation-id");
-		const ordinal = context.headers?.get("x-better-ccflare-gateway-attempt-number");
+		const ordinal = context.headers?.get(
+			"x-better-ccflare-gateway-attempt-number",
+		);
 		const metadata: Facts = {
 			event: "prepared",
 			ts_ms: now,

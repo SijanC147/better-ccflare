@@ -4360,19 +4360,21 @@ describe("CodexProvider native Responses preservation", () => {
 			null,
 		);
 		expect(response.headers.get("x-better-ccflare-transport-used")).toBe("sse");
-		expect(response.headers.get("x-better-ccflare-continuation-used")).toBe("false");
+		expect(response.headers.get("x-better-ccflare-continuation-used")).toBe(
+			"false",
+		);
 		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe(
 			"cold",
 		);
-		expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
-			"true",
-		);
-		expect(response.headers.get("x-better-ccflare-previous-response-present")).toBe(
-			"false",
-		);
-		expect(response.headers.get("x-better-ccflare-stable-prefix-digest")).toMatch(
-			/^[0-9a-f]{64}$/,
-		);
+		expect(
+			response.headers.get("x-better-ccflare-cache-controls-applied"),
+		).toBe("true");
+		expect(
+			response.headers.get("x-better-ccflare-previous-response-present"),
+		).toBe("false");
+		expect(
+			response.headers.get("x-better-ccflare-stable-prefix-digest"),
+		).toMatch(/^[0-9a-f]{64}$/);
 		expect(response.headers.get("x-better-ccflare-session-digest")).toMatch(
 			/^[0-9a-f]{64}$/,
 		);
@@ -4432,8 +4434,12 @@ describe("CodexProvider native Responses preservation", () => {
 			),
 			null,
 		);
-		expect(cold.headers.get("x-better-ccflare-continuation-result")).toBe("cold");
-		expect(cold.headers.get("x-better-ccflare-cache-controls-applied")).toBe("true");
+		expect(cold.headers.get("x-better-ccflare-continuation-result")).toBe(
+			"cold",
+		);
+		expect(cold.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
+			"true",
+		);
 		await cold.text();
 
 		const suffix = inputItem("second turn");
@@ -4472,7 +4478,9 @@ describe("CodexProvider native Responses preservation", () => {
 			null,
 		);
 		expect(hit.headers.get("x-better-ccflare-continuation-result")).toBe("hit");
-		expect(hit.headers.get("x-better-ccflare-cache-controls-applied")).toBe("true");
+		expect(hit.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
+			"true",
+		);
 		await hit.text();
 	});
 
@@ -4532,9 +4540,9 @@ describe("CodexProvider native Responses preservation", () => {
 				),
 				null,
 			);
-			expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
-				"false",
-			);
+			expect(
+				response.headers.get("x-better-ccflare-cache-controls-applied"),
+			).toBe("false");
 			await response.text();
 		}
 	});
@@ -4581,14 +4589,18 @@ describe("CodexProvider native Responses preservation", () => {
 			null,
 		);
 		expect(response.headers.get("x-better-ccflare-transport-used")).toBe("sse");
-		expect(response.headers.get("x-better-ccflare-continuation-used")).toBe("true");
-		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe("hit");
-		expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
-			"false",
-		);
-		expect(response.headers.get("x-better-ccflare-previous-response-present")).toBe(
+		expect(response.headers.get("x-better-ccflare-continuation-used")).toBe(
 			"true",
 		);
+		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe(
+			"hit",
+		);
+		expect(
+			response.headers.get("x-better-ccflare-cache-controls-applied"),
+		).toBe("false");
+		expect(
+			response.headers.get("x-better-ccflare-previous-response-present"),
+		).toBe("true");
 		await response.text();
 	});
 
