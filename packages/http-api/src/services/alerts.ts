@@ -254,7 +254,16 @@ export class AlertService {
 		this.config = config;
 		this.requestListener = (event) => {
 			if (event.type === "summary") {
-				void this.evaluateRequest(event.payload);
+				// Alert evaluation runs the aggregate-threshold queries below,
+				// which can reject (e.g. a PG statement-timeout during a DB
+				// slowdown, #451). This listener is invoked from an async event
+				// handler, so an unhandled rejection here would crash the proxy
+				// with exit code 1 — catch and log instead.
+				this.evaluateRequest(event.payload).catch((error) => {
+					log.error(
+						`Alert evaluation failed for request ${event.payload.id}: ${(error as Error).message}`,
+					);
+				});
 			}
 		};
 		this.authFailureListener = (event) => {
@@ -322,7 +331,13 @@ export class AlertService {
 		if (!config.anomalyEnabled) return;
 		this.anomalyTimer = setInterval(
 			() => {
-				void this.evaluateAnomalies();
+				// Same rationale as evaluateRequest above: this timer callback
+				// fires an async function with no caller to await it, so an
+				// unhandled rejection (e.g. a PG timeout on the anomaly window
+				// query, #451) would otherwise crash the proxy.
+				this.evaluateAnomalies().catch((error) => {
+					log.error(`Anomaly evaluation failed: ${(error as Error).message}`);
+				});
 			},
 			config.anomalyIntervalMinutes * 60 * 1000,
 		);
