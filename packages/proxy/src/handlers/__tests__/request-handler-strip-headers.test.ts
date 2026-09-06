@@ -37,12 +37,12 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			"x-better-ccflare-codex-custom-tools": "true",
 			"x-better-ccflare-native-responses": "true",
 			"x-better-ccflare-exclude-providers": "anthropic-oauth",
-			"x-lanetally-codex-continuation": "previous_response_id",
-			"x-lanetally-prompt-cache-mode": "implicit",
-			"x-lanetally-prompt-cache-ttl": "30m",
-			"x-lanetally-prompt-cache-breakpoint": "developer",
-			"x-lanetally-codex-path": "native_responses",
-			"x-lanetally-codex-transport": "sse",
+			"x-better-ccflare-codex-continuation": "previous_response_id",
+			"x-better-ccflare-prompt-cache-mode": "implicit",
+			"x-better-ccflare-prompt-cache-ttl": "30m",
+			"x-better-ccflare-prompt-cache-breakpoint": "developer",
+			"x-better-ccflare-codex-path": "native_responses",
+			"x-better-ccflare-codex-transport": "sse",
 			authorization: "Bearer token",
 			"content-type": "application/json",
 		});
@@ -64,12 +64,12 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 		expect(sentHeaders?.get("x-better-ccflare-native-responses")).toBeNull();
 		expect(sentHeaders?.get("x-better-ccflare-exclude-providers")).toBeNull();
 		for (const header of [
-			"x-lanetally-codex-continuation",
-			"x-lanetally-prompt-cache-mode",
-			"x-lanetally-prompt-cache-ttl",
-			"x-lanetally-prompt-cache-breakpoint",
-			"x-lanetally-codex-path",
-			"x-lanetally-codex-transport",
+			"x-better-ccflare-codex-continuation",
+			"x-better-ccflare-prompt-cache-mode",
+			"x-better-ccflare-prompt-cache-ttl",
+			"x-better-ccflare-prompt-cache-breakpoint",
+			"x-better-ccflare-codex-path",
+			"x-better-ccflare-codex-transport",
 		]) {
 			expect(sentHeaders?.get(header)).toBeNull();
 		}
@@ -87,12 +87,12 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 				"x-better-ccflare-request-id": "internal-request-id",
 				"x-better-ccflare-native-responses": "true",
 				"x-better-ccflare-exclude-providers": "anthropic-oauth",
-				"x-lanetally-codex-continuation": "previous_response_id",
-				"x-lanetally-prompt-cache-mode": "implicit",
-				"x-lanetally-prompt-cache-ttl": "30m",
-				"x-lanetally-prompt-cache-breakpoint": "developer",
-				"x-lanetally-codex-path": "native_responses",
-				"x-lanetally-codex-transport": "sse",
+				"x-better-ccflare-codex-continuation": "previous_response_id",
+				"x-better-ccflare-prompt-cache-mode": "implicit",
+				"x-better-ccflare-prompt-cache-ttl": "30m",
+				"x-better-ccflare-prompt-cache-breakpoint": "developer",
+				"x-better-ccflare-codex-path": "native_responses",
+				"x-better-ccflare-codex-transport": "sse",
 				authorization: "Bearer token",
 			},
 		});
@@ -105,12 +105,12 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 		expect(sentHeaders?.get("x-better-ccflare-native-responses")).toBeNull();
 		expect(sentHeaders?.get("x-better-ccflare-exclude-providers")).toBeNull();
 		for (const header of [
-			"x-lanetally-codex-continuation",
-			"x-lanetally-prompt-cache-mode",
-			"x-lanetally-prompt-cache-ttl",
-			"x-lanetally-prompt-cache-breakpoint",
-			"x-lanetally-codex-path",
-			"x-lanetally-codex-transport",
+			"x-better-ccflare-codex-continuation",
+			"x-better-ccflare-prompt-cache-mode",
+			"x-better-ccflare-prompt-cache-ttl",
+			"x-better-ccflare-prompt-cache-breakpoint",
+			"x-better-ccflare-codex-path",
+			"x-better-ccflare-codex-transport",
 		]) {
 			expect(sentHeaders?.get(header)).toBeNull();
 		}

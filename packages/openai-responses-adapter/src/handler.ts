@@ -14,10 +14,10 @@ const TERMINAL_RESPONSE_EVENT_TYPES = new Set([
 ]);
 
 const NATIVE_RESPONSES_HEADER = "x-better-ccflare-native-responses";
-const LANETALLY_CONTINUATION_HEADER = "x-lanetally-codex-continuation";
-const LANETALLY_CACHE_MODE_HEADER = "x-lanetally-prompt-cache-mode";
-const LANETALLY_CACHE_TTL_HEADER = "x-lanetally-prompt-cache-ttl";
-const LANETALLY_CACHE_BREAKPOINT_HEADER = "x-lanetally-prompt-cache-breakpoint";
+const CONTINUATION_HEADER = "x-better-ccflare-codex-continuation";
+const CACHE_MODE_HEADER = "x-better-ccflare-prompt-cache-mode";
+const CACHE_TTL_HEADER = "x-better-ccflare-prompt-cache-ttl";
+const CACHE_BREAKPOINT_HEADER = "x-better-ccflare-prompt-cache-breakpoint";
 const MAX_PROMPT_CACHE_BREAKPOINTS = 4;
 const CACHE_DIAGNOSTIC_TYPES = new Set(["cache_hit", "cache_miss"]);
 const CACHE_DIAGNOSTIC_REASONS = new Set([
@@ -179,13 +179,13 @@ function addDeveloperBreakpoint(body: ResponsesRequest): ResponsesRequest {
 	throw new Error("developer cache breakpoint boundary was not found");
 }
 
-function applyLaneTallyCacheControls(
+function applyPromptCacheControls(
 	body: ResponsesRequest,
 	headers: Headers,
 ): ResponsesRequest {
 	let controlled = body;
-	const mode = headers.get(LANETALLY_CACHE_MODE_HEADER)?.toLowerCase();
-	const ttl = headers.get(LANETALLY_CACHE_TTL_HEADER)?.toLowerCase();
+	const mode = headers.get(CACHE_MODE_HEADER)?.toLowerCase();
+	const ttl = headers.get(CACHE_TTL_HEADER)?.toLowerCase();
 	const suppliedOptions = controlled.prompt_cache_options as
 		| {
 				mode?: string;
@@ -218,7 +218,7 @@ function applyLaneTallyCacheControls(
 		};
 	}
 	if (
-		headers.get(LANETALLY_CACHE_BREAKPOINT_HEADER)?.toLowerCase() ===
+		headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() ===
 		"developer"
 	) {
 		controlled = addDeveloperBreakpoint(controlled);
@@ -235,7 +235,7 @@ function logCacheRequestDiagnostics(body: ResponsesRequest, headers: Headers) {
 			typeof body.previous_response_id === "string" &&
 			body.previous_response_id.length > 0,
 		continuationStrategy:
-			headers.get(LANETALLY_CONTINUATION_HEADER) === "previous_response_id"
+			headers.get(CONTINUATION_HEADER) === "previous_response_id"
 				? "previous_response_id"
 				: "none",
 		cacheMode:
@@ -293,7 +293,7 @@ function logCacheResponseDiagnostics(response: Record<string, unknown>): void {
 	});
 }
 
-function exactLaneTallyCacheControlsApplied(
+function exactPromptCacheControlsApplied(
 	body: ResponsesRequest,
 	headers: Headers,
 ): boolean {
@@ -305,9 +305,9 @@ function exactLaneTallyCacheControlsApplied(
 		Object.keys(options).length === 1 &&
 		(options as Record<string, unknown>).ttl === "30m";
 	return (
-		headers.get(LANETALLY_CACHE_MODE_HEADER)?.toLowerCase() === "implicit" &&
-		headers.get(LANETALLY_CACHE_TTL_HEADER)?.toLowerCase() === "30m" &&
-		headers.get(LANETALLY_CACHE_BREAKPOINT_HEADER)?.toLowerCase() ===
+		headers.get(CACHE_MODE_HEADER)?.toLowerCase() === "implicit" &&
+		headers.get(CACHE_TTL_HEADER)?.toLowerCase() === "30m" &&
+		headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() ===
 			"developer" &&
 		exactOptions &&
 		hasExactlyOneExplicitPromptCacheBreakpoint(body.input)
@@ -492,7 +492,7 @@ export async function handleResponsesRequest(
 		};
 	}
 	try {
-		body = applyLaneTallyCacheControls(body, req.headers);
+		body = applyPromptCacheControls(body, req.headers);
 	} catch (error) {
 		const message =
 			error instanceof Error ? error.message : "invalid cache controls";
@@ -525,7 +525,7 @@ export async function handleResponsesRequest(
 		req.headers.get("session-id") ||
 		req.headers.get("session_id") ||
 		req.headers.get("x-session-id") ||
-		req.headers.get("x-bf-eh-session-id") ||
+		req.headers.get("x-better-ccflare-session-id") ||
 		null;
 	if (sessionKey && !anthropicBody.metadata) {
 		anthropicBody.metadata = { user_id: `codex-responses-${sessionKey}` };
@@ -536,21 +536,21 @@ export async function handleResponsesRequest(
 	messagesUrl.pathname = "/v1/messages";
 	const syntheticHeaders = new Headers(req.headers);
 	const forwardedSessionId =
-		req.headers.get("session-id") ?? req.headers.get("x-bf-eh-session-id");
+		req.headers.get("session-id") ?? req.headers.get("x-better-ccflare-session-id");
 	const forwardedClientRequestId =
 		req.headers.get("x-client-request-id") ??
-		req.headers.get("x-bf-eh-x-client-request-id");
+		req.headers.get("x-better-ccflare-client-request-id");
 	if (forwardedSessionId)
 		syntheticHeaders.set("session-id", forwardedSessionId);
 	if (forwardedClientRequestId) {
 		syntheticHeaders.set("x-client-request-id", forwardedClientRequestId);
 	}
-	syntheticHeaders.delete("x-bf-eh-session-id");
-	syntheticHeaders.delete("x-bf-eh-x-client-request-id");
-	syntheticHeaders.delete(LANETALLY_CONTINUATION_HEADER);
-	syntheticHeaders.delete(LANETALLY_CACHE_MODE_HEADER);
-	syntheticHeaders.delete(LANETALLY_CACHE_TTL_HEADER);
-	syntheticHeaders.delete(LANETALLY_CACHE_BREAKPOINT_HEADER);
+	syntheticHeaders.delete("x-better-ccflare-session-id");
+	syntheticHeaders.delete("x-better-ccflare-client-request-id");
+	syntheticHeaders.delete(CONTINUATION_HEADER);
+	syntheticHeaders.delete(CACHE_MODE_HEADER);
+	syntheticHeaders.delete(CACHE_TTL_HEADER);
+	syntheticHeaders.delete(CACHE_BREAKPOINT_HEADER);
 	syntheticHeaders.set(NATIVE_RESPONSES_HEADER, "true");
 	syntheticHeaders.set("content-type", "application/json");
 	syntheticHeaders.delete("content-length");
@@ -574,7 +574,7 @@ export async function handleResponsesRequest(
 			.update(apiKeyId)
 			.digest("hex");
 	}
-	if (exactLaneTallyCacheControlsApplied(body, req.headers)) {
+	if (exactPromptCacheControlsApplied(body, req.headers)) {
 		codexPassthrough.cache_controls_applied = true;
 	}
 	if (body.model !== undefined) codexPassthrough.model = body.model;
@@ -586,7 +586,7 @@ export async function handleResponsesRequest(
 	if (body.previous_response_id !== undefined)
 		codexPassthrough.previous_response_id = body.previous_response_id;
 	if (
-		req.headers.get(LANETALLY_CONTINUATION_HEADER) === "previous_response_id"
+		req.headers.get(CONTINUATION_HEADER) === "previous_response_id"
 	) {
 		codexPassthrough.continuation_strategy = "previous_response_id";
 	}

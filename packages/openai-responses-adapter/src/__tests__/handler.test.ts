@@ -138,7 +138,7 @@ describe("handleResponsesRequest", () => {
 		).toBeUndefined();
 	});
 
-	test("preserves native continuation/cache controls and normalizes LaneTally identity headers", async () => {
+	test("preserves native continuation/cache controls and normalizes gateway identity headers", async () => {
 		let forwardedBody: Record<string, unknown> | null = null;
 		let forwardedHeaders: Headers | null = null;
 		let forwardedOptions: { trustedNativeResponses?: boolean } | undefined;
@@ -184,12 +184,12 @@ describe("handleResponsesRequest", () => {
 			}),
 			headers: {
 				"Content-Type": "application/json",
-				"X-LaneTally-Codex-Continuation": "previous_response_id",
-				"X-LaneTally-Prompt-Cache-Mode": "implicit",
-				"X-LaneTally-Prompt-Cache-Ttl": "30m",
-				"X-LaneTally-Prompt-Cache-Breakpoint": "developer",
-				"X-Bf-Eh-Session-Id": "session-123",
-				"X-Bf-Eh-X-Client-Request-Id": "client-request-123",
+				"X-Better-Ccflare-Codex-Continuation": "previous_response_id",
+				"X-Better-Ccflare-Prompt-Cache-Mode": "implicit",
+				"X-Better-Ccflare-Prompt-Cache-Ttl": "30m",
+				"X-Better-Ccflare-Prompt-Cache-Breakpoint": "developer",
+				"X-Better-Ccflare-Session-Id": "session-123",
+				"X-Better-Ccflare-Client-Request-Id": "client-request-123",
 			},
 		});
 
@@ -231,8 +231,8 @@ describe("handleResponsesRequest", () => {
 		expect(forwardedHeaders?.get("x-client-request-id")).toBe(
 			"client-request-123",
 		);
-		expect(forwardedHeaders?.get("x-bf-eh-session-id")).toBeNull();
-		expect(forwardedHeaders?.get("x-lanetally-prompt-cache-mode")).toBeNull();
+		expect(forwardedHeaders?.get("x-better-ccflare-session-id")).toBeNull();
+		expect(forwardedHeaders?.get("x-better-ccflare-prompt-cache-mode")).toBeNull();
 		expect(forwardedHeaders?.get("x-better-ccflare-native-responses")).toBe(
 			"true",
 		);
@@ -245,8 +245,8 @@ describe("handleResponsesRequest", () => {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-lanetally-prompt-cache-mode": "implicit",
-				"x-lanetally-prompt-cache-ttl": "30m",
+				"x-better-ccflare-prompt-cache-mode": "implicit",
+				"x-better-ccflare-prompt-cache-ttl": "30m",
 			},
 			body: JSON.stringify({
 				model: "gpt-5.6-sol",
@@ -290,9 +290,9 @@ describe("handleResponsesRequest", () => {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					"x-lanetally-prompt-cache-mode": "implicit",
-					"x-lanetally-prompt-cache-ttl": "30m",
-					"x-lanetally-prompt-cache-breakpoint": "developer",
+					"x-better-ccflare-prompt-cache-mode": "implicit",
+					"x-better-ccflare-prompt-cache-ttl": "30m",
+					"x-better-ccflare-prompt-cache-breakpoint": "developer",
 				},
 				body: JSON.stringify({
 					model: "gpt-5.6-sol",
@@ -463,7 +463,7 @@ describe("handleResponsesRequest", () => {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-lanetally-prompt-cache-breakpoint": "developer",
+				"x-better-ccflare-prompt-cache-breakpoint": "developer",
 			},
 			body: JSON.stringify({
 				model: "gpt-5.6-sol",
@@ -502,7 +502,7 @@ describe("handleResponsesRequest", () => {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-lanetally-prompt-cache-breakpoint": "developer",
+				"x-better-ccflare-prompt-cache-breakpoint": "developer",
 			},
 			body: JSON.stringify({
 				model: "gpt-5.6-sol",
@@ -545,7 +545,7 @@ describe("handleResponsesRequest", () => {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-lanetally-prompt-cache-breakpoint": "developer",
+				"x-better-ccflare-prompt-cache-breakpoint": "developer",
 			},
 			body: JSON.stringify({
 				model: "gpt-5.6-sol",
@@ -574,13 +574,13 @@ describe("handleResponsesRequest", () => {
 				status: 429,
 				headers: {
 					"x-better-ccflare-codex-response-format": "responses-api",
-					"x-lanetally-transport-used": "http",
-					"x-lanetally-continuation-used": "false",
-					"x-lanetally-previous-response-present": "false",
-					"x-lanetally-stable-prefix-digest": "a".repeat(64),
-					"x-lanetally-session-digest": "b".repeat(64),
-					"x-lanetally-continuation-result": "hit",
-					"x-lanetally-cache-controls-applied": "true",
+					"x-better-ccflare-transport-used": "http",
+					"x-better-ccflare-continuation-used": "false",
+					"x-better-ccflare-previous-response-present": "false",
+					"x-better-ccflare-stable-prefix-digest": "a".repeat(64),
+					"x-better-ccflare-session-digest": "b".repeat(64),
+					"x-better-ccflare-continuation-result": "hit",
+					"x-better-ccflare-cache-controls-applied": "true",
 				},
 			});
 
@@ -606,8 +606,8 @@ describe("handleResponsesRequest", () => {
 			{},
 		);
 		expect(resp.status).toBe(429);
-		expect(resp.headers.get("x-lanetally-transport-used")).toBe("http");
-		expect(resp.headers.get("x-lanetally-stable-prefix-digest")).toBe(
+		expect(resp.headers.get("x-better-ccflare-transport-used")).toBe("http");
+		expect(resp.headers.get("x-better-ccflare-stable-prefix-digest")).toBe(
 			"a".repeat(64),
 		);
 		expect(
@@ -869,13 +869,13 @@ describe("handleResponsesRequest", () => {
 				headers: {
 					"content-type": "application/json",
 					"x-better-ccflare-codex-response-format": "responses-api",
-					"x-lanetally-transport-used": "http",
-					"x-lanetally-continuation-used": "false",
-					"x-lanetally-previous-response-present": "false",
-					"x-lanetally-stable-prefix-digest": "a".repeat(64),
-					"x-lanetally-session-digest": "b".repeat(64),
-					"x-lanetally-continuation-result": "hit",
-					"x-lanetally-cache-controls-applied": "true",
+					"x-better-ccflare-transport-used": "http",
+					"x-better-ccflare-continuation-used": "false",
+					"x-better-ccflare-previous-response-present": "false",
+					"x-better-ccflare-stable-prefix-digest": "a".repeat(64),
+					"x-better-ccflare-session-digest": "b".repeat(64),
+					"x-better-ccflare-continuation-result": "hit",
+					"x-better-ccflare-cache-controls-applied": "true",
 				},
 			});
 		const req = new Request("http://localhost/v1/responses", {
@@ -894,12 +894,12 @@ describe("handleResponsesRequest", () => {
 			{},
 		);
 		expect(await response.json()).toEqual(nativeJson);
-		expect(response.headers.get("x-lanetally-transport-used")).toBe("http");
-		expect(response.headers.get("x-lanetally-stable-prefix-digest")).toBe(
+		expect(response.headers.get("x-better-ccflare-transport-used")).toBe("http");
+		expect(response.headers.get("x-better-ccflare-stable-prefix-digest")).toBe(
 			"a".repeat(64),
 		);
-		expect(response.headers.get("x-lanetally-continuation-result")).toBe("hit");
-		expect(response.headers.get("x-lanetally-cache-controls-applied")).toBe(
+		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe("hit");
+		expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
 			"true",
 		);
 		expect(

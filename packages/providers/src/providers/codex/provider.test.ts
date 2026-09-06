@@ -4359,21 +4359,21 @@ describe("CodexProvider native Responses preservation", () => {
 			}),
 			null,
 		);
-		expect(response.headers.get("x-lanetally-transport-used")).toBe("sse");
-		expect(response.headers.get("x-lanetally-continuation-used")).toBe("false");
-		expect(response.headers.get("x-lanetally-continuation-result")).toBe(
+		expect(response.headers.get("x-better-ccflare-transport-used")).toBe("sse");
+		expect(response.headers.get("x-better-ccflare-continuation-used")).toBe("false");
+		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe(
 			"cold",
 		);
-		expect(response.headers.get("x-lanetally-cache-controls-applied")).toBe(
+		expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
 			"true",
 		);
-		expect(response.headers.get("x-lanetally-previous-response-present")).toBe(
+		expect(response.headers.get("x-better-ccflare-previous-response-present")).toBe(
 			"false",
 		);
-		expect(response.headers.get("x-lanetally-stable-prefix-digest")).toMatch(
+		expect(response.headers.get("x-better-ccflare-stable-prefix-digest")).toMatch(
 			/^[0-9a-f]{64}$/,
 		);
-		expect(response.headers.get("x-lanetally-session-digest")).toMatch(
+		expect(response.headers.get("x-better-ccflare-session-digest")).toMatch(
 			/^[0-9a-f]{64}$/,
 		);
 		expect(JSON.stringify(Object.fromEntries(response.headers))).not.toContain(
@@ -4432,8 +4432,8 @@ describe("CodexProvider native Responses preservation", () => {
 			),
 			null,
 		);
-		expect(cold.headers.get("x-lanetally-continuation-result")).toBe("cold");
-		expect(cold.headers.get("x-lanetally-cache-controls-applied")).toBe("true");
+		expect(cold.headers.get("x-better-ccflare-continuation-result")).toBe("cold");
+		expect(cold.headers.get("x-better-ccflare-cache-controls-applied")).toBe("true");
 		await cold.text();
 
 		const suffix = inputItem("second turn");
@@ -4471,8 +4471,8 @@ describe("CodexProvider native Responses preservation", () => {
 			),
 			null,
 		);
-		expect(hit.headers.get("x-lanetally-continuation-result")).toBe("hit");
-		expect(hit.headers.get("x-lanetally-cache-controls-applied")).toBe("true");
+		expect(hit.headers.get("x-better-ccflare-continuation-result")).toBe("hit");
+		expect(hit.headers.get("x-better-ccflare-cache-controls-applied")).toBe("true");
 		await hit.text();
 	});
 
@@ -4532,7 +4532,7 @@ describe("CodexProvider native Responses preservation", () => {
 				),
 				null,
 			);
-			expect(response.headers.get("x-lanetally-cache-controls-applied")).toBe(
+			expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
 				"false",
 			);
 			await response.text();
@@ -4573,20 +4573,20 @@ describe("CodexProvider native Responses preservation", () => {
 						"content-type": "Text/Event-Stream; charset=utf-8",
 						"x-better-ccflare-native-responses": "true",
 						"x-better-ccflare-request-id": "request-attest-hit-next",
-						"x-lanetally-continuation-result": "attacker-value",
-						"x-lanetally-cache-controls-applied": "true",
+						"x-better-ccflare-continuation-result": "attacker-value",
+						"x-better-ccflare-cache-controls-applied": "true",
 					},
 				},
 			),
 			null,
 		);
-		expect(response.headers.get("x-lanetally-transport-used")).toBe("sse");
-		expect(response.headers.get("x-lanetally-continuation-used")).toBe("true");
-		expect(response.headers.get("x-lanetally-continuation-result")).toBe("hit");
-		expect(response.headers.get("x-lanetally-cache-controls-applied")).toBe(
+		expect(response.headers.get("x-better-ccflare-transport-used")).toBe("sse");
+		expect(response.headers.get("x-better-ccflare-continuation-used")).toBe("true");
+		expect(response.headers.get("x-better-ccflare-continuation-result")).toBe("hit");
+		expect(response.headers.get("x-better-ccflare-cache-controls-applied")).toBe(
 			"false",
 		);
-		expect(response.headers.get("x-lanetally-previous-response-present")).toBe(
+		expect(response.headers.get("x-better-ccflare-previous-response-present")).toBe(
 			"true",
 		);
 		await response.text();

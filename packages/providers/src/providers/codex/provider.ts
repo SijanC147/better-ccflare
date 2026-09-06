@@ -716,20 +716,11 @@ export class CodexProvider extends BaseProvider {
 		newHeaders.delete("x-api-key");
 		newHeaders.delete("host");
 
-		// Remove internal proxy headers.
+		// Remove internal proxy headers. Every control and identity header this
+		// proxy understands lives under the one namespace, so the prefix is the
+		// whole rule.
 		for (const key of [...newHeaders.keys()]) {
-			if (
-				key.startsWith("x-better-ccflare-") ||
-				key.startsWith("x-lanetally-gateway-") ||
-				[
-					"x-lanetally-conversation-id",
-					"x-lanetally-agent-id",
-					"x-lanetally-parent-agent-id",
-					"x-lanetally-conversation-digest",
-					"x-lanetally-agent-digest",
-					"x-lanetally-parent-agent-digest",
-				].includes(key)
-			) {
+			if (key.startsWith("x-better-ccflare-")) {
 				newHeaders.delete(key);
 			}
 		}
@@ -753,8 +744,8 @@ export class CodexProvider extends BaseProvider {
 			path: nativeResponses ? "native" : "legacy",
 		};
 		for (const [header, field] of [
-			["x-lanetally-gateway-request-digest", "gateway_request_digest"],
-			["x-lanetally-gateway-attempt-digest", "gateway_attempt_digest"],
+			["x-better-ccflare-gateway-request-digest", "gateway_request_digest"],
+			["x-better-ccflare-gateway-attempt-digest", "gateway_attempt_digest"],
 		]) {
 			const value = headers.get(header);
 			facts[field] = value && /^[0-9a-f]{64}$/.test(value) ? value : null;
@@ -1277,7 +1268,7 @@ export class CodexProvider extends BaseProvider {
 		return exact && count === 1;
 	}
 
-	private hasExactLaneTallyPromptCacheOptions(value: unknown): boolean {
+	private hasExactPromptCacheOptions(value: unknown): boolean {
 		return (
 			value !== null &&
 			typeof value === "object" &&
@@ -1446,7 +1437,7 @@ export class CodexProvider extends BaseProvider {
 			previousResponsePresent: result === "hit",
 			cacheControlsApplied:
 				cacheControlsApplied === true &&
-				this.hasExactLaneTallyPromptCacheOptions(body.prompt_cache_options) &&
+				this.hasExactPromptCacheOptions(body.prompt_cache_options) &&
 				originalBreakpointIsExact,
 		});
 		this.sweepContinuationState(now);
@@ -1647,13 +1638,13 @@ export class CodexProvider extends BaseProvider {
 		const headers = sanitizeResponseHeaders(response.headers);
 		for (const attestationHeader of [
 			"x-better-ccflare-codex-continuation",
-			"x-lanetally-transport-used",
-			"x-lanetally-continuation-used",
-			"x-lanetally-previous-response-present",
-			"x-lanetally-stable-prefix-digest",
-			"x-lanetally-session-digest",
-			"x-lanetally-continuation-result",
-			"x-lanetally-cache-controls-applied",
+			"x-better-ccflare-transport-used",
+			"x-better-ccflare-continuation-used",
+			"x-better-ccflare-previous-response-present",
+			"x-better-ccflare-stable-prefix-digest",
+			"x-better-ccflare-session-digest",
+			"x-better-ccflare-continuation-result",
+			"x-better-ccflare-cache-controls-applied",
 		]) {
 			headers.delete(attestationHeader);
 		}
@@ -1664,25 +1655,25 @@ export class CodexProvider extends BaseProvider {
 			.includes("text/event-stream")
 			? "sse"
 			: "http";
-		headers.set("x-lanetally-transport-used", transportUsed);
+		headers.set("x-better-ccflare-transport-used", transportUsed);
 		if (diagnostics) {
 			headers.set("x-better-ccflare-codex-continuation", diagnostics.result);
-			headers.set("x-lanetally-continuation-result", diagnostics.result);
+			headers.set("x-better-ccflare-continuation-result", diagnostics.result);
 			headers.set(
-				"x-lanetally-continuation-used",
+				"x-better-ccflare-continuation-used",
 				diagnostics.result === "hit" ? "true" : "false",
 			);
 			headers.set(
-				"x-lanetally-previous-response-present",
+				"x-better-ccflare-previous-response-present",
 				diagnostics.previousResponsePresent ? "true" : "false",
 			);
 			headers.set(
-				"x-lanetally-stable-prefix-digest",
+				"x-better-ccflare-stable-prefix-digest",
 				diagnostics.stablePrefixDigest,
 			);
-			headers.set("x-lanetally-session-digest", diagnostics.sessionDigest);
+			headers.set("x-better-ccflare-session-digest", diagnostics.sessionDigest);
 			headers.set(
-				"x-lanetally-cache-controls-applied",
+				"x-better-ccflare-cache-controls-applied",
 				diagnostics.cacheControlsApplied ? "true" : "false",
 			);
 		}

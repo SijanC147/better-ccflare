@@ -87,9 +87,9 @@ export class CodexCacheDiagnostics {
 		};
 		const suppliedDigest = (name: string) => gatewayIdentity(name);
 		const conversation =
-			suppliedDigest("x-lanetally-conversation-digest") ??
-			callerIdentity("x-lanetally-conversation-id");
-		const ordinal = context.headers?.get("x-lanetally-gateway-attempt-number");
+			suppliedDigest("x-better-ccflare-conversation-digest") ??
+			callerIdentity("x-better-ccflare-conversation-id");
+		const ordinal = context.headers?.get("x-better-ccflare-gateway-attempt-number");
 		const metadata: Facts = {
 			event: "prepared",
 			ts_ms: now,
@@ -97,20 +97,20 @@ export class CodexCacheDiagnostics {
 			attempt_digest: hash([this.instance, attempt]),
 			observer_attempt_sequence: attempt,
 			gateway_request_digest: gatewayIdentity(
-				"x-lanetally-gateway-request-digest",
+				"x-better-ccflare-gateway-request-digest",
 			),
 			gateway_attempt_digest: gatewayIdentity(
-				"x-lanetally-gateway-attempt-digest",
+				"x-better-ccflare-gateway-attempt-digest",
 			),
 			account_digest: account ? hash(account) : null,
 			session_digest: session ? hash([account, session]) : null,
 			conversation_digest: conversation,
 			agent_digest:
-				suppliedDigest("x-lanetally-agent-digest") ??
-				callerIdentity("x-lanetally-agent-id"),
+				suppliedDigest("x-better-ccflare-agent-digest") ??
+				callerIdentity("x-better-ccflare-agent-id"),
 			parent_agent_digest:
-				suppliedDigest("x-lanetally-parent-agent-digest") ??
-				callerIdentity("x-lanetally-parent-agent-id"),
+				suppliedDigest("x-better-ccflare-parent-agent-digest") ??
+				callerIdentity("x-better-ccflare-parent-agent-id"),
 			gateway_attempt_number:
 				ordinal && /^\d{1,6}$/.test(ordinal) ? count(Number(ordinal)) : null,
 			gateway_identity_source: "header_hint",

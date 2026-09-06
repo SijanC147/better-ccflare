@@ -249,7 +249,7 @@ describe("Claude to Codex replay cache stability", () => {
 	test("legacy explicit cache affinity survives without admitting native execution controls", async () => {
 		const provider = new CodexProvider();
 		for (const key of [
-			"lanetally-run-11111111-1111-4111-8111-111111111111",
+			"gateway-run-11111111-1111-4111-8111-111111111111",
 			"",
 		]) {
 			const converted = await (
