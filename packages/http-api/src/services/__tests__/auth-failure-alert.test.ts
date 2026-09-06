@@ -230,13 +230,16 @@ class TimingOutPgAdapter implements BunSqlAdapterType {
 	async run(_sql: string, _params?: unknown[]): Promise<void> {}
 }
 
-function makeAggregateConfig(): Config {
+function makeAggregateConfig(
+	overrides: Partial<{ anomalyIntervalMinutes: number }> = {},
+): Config {
 	return Object.assign(new EventEmitter(), {
 		getAlertDailySpendUsd: () => 0,
 		getAlertTokensPerHour: () => 1,
 		getAlertRequestTokens: () => 0,
 		getAlertAnomalyEnabled: () => true,
-		getAlertAnomalyIntervalMinutes: () => 15,
+		getAlertAnomalyIntervalMinutes: () =>
+			overrides.anomalyIntervalMinutes ?? 15,
 		getAlertAnomalyBaselineWindowMinutes: () => 1440,
 		getAlertAnomalyLoopMinRequests: () => 25,
 		getAlertCooldownMinutes: () => 60,
@@ -310,17 +313,17 @@ describe("AlertService aggregate-query timeout (issue #451)", () => {
 
 	it("does not leak an unhandled rejection when the anomaly timer's query times out", async () => {
 		const adapter = new TimingOutPgAdapter();
+		// A sub-millisecond interval so the real setInterval callback in
+		// restartAnomalyTimer fires during the test wait below — this exercises
+		// the timer's own .catch() wrapper directly, rather than calling
+		// evaluateAnomalies() and catching it ourselves (which would still pass
+		// even if the production .catch() were removed).
 		const service = new AlertService(
 			adapter as unknown as BunSqlAdapterType,
-			makeAggregateConfig(),
+			makeAggregateConfig({ anomalyIntervalMinutes: 1 / 6_000_000 }),
 		);
 		service.start();
 		try {
-			// evaluateAnomalies is invoked directly here (rather than waiting for
-			// the interval timer) so the test isn't tied to
-			// anomalyIntervalMinutes, but it exercises the exact rejecting
-			// `.query()` call the timer callback fires-and-forgets.
-			service.evaluateAnomalies().catch(() => {});
 			await Bun.sleep(20);
 			expect(unhandled).toHaveLength(0);
 		} finally {
