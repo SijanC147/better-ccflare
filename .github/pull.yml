@@ -1,0 +1,11 @@
+version: "1"
+rules:
+  - base: main
+    upstream: tombii:main
+    mergeMethod: none
+    mergeUnstable: false
+    assignees: []
+    reviewers: []
+    conflictReviewers: []
+label: "⤵️ pull"
+conflictLabel: merge-conflict
