@@ -1,0 +1,564 @@
+# Upstream maintainer configuration for SijanC147/better-ccflare
+#
+# Tracks tombii/better-ccflare. Written 2026-09-11 from the accumulated record of five
+# hand-run syncs, the most recent of which integrated 624 commits.
+#
+# The governing lesson from that record, and the reason this file is shaped the way it
+# is: CONFLICT COUNT IS NOT COVERAGE. The 2026-08 sync produced 37 conflicts and 494
+# clean auto-merges, and every one of the five real defects came from the clean side.
+# Three of them produced no merge marker at all. So the weight here sits on policy and
+# gates, which run whether or not anything conflicted, rather than on resolver guidance.
+#
+# Companion documents, all tracked, all fed to the agent via agent.context_files:
+#   docs/upstream-sync.md  the per-repo calibration and the standing conflict resolutions
+#   docs/release.md        release mechanics, the version policy, the manifest boundary
+#   docs/rollback.md       recovery, and what a rollback does not undo
+#   MERGELOG.md            what every prior sync actually did
+
+version: 1
+
+identity:
+  name: Upstream Maintainer
+  email: upstream-maintainer@users.noreply.github.com
+
+# One sync at a time. Both required checks are STRICT, so a second open sync PR would
+# need its base updated and CI re-run the moment the first merged. Serialising is
+# cheaper than that.
+concurrency:
+  max_open_prs: 1
+
+defaults:
+  target_branch: main
+
+  # Weekly, Monday 05:00 Europe/Malta. The minute field is required but ignored by the
+  # controller, which evaluates only hour and day. Upstream moves fast (85 commits in
+  # the fortnight after the last sync), but merge.mode is manual and a failed pair is
+  # not retried automatically, so a daily cadence would just queue behind a review.
+  schedule:
+    cron: "0 5 * * 1"
+    timezone: Europe/Malta
+
+  strategy:
+    kind: merge
+    # Decided once, in config, so they cost no resolver round and cannot be argued with.
+    path_rules:
+      # Upstream owns apps/cli/README.md; the fork keeps its own and never adopts theirs.
+      - {glob: "apps/cli/README.md", resolve: ours}
+      # The fork's .gitignore deliberately does NOT ignore the three inline-*-worker.ts
+      # files that upstream ignores. Keeping ours wholesale guarantees that, at the cost
+      # of not picking up upstream's new ignore entries. That trade is deliberate: an
+      # ignored-and-untracked worker lets a release ship generated code absent from the
+      # tag's tracked tree, because the clean-tree gate uses --untracked-files=no.
+      - {glob: ".gitignore", resolve: ours}
+
+  policy:
+    # Target paths the integration may not change. .github/** and
+    # .github/upstream-maintainer.yml are always appended by the controller.
+    #
+    # Everything in the first block is Hextap release machinery. Upstream has never
+    # heard of Hextap (verified 2026-09-11: `git grep -il hextap upstream/main` is
+    # empty), so none of it should ever conflict. If one does, that is a signal to stop,
+    # not something to resolve.
+    protected_paths:
+      - ".hextap.json"
+      - ".hextap/**"
+      - "scripts/hextap-build"
+      - "scripts/hextap-contract.test.ts"
+      - "scripts/test-hextap-build.ts"
+      - "apps/cli/hextap-build.ts"
+      - "apps/cli/hextap-targets.ts"
+      - "packages/core/src/build-identity.ts"
+      # Fork-owned prose. Upstream rewrites its own equivalents constantly and the fork
+      # versions are customized; content inside <!-- fork:keep --> is inviolable.
+      - "CLAUDE.md"
+      - "README.md"
+      - "docs/**"
+      - "MERGELOG.md"
+
+    # NOT `halt`, and this is the one counter-intuitive setting in the file.
+    #
+    # `.github/**` is ALWAYS protected and cannot be un-protected. Upstream actively
+    # develops nine live workflows against the fork's three. Under `halt`, every sync
+    # touching any upstream workflow would stop before doing anything, which is every
+    # sync. `ours` keeps the fork's version and lets the run continue, which is exactly
+    # the calibration's standing rule for workflows: keep ours by default, record any
+    # adoption as a separate follow-up.
+    #
+    # This does mean upstream changes to the Hextap paths above would also be silently
+    # kept-ours rather than halting. That is acceptable only because upstream cannot
+    # reach them today, and the forbidden_patterns rule below is what catches the day
+    # that stops being true.
+    on_upstream_protected_change: ours
+
+    manifests:
+      # The manifest is a release AND recovery boundary. All four top-level keys frozen.
+      # The three copies (.hextap.json, .hextap/tap-registration.json, and the tap's
+      # Projects/better-ccflare.json) must stay byte-identical; changing it can
+      # permanently close `homebrew-only` recovery for tags already published. A sync
+      # must never touch it, and reformatting counts as touching it.
+      - file: .hextap.json
+        frozen_keys: [schema, formula, homebrew, release]
+      # A new workspace package must land in `workspaces` AND a regenerated bun.lock, or
+      # `bun install --frozen-lockfile` fails the release. This killed the first v3.8.0
+      # tag (SB23-312). The agent has no network and cannot regenerate a lockfile, so
+      # freezing this forces a human in rather than letting a broken pair through.
+      - file: package.json
+        frozen_keys: [workspaces]
+
+    # Deliberately omitted: preserve_upstream_paths.
+    #
+    # The obvious use would be `tests/**`, to stop a resolver "fixing" an upstream test
+    # to make it pass. It is omitted because the 2026-08 sync had to make exactly three
+    # legitimate edits to upstream test files: cache-keepalive-scheduler.test.ts,
+    # proxy-model-capacity.test.ts and the NanoGPT block of pricing.test.ts each
+    # destroyed globalThis.fetch without restoring it, and because Bun shares globals
+    # across test files, each one broke every test file that ran after it. Those were
+    # restorations, not weakenings, and a byte-equality guard cannot tell the difference.
+    # It would have halted a correct sync. The reviewer and the gates below cover
+    # weakening instead.
+
+    forbidden_patterns:
+      # The collision the merge cannot see. Upstream adopting Hextap, or any tap or
+      # Formula publishing of its own, would be textually clean here and still wrong:
+      # two publishers racing the same immutable v* tag. Verified absent upstream on
+      # 2026-09-11, so this does not misfire today.
+      - paths: ["**/*.yml", "**/*.yaml", "**/*.json", "**/*.ts", "**/*.md"]
+        # Spelled as a character class rather than with an inline (?i) flag, which the
+        # JavaScript regular-expression engine the controller uses rejects outright.
+        regex: '[Hh][Ee][Xx][Tt][Aa][Pp]'
+        message: >-
+          Upstream has started referencing Hextap. Do not resolve this automatically.
+          The fork owns the entire Hextap release path and assumes upstream knows nothing
+          about it; two release publishers on one v* tag can write a ninth asset into an
+          immutable release. Read docs/upstream-sync.md, then escalate via
+          /ask-hextap-coordinator before any sync proceeds.
+      # SemVer build metadata can never be part of release identity here: Hextap rejects
+      # it outright. Upstream's CCFLARE_BUILD_SUFFIX yields X.Y.Z+suffix. It exists
+      # upstream today in build-multi-arch.ts, which the fork does not use, so this rule
+      # is scoped to the files where it WOULD reach release identity.
+      - paths:
+          - "apps/cli/build-standalone.ts"
+          - "packages/core/src/build-identity.ts"
+          - "packages/core/src/version.ts"
+          - "packages/dashboard-web/build.ts"
+        regex: 'CCFLARE_BUILD_SUFFIX'
+        message: >-
+          Upstream has routed CCFLARE_BUILD_SUFFIX into the build-identity or dashboard
+          build path. Hextap rejects SemVer build metadata, so X.Y.Z+suffix can never be
+          release identity. Fail closed and adapt by hand; see the standing resolution
+          table in docs/upstream-sync.md.
+
+  agent:
+    effort: high
+    # Every tool left at its default of false. In particular NOT shell: the design
+    # otherwise prevents the resolver from executing code, and nothing about this repo
+    # needs that. The gates run the code, in a container the agent cannot influence.
+    max_repair_rounds: 2
+    timeouts:
+      resolve_minutes: 15
+      repair_minutes: 12
+      review_minutes: 10
+
+    # Read from the BASE commit, so this is maintainer-authored context the candidate
+    # cannot alter. Paths arrive as context/<path with / replaced by __>.
+    context_files:
+      - docs/upstream-sync.md
+      - docs/release.md
+      - docs/rollback.md
+      - CLAUDE.md
+      - MERGELOG.md
+
+    prompt: |
+      You are integrating tombii/better-ccflare into the SijanC147/better-ccflare fork.
+
+      READ FIRST, and treat as authoritative over your own judgement:
+        context/docs__upstream-sync.md   remotes, protections, standing resolutions, and
+                                        the "breaks without producing a conflict" audit
+        context/docs__release.md        release mechanics and the version policy
+        context/MERGELOG.md             what every previous sync actually decided
+
+      The single most important thing to understand about this repository: the danger is
+      not in the conflicts. The last sync resolved 37 conflicts and auto-merged 494
+      files cleanly, and all five real defects came from the clean side. Three produced
+      no merge marker. A resolution that only makes the markers go away is not done.
+
+      STANDING RESOLUTIONS. These were decided by the Hextap coordinator on 2026-08-27.
+      Apply them. Do not re-litigate them.
+
+      1. .github/workflows/release.yml. The fork DELETED it; upstream still develops it,
+         so git reports delete/modify and "keep the file" is the wrong instinct. Remove
+         it. scripts/hextap-contract.test.ts asserts it does not exist and that exactly
+         one workflow owns the v* trigger. Restoring it creates two publishers racing
+         the same immutable tag.
+      2. The three packages/database/src/inline-*-worker.ts files stay TRACKED and
+         un-ignored, even though upstream gitignores them. packages/proxy/src/
+         inline-worker.ts is orphaned and may follow upstream; do not conflate them.
+      3. packages/dashboard-web/src/lib/version.ts keeps the fork shape: root
+         package.json fallback, both __BETTER_CCFLARE_VERSION__ and
+         __BETTER_CCFLARE_COMMIT__ declares, displayVersion(), and the version/commit
+         exports, which navigation.tsx imports. Add getVersion() only as an additive
+         alias, never as a replacement.
+      4. packages/dashboard-web/build.ts must read BETTER_CCFLARE_BUILD_VERSION and
+         BETTER_CCFLARE_BUILD_COMMIT and inject both defines. Upstream's version ignores
+         those env vars and reads apps/cli/package.json, which would embed the wrong
+         version in a release and fail test-hextap-build.ts.
+
+      FORK-OWNED BEHAVIOUR that must survive. If upstream refactors a file these touch,
+      replay the fork's change onto upstream's version rather than dropping it:
+        - Project attribution: the X-CCFlare-Project header, the project_id column,
+          worktree-path attribution, dashboard project filters and the grouped request
+          stream. Note that upstream has since added its OWN project-attribution
+          implementation, already reconciled during the 2026-08 sync; keep the fork's
+          dual-header behaviour and headers-only storage intact when touching it.
+        - Dashboard customizations: color-coded model and account chips, the collapsible
+          sidebar with localStorage persistence, the 24-hour time toggle.
+        - Any migration added to packages/database/src/migrations.ts MUST also be ported
+          to migrations-pg.ts. See CLAUDE.md for the five specific places.
+
+      SECURITY POSTURE. The fork is deliberately stricter than upstream in two places
+      that have each drifted back once already:
+        - No query-parameter API key authentication. Upstream removed its ?api_key=
+          fallback in #379; a second SSE endpoint in the fork still carried one and had
+          to be migrated to token auth. Never reintroduce a query-parameter credential.
+        - PathValidator logs resolved TLS paths at debug, never at info. Upstream raised
+          this once. The description stays at info; the resolved path does not.
+        - Never adopt a blanket /api/oauth or non-/api static auth exemption. That
+          reintroduces a token-mutation vulnerability the fork has rejected twice.
+
+      VERSION. The git tag is the release version and Hextap injects it as a
+      compile-time define. Upstream bumps its package.json version on almost every
+      commit; the fork's manifests are set deliberately in a dedicated PR before
+      tagging. DO NOT let an upstream version bump through. Keep the fork's "version" in
+      both package.json and apps/cli/package.json exactly as the base commit has it. A
+      gate enforces this, and it is the one thing most likely to send you into a repair
+      round.
+
+      NEVER edit .hextap.json or .hextap/tap-registration.json. They must stay
+      byte-identical to each other and to the tap's copy. Reformatting counts as an
+      edit, and breaking that equality can permanently close release recovery for tags
+      that are already published.
+
+      If a conflict touches Hextap release machinery and the standing resolutions above
+      do not cover it, STOP and leave it conflicted rather than guessing. A plausible
+      resolution in those files can silently break an immutable release. A human
+      escalation path exists and is cheap; a burnt release tag is not recoverable.
+
+    reviewer:
+      effort: high
+      prompt: |
+        You are reviewing an upstream integration into a fork whose release pipeline is
+        unforgiving: v* tags are immutable, and a bad release cannot be re-cut, only
+        superseded.
+
+        Judge the clean merges, not only the resolved conflicts. In the last hand-run
+        sync of this repository, every genuine defect arrived through a file that merged
+        without a conflict, and three of them produced no marker at all. Specifically
+        check for:
+
+          - More than one workflow reacting to a v* tag, or any second path that writes
+            a GitHub release, uploads an asset, or pushes to the Homebrew tap.
+          - A reintroduced query-parameter API key, or a widened auth exemption for
+            /api/oauth or non-/api static paths.
+          - Resolved filesystem or TLS paths logged above debug level.
+          - Duplicate object keys, or two spellings of one field with different null
+            semantics, in a file that merged cleanly.
+          - An upstream package.json version bump surviving into the fork's manifests.
+          - Any change at all to .hextap.json or .hextap/tap-registration.json.
+          - A test weakened, skipped, or given a looser assertion to make it pass.
+
+        Reject rather than approve when a fork behaviour documented in
+        context/docs__upstream-sync.md has been dropped in favour of upstream's version.
+        Silent loss of a fork feature is the failure mode this review exists to catch.
+
+  validation:
+    environment:
+      # Pinned to bun 1.3.14, the EXACT version .hextap.json and ci.yml pin. A different
+      # bun regenerates the tracked inline workers and produces phantom diffs.
+      # Digest resolved from the registry and the image verified on 2026-09-11:
+      # apt-get present, sha256sum present, `bun --version` reports 1.3.14.
+      image: oven/bun:1.3.14-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f
+      env:
+        # Base gates run with the working directory at the BASE tree and the candidate
+        # mounted read-only here. Every base gate below reads the candidate explicitly
+        # through this variable, because a base gate that reads its own working
+        # directory is testing the wrong tree.
+        CANDIDATE: /workspace/target
+
+    gates:
+      # ---------------------------------------------------------------------------
+      # base gates: the test code comes from before the integration, so the resolver
+      # cannot weaken the check that judges its own work. These encode the audit list
+      # in docs/upstream-sync.md, "Breaks without producing a conflict".
+      # ---------------------------------------------------------------------------
+
+      - name: version-not-bumped-by-sync
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Upstream bumps its version constantly; the fork sets versions deliberately
+          # in a dedicated pre-tag PR. A sync must never move them.
+          rc=0
+          for manifest in package.json apps/cli/package.json; do
+            before=$(bun -e "console.log(require('./$manifest').version)")
+            after=$(bun -e "console.log(require('$CANDIDATE/$manifest').version)")
+            if [ "$before" != "$after" ]; then
+              echo "FAIL $manifest version changed by the sync: $before -> $after" >&2
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "The git tag is the release version. Restore the base version in both" >&2
+            echo "manifests; they are bumped only in their own PR before tagging." >&2
+            exit 1
+          }
+          echo "Both manifests still at the base version."
+
+      - name: hextap-manifest-boundary-intact
+        source: base
+        timeout_minutes: 3
+        run: |
+          # The manifest is a release and recovery boundary. It must be unchanged by the
+          # sync, and its two copies must stay byte-identical to each other.
+          for f in .hextap.json .hextap/tap-registration.json; do
+            if ! cmp -s "./$f" "$CANDIDATE/$f"; then
+              echo "FAIL $f was modified by the sync." >&2
+              echo "Breaking this equality can permanently close homebrew-only recovery" >&2
+              echo "for tags already published. Restore the base bytes exactly." >&2
+              exit 1
+            fi
+          done
+          a=$(sha256sum < "$CANDIDATE/.hextap.json" | cut -d' ' -f1)
+          b=$(sha256sum < "$CANDIDATE/.hextap/tap-registration.json" | cut -d' ' -f1)
+          [ "$a" = "$b" ] || {
+            echo "FAIL source and tap manifests are no longer byte-identical." >&2
+            exit 1
+          }
+          echo "Manifest unchanged and both copies identical ($a)."
+
+      - name: contract-test-not-weakened
+        source: base
+        timeout_minutes: 2
+        run: |
+          # scripts/hextap-contract.test.ts is protected policy-side too. This is the
+          # cheap independent confirmation, and it is what makes the candidate-sourced
+          # hextap-contract gate below trustworthy.
+          cmp -s ./scripts/hextap-contract.test.ts "$CANDIDATE/scripts/hextap-contract.test.ts" || {
+            echo "FAIL the Hextap contract test was modified by the integration." >&2
+            echo "That test is the gate on the release contract; it is not the agent's" >&2
+            echo "to edit. Restore it from the base commit." >&2
+            exit 1
+          }
+          echo "Contract test byte-identical to base."
+
+      - name: inline-workers-tracked-and-unignored
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Upstream gitignores these; the fork must not. An ignored-and-untracked
+          # worker lets a release ship generated code absent from the tag's tracked
+          # tree, because the clean-tree gate uses --untracked-files=no. The release
+          # quality phase also runs typecheck and test BEFORE the adapter regenerates
+          # them, so an absent file fails on a missing import.
+          rc=0
+          for w in inline-vacuum-worker inline-incremental-vacuum-worker inline-integrity-check-worker; do
+            path="packages/database/src/$w.ts"
+            [ -f "$CANDIDATE/$path" ] || { echo "FAIL missing $path" >&2; rc=1; }
+          done
+          if grep -qE 'inline-(vacuum|incremental-vacuum|integrity-check)-worker' "$CANDIDATE/.gitignore" 2>/dev/null; then
+            echo "FAIL .gitignore now ignores an inline database worker." >&2
+            echo "Upstream ignores these; this fork must keep all three tracked." >&2
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "All three inline database workers present and un-ignored."
+
+      - name: workspace-lockfile-coherence
+        source: base
+        timeout_minutes: 5
+        run: |
+          # A new workspace package must appear in a regenerated bun.lock or
+          # `bun install --frozen-lockfile` fails the release. This killed the first
+          # v3.8.0 tag. The agent has no network and cannot regenerate the lockfile, so
+          # this failing means a human must run bun install and commit the result.
+          missing=""
+          for pkg in "$CANDIDATE"/apps/*/package.json "$CANDIDATE"/packages/*/package.json; do
+            [ -f "$pkg" ] || continue
+            name=$(bun -e "console.log(require('$pkg').name)")
+            grep -qF "$name" "$CANDIDATE/bun.lock" || missing="$missing $name"
+          done
+          [ -z "$missing" ] || {
+            echo "FAIL workspace packages absent from bun.lock:$missing" >&2
+            echo "Run 'bun install' and commit the regenerated bun.lock. A frozen" >&2
+            echo "lockfile install is required at release time and will fail without it." >&2
+            exit 1
+          }
+          echo "Every workspace package resolves in bun.lock."
+
+      - name: bun-pin-unchanged
+        source: base
+        timeout_minutes: 3
+        run: |
+          # The pinned runtime is a manifest and tap recovery-boundary value, not a CI
+          # tweak. Both sides must move together, deliberately, never in a sync.
+          before=$(bun -e "console.log(require('./.hextap.json').release.profile.runtime_version ?? '')")
+          after=$(bun -e "console.log(require('$CANDIDATE/.hextap.json').release.profile.runtime_version ?? '')")
+          [ "$before" = "$after" ] || {
+            echo "FAIL pinned bun runtime changed by the sync: $before -> $after" >&2
+            exit 1
+          }
+          if [ -n "$after" ] && ! grep -q "bun-version: \"$after\"" "$CANDIDATE/.github/workflows/ci.yml"; then
+            echo "FAIL ci.yml no longer pins bun $after; the manifest and CI have drifted." >&2
+            exit 1
+          fi
+          echo "Bun pinned at $after in both the manifest and CI."
+
+      - name: required-check-names-unchanged
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Renaming a required check needs .hextap/rulesets/main.json, the live ruleset
+          # 21627513, the contract test and the online doctor updated together. A rename
+          # arriving through a sync silently un-gates protected main.
+          before=$(grep -E '^    name: ' ./.github/workflows/ci.yml | sort)
+          after=$(grep -E '^    name: ' "$CANDIDATE/.github/workflows/ci.yml" | sort)
+          [ "$before" = "$after" ] || {
+            echo "FAIL CI job names changed by the sync." >&2
+            printf 'base:\n%s\ncandidate:\n%s\n' "$before" "$after" >&2
+            echo "These names are required checks on protected main. Renaming one needs a" >&2
+            echo "coordinated ruleset change; it cannot ride an upstream sync." >&2
+            exit 1
+          }
+          echo "Required check names unchanged."
+
+      - name: build-identity-exports-present
+        source: base
+        timeout_minutes: 3
+        run: |
+          # The release binary must report `better-ccflare X.Y.Z (commit FULL_SHA)`, which
+          # the tap service smoke test enforces. These symbols carry it, and an upstream
+          # refactor can remove one with no conflict at all.
+          #
+          # Asserted per declaring FILE and as an `export`, not by grepping the package.
+          # Mutation-tested 2026-09-11: the recursive-grep version MISSED a rename,
+          # because the old name survived in a sibling test file and the grep passed.
+          rc=0
+          check_export() {
+            grep -qE "export (function|const) $2\b" "$CANDIDATE/packages/core/src/$1" \
+              || { echo "FAIL $2 no longer exported from $1" >&2; rc=1; }
+            grep -qE "(^|[^A-Za-z_])$2([^A-Za-z_]|$)" "$CANDIDATE/packages/core/src/index.ts" \
+              || { echo "FAIL $2 no longer re-exported from index.ts" >&2; rc=1; }
+          }
+          check_export build-identity.ts normalizeBuildVersion
+          check_export build-identity.ts normalizeBuildCommit
+          check_export build-identity.ts formatBuildIdentity
+          check_export version.ts getBuildIdentitySync
+          check_export version.ts getCommitSync
+          for def in __BETTER_CCFLARE_VERSION__ __BETTER_CCFLARE_COMMIT__; do
+            grep -qE "declare const $def\b" "$CANDIDATE/packages/core/src/version.ts" \
+              || { echo "FAIL compile define $def no longer declared in version.ts" >&2; rc=1; }
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "Release binaries would stop reporting their injected version." >&2
+            exit 1
+          }
+          echo "All five build-identity exports and both compile defines intact."
+
+      - name: fork-features-present
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Silent loss of a fork feature through a clean merge is the failure this
+          # whole configuration exists to prevent. These are the cheap tripwires.
+          rc=0
+          grep -rqF 'X-CCFlare-Project' "$CANDIDATE/packages" || { echo "FAIL project header gone" >&2; rc=1; }
+          grep -rqF 'project_id' "$CANDIDATE/packages/database/src/migrations.ts" || { echo "FAIL project_id absent from SQLite migrations" >&2; rc=1; }
+          grep -rqF 'project_id' "$CANDIDATE/packages/database/src/migrations-pg.ts" || { echo "FAIL project_id absent from PostgreSQL migrations; every migration must be ported" >&2; rc=1; }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "Fork project-attribution features present on both database paths."
+
+      # ---------------------------------------------------------------------------
+      # candidate gate: runs the fork's own release-contract test against the merged
+      # tree, so it picks up whatever the integration actually produced. Trustworthy
+      # because scripts/hextap-contract.test.ts is protected policy-side AND checked
+      # byte-identical by contract-test-not-weakened above.
+      #
+      # Verified 2026-09-11: this test imports only bun:test, node:fs and node:path, so
+      # it runs in a clean export with no node_modules (3 pass). The full suite cannot
+      # run here, because it needs `bun install` and the gate container has no network;
+      # that is what validation.required_checks is for.
+      # ---------------------------------------------------------------------------
+
+      - name: hextap-contract
+        source: candidate
+        timeout_minutes: 5
+        run: bun test scripts/hextap-contract.test.ts
+
+    # The target's own CI on the pull request. Names must match branch protection
+    # ruleset hextap/main (21627513) exactly, or merge.mode: auto would wait forever.
+    # This is where the full suite, typecheck, frozen-lockfile install, dashboard build
+    # and the Hextap release-contract job actually run, with network available.
+    required_checks:
+      - "Bun and release tooling"
+      - "Hextap release contract"
+
+  pull_request:
+    title_template: "sync(upstream): integrate {{upstream.repo}} {{upstream.sha12}}"
+    body_template: |
+      Integrates `{{upstream.repo}}` at `{{upstream.sha}}` into `{{target.branch}}` from base `{{base.sha}}`, through a real two-parent merge.
+
+      Candidate: `{{candidate.sha}}`
+      Controller run: {{run.url}}
+
+      {{gates.markdown}}
+
+      {{isolation.markdown}}
+
+      ### Reviewer checklist
+
+      The gates above cover the mechanical invariants. These need a human, because the last hand-run sync found all five of its real defects in files that merged **without a conflict**:
+
+      - [ ] Read `docs/upstream-sync.md`, section "Breaks without producing a conflict". Walk its eleven items against this diff.
+      - [ ] Grep every live workflow for a `v*` tag trigger and any release write. Exactly one workflow may own that trigger.
+      - [ ] No query-parameter API key anywhere. No widened `/api/oauth` or non-`/api` static auth exemption.
+      - [ ] Resolved filesystem and TLS paths log at `debug`, not `info`.
+      - [ ] Any new migration in `migrations.ts` is ported to `migrations-pg.ts` in all five required places.
+      - [ ] `bare better-ccflare` with no arguments still starts the server; the Homebrew service depends on it.
+      - [ ] Dashboard still emits to `@better-ccflare/dashboard-web/dist/embedded`.
+      - [ ] Update `MERGELOG.md` and its `last-sync-sha` marker before merging. That marker is the **upstream tip consumed**, not this merge commit.
+    commit_message_template: "sync(upstream): merge {{upstream.repo}} {{upstream.sha12}}"
+    labels:
+      - upstream-sync
+    assignees:
+      - SijanC147
+    status_context: upstream-maintainer/verified
+
+  # Manual, and it should stay manual. Both required checks are strict, the review is
+  # substantive rather than mechanical, and MERGELOG.md plus its last-sync-sha marker
+  # must be updated by hand before the merge. Revisit only after several runs have
+  # landed cleanly with no reviewer findings.
+  merge:
+    mode: manual
+    method: merge
+    require_branch_protection: true
+    delete_branch_on_merge: false
+
+  notifications:
+    on_failure:
+      issue_in_target: true
+      labels:
+        - upstream-maintainer
+      mention:
+        - SijanC147
+
+  # Releases are deliberately human here. A release is a pushed annotated tag on
+  # protected main and nothing else starts one; v* tags are immutable, the sequence is
+  # RC-then-stable on the same commit, and the pre-tag version PR has to land first.
+  # See docs/release.md. Automating this would skip all of it.
+  release:
+    enabled: false
+
+upstreams:
+  - repo: tombii/better-ccflare
+    ref:
+      kind: branch
+      name: main
