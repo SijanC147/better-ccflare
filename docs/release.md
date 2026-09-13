@@ -10,7 +10,20 @@ Migrated in PRs [#36](https://github.com/SijanC147/better-ccflare/pull/36) and
 
 ## The short version
 
-A release is a **pushed annotated git tag on protected `main`**. Nothing else starts one.
+A release is a **pushed `v*` git tag on protected `main`**. Nothing else starts one.
+
+The tag does not have to be annotated. `.github/workflows/hextap-release.yml` triggers on
+`push: tags: v*`, which fires for an annotated tag and a lightweight one alike. An earlier
+version of this document claimed a release required an annotated tag; that was never true.
+`v3.8.1` shipped on a lightweight tag and released normally, while `v3.8.0` and `v3.9.0` are
+annotated. Annotated is still the convention below, because it records who cut the release
+and when, but nothing in the pipeline enforces it.
+
+This matters for one path in particular. Publishing a GitHub release, including a draft
+prepared in advance, creates the tag through the Releases API, and that API creates a
+**lightweight** tag. Measured 2026-09-13: a draft holds no tag at all until it is published,
+publishing creates the tag at the release's pinned `target_commitish` rather than at current
+head, and the resulting push fires the `v*` workflow exactly as a hand-pushed tag does.
 
 ```bash
 git tag -a v3.8.3 -m "Release v3.8.3"
