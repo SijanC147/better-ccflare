@@ -293,7 +293,9 @@ export class APIRouter {
 		const versionStatusService = new VersionStatusService({
 			currentVersion: getVersionSync(),
 			mergedSha: MERGED_UPSTREAM_SHA,
-			token: process.env.BETTER_CCFLARE_GITHUB_TOKEN || undefined,
+			// Environment or the 0600 config file. The service is constructed once,
+			// so a token added to the file needs a restart, the same as pg_password.
+			token: config.getGithubReadToken() || undefined,
 		});
 		const versionCheckHandler = createVersionCheckHandler(versionStatusService);
 		const versionStatusHandler = createVersionStatusHandler(

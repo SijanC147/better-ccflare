@@ -76,9 +76,37 @@ still carries the local version, commit and merged sha, and `remote.error`
 explains why the remote half is missing. The widget can never block or break the
 sidebar because GitHub is unreachable.
 
-`BETTER_CCFLARE_GITHUB_TOKEN`, if set, is sent as a bearer token purely to raise
-the rate limit. It is never returned by an endpoint and never logged. All five
-reads are public data, so the token is optional.
+A GitHub token, if configured, is sent as a bearer token purely to raise the rate
+limit. It is never returned by an endpoint and never logged. All five reads are
+public data, so the token needs **no scopes at all** and is optional.
+
+Optional, but the limit it lifts is real: unauthenticated calls share 60 requests
+an hour **per IP** with every other tool on the machine, and exhausting it is
+what makes the sidebar report "Release check unavailable, GitHub rate limit
+exceeded". With a token the limit is 5,000.
+
+It is read like every other secret here, **environment first, then the persisted
+config file**:
+
+```jsonc
+// ~/.config/better-ccflare/better-ccflare.json
+{
+  "github_read_token": "ghp_..."
+}
+```
+
+`BETTER_CCFLARE_GITHUB_TOKEN` in the server environment works too and wins over
+the stored value. Prefer the config file: the service runs under launchd, where
+the environment reaches it only through `launchctl setenv`, which is machine-wide
+and lost on reboot, or through the LaunchAgent plist, which Homebrew regenerates
+on every `brew services` action. The config file is 0600 and survives both.
+
+**This is not the maintainer token.** `github_read_token` needs no scopes and only
+reads public releases and commits; `upstream_maintainer_token` authorizes a
+`repository_dispatch` on another repository. Do not reuse one for the other.
+
+Either way the service reads it once at construction, so adding it to the file
+needs a restart, the same as `pg_password`.
 
 ## The two capabilities that execute something
 

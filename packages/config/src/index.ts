@@ -195,6 +195,10 @@ export interface ConfigData {
 	// the dashboard offers no button. Sensitive — handled like pg_password: never
 	// returned by an endpoint, never logged, and excluded from getAllSettings().
 	upstream_maintainer_token?: string;
+	// Raises GitHub's API rate limit for the version widget from 60 requests an
+	// hour to 5,000. Needs no scopes: it only reads public releases and commits.
+	// Sensitive all the same, excluded from getAllSettings() with the others.
+	github_read_token?: string;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -1514,6 +1518,35 @@ export class Config extends EventEmitter {
 		return this.getUpstreamMaintainerToken().length > 0;
 	}
 
+	/**
+	 * Token used only to raise GitHub's API rate limit for the version widget.
+	 *
+	 * Unauthenticated calls share 60 requests an hour per IP with everything else
+	 * on the machine, which the sidebar exhausts and then reports as "Release
+	 * check unavailable". With a token the limit is 5,000.
+	 *
+	 * Environment first, then the persisted config file, matching every other
+	 * secret here. It exists separately from the maintainer token because the
+	 * scopes differ: this one needs no scopes at all, since it only reads public
+	 * releases and commits, while the maintainer token authorizes a workflow
+	 * dispatch on another repository. Do not reuse one for the other.
+	 *
+	 * Never returned by an endpoint and never logged.
+	 */
+	getGithubReadToken(): string {
+		return (
+			process.env.BETTER_CCFLARE_GITHUB_TOKEN ||
+			(typeof this.data.github_read_token === "string"
+				? this.data.github_read_token
+				: "")
+		);
+	}
+
+	/** Whether a read token is configured, for reporting without revealing it. */
+	hasGithubReadToken(): boolean {
+		return this.getGithubReadToken().length > 0;
+	}
+
 	// Deliberately no setter. Unlike pg_password, this value has no write path
 	// at all: the operator edits the config file (or sets the environment
 	// variable) and nothing reachable from the dashboard can set or overwrite it.
@@ -1730,6 +1763,7 @@ export class Config extends EventEmitter {
 			pg_password: _pgPassword,
 			local_control_secret: _localControlSecret,
 			upstream_maintainer_token: _upstreamMaintainerToken,
+			github_read_token: _githubReadToken,
 			...safeData
 		} = this.data;
 
