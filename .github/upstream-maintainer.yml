@@ -302,6 +302,13 @@ defaults:
         run: |
           # Upstream bumps its version constantly; the fork sets versions deliberately
           # in a dedicated pre-tag PR. A sync must never move them.
+          #
+          # Expect this gate to FAIL on nearly every sync, by design. Upstream bumps
+          # both manifests as part of its own release flow, so any sync spanning a
+          # release carries the bump in without a conflict. The repair is mechanical
+          # (restore both manifests to the base version), but it forces at least one of
+          # the two max_repair_rounds on nearly every sync, leaving one round for
+          # everything else. A failure here is routine, not evidence of a bad merge.
           rc=0
           for manifest in package.json apps/cli/package.json; do
             before=$(bun -e "console.log(require('./$manifest').version)")
@@ -480,6 +487,123 @@ defaults:
           grep -rqF 'project_id' "$CANDIDATE/packages/database/src/migrations-pg.ts" || { echo "FAIL project_id absent from PostgreSQL migrations; every migration must be ported" >&2; rc=1; }
           [ "$rc" -eq 0 ] || exit 1
           echo "Fork project-attribution features present on both database paths."
+
+      # The next three gates are the security regressions the v3.9.0 sync merged
+      # WITHOUT a conflict. Each one was found by hand, in a file git reported as
+      # clean. They are the reason this config exists.
+
+      - name: path-validator-log-level
+        source: base
+        timeout_minutes: 2
+        run: |
+          # Upstream logged the RESOLVED path at info. A validated path is itself
+          # sensitive (TLS key and cert locations are the motivating case) and this
+          # runs on CLI-supplied paths, so info puts it in default output. The
+          # resolved path belongs at debug only.
+          #
+          # Matched against the file joined into one line, because the formatter wraps
+          # long log calls and a per-line grep would miss a wrapped `log.info(` as well
+          # as fail on a wrapped debug line. `[^)]*` keeps each match inside one call.
+          f="$CANDIDATE/packages/security/src/path-validator.ts"
+          rc=0
+          [ -f "$f" ] || { echo "FAIL $f is gone; this gate can no longer judge anything." >&2; exit 1; }
+          joined=$(tr '\n' ' ' < "$f")
+          # Exactly one call above debug level may name the resolved path: the symlink
+          # warning, where the path is the subject of the warning. Anything else above
+          # debug is the regression. Asserted as a count plus an identity check, because
+          # the defect shape is an ADDED info-level line, not an edit to this one.
+          loud=$(printf '%s' "$joined" \
+            | grep -oE '(log\.(info|warn|error)|console\.(log|info|warn|error))\([^)]*resolvedPath' || true)
+          n=$(printf '%s' "$loud" | grep -c 'resolvedPath' || true)
+          if [ "$n" -ne 1 ] || ! printf '%s' "$loud" | grep -q 'symbolic link'; then
+            echo "FAIL expected exactly one above-debug log of resolvedPath (the symlink warning), found $n:" >&2
+            printf '%s\n' "$loud" >&2
+            echo "The resolved path is sensitive (TLS key and cert locations) and must" >&2
+            echo "stay at debug outside that one warning." >&2
+            rc=1
+          fi
+          # Anchored on the success path specifically. A plain "some debug call mentions
+          # resolvedPath" assertion is satisfied by the symlink-check debug call, so
+          # deleting the success line would pass. Mutation-tested 2026-09-13.
+          printf '%s' "$joined" | grep -qE 'log\.debug\([^)]*validation successful[^)]*resolvedPath' || {
+            echo "FAIL the successful-validation debug log no longer names resolvedPath." >&2
+            echo "Keep it at debug; do not delete it and do not raise its level." >&2
+            rc=1
+          }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "Resolved path logged at debug only."
+
+      - name: no-query-param-api-key
+        source: base
+        timeout_minutes: 2
+        run: |
+          # Upstream reintroduced a `?api_key=` fallback, which puts a long-lived
+          # credential in a URL, where it reaches access logs, the Referer header and
+          # shell history. Key extraction is header-only, and the stream endpoints use
+          # short-lived tokens instead.
+          rc=0
+          e="$CANDIDATE/packages/http-api/src/services/extract-api-key.ts"
+          [ -f "$e" ] || { echo "FAIL $e is gone." >&2; exit 1; }
+          if grep -q 'searchParams' "$e"; then
+            echo "FAIL extract-api-key.ts reads the query string; extraction is header-only." >&2
+            grep -n 'searchParams' "$e" >&2
+            rc=1
+          fi
+          hits=$(grep -rnE "searchParams\.get\(['\"]api_key" \
+            "$CANDIDATE/packages/http-api/src" "$CANDIDATE/packages/proxy/src" || true)
+          if [ -n "$hits" ]; then
+            echo "FAIL a query-string api_key read was reintroduced:" >&2
+            printf '%s\n' "$hits" >&2
+            rc=1
+          fi
+          grep -qF 'STREAM_TOKEN_PATHS' "$CANDIDATE/packages/http-api/src/services/auth-service.ts" || {
+            echo "FAIL STREAM_TOKEN_PATHS is gone from auth-service.ts." >&2
+            echo "That set is what gives /api/logs/stream and /api/requests/stream a" >&2
+            echo "short-lived token instead of the raw key in the URL." >&2
+            rc=1
+          }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "API keys come from headers only; stream-token paths intact."
+
+      - name: oauth-exemption-literals
+        source: base
+        timeout_minutes: 2
+        run: |
+          # Upstream exempts all of /api/oauth from authentication. That reopens the
+          # unauthenticated token-overwrite vector (Codex P1): init, reauth and
+          # callback all mutate stored tokens. Only the two read-only GET status
+          # prefixes are exempt here, and the narrowing must survive the sync.
+          f="$CANDIDATE/packages/http-api/src/services/auth-service.ts"
+          [ -f "$f" ] || { echo "FAIL $f is gone." >&2; exit 1; }
+          # The branch is extracted by indentation rather than by a fixed tab depth, so
+          # a reindent of authenticateRequest does not turn this gate into a false
+          # positive: record the `if` line's leading whitespace, stop at the first
+          # closing brace indented no deeper than it.
+          block=$(awk '
+            !f && /if \(path\.startsWith\("\/api\/oauth"\)\) \{/ { match($0, /^[ \t]*/); ind = RLENGTH; f = 1; print; next }
+            f { print; if ($0 ~ /^[ \t]*\}/) { match($0, /^[ \t]*/); if (RLENGTH <= ind) exit } }
+          ' "$f")
+          [ -n "$block" ] || {
+            echo "FAIL no /api/oauth branch found in authenticateRequest." >&2
+            echo "Either it was removed or its shape changed; review by hand." >&2
+            exit 1
+          }
+          rc=0
+          for lit in '/api/oauth/qwen/status/' '/api/oauth/codex/status/' 'method === "GET"'; do
+            printf '%s\n' "$block" | grep -qF "$lit" || {
+              echo "FAIL the /api/oauth branch no longer requires $lit" >&2
+              rc=1
+            }
+          done
+          if printf '%s\n' "$block" | grep -qE '(^|[^A-Za-z_])return true'; then
+            echo "FAIL the /api/oauth branch exempts the whole prefix (return true)." >&2
+            printf '%s\n' "$block" >&2
+            echo "Token-mutating OAuth endpoints must NOT be exempt. Restore the" >&2
+            echo "read-only GET status narrowing." >&2
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "OAuth exemption still limited to the two read-only GET status prefixes."
 
       # ---------------------------------------------------------------------------
       # candidate gate: runs the fork's own release-contract test against the merged
