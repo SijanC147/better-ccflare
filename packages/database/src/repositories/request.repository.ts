@@ -410,6 +410,47 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	// Analytics queries
+	/**
+	 * One request's summary row by id, or null when no such request exists.
+	 *
+	 * The same column set `getRecentRequests` returns, so a caller that has a row
+	 * from the list and a row from here can treat them interchangeably. Payloads
+	 * are deliberately not joined: `getPayload` already serves those, capture is
+	 * optional, and a request with no payload is normal rather than an error.
+	 */
+	async getRequestById(id: string): Promise<{
+		id: string;
+		timestamp: number;
+		method: string;
+		path: string;
+		account_used: string | null;
+		status_code: number | null;
+		success: boolean;
+		response_time_ms: number | null;
+	} | null> {
+		const rows = await this.query<{
+			id: string;
+			timestamp: number;
+			method: string;
+			path: string;
+			account_used: string | null;
+			status_code: number | null;
+			success: 0 | 1;
+			response_time_ms: number | null;
+		}>(
+			`
+			SELECT id, timestamp, method, path, account_used, status_code, success, response_time_ms
+			FROM requests
+			WHERE id = ?
+			LIMIT 1
+		`,
+			[id],
+		);
+		const row = rows[0];
+		if (!row) return null;
+		return { ...row, success: !!row.success };
+	}
+
 	async getRecentRequests(limit = 100): Promise<
 		Array<{
 			id: string;

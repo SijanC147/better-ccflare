@@ -2,7 +2,11 @@ import type {
 	BunSqlAdapter,
 	DatabaseOperations,
 } from "@better-ccflare/database";
-import { jsonResponse } from "@better-ccflare/http-common";
+import {
+	errorResponse,
+	jsonResponse,
+	NotFound,
+} from "@better-ccflare/http-common";
 // Subpath, not the package barrel: these are RUNTIME imports, and evaluating
 // the barrel first trips the documented types↔core cycle (see the header of
 // packages/types/src/request.ts). `types/request` imports nothing.
@@ -212,6 +216,30 @@ export function createRequestsDetailHandler(dbOps: DatabaseOperations) {
 		});
 
 		return jsonResponse(parsed);
+	};
+}
+
+/**
+ * `GET /api/requests/:id` — one request's summary row.
+ *
+ * The list routes page over recent requests, so anything holding an id from a
+ * log line, an alert or an external system had no way to look it up without
+ * paging until the id appeared. This closes that.
+ *
+ * Summary only. The payload lives at `/api/requests/payload/:id` and stays
+ * there: capture is optional, payloads of long-running requests are released to
+ * bound memory, and a request with no payload is ordinary rather than missing.
+ * Joining them here would make a normal request look like a broken one.
+ *
+ * 404 means no request with that id. It does not mean the payload is gone.
+ */
+export function createRequestByIdHandler(dbOps: DatabaseOperations) {
+	return async (requestId: string): Promise<Response> => {
+		const request = await dbOps.getRequestById(requestId);
+		if (!request) {
+			return errorResponse(NotFound(`No request with id ${requestId}`));
+		}
+		return jsonResponse(request);
 	};
 }
 
