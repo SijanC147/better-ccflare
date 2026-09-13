@@ -37,7 +37,7 @@ unauthenticated rate limit.
 | Merged upstream sha | `last-sync-sha` marker in `MERGELOG.md`, inlined at build time |
 | Commits behind upstream | `repos/tombii/better-ccflare/compare/<merged-sha>...main` → `ahead_by` |
 | Merged upstream tag | newest upstream release the merged sha is at or ahead of |
-| Open sync PR | open PR on the fork whose head branch starts with `upstream-sync/` |
+| Open sync PR | open PR whose head branch starts with `upstream-sync/` **and** lives on the fork itself |
 
 ### The merged-upstream sha in a compiled binary
 
@@ -56,8 +56,18 @@ that `.github/upstream-maintainer.yml` and `scripts/test-hextap-build.ts` gate.
 A full refresh is four GitHub calls, and the merged-tag resolution adds one
 release-list page plus at most ten compares once per process. A successful
 snapshot is served for 15 minutes, concurrent refreshes collapse into one network
-pass, and a `403`/`429` carrying `x-ratelimit-remaining: 0` suppresses all
-requests until the reported reset.
+pass, a `403`/`429` carrying `x-ratelimit-remaining: 0` suppresses all requests
+until the reported reset, and a refresh in which every call failed backs off for
+60 seconds. That last brake is what bounds a DNS failure, timeout or 5xx, none of
+which set a rate-limit header, and it applies to `?refresh=1` as well: `force`
+skips the freshness TTL, not the failure brake.
+
+The sync-PR match requires the head branch to live on the fork itself, not only
+to carry the `upstream-sync/` prefix. This repository is public and accepts pull
+requests from anyone, so a prefix test alone would let an outsider open
+`upstream-sync/anything` from their own fork and have the dashboard present it as
+the maintainer's sync PR. Only an account with push access can put a branch on
+the fork.
 
 `GET /api/version/status` always answers `200`. Each section degrades on its own:
 a failing call nulls its own half and leaves the rest, and a total failure serves
@@ -90,9 +100,13 @@ the supervisor. Four independent gates, all fail-closed:
    could trigger a package upgrade and a restart. Because the router authorizes
    `/api/*` before dispatch and only an `admin`-role key may reach non-proxy
    paths, an API-only key cannot call it either.
-3. The running executable must live inside a Homebrew prefix, else `409`. A
-   binary outside the Cellar was not installed by Homebrew, so `brew upgrade`
-   would replace a different copy than the one serving the request.
+3. The running executable must be **this formula's** Homebrew-installed binary,
+   else `409`. The formula name is part of every path test on purpose: a
+   prefix-only check (`/Cellar/`, `/opt/homebrew/`) also matches a
+   Homebrew-installed Bun running the server from a source checkout, where
+   `process.execPath` is `/opt/homebrew/Cellar/bun/<version>/bin/bun`. That would
+   let the gate pass in development, upgrade an unrelated Cellar copy and exit a
+   process with no supervisor behind it.
 4. The command is `Bun.spawn([<brew>, "upgrade", "better-ccflare"])`. Every
    element is a compile-time constant or a path from a fixed list, no request
    field reaches argv, and there is no shell, so there is nothing for a quoting
@@ -110,6 +124,17 @@ is not found, the absolute path runs. When no brew executable is present the
 handler answers `409` before spawning anything. The child also gets
 `HOMEBREW_NO_AUTO_UPDATE=1`, so upgrading the formula does not drag in a
 Homebrew self-update.
+
+The child's environment is an allowlist (`PATH`, `HOME`, `LANG`, `TMPDIR`,
+`HOMEBREW_NO_AUTO_UPDATE`), not an inherited copy of the server's. Homebrew runs
+formula Ruby and `git`, and this process holds both GitHub tokens; inheriting the
+environment would hand them over. For the same reason the command's output never
+reaches the client: it goes to the server log with credential shapes redacted,
+and the response carries only the exit code. This fork installs from a private
+tap, so a failed fetch can echo a credentialed remote URL.
+
+Only one upgrade runs at a time. Overlapping requests share the first one's
+result rather than spawning a second `brew`.
 
 `brew upgrade` does not restart services of its own accord (`upgrade.rb` has no
 service handling; `brew services restart` is a separate user-invoked command), so

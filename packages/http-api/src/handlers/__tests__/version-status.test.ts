@@ -17,6 +17,7 @@ import {
 	findBrewExecutable,
 	isHomebrewInstall,
 	MANUAL_UPDATE_COMMAND,
+	redactSecrets,
 } from "../version-status";
 
 const BREW_EXEC =
@@ -55,17 +56,32 @@ function okService(forkTag: string) {
 }
 
 describe("isHomebrewInstall", () => {
-	it("accepts a Cellar path and a Homebrew prefix", () => {
+	it("accepts this formula's own installed binary", () => {
 		expect(isHomebrewInstall(BREW_EXEC)).toBe(true);
 		expect(isHomebrewInstall("/opt/homebrew/bin/better-ccflare")).toBe(true);
+		expect(isHomebrewInstall("/usr/local/bin/better-ccflare")).toBe(true);
 		expect(
 			isHomebrewInstall("/home/linuxbrew/.linuxbrew/bin/better-ccflare"),
 		).toBe(true);
+		expect(
+			isHomebrewInstall("/opt/homebrew/opt/better-ccflare/bin/better-ccflare"),
+		).toBe(true);
+	});
+
+	it("rejects a Homebrew-installed Bun running the server from source", () => {
+		// The gate asks whether `brew upgrade better-ccflare` would replace THIS
+		// binary. Under `bun start`, process.execPath is the Bun runtime, which on
+		// this machine lives at /opt/homebrew/Cellar/bun/<version>/bin/bun — a
+		// prefix-only test would pass it and upgrade an unrelated Cellar copy.
+		expect(isHomebrewInstall("/opt/homebrew/Cellar/bun/1.4.2/bin/bun")).toBe(
+			false,
+		);
+		expect(isHomebrewInstall("/opt/homebrew/bin/bun")).toBe(false);
 	});
 
 	it("rejects anything else", () => {
 		expect(isHomebrewInstall(LOCAL_EXEC)).toBe(false);
-		expect(isHomebrewInstall("/usr/local/bin/better-ccflare")).toBe(false);
+		expect(isHomebrewInstall("/usr/bin/better-ccflare")).toBe(false);
 	});
 });
 
@@ -83,6 +99,26 @@ describe("findBrewExecutable", () => {
 
 	it("returns null when no prefix has brew", () => {
 		expect(findBrewExecutable(() => false)).toBeNull();
+	});
+});
+
+describe("redactSecrets", () => {
+	it("strips token and credentialed-URL shapes", () => {
+		expect(redactSecrets("fatal: ghp_abcdefghijklmnopqrstuvwxyz012345")).toBe(
+			"fatal: [redacted]",
+		);
+		expect(
+			redactSecrets("github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz"),
+		).toBe("[redacted]");
+		expect(redactSecrets("https://user:secret@github.com/x.git")).toBe(
+			"https://[redacted]@github.com/x.git",
+		);
+	});
+
+	it("leaves ordinary output alone", () => {
+		expect(redactSecrets("==> Upgrading better-ccflare")).toBe(
+			"==> Upgrading better-ccflare",
+		);
 	});
 });
 
@@ -252,6 +288,7 @@ describe("POST /api/admin/self-update", () => {
 		const response = await handler();
 		expect(response.status).toBe(202);
 		expect(restarted).toBe(true);
+		expect(await response.text()).not.toContain("==> Upgrading");
 	});
 
 	it("reports a failed upgrade and does not restart", async () => {
@@ -272,7 +309,11 @@ describe("POST /api/admin/self-update", () => {
 		const response = await handler();
 		expect(response.status).toBe(500);
 		expect(restarted).toBe(false);
-		expect(await response.text()).toContain("No available formula");
+		// Homebrew output stays in the server log: this fork installs from a
+		// private tap, so a failed fetch can echo a credentialed remote URL.
+		const body = await response.text();
+		expect(body).toContain("exit code 1");
+		expect(body).not.toContain("No available formula");
 	});
 });
 

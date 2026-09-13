@@ -51,23 +51,47 @@ export interface SelfUpdateEnvironment {
 	scheduleRestart: () => void;
 }
 
+/**
+ * Strip credential shapes from subprocess output before it reaches a log.
+ *
+ * Defence in depth rather than the primary control: the subprocess environment
+ * is already an allowlist that excludes every token this process holds.
+ */
+export function redactSecrets(text: string): string {
+	return text
+		.replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "[redacted]")
+		.replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[redacted]")
+		.replace(/:\/\/[^@\s/]+@/g, "://[redacted]@");
+}
+
 /** The manual command an operator runs when self-update is unavailable. */
 export const MANUAL_UPDATE_COMMAND = `brew upgrade ${HOMEBREW_FORMULA}`;
 
 /**
- * True when the running executable lives inside a Homebrew prefix.
+ * True when the running executable is *this formula's* Homebrew-installed
+ * binary.
  *
  * Checked against the executable path rather than a config value: a binary
  * outside the Cellar was not installed by Homebrew, so `brew upgrade` would
  * either do nothing or replace a different copy than the one serving this
  * request.
+ *
+ * The formula name is part of every test on purpose. A bare `/Cellar/` or
+ * `/opt/homebrew/` prefix test also matches a Homebrew-installed Bun running
+ * this server from a source checkout (`process.execPath` is then
+ * `/opt/homebrew/Cellar/bun/<version>/bin/bun`), which would let the gate pass
+ * in development, upgrade an unrelated Cellar copy and exit a process with no
+ * supervisor behind it. Requiring the formula's own name means only the
+ * compiled, installed binary satisfies it.
  */
 export function isHomebrewInstall(execPath: string): boolean {
 	return (
-		execPath.includes("/Cellar/") ||
-		execPath.startsWith("/opt/homebrew/") ||
-		execPath.startsWith("/usr/local/Homebrew/") ||
-		execPath.startsWith("/home/linuxbrew/")
+		execPath.includes(`/Cellar/${HOMEBREW_FORMULA}/`) ||
+		execPath === `/opt/homebrew/bin/${HOMEBREW_FORMULA}` ||
+		execPath === `/usr/local/bin/${HOMEBREW_FORMULA}` ||
+		execPath === `/home/linuxbrew/.linuxbrew/bin/${HOMEBREW_FORMULA}` ||
+		execPath.startsWith(`/opt/homebrew/opt/${HOMEBREW_FORMULA}/`) ||
+		execPath.startsWith(`/usr/local/opt/${HOMEBREW_FORMULA}/`)
 	);
 }
 
@@ -107,9 +131,19 @@ async function spawnBrewUpgrade(): Promise<{
 	// request field reaches argv, and there is no shell, so there is nothing for
 	// a quoting bug to escape.
 	const child = Bun.spawn([brew, "upgrade", HOMEBREW_FORMULA], {
-		// Upgrading the formula must not drag in a Homebrew self-update, which
-		// can take minutes and has nothing to do with this request.
-		env: { ...process.env, HOMEBREW_NO_AUTO_UPDATE: "1" },
+		// An allowlist, not `...process.env`. Homebrew executes formula Ruby and
+		// git, and this process holds BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN and
+		// BETTER_CCFLARE_GITHUB_TOKEN; inheriting the whole environment would hand
+		// both to it. HOMEBREW_NO_AUTO_UPDATE stops the formula upgrade from
+		// dragging in a Homebrew self-update, which can take minutes and has
+		// nothing to do with this request.
+		env: {
+			PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+			HOME: process.env.HOME ?? "",
+			LANG: process.env.LANG ?? "C",
+			TMPDIR: process.env.TMPDIR ?? "/tmp",
+			HOMEBREW_NO_AUTO_UPDATE: "1",
+		},
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -218,6 +252,10 @@ export function createSelfUpdateHandler(
 ) {
 	const execPath = options.environment?.execPath ?? process.execPath;
 	const runUpgrade = options.environment?.runUpgrade ?? spawnBrewUpgrade;
+	// One upgrade at a time. Two overlapping POSTs would spawn two `brew upgrade`
+	// processes, and the exit scheduled 250ms after the first success would
+	// orphan the second mid-run.
+	let inFlight: Promise<Response> | null = null;
 	const scheduleRestart =
 		options.environment?.scheduleRestart ??
 		(() => {
@@ -227,7 +265,7 @@ export function createSelfUpdateHandler(
 			}, 250);
 		});
 
-	return async (): Promise<Response> => {
+	const handle = async (): Promise<Response> => {
 		if (!options.enabled) {
 			return errorResponse(NotFound("Not found"));
 		}
@@ -275,24 +313,42 @@ export function createSelfUpdateHandler(
 		}
 
 		if (outcome.exitCode !== 0) {
-			log.error(`Self-update failed with exit code ${outcome.exitCode}`);
+			// The output goes to the server log, redacted, and not to the client.
+			// Homebrew echoes remote URLs and formula output, and this fork
+			// installs from a private tap, so a failed fetch can carry a
+			// credentialed remote into whatever reads the response.
+			log.error(
+				`Self-update failed with exit code ${outcome.exitCode}: ${redactSecrets(
+					outcome.output,
+				)}`,
+			);
 			return errorResponse(
 				InternalServerError(
-					`Upgrade failed (exit ${outcome.exitCode}). Output: ${outcome.output}`,
+					`Upgrade failed with exit code ${outcome.exitCode}. ` +
+						"See the server log for the command output.",
 				),
 			);
 		}
 
-		log.info("Self-update succeeded; restarting");
+		log.info(
+			`Self-update succeeded; restarting. Output: ${redactSecrets(outcome.output)}`,
+		);
 		scheduleRestart();
 		return jsonResponse(
 			{
 				message: "Upgrade complete; restarting",
 				command: MANUAL_UPDATE_COMMAND,
-				output: outcome.output,
 			},
 			202,
 		);
+	};
+
+	return async (): Promise<Response> => {
+		if (inFlight) return inFlight;
+		inFlight = handle().finally(() => {
+			inFlight = null;
+		});
+		return inFlight;
 	};
 }
 

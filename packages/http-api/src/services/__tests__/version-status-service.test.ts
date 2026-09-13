@@ -352,7 +352,7 @@ describe("VersionStatusService", () => {
 		expect(result.snapshot?.upstream).toBeNull();
 	});
 
-	it("matches only a head branch under the maintainer's prefix", async () => {
+	it("matches only a maintainer-prefixed branch pushed to the fork itself", async () => {
 		const { service } = makeService([
 			...HAPPY_ROUTES.filter(
 				([needle]) => !needle.includes("/pulls?state=open"),
@@ -365,14 +365,31 @@ describe("VersionStatusService", () => {
 							number: 50,
 							html_url: "https://github.com/SijanC147/better-ccflare/pull/50",
 							title: "feat/upstream-sync lookalike",
-							head: { ref: "feature/upstream-sync/nope" },
+							head: {
+								ref: "feature/upstream-sync/nope",
+								repo: { full_name: "SijanC147/better-ccflare" },
+							},
+						},
+						{
+							// Right prefix, but pushed from an outsider's own fork.
+							// Anyone can open this against a public repository.
+							number: 51,
+							html_url: "https://github.com/SijanC147/better-ccflare/pull/51",
+							title: "upstream sync (spoofed)",
+							head: {
+								ref: "upstream-sync/tombii-better-ccflare/spoof",
+								repo: { full_name: "someone-else/better-ccflare" },
+							},
 						},
 						{
 							number: 52,
 							html_url: "https://github.com/SijanC147/better-ccflare/pull/52",
 							title: "sync upstream",
 							draft: false,
-							head: { ref: "upstream-sync/tombii-better-ccflare/abc...def" },
+							head: {
+								ref: "upstream-sync/tombii-better-ccflare/abc...def",
+								repo: { full_name: "SijanC147/better-ccflare" },
+							},
 						},
 					],
 				},

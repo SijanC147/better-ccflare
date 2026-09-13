@@ -163,8 +163,12 @@ export class VersionStatusService {
 		// round of outbound requests, and /api/version/check reaches this service
 		// without authentication. A DNS failure, timeout or 5xx sets no rate-limit
 		// header, so this is the only thing bounding that.
+		//
+		// Applies to a forced refresh too. `force` is meant to skip the freshness
+		// TTL, not the failure brake: on an install with no API keys configured
+		// every /api route is open, so an exempt caller looping ?refresh=1 would
+		// otherwise drive outbound requests with nothing damping them.
 		if (
-			!force &&
 			this.lastFailureAt !== 0 &&
 			now - this.lastFailureAt < FAILURE_BACKOFF_MS
 		) {
@@ -200,7 +204,7 @@ export class VersionStatusService {
 					html_url?: string;
 					title?: string;
 					draft?: boolean;
-					head?: { ref?: string };
+					head?: { ref?: string; repo?: { full_name?: string } };
 				}>
 			>(`/repos/${FORK_REPO}/pulls?state=open&per_page=50`),
 		]);
@@ -251,8 +255,15 @@ export class VersionStatusService {
 		if (pulls.ok && Array.isArray(pulls.data)) {
 			for (const pull of pulls.data) {
 				const ref = pull.head?.ref;
+				// The head branch must live on the fork itself, not on someone
+				// else's fork of it. This repository is public and accepts pull
+				// requests from anyone, so a branch-name test alone would let an
+				// outsider open "upstream-sync/anything" and have the dashboard
+				// present it as the maintainer's own sync PR. Only an account with
+				// push access can put a branch on FORK_REPO.
 				if (
 					ref?.startsWith(SYNC_BRANCH_PREFIX) &&
+					pull.head?.repo?.full_name === FORK_REPO &&
 					typeof pull.number === "number" &&
 					pull.html_url
 				) {
