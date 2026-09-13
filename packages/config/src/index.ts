@@ -353,12 +353,21 @@ export class Config extends EventEmitter {
 				this.data = {};
 				return;
 			}
-			try {
-				const content = readFileSync(trusted, "utf8");
-				this.data = JSON.parse(content) as ConfigData;
-			} catch (error) {
-				log.error(`Failed to parse config file: ${error}`);
+			// readRegularFile() returns null for anything that is not a regular
+			// file, which keeps a FIFO at the config path from stalling startup
+			// forever. It has already said why, at error level. Fall through
+			// rather than returning, so the directory is still brought to 0700
+			// and stale temp files are still swept.
+			const content = this.readRegularFile(trusted);
+			if (content === null) {
 				this.data = {};
+			} else {
+				try {
+					this.data = JSON.parse(content) as ConfigData;
+				} catch (error) {
+					log.error(`Failed to parse config file: ${error}`);
+					this.data = {};
+				}
 			}
 			// An upgrade from a version that wrote 0644 may never write a setting
 			// again, because getLocalControlSecret() returns early once the secret
@@ -386,6 +395,44 @@ export class Config extends EventEmitter {
 				lb_strategy: DEFAULT_STRATEGY,
 			};
 			this.saveConfig();
+		}
+	}
+
+	/**
+	 * Read a config file, but only when it really is a regular file.
+	 *
+	 * existsSync() returns true for a FIFO, and a FIFO is not a symlink, so
+	 * writeTarget() hands it back as a trusted path and readFileSync() then
+	 * blocks forever waiting for a writer that never arrives. Measured during the
+	 * review of PR #57: the log reached "about to construct" and never reached
+	 * the next line, and the process had to be killed. An unconditional permanent
+	 * stall in the constructor with no log line explaining it is harder to
+	 * diagnose than a wrong value, so the stat comes first. Character devices are
+	 * the same shape: /dev/zero would read forever instead.
+	 *
+	 * statSync() does not open the file, so it does not block on a FIFO the way
+	 * readFileSync() does. It follows links deliberately: writeTarget() has
+	 * already walked and trusted the chain, so what matters here is the type of
+	 * what the chain lands on.
+	 *
+	 * Returns null on a non-regular file and on a stat failure, having logged the
+	 * reason. Callers treat that as "no config", exactly as they treat a parse
+	 * failure. This is the same isFile() guard restrictConfigFile() applies
+	 * before chmod, applied to the read.
+	 */
+	private readRegularFile(target: string): string | null {
+		try {
+			const info = statSync(target);
+			if (!info.isFile()) {
+				log.error(
+					`The config path ${target} is not a regular file, so it was not read. Point BETTER_CCFLARE_CONFIG_PATH at a file.`,
+				);
+				return null;
+			}
+			return readFileSync(target, "utf8");
+		} catch (error) {
+			log.error(`Failed to read config file: ${error}`);
+			return null;
 		}
 	}
 
@@ -568,6 +615,17 @@ export class Config extends EventEmitter {
 	 * anywhere we can write, with a target of their choosing. Which link they
 	 * control makes no difference, so every one is checked.
 	 *
+	 * Every exit returns the `current` whose directory that same iteration
+	 * checked, and that invariant is what makes the walk a trust check rather
+	 * than decoration. It holds because no exit returns a path derived after the
+	 * check: the last statement of the loop body assigns
+	 * `resolve(dirname(current), readlinkSync(current))`, and `readlinkSync`
+	 * is evaluated first, so a throw leaves `current` untouched and the next
+	 * iteration re-checks whatever it does assign. Do not add an exit that
+	 * computes a return value from `readlinkSync` output and returns it without
+	 * looping: that path would be returned unchecked and the refusal would stop
+	 * working silently, with no test failing.
+	 *
 	 * Bounded at 40 hops. Beyond that it is a cycle and is refused rather than
 	 * falling back to the configured path, because that fallback would rename over
 	 * the first link and destroy a link the operator manages, which is the
@@ -596,8 +654,17 @@ export class Config extends EventEmitter {
 			if (!info.isSymbolicLink()) return current;
 			try {
 				current = resolve(dirname(current), readlinkSync(current));
-			} catch {
-				return current;
+			} catch (error) {
+				// lstat said this is a link and readlink then failed, so where it
+				// points is unknown. Returning `current` would hand back the link
+				// itself as the write target, and saveByRename() would rename over
+				// it and destroy a link the operator manages: the same destructive
+				// behaviour PR #57 removed from the cycle case. Nothing is disclosed
+				// by refusing, since the trust check has already passed.
+				log.error(
+					`The config path ${this.configPath} passes through the symlink ${current}, which could not be read (${error}); refusing to read or write it`,
+				);
+				return null;
 			}
 		}
 		// Refuse, rather than falling back to the configured path. Falling back
@@ -1075,8 +1142,13 @@ export class Config extends EventEmitter {
 			);
 			return undefined;
 		}
+		// Same non-regular-file guard as loadConfig(). Both readers need it: this
+		// one runs from getLocalControlSecret(), which the server calls after
+		// construction, so a FIFO planted at the config path would stall here
+		// instead of at startup if only loadConfig() were guarded.
+		const content = this.readRegularFile(trusted);
+		if (content === null) return undefined;
 		try {
-			const content = readFileSync(trusted, "utf8");
 			const parsed = JSON.parse(content) as ConfigData;
 			const value = parsed.local_control_secret;
 			return typeof value === "string" && value.length > 0 ? value : undefined;
