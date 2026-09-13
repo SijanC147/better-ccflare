@@ -19,6 +19,7 @@ import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
 import { ProjectsTab } from "./components/ProjectsTab";
 import { RequestsTab } from "./components/RequestsTab";
+import { ApiPlaygroundTab } from "./components/ApiPlaygroundTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { ThemeProvider } from "./contexts/theme-context";
@@ -145,6 +146,12 @@ export function App() {
 				element: <LogsTab />,
 				title: "System Logs",
 				subtitle: "Real-time system logs and debugging information",
+			},
+			{
+				path: "/api-playground",
+				element: <ApiPlaygroundTab />,
+				title: "API Playground",
+				subtitle: "Call any endpoint this server serves and inspect the response",
 			},
 			{
 				path: "/settings",
