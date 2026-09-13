@@ -1,0 +1,924 @@
+# Upstream maintainer configuration for SijanC147/better-ccflare
+#
+# Tracks tombii/better-ccflare. Written 2026-09-11 from the accumulated record of five
+# hand-run syncs, the most recent of which integrated 624 commits.
+#
+# The governing lesson from that record, and the reason this file is shaped the way it
+# is: CONFLICT COUNT IS NOT COVERAGE. The 2026-08 sync produced 37 conflicts and 494
+# clean auto-merges, and every one of the five real defects came from the clean side.
+# Three of them produced no merge marker at all. So the weight here sits on policy and
+# gates, which run whether or not anything conflicted, rather than on resolver guidance.
+#
+# Companion documents, all tracked, all fed to the agent via agent.context_files:
+#   docs/upstream-sync.md  the per-repo calibration and the standing conflict resolutions
+#   docs/release.md        release mechanics, the version policy, the manifest boundary
+#   docs/rollback.md       recovery, and what a rollback does not undo
+#   MERGELOG.md            what every prior sync actually did
+
+version: 1
+
+identity:
+  name: Upstream Maintainer
+  email: upstream-maintainer@users.noreply.github.com
+
+# One sync at a time. Both required checks are STRICT, so a second open sync PR would
+# need its base updated and CI re-run the moment the first merged. Serialising is
+# cheaper than that.
+concurrency:
+  max_open_prs: 1
+
+defaults:
+  target_branch: main
+
+  # Weekly, Monday 05:00 Europe/Malta. The controller evaluates hour, day-of-month, month
+  # and weekday; only the minute is ignored, so the run fires at some point in the 05:00
+  # hour on Mondays. Upstream moves fast (106 commits in the fortnight after the last
+  # sync), but merge.mode is manual and a failed pair is
+  # not retried automatically, so a daily cadence would just queue behind a review.
+  schedule:
+    cron: "0 5 * * 1"
+    timezone: Europe/Malta
+
+  strategy:
+    kind: merge
+    # Decided once, in config, so they cost no resolver round and cannot be argued with.
+    path_rules:
+      # Upstream owns apps/cli/README.md; the fork keeps its own and never adopts theirs.
+      - {glob: "apps/cli/README.md", resolve: ours}
+      # The fork's .gitignore deliberately does NOT ignore the three inline-*-worker.ts
+      # files that upstream ignores. Keeping ours wholesale guarantees that, at the cost
+      # of not picking up upstream's new ignore entries. That trade is deliberate: an
+      # ignored-and-untracked worker lets a release ship generated code absent from the
+      # tag's tracked tree, because the clean-tree gate uses --untracked-files=no.
+      - {glob: ".gitignore", resolve: ours}
+
+      # Everything below keeps the fork's version of a path the fork owns. These are NOT
+      # a convenience: they are the only mechanism that does it.
+      #
+      # Measured in the controller's source on 2026-09-13: `protected_paths` has exactly
+      # one consumer, `assertAllowedChanges` in src/policy.ts, and it acts only when
+      # `on_upstream_protected_change` is `halt`. With `ours` the controller takes no
+      # action at all, and the merge treats a protected path like any other file. The
+      # local replay showed it: upstream's edits to `CLAUDE.md` came out as a conflict for
+      # the resolver, and upstream's DELETION of `.github/workflows/pr-review.yml.disabled`
+      # produced a delete/modify that aborted the whole run before any agent saw it,
+      # because only marked textual conflicts can be handled automatically.
+      #
+      # `resolve: ours` is applied by git before the resolver runs, so it costs no repair
+      # round, and it handles the deleted-on-one-side case: a path absent from the base is
+      # removed rather than taken from upstream. That is also what the standing resolution
+      # for `.github/workflows/release.yml` requires (`git rm`, never restore a second
+      # release publisher).
+      #
+      # The cost, stated plainly: upstream improvements to a shared file under these globs
+      # are dropped silently, and a NEW upstream file under them never lands. 33 of the 36
+      # files under `docs/` exist upstream too, so this freezes them. That is the standing
+      # resolution in docs/upstream-sync.md ("fork-customized", "keep ours by default"),
+      # and adopting an upstream doc is a deliberate follow-up commit, not a sync outcome.
+      - {glob: ".hextap.json", resolve: ours}
+      - {glob: ".hextap/**", resolve: ours}
+      # Two globs, because `scripts/hextap-*` does not cover `scripts/test-hextap-build.ts`,
+      # which is part of the quality gate.
+      - {glob: "scripts/hextap-*", resolve: ours}
+      - {glob: "scripts/*hextap*", resolve: ours}
+      - {glob: "apps/cli/hextap-*", resolve: ours}
+      - {glob: "packages/core/src/build-identity.ts", resolve: ours}
+      - {glob: "CLAUDE.md", resolve: ours}
+      - {glob: "README.md", resolve: ours}
+      - {glob: "MERGELOG.md", resolve: ours}
+      - {glob: "docs/**", resolve: ours}
+      # The fork owns 3 live workflows against upstream's ~10 and disables the rest by
+      # renaming them `*.yml.disabled`, so upstream workflow changes arrive as new live
+      # files or as modifies against a renamed file. Keeping ours wholesale is the
+      # documented default; adoption is recorded as a follow-up.
+      - {glob: ".github/**", resolve: ours}
+
+  policy:
+    # Target paths the integration may not change. .github/** and
+    # .github/upstream-maintainer.yml are always appended by the controller.
+    #
+    # Everything in the first block is Hextap release machinery. Upstream has never
+    # heard of Hextap (verified 2026-09-11: `git grep -il hextap upstream/main` is
+    # empty), so none of it should ever conflict. If one does, that is a signal to stop,
+    # not something to resolve.
+    protected_paths:
+      - ".hextap.json"
+      - ".hextap/**"
+      - "scripts/hextap-build"
+      - "scripts/hextap-contract.test.ts"
+      - "scripts/test-hextap-build.ts"
+      - "apps/cli/hextap-build.ts"
+      - "apps/cli/hextap-targets.ts"
+      - "packages/core/src/build-identity.ts"
+      # Fork-owned prose. Upstream rewrites its own equivalents constantly and the fork
+      # versions are customized; content inside <!-- fork:keep --> is inviolable.
+      - "CLAUDE.md"
+      - "README.md"
+      - "docs/**"
+      - "MERGELOG.md"
+
+    # NOT `halt`, and this is the one counter-intuitive setting in the file.
+    #
+    # `.github/**` is ALWAYS protected and cannot be un-protected. Upstream actively
+    # develops nine live workflows against the fork's three. Under `halt`, every sync
+    # touching any upstream workflow would stop before doing anything, which is every
+    # sync. `ours` only suppresses that halt and lets the run continue. It does NOT keep
+    # anything: `assertAllowedChanges` takes no action under it at all. The keeping is done
+    # entirely by the `path_rules` block above, which is why those globs exist and why the
+    # two lists have to be read together. The standing rule for workflows is satisfied by
+    # the rule, not by this setting: keep ours by default, record any adoption separately.
+    #
+    # This does mean upstream changes to the Hextap paths above do not halt the run. That
+    # is acceptable only because upstream cannot
+    # reach them today, and the forbidden_patterns rule below is what catches the day
+    # that stops being true.
+    on_upstream_protected_change: ours
+
+    manifests:
+      # The manifest is a release AND recovery boundary. All four top-level keys frozen.
+      # The three copies (.hextap.json, .hextap/tap-registration.json, and the tap's
+      # Projects/better-ccflare.json) must stay byte-identical; changing it can
+      # permanently close `homebrew-only` recovery for tags already published. A sync
+      # must never touch it, and reformatting counts as touching it.
+      - file: .hextap.json
+        frozen_keys: [schema, formula, homebrew, release]
+      # A new workspace package must land in `workspaces` AND a regenerated bun.lock, or
+      # `bun install --frozen-lockfile` fails the release. This killed the first v3.8.0
+      # tag (SB23-312). The agent has no network and cannot regenerate a lockfile, so
+      # freezing this forces a human in rather than letting a broken pair through.
+      - file: package.json
+        frozen_keys: [workspaces]
+
+    # Deliberately omitted: preserve_upstream_paths.
+    #
+    # The obvious use would be `tests/**`, to stop a resolver "fixing" an upstream test
+    # to make it pass. It is omitted because the 2026-08 sync had to make exactly three
+    # legitimate edits to upstream test files: cache-keepalive-scheduler.test.ts,
+    # proxy-model-capacity.test.ts and the NanoGPT block of pricing.test.ts each
+    # destroyed globalThis.fetch without restoring it, and because Bun shares globals
+    # across test files, each one broke every test file that ran after it. Those were
+    # restorations, not weakenings, and a byte-equality guard cannot tell the difference.
+    # It would have halted a correct sync. The reviewer and the gates below cover
+    # weakening instead.
+
+    forbidden_patterns:
+      # The collision the merge cannot see. Upstream adopting Hextap, or any tap or
+      # Formula publishing of its own, would be textually clean here and still wrong:
+      # two publishers racing the same immutable v* tag. Verified absent upstream on
+      # 2026-09-11, so this does not misfire today.
+      # Scoped to code and configuration, deliberately NOT **/*.md. A prose mention of
+      # Hextap in an upstream changelog or acknowledgements file would permanently block
+      # every sync until someone edited this config, and forbidden_patterns has no
+      # `except`. The real two-publisher guard is the hextap-contract gate, which asserts
+      # exactly one workflow owns the v* trigger.
+      # `**/*.json`, not `*.json`: the controller compiles `*` to `[^/]*` and anchors the
+      # whole pattern, so `*.json` matches root-level JSON only and would have missed
+      # upstream's nested apps/cli/package.json and every packages/*/package.json, which is
+      # exactly where a tap or Formula reference would appear.
+      - paths: [".github/**", "scripts/**", "apps/**", "packages/**", "**/*.json"]
+        # Spelled as a character class rather than with an inline (?i) flag, which the
+        # JavaScript regular-expression engine the controller uses rejects outright.
+        regex: '[Hh][Ee][Xx][Tt][Aa][Pp]'
+        message: >-
+          Upstream has started referencing Hextap. Do not resolve this automatically.
+          The fork owns the entire Hextap release path and assumes upstream knows nothing
+          about it; two release publishers on one v* tag can write a ninth asset into an
+          immutable release. Read docs/upstream-sync.md, then escalate via
+          /ask-hextap-coordinator before any sync proceeds.
+      # SemVer build metadata can never be part of release identity here: Hextap rejects
+      # it outright. Upstream's CCFLARE_BUILD_SUFFIX yields X.Y.Z+suffix.
+      #
+      # This rule is scoped to the three files where the name does not appear in the fork
+      # at all, so it can only fire on a genuine new reach into release identity. It is NOT
+      # a general ban on the name, and it cannot be: upstream already uses the name in
+      # apps/cli/build-multi-arch.ts, a file the fork also has in diverged form and runs as
+      # `build:multi` from apps/cli/package.json. forbidden_patterns matches files at the
+      # UPSTREAM revision, so listing that path would fire on the next sync that touched it
+      # and never stop. The no-semver-build-metadata gate covers it instead, judging the
+      # MERGED result rather than upstream's tree.
+      #
+      # How this is evaluated, because it is not what it looks like: forbidden_patterns is
+      # judged on the UPSTREAM tree only, never on the fork's. It lists every file at the
+      # upstream revision and reads each one there, so it rescans the whole upstream tree
+      # on every run and has nothing to do with which files the merge touched.
+      #
+      # That is why packages/dashboard-web/build.ts is deliberately NOT listed, though an
+      # earlier draft listed it: UPSTREAM's copy of that file carries the name, so the rule
+      # fired on every run and nothing a sync did could clear it, with no `except` to
+      # relieve it. The local replay on 2026-09-13 proved it, failing `prepare` closed on
+      # real commits (4d27cb22..ea0e3320) before reaching the merge. Upstream also carries
+      # the name in apps/cli/package.json, src/lib/version.ts, build-multi-arch.ts and
+      # docs/acknowledgements.md, so none of those may be listed either.
+      #
+      # The three files below are free of the name in upstream's tree, so the rule fires
+      # only when upstream genuinely reaches into release identity. Measured 2026-09-13:
+      # build-standalone.ts and build-identity.ts do not exist upstream at all, so in
+      # practice this rule can only ever fire on packages/core/src/version.ts. It is an
+      # early fail-closed on one file, not the real coverage. The real coverage is the
+      # no-semver-build-metadata gate, which judges the MERGED tree and so sees what the
+      # integration actually produced in every fork build entry point.
+      - paths:
+          - "apps/cli/build-standalone.ts"
+          - "packages/core/src/build-identity.ts"
+          - "packages/core/src/version.ts"
+        regex: 'CCFLARE_BUILD_SUFFIX'
+        message: >-
+          Upstream has routed CCFLARE_BUILD_SUFFIX into the build-identity or dashboard
+          build path. Hextap rejects SemVer build metadata, so X.Y.Z+suffix can never be
+          release identity. Fail closed and adapt by hand; see the standing resolution
+          table in docs/upstream-sync.md.
+
+  agent:
+    effort: high
+    # Every tool left at its default of false. In particular NOT shell: the design
+    # otherwise prevents the resolver from executing code, and nothing about this repo
+    # needs that. The gates run the code, in a container the agent cannot influence.
+    max_repair_rounds: 2
+    timeouts:
+      resolve_minutes: 15
+      repair_minutes: 12
+      review_minutes: 10
+
+    # Read from the BASE commit, so this is maintainer-authored context the candidate
+    # cannot alter. Paths arrive as context/<path with / replaced by __>.
+    context_files:
+      - docs/upstream-sync.md
+      - docs/release.md
+      - docs/rollback.md
+      - CLAUDE.md
+      - MERGELOG.md
+
+    prompt: |
+      You are integrating tombii/better-ccflare into the SijanC147/better-ccflare fork.
+
+      READ FIRST, and treat as authoritative over your own judgement:
+        context/docs__upstream-sync.md   remotes, protections, standing resolutions, and
+                                        the "breaks without producing a conflict" audit
+        context/docs__release.md        release mechanics and the version policy
+        context/MERGELOG.md             what every previous sync actually decided
+
+      The single most important thing to understand about this repository: the danger is
+      not in the conflicts. The last sync resolved 37 conflicts and auto-merged 494
+      files cleanly, and all five real defects came from the clean side. Three produced
+      no merge marker. A resolution that only makes the markers go away is not done.
+
+      STANDING RESOLUTIONS. These were decided by the Hextap coordinator on 2026-08-27.
+      Apply them. Do not re-litigate them.
+
+      1. .github/workflows/release.yml. The fork DELETED it; upstream still develops it,
+         so git reports delete/modify and "keep the file" is the wrong instinct. Remove
+         it. scripts/hextap-contract.test.ts asserts it does not exist and that exactly
+         one workflow owns the v* trigger. Restoring it creates two publishers racing
+         the same immutable tag.
+      2. The three packages/database/src/inline-*-worker.ts files stay TRACKED and
+         un-ignored, even though upstream gitignores them. packages/proxy/src/
+         inline-worker.ts is orphaned and may follow upstream; do not conflate them.
+      3. packages/dashboard-web/src/lib/version.ts keeps the fork shape: root
+         package.json fallback, both __BETTER_CCFLARE_VERSION__ and
+         __BETTER_CCFLARE_COMMIT__ declares, displayVersion(), and the version/commit
+         exports, which navigation.tsx imports. Add getVersion() only as an additive
+         alias, never as a replacement.
+      4. packages/dashboard-web/build.ts must read BETTER_CCFLARE_BUILD_VERSION and
+         BETTER_CCFLARE_BUILD_COMMIT and inject both defines. Upstream's version ignores
+         those env vars and reads apps/cli/package.json, which would embed the wrong
+         version in a release and fail test-hextap-build.ts.
+
+      FORK-OWNED BEHAVIOUR that must survive. If upstream refactors a file these touch,
+      replay the fork's change onto upstream's version rather than dropping it:
+        - Project attribution: the X-CCFlare-Project header, the project_id column,
+          worktree-path attribution, dashboard project filters and the grouped request
+          stream. Note that upstream has since added its OWN project-attribution
+          implementation, already reconciled during the 2026-08 sync; keep the fork's
+          dual-header behaviour and headers-only storage intact when touching it.
+        - Dashboard customizations: color-coded model and account chips, the collapsible
+          sidebar with localStorage persistence, the 24-hour time toggle.
+        - Any migration added to packages/database/src/migrations.ts MUST also be ported
+          to migrations-pg.ts. See CLAUDE.md for the five specific places.
+
+      SECURITY POSTURE. The fork is deliberately stricter than upstream in two places
+      that have each drifted back once already:
+        - No query-parameter API key authentication. Upstream removed its ?api_key=
+          fallback in #379; a second SSE endpoint in the fork still carried one and had
+          to be migrated to token auth. Never reintroduce a query-parameter credential.
+        - PathValidator logs resolved TLS paths at debug, never at info. Upstream raised
+          this once. The description stays at info; the resolved path does not.
+        - Never adopt a blanket /api/oauth or non-/api static auth exemption. That
+          reintroduces a token-mutation vulnerability the fork has rejected twice.
+
+      VERSION. The git tag is the release version and Hextap injects it as a
+      compile-time define. Upstream bumps its package.json version on almost every
+      commit; the fork's manifests are set deliberately in a dedicated PR before
+      tagging. DO NOT let an upstream version bump through. Keep the fork's "version" in
+      both package.json and apps/cli/package.json exactly as the base commit has it. A
+      gate enforces this, and it is the one thing most likely to send you into a repair
+      round.
+
+      NEVER edit .hextap.json or .hextap/tap-registration.json. They must stay
+      byte-identical to each other and to the tap's copy. Reformatting counts as an
+      edit, and breaking that equality can permanently close release recovery for tags
+      that are already published.
+
+      If a conflict touches Hextap release machinery and the standing resolutions above
+      do not cover it, STOP and leave it conflicted rather than guessing. A plausible
+      resolution in those files can silently break an immutable release. A human
+      escalation path exists and is cheap; a burnt release tag is not recoverable.
+
+    reviewer:
+      effort: high
+      prompt: |
+        You are reviewing an upstream integration into a fork whose release pipeline is
+        unforgiving: v* tags are immutable, and a bad release cannot be re-cut, only
+        superseded.
+
+        Judge the clean merges, not only the resolved conflicts. In the last hand-run
+        sync of this repository, every genuine defect arrived through a file that merged
+        without a conflict, and three of them produced no marker at all. Specifically
+        check for:
+
+          - More than one workflow reacting to a v* tag, or any second path that writes
+            a GitHub release, uploads an asset, or pushes to the Homebrew tap.
+          - A reintroduced query-parameter API key, or a widened auth exemption for
+            /api/oauth or non-/api static paths.
+          - Resolved filesystem or TLS paths logged above debug level.
+          - Duplicate object keys, or two spellings of one field with different null
+            semantics, in a file that merged cleanly.
+          - An upstream package.json version bump surviving into the fork's manifests.
+          - Any change at all to .hextap.json or .hextap/tap-registration.json.
+          - A test weakened, skipped, or given a looser assertion to make it pass.
+
+        Reject rather than approve when a fork behaviour documented in
+        context/docs__upstream-sync.md has been dropped in favour of upstream's version.
+        Silent loss of a fork feature is the failure mode this review exists to catch.
+
+  validation:
+    environment:
+      # Pinned to bun 1.3.14, the EXACT version .hextap.json and ci.yml pin. A different
+      # bun regenerates the tracked inline workers and produces phantom diffs.
+      # Digest resolved from the registry and the image verified on 2026-09-11:
+      # apt-get present, sha256sum present, `bun --version` reports 1.3.14.
+      image: oven/bun:1.3.14-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f
+      env:
+        # Base gates run with the working directory at the BASE tree and the candidate
+        # mounted read-only here. Every base gate below reads the candidate explicitly
+        # through this variable, because a base gate that reads its own working
+        # directory is testing the wrong tree.
+        CANDIDATE: /workspace/target
+
+    gates:
+      # ---------------------------------------------------------------------------
+      # base gates: the test code comes from before the integration, so the resolver
+      # cannot weaken the check that judges its own work. These encode the audit list
+      # in docs/upstream-sync.md, "Breaks without producing a conflict".
+      # ---------------------------------------------------------------------------
+
+      - name: version-not-bumped-by-sync
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Upstream bumps its version constantly; the fork sets versions deliberately
+          # in a dedicated pre-tag PR. A sync must never move them.
+          #
+          # Expect this gate to FAIL on nearly every sync, by design. Upstream bumps
+          # both manifests as part of its own release flow, so any sync spanning a
+          # release carries the bump in without a conflict. The repair is mechanical
+          # (restore both manifests to the base version), but it forces at least one of
+          # the two max_repair_rounds on nearly every sync, leaving one round for
+          # everything else. A failure here is routine, not evidence of a bad merge.
+          rc=0
+          for manifest in package.json apps/cli/package.json; do
+            before=$(bun -e "console.log(require('./$manifest').version)")
+            after=$(bun -e "console.log(require('$CANDIDATE/$manifest').version)")
+            if [ "$before" != "$after" ]; then
+              echo "FAIL $manifest version changed by the sync: $before -> $after" >&2
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "The git tag is the release version. Restore the base version in both" >&2
+            echo "manifests; they are bumped only in their own PR before tagging." >&2
+            exit 1
+          }
+          echo "Both manifests still at the base version."
+
+      - name: hextap-manifest-boundary-intact
+        source: base
+        timeout_minutes: 3
+        run: |
+          # The manifest is a release and recovery boundary. It must be unchanged by the
+          # sync, and its two copies must stay byte-identical to each other.
+          for f in .hextap.json .hextap/tap-registration.json; do
+            if ! cmp -s "./$f" "$CANDIDATE/$f"; then
+              echo "FAIL $f was modified by the sync." >&2
+              echo "Breaking this equality can permanently close homebrew-only recovery" >&2
+              echo "for tags already published. Restore the base bytes exactly." >&2
+              exit 1
+            fi
+          done
+          a=$(sha256sum < "$CANDIDATE/.hextap.json" | cut -d' ' -f1)
+          b=$(sha256sum < "$CANDIDATE/.hextap/tap-registration.json" | cut -d' ' -f1)
+          [ "$a" = "$b" ] || {
+            echo "FAIL source and tap manifests are no longer byte-identical." >&2
+            exit 1
+          }
+          echo "Manifest unchanged and both copies identical ($a)."
+
+      - name: contract-test-not-weakened
+        source: base
+        timeout_minutes: 2
+        run: |
+          # scripts/hextap-contract.test.ts is protected policy-side too. This is the
+          # cheap independent confirmation, and it is what makes the candidate-sourced
+          # hextap-contract gate below trustworthy.
+          cmp -s ./scripts/hextap-contract.test.ts "$CANDIDATE/scripts/hextap-contract.test.ts" || {
+            echo "FAIL the Hextap contract test was modified by the integration." >&2
+            echo "That test is the gate on the release contract; it is not the agent's" >&2
+            echo "to edit. Restore it from the base commit." >&2
+            exit 1
+          }
+          echo "Contract test byte-identical to base."
+
+      - name: inline-workers-tracked-and-unignored
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Upstream gitignores these; the fork must not. An ignored-and-untracked
+          # worker lets a release ship generated code absent from the tag's tracked
+          # tree, because the clean-tree gate uses --untracked-files=no. The release
+          # quality phase also runs typecheck and test BEFORE the adapter regenerates
+          # them, so an absent file fails on a missing import.
+          rc=0
+          for w in inline-vacuum-worker inline-incremental-vacuum-worker inline-integrity-check-worker; do
+            path="packages/database/src/$w.ts"
+            [ -f "$CANDIDATE/$path" ] || { echo "FAIL missing $path" >&2; rc=1; }
+          done
+          # The file must exist. `grep -q ... 2>/dev/null` on a missing file exits 2, which
+          # `if` treats as false, so a DELETED .gitignore passed this half silently. Every
+          # other gate here fails loudly on a missing file; this one did not.
+          [ -f "$CANDIDATE/.gitignore" ] || {
+            echo "FAIL .gitignore is gone, so nothing keeps the inline workers un-ignored." >&2
+            exit 1
+          }
+          # Matched as a glob shape, not three exact names: `inline-*-worker.ts` ignores all
+          # three and defeats an exact-name regex.
+          if grep -qE 'inline-[^/[:space:]]*worker' "$CANDIDATE/.gitignore"; then
+            echo "FAIL .gitignore now ignores an inline database worker." >&2
+            echo "Upstream ignores these; this fork must keep all three tracked." >&2
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "All three inline database workers present and un-ignored."
+
+      - name: workspace-lockfile-coherence
+        source: base
+        timeout_minutes: 5
+        run: |
+          # A new workspace package must appear in a regenerated bun.lock or
+          # `bun install --frozen-lockfile` fails the release. This killed the first
+          # v3.8.0 tag. The agent has no network and cannot regenerate the lockfile, so
+          # this failing means a human must run bun install and commit the result.
+          missing=""
+          for pkg in "$CANDIDATE"/apps/*/package.json "$CANDIDATE"/packages/*/package.json; do
+            [ -f "$pkg" ] || continue
+            name=$(bun -e "console.log(require('$pkg').name)")
+            # Quoted, because an unquoted substring match is satisfied by a longer sibling:
+            # a new @better-ccflare/ui would have passed on the existing
+            # @better-ccflare/ui-common entry. Every workspace name appears quoted in
+            # bun.lock, verified against all of them.
+            grep -qF "\"$name\"" "$CANDIDATE/bun.lock" || missing="$missing $name"
+          done
+          [ -z "$missing" ] || {
+            echo "FAIL workspace packages absent from bun.lock:$missing" >&2
+            echo "Run 'bun install' and commit the regenerated bun.lock. A frozen" >&2
+            echo "lockfile install is required at release time and will fail without it." >&2
+            exit 1
+          }
+          echo "Every workspace package resolves in bun.lock."
+
+      - name: bun-pin-unchanged
+        source: base
+        timeout_minutes: 3
+        run: |
+          # The pinned runtime is a manifest and tap recovery-boundary value, not a CI
+          # tweak. Both sides must move together, deliberately, never in a sync.
+          before=$(bun -e "console.log(require('./.hextap.json').release.profile.runtime_version ?? '')")
+          after=$(bun -e "console.log(require('$CANDIDATE/.hextap.json').release.profile.runtime_version ?? '')")
+          [ "$before" = "$after" ] || {
+            echo "FAIL pinned bun runtime changed by the sync: $before -> $after" >&2
+            exit 1
+          }
+          if [ -n "$after" ] && ! grep -q "bun-version: \"$after\"" "$CANDIDATE/.github/workflows/ci.yml"; then
+            echo "FAIL ci.yml no longer pins bun $after; the manifest and CI have drifted." >&2
+            exit 1
+          fi
+          echo "Bun pinned at $after in both the manifest and CI."
+
+      - name: required-check-names-unchanged
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Renaming a required check needs .hextap/rulesets/main.json, the live ruleset
+          # 21627513, the contract test and the online doctor updated together. A rename
+          # arriving through a sync silently un-gates protected main.
+          before=$(grep -E '^    name: ' ./.github/workflows/ci.yml | sort)
+          after=$(grep -E '^    name: ' "$CANDIDATE/.github/workflows/ci.yml" | sort)
+          [ "$before" = "$after" ] || {
+            echo "FAIL CI job names changed by the sync." >&2
+            printf 'base:\n%s\ncandidate:\n%s\n' "$before" "$after" >&2
+            echo "These names are required checks on protected main. Renaming one needs a" >&2
+            echo "coordinated ruleset change; it cannot ride an upstream sync." >&2
+            exit 1
+          }
+          echo "Required check names unchanged."
+
+      - name: build-identity-exports-present
+        source: base
+        timeout_minutes: 3
+        run: |
+          # The release binary must report `better-ccflare X.Y.Z (commit FULL_SHA)`, which
+          # the tap service smoke test enforces. These symbols carry it, and an upstream
+          # refactor can remove one with no conflict at all.
+          #
+          # Asserted per declaring FILE and as an `export`, not by grepping the package.
+          # Mutation-tested 2026-09-11: the recursive-grep version MISSED a rename,
+          # because the old name survived in a sibling test file and the grep passed.
+          rc=0
+          check_export() {
+            grep -qE "export (function|const) $2\b" "$CANDIDATE/packages/core/src/$1" \
+              || { echo "FAIL $2 no longer exported from $1" >&2; rc=1; }
+            grep -qE "(^|[^A-Za-z_])$2([^A-Za-z_]|$)" "$CANDIDATE/packages/core/src/index.ts" \
+              || { echo "FAIL $2 no longer re-exported from index.ts" >&2; rc=1; }
+          }
+          check_export build-identity.ts normalizeBuildVersion
+          check_export build-identity.ts normalizeBuildCommit
+          check_export build-identity.ts formatBuildIdentity
+          check_export version.ts getBuildIdentitySync
+          check_export version.ts getCommitSync
+          for def in __BETTER_CCFLARE_VERSION__ __BETTER_CCFLARE_COMMIT__; do
+            grep -qE "declare const $def\b" "$CANDIDATE/packages/core/src/version.ts" \
+              || { echo "FAIL compile define $def no longer declared in version.ts" >&2; rc=1; }
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "Release binaries would stop reporting their injected version." >&2
+            exit 1
+          }
+          echo "All five build-identity exports and both compile defines intact."
+
+      - name: fork-features-present
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Silent loss of a fork feature through a clean merge is the failure this
+          # whole configuration exists to prevent. These are the cheap tripwires.
+          #
+          # The header literal is asserted per AREA, not across packages/. A recursive grep
+          # over the whole tree is satisfied by the dashboard's own display and filter
+          # string in RequestsTab.tsx, so deleting the emission from all three proxy files
+          # left the gate green. Same failure shape as the first build-identity gate: a
+          # sibling file carrying the literal for an unrelated reason. Areas rather than
+          # file names, so a legitimate move inside packages/proxy does not misfire.
+          rc=0
+          grep -rqF 'X-CCFlare-Project' "$CANDIDATE/packages/proxy/src" || { echo "FAIL the project header is no longer emitted anywhere under packages/proxy/src" >&2; rc=1; }
+          grep -rqF 'X-CCFlare-Project' "$CANDIDATE/packages/dashboard-web/src" || { echo "FAIL the project header is no longer read anywhere under packages/dashboard-web/src" >&2; rc=1; }
+          grep -rqF 'project_id' "$CANDIDATE/packages/database/src/migrations.ts" || { echo "FAIL project_id absent from SQLite migrations" >&2; rc=1; }
+          grep -rqF 'project_id' "$CANDIDATE/packages/database/src/migrations-pg.ts" || { echo "FAIL project_id absent from PostgreSQL migrations; every migration must be ported" >&2; rc=1; }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "Fork project-attribution features present on both database paths."
+
+      - name: dashboard-release-identity
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Standing resolutions 3 and 4 in docs/upstream-sync.md had no gate and no path
+          # rule, only prompt text and the reviewer, while comparable invariants in
+          # packages/core got a dedicated gate. Upstream actively edits both files.
+          #
+          # Upstream's build.ts ignores the Hextap env vars and reads apps/cli/package.json
+          # instead, so a v3.8.2 release would embed 3.8.1 and fail test-hextap-build.ts
+          # with "dashboard did not embed the release version and commit". The dashboard is
+          # not covered by the build-identity gate, which reads packages/core only.
+          rc=0
+          b="$CANDIDATE/packages/dashboard-web/build.ts"
+          v="$CANDIDATE/packages/dashboard-web/src/lib/version.ts"
+          for f in "$b" "$v"; do
+            [ -f "$f" ] || { echo "FAIL $f is gone" >&2; exit 1; }
+          done
+          # `(process|Bun)\.env` rather than a literal `process.env.`, because a resolver
+          # replaying the fork diff onto upstream's rewritten build.ts could legitimately
+          # land on Bun.env, and a gate that fails on that costs a repair round for nothing.
+          for token in BETTER_CCFLARE_BUILD_VERSION BETTER_CCFLARE_BUILD_COMMIT; do
+            grep -qE "(process|Bun)\.env[.[]\"?$token" "$b" || { echo "FAIL build.ts no longer reads $token" >&2; rc=1; }
+          done
+          for define in __BETTER_CCFLARE_VERSION__ __BETTER_CCFLARE_COMMIT__; do
+            # The occurrence must be on a line that is not a comment. Commenting the
+            # injection out rather than deleting it is a realistic conflict-resolution
+            # artifact, and a plain grep accepts it. Filtering comment lines catches that
+            # without anchoring to key position, which a reformat could move.
+            grep -F "$define" "$b" | grep -qvE '^[[:space:]]*(//|/\*|\*)' \
+              || { echo "FAIL build.ts no longer injects the $define define in live code" >&2; rc=1; }
+            grep -qE "declare const $define\b" "$v" || { echo "FAIL version.ts no longer declares $define" >&2; rc=1; }
+          done
+          # navigation.tsx imports both named exports, and displayVersion is the fork shape
+          # upstream's getVersion() would replace rather than extend.
+          grep -qE 'export function displayVersion\b' "$v" || { echo "FAIL version.ts no longer exports displayVersion" >&2; rc=1; }
+          # A barrel `export { version, commit }` is as valid as `export const version`, so
+          # both shapes satisfy this. The invariant is that navigation.tsx can import the
+          # name, not how the line is written.
+          for sym in version commit; do
+            grep -qE "export (const $sym\b|\{[^}]*\b$sym\b)" "$v" || { echo "FAIL version.ts no longer exports $sym" >&2; rc=1; }
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "A release would embed the wrong version in the dashboard and fail" >&2
+            echo "scripts/test-hextap-build.ts. See the standing resolutions in" >&2
+            echo "docs/upstream-sync.md; getVersion() is additive only." >&2
+            exit 1
+          }
+          echo "Dashboard reads both Hextap env vars, injects both defines, keeps the fork's version exports."
+
+      - name: no-semver-build-metadata
+        source: base
+        timeout_minutes: 2
+        run: |
+          # The invariant the forbidden_patterns rule cannot express. Hextap rejects SemVer
+          # build metadata, so no fork build entry point may inject X.Y.Z+suffix into the
+          # compile-time version define.
+          #
+          # A pattern rule reads upstream's tree, where the name already exists in
+          # apps/cli/build-multi-arch.ts, so it would block every sync forever. A gate reads
+          # the MERGED tree, so it fires only if the integration actually brought the
+          # suffix into one of these files. The fork has build-multi-arch.ts in diverged
+          # form, free of the name, and runs it as `build:multi`; upstream's copy injects
+          # the suffix into __BETTER_CCFLARE_VERSION__.
+          #
+          # packages/dashboard-web/build.ts is excluded on purpose: the fork uses the name
+          # there legitimately, to throw when it is combined with Hextap build identity.
+          rc=0
+          for f in apps/cli/build-multi-arch.ts apps/cli/build-standalone.ts \
+                   packages/core/src/build-identity.ts packages/core/src/version.ts; do
+            [ -f "$CANDIDATE/$f" ] || continue
+            if grep -qF 'CCFLARE_BUILD_SUFFIX' "$CANDIDATE/$f"; then
+              echo "FAIL $f now references CCFLARE_BUILD_SUFFIX:" >&2
+              grep -nF 'CCFLARE_BUILD_SUFFIX' "$CANDIDATE/$f" >&2
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "Hextap rejects SemVer build metadata, so X.Y.Z+suffix can never be release" >&2
+            echo "identity. See the standing resolution table in docs/upstream-sync.md." >&2
+            exit 1
+          }
+          echo "No fork build entry point injects SemVer build metadata."
+
+      # The next three gates are the security regressions the v3.9.0 sync merged
+      # WITHOUT a conflict. Each one was found by hand, in a file git reported as
+      # clean. They are the reason this config exists.
+
+      - name: path-validator-log-level
+        source: base
+        timeout_minutes: 2
+        run: |
+          # Upstream logged the RESOLVED path at info. A validated path is itself
+          # sensitive (TLS key and cert locations are the motivating case) and this
+          # runs on CLI-supplied paths, so info puts it in default output. The
+          # resolved path belongs at debug only.
+          #
+          # Matched against the file joined into one line, because the formatter wraps
+          # long log calls and a per-line grep would miss a wrapped `log.info(` as well
+          # as fail on a wrapped debug line. `[^)]*` keeps each match inside one call.
+          f="$CANDIDATE/packages/security/src/path-validator.ts"
+          rc=0
+          [ -f "$f" ] || { echo "FAIL $f is gone; this gate can no longer judge anything." >&2; exit 1; }
+          joined=$(tr '\n' ' ' < "$f")
+          # What this gate does and does not claim, stated exactly, because an earlier
+          # draft claimed "resolved path logged at debug only" and that is FALSE of this
+          # file. `logSecurityEvent` logs at log.warn, and the `reason` strings its four
+          # call sites pass interpolate ${resolvedPath}, so failure paths already put the
+          # resolved path at warn. Those are deliberate security events and are not this
+          # gate's business. The v3.9.0 defect was the SUCCESS path at info.
+          #
+          # So: info and console are forbidden to name the resolved path, warn is not.
+          # Bounded on `;` rather than `)`, because a call with any `)` before the path
+          # (a `.join(", ")` in the same template, an idiom already used at the
+          # whitelist-bypass site) escaped a `)`-bounded window entirely.
+          loud=$(printf '%s' "$joined" \
+            | grep -oE '(log\.info|console\.(log|info|warn|error))\([^;]*resolvedPath' || true)
+          if [ -n "$loud" ]; then
+            echo "FAIL the resolved path is logged at info level or through console:" >&2
+            printf '%s\n' "$loud" >&2
+            echo "The resolved path is sensitive (TLS key and cert locations are the" >&2
+            echo "motivating case) and this runs on CLI-supplied paths, so info puts it in" >&2
+            echo "default output. Keep it at debug." >&2
+            rc=1
+          fi
+          # And the one function that may name it above debug must stay at warn. Raising
+          # logSecurityEvent one level is a one-word change that would otherwise move four
+          # call sites' worth of resolved paths into default output at once.
+          sec=$(awk '
+            !f && /^function logSecurityEvent\(/ { f = 1; print; next }
+            f { print; if ($0 ~ /^\}/) exit }
+          ' "$f")
+          if [ -z "$sec" ]; then
+            echo "FAIL logSecurityEvent is gone from path-validator; re-read this gate." >&2
+            rc=1
+          elif printf '%s\n' "$sec" | grep -qE 'log\.(info|error)|console\.'; then
+            echo "FAIL logSecurityEvent no longer logs only at warn:" >&2
+            printf '%s\n' "$sec" | grep -nE 'log\.|console\.' >&2
+            rc=1
+          fi
+          # Anchored on the success path specifically. A plain "some debug call mentions
+          # resolvedPath" assertion is satisfied by the symlink-check debug call, so
+          # deleting the success line would pass. Mutation-tested 2026-09-13.
+          printf '%s' "$joined" | grep -qE 'log\.debug\([^)]*validation successful[^)]*resolvedPath' || {
+            echo "FAIL the successful-validation debug log no longer names resolvedPath." >&2
+            echo "Keep it at debug; do not delete it and do not raise its level." >&2
+            rc=1
+          }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "Success path at debug, no info or console path logging, logSecurityEvent at warn."
+
+      - name: no-query-param-api-key
+        source: base
+        timeout_minutes: 2
+        run: |
+          # Upstream reintroduced a `?api_key=` fallback, which puts a long-lived
+          # credential in a URL, where it reaches access logs, the Referer header and
+          # shell history. Key extraction is header-only, and the stream endpoints use
+          # short-lived tokens instead.
+          rc=0
+          e="$CANDIDATE/packages/http-api/src/services/extract-api-key.ts"
+          [ -f "$e" ] || { echo "FAIL $e is gone." >&2; exit 1; }
+          if grep -q 'searchParams' "$e"; then
+            echo "FAIL extract-api-key.ts reads the query string; extraction is header-only." >&2
+            grep -n 'searchParams' "$e" >&2
+            rc=1
+          fi
+          # Scanned across packages/ and apps/, not just the two obvious directories: the
+          # read only has to happen somewhere on the request path, and http-common, config
+          # and apps/server are all on it. The quote class includes a backtick, and the
+          # name alternation covers the spellings a rewrite would reach for.
+          # The closing quote is part of the match. Without it, `apiKey` also matched
+          # `searchParams.get("apiKeys")` in query-filters.ts, which is the dashboard's
+          # filter over API key NAMES, not a credential read, and the gate failed on a
+          # clean tree.
+          hits=$(grep -rnE "searchParams\.get\([\`'\"][[:space:]]*(api_key|apiKey|api-key)[[:space:]]*[\`'\"]" \
+            "$CANDIDATE/packages" "$CANDIDATE/apps" || true)
+          if [ -n "$hits" ]; then
+            echo "FAIL a query-string api_key read was reintroduced:" >&2
+            printf '%s\n' "$hits" >&2
+            rc=1
+          fi
+          grep -qF 'STREAM_TOKEN_PATHS' "$CANDIDATE/packages/http-api/src/services/auth-service.ts" || {
+            echo "FAIL STREAM_TOKEN_PATHS is gone from auth-service.ts." >&2
+            echo "That set is what gives /api/logs/stream and /api/requests/stream a" >&2
+            echo "short-lived token instead of the raw key in the URL." >&2
+            rc=1
+          }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "API keys come from headers only; stream-token paths intact."
+
+      - name: oauth-exemption-literals
+        source: base
+        timeout_minutes: 2
+        run: |
+          # Upstream exempts all of /api/oauth from authentication. That reopens the
+          # unauthenticated token-overwrite vector (Codex P1): init, reauth and
+          # callback all mutate stored tokens. Only the two read-only GET status
+          # prefixes are exempt here, and the narrowing must survive the sync.
+          f="$CANDIDATE/packages/http-api/src/services/auth-service.ts"
+          [ -f "$f" ] || { echo "FAIL $f is gone." >&2; exit 1; }
+          # The branch is extracted by indentation rather than by a fixed tab depth, so
+          # a reindent of authenticateRequest does not turn this gate into a false
+          # positive: record the `if` line's leading whitespace, stop at the first
+          # closing brace indented no deeper than it.
+          block=$(awk '
+            !f && /if \(path\.startsWith\("\/api\/oauth"\)\) \{/ { match($0, /^[ \t]*/); ind = RLENGTH; f = 1; print; next }
+            f { print; if ($0 ~ /^[ \t]*\}/) { match($0, /^[ \t]*/); if (RLENGTH <= ind) exit } }
+          ' "$f")
+          [ -n "$block" ] || {
+            echo "FAIL no /api/oauth branch found in authenticateRequest." >&2
+            echo "Either it was removed or its shape changed; review by hand." >&2
+            exit 1
+          }
+          rc=0
+          # File-wide first, then the block. Extracting a block and judging only that is
+          # blind to an exemption added ABOVE it: the awk anchor needs the exact spelling
+          # `if (path.startsWith("/api/oauth")) {`, so a brace-less
+          # `if (path.startsWith("/api/oauth")) return true;` or a trailing-slash
+          # `startsWith("/api/oauth/")` both sit outside the extracted block and short-
+          # circuit before it. A duplicated broader block below the anchor is the
+          # clean-merge artifact this config exists to catch, and is equally invisible.
+          #
+          # So every `/api/oauth` prefix test in the file must be one of the three known
+          # spellings. A new one fails this gate deliberately: adding an OAuth exemption
+          # site is exactly the change a human must look at.
+          unknown=$(grep -n 'startsWith("/api/oauth' "$f" \
+            | grep -vE 'startsWith\("/api/oauth"\)\) \{' \
+            | grep -vE 'startsWith\("/api/oauth/(qwen|codex)/status/"\)' || true)
+          if [ -n "$unknown" ]; then
+            echo "FAIL unrecognized /api/oauth prefix test(s):" >&2
+            printf '%s\n' "$unknown" >&2
+            echo "Only the guard itself and the two read-only GET status prefixes may test" >&2
+            echo "this prefix. A new site must be reviewed by hand, not merged by a resolver." >&2
+            rc=1
+          fi
+          for lit in '/api/oauth/qwen/status/' '/api/oauth/codex/status/' 'method === "GET"'; do
+            printf '%s\n' "$block" | grep -qF "$lit" || {
+              echo "FAIL the /api/oauth branch no longer requires $lit" >&2
+              rc=1
+            }
+          done
+          if printf '%s\n' "$block" | grep -qE '(^|[^A-Za-z_])return true'; then
+            echo "FAIL the /api/oauth branch exempts the whole prefix (return true)." >&2
+            printf '%s\n' "$block" >&2
+            echo "Token-mutating OAuth endpoints must NOT be exempt. Restore the" >&2
+            echo "read-only GET status narrowing." >&2
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "OAuth exemption still limited to the two read-only GET status prefixes."
+
+      # ---------------------------------------------------------------------------
+      # candidate gate: runs the fork's own release-contract test against the merged
+      # tree, so it picks up whatever the integration actually produced. Trustworthy
+      # because scripts/hextap-contract.test.ts is protected policy-side AND checked
+      # byte-identical by contract-test-not-weakened above.
+      #
+      # Verified 2026-09-11: this test imports only bun:test, node:fs and node:path, so
+      # it runs in a clean export with no node_modules (3 pass). The full suite cannot
+      # run here, because it needs `bun install` and the gate container has no network;
+      # that is what validation.required_checks is for.
+      # ---------------------------------------------------------------------------
+
+      - name: hextap-contract
+        source: candidate
+        timeout_minutes: 5
+        run: bun test scripts/hextap-contract.test.ts
+
+    # The target's own CI on the pull request. Names must match branch protection
+    # ruleset hextap/main (21627513) exactly, or merge.mode: auto would wait forever.
+    # This is where the full suite, typecheck, frozen-lockfile install, dashboard build
+    # and the Hextap release-contract job actually run, with network available.
+    required_checks:
+      - "Bun and release tooling"
+      - "Hextap release contract"
+
+  pull_request:
+    title_template: "sync(upstream): integrate {{upstream.repo}} {{upstream.sha12}}"
+    body_template: |
+      Integrates `{{upstream.repo}}` at `{{upstream.sha}}` into `{{target.branch}}` from base `{{base.sha}}`, through a real two-parent merge.
+
+      Candidate: `{{candidate.sha}}`
+      Controller run: {{run.url}}
+
+      {{gates.markdown}}
+
+      {{isolation.markdown}}
+
+      ### Reviewer checklist
+
+      The gates above cover the mechanical invariants. These need a human, because the last hand-run sync found all five of its real defects in files that merged **without a conflict**:
+
+      - [ ] Read `docs/upstream-sync.md`, section "Breaks without producing a conflict". Walk its eleven items against this diff.
+      - [ ] Grep every live workflow for a `v*` tag trigger and any release write. Exactly one workflow may own that trigger.
+      - [ ] No query-parameter API key anywhere. No widened `/api/oauth` or non-`/api` static auth exemption.
+      - [ ] Resolved filesystem and TLS paths log at `debug`, not `info`.
+      - [ ] Any new migration in `migrations.ts` is ported to `migrations-pg.ts` in all five required places.
+      - [ ] `bare better-ccflare` with no arguments still starts the server; the Homebrew service depends on it.
+      - [ ] Dashboard still emits to `@better-ccflare/dashboard-web/dist/embedded`.
+      - [ ] Update `MERGELOG.md` and its `last-sync-sha` marker before merging. That marker is the **upstream tip consumed**, not this merge commit.
+    commit_message_template: "sync(upstream): merge {{upstream.repo}} {{upstream.sha12}}"
+    labels:
+      - upstream-sync
+    assignees:
+      - SijanC147
+    status_context: upstream-maintainer/verified
+
+  # Manual, and it should stay manual. Both required checks are strict, the review is
+  # substantive rather than mechanical, and MERGELOG.md plus its last-sync-sha marker
+  # must be updated by hand before the merge. Revisit only after several runs have
+  # landed cleanly with no reviewer findings.
+  merge:
+    mode: manual
+    method: merge
+    require_branch_protection: true
+    delete_branch_on_merge: false
+
+  notifications:
+    on_failure:
+      issue_in_target: true
+      labels:
+        - upstream-maintainer
+      mention:
+        - SijanC147
+
+  # Releases are deliberately human here. A release is a pushed annotated tag on
+  # protected main and nothing else starts one; v* tags are immutable, the sequence is
+  # RC-then-stable on the same commit, and the pre-tag version PR has to land first.
+  # See docs/release.md. Automating this would skip all of it.
+  release:
+    enabled: false
+
+upstreams:
+  - repo: tombii/better-ccflare
+    ref:
+      kind: branch
+      name: main
