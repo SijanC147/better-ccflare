@@ -50,6 +50,27 @@ export type {
 	WorktreeRule,
 } from "@better-ccflare/types";
 
+/** What `GET /api/config/openobserve` reports. The token is never returned. */
+export interface OpenObserveConfig {
+	/** Whether a base URL is set, which is the only switch. */
+	enabled: boolean;
+	url: string;
+	org: string;
+	user: string;
+	logStream: string;
+	requestStream: string;
+	shipPayloads: boolean;
+	tokenSet: boolean;
+	tokenFromEnvironment: boolean;
+	endpointFromEnvironment: boolean;
+}
+
+/** An omitted `token` leaves the stored one alone; an empty string clears it. */
+export type OpenObserveConfigUpdate = Omit<
+	OpenObserveConfig,
+	"enabled" | "tokenSet" | "tokenFromEnvironment" | "endpointFromEnvironment"
+> & { token?: string };
+
 // Agent response interface
 export interface AgentsResponse {
 	agents: Agent[];
@@ -2771,6 +2792,24 @@ class API extends HttpClient {
 		const url = "/api/config/github-token";
 		this.logger.debug(`→ POST ${url} (token redacted)`);
 		await this.post(url, { token });
+	}
+
+	// OpenObserve shipping. Deliberately not logged with its body: the token
+	// would land in the log stream the dashboard itself can read.
+	async getOpenObserveConfig(): Promise<OpenObserveConfig> {
+		const url = "/api/config/openobserve";
+		this.logger.debug(`→ GET ${url}`);
+		return await this.get<OpenObserveConfig>(url);
+	}
+
+	/**
+	 * An omitted `token` leaves the stored one alone, an empty string clears it.
+	 * The value is never logged.
+	 */
+	async setOpenObserveConfig(settings: OpenObserveConfigUpdate): Promise<void> {
+		const url = "/api/config/openobserve";
+		this.logger.debug(`→ POST ${url} (token redacted)`);
+		await this.post(url, settings);
 	}
 
 	// PostgreSQL configuration

@@ -6,7 +6,12 @@ import type {
 } from "@better-ccflare/types";
 import { COMMON_MODELS } from "@better-ccflare/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type RequestPayload, type RequestSummary } from "../api";
+import {
+	api,
+	type OpenObserveConfigUpdate,
+	type RequestPayload,
+	type RequestSummary,
+} from "../api";
 import { queryKeys } from "../lib/query-keys";
 
 /**
@@ -514,6 +519,24 @@ export const useSetGithubToken = () => {
 			// The widget reads the token per request, so the next status refresh
 			// already uses it. Invalidate so the card stops showing the old error.
 			queryClient.invalidateQueries({ queryKey: queryKeys.versionStatus() });
+		},
+	});
+};
+
+export const useOpenObserveConfig = () => {
+	return useQuery({
+		queryKey: ["openobserve-config"],
+		queryFn: () => api.getOpenObserveConfig(),
+	});
+};
+
+export const useSetOpenObserveConfig = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (settings: OpenObserveConfigUpdate) =>
+			api.setOpenObserveConfig(settings),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["openobserve-config"] });
 		},
 	});
 };
