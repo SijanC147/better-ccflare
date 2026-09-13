@@ -82,6 +82,7 @@ import {
 } from "./handlers/combos";
 import { createConfigHandlers } from "./handlers/config";
 import { createGithubTokenConfigHandlers } from "./handlers/config-github-token";
+import { createOpenObserveConfigHandlers } from "./handlers/config-openobserve";
 import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import { createRequestStorageHandlers } from "./handlers/config-request-storage";
 import { createUpstreamMaintainerConfigHandlers } from "./handlers/config-upstream-maintainer";
@@ -320,6 +321,7 @@ export class APIRouter {
 		const upstreamMaintainerConfigHandlers =
 			createUpstreamMaintainerConfigHandlers(config);
 		const githubTokenConfigHandlers = createGithubTokenConfigHandlers(config);
+		const openObserveConfigHandlers = createOpenObserveConfigHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -560,6 +562,14 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/github-token", (req) =>
 			githubTokenConfigHandlers.updateGithubTokenConfig(req),
+		);
+		// Writable for the same reason: the endpoint and token are the operator's
+		// own, and the token authorizes nothing but writes into their own org.
+		this.handlers.set("GET:/api/config/openobserve", () =>
+			openObserveConfigHandlers.getOpenObserveConfig(),
+		);
+		this.handlers.set("POST:/api/config/openobserve", (req) =>
+			openObserveConfigHandlers.updateOpenObserveConfig(req),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
