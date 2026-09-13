@@ -30,6 +30,99 @@ const log = new Logger("AlertsService");
 const HOUR_MS = 60 * 60 * 1000;
 const MAX_ANOMALY_ALERTS_PER_RUN = 25;
 
+/**
+ * Trailing window counted when an upstream error response arrives. Fixed
+ * rather than configurable, matching the reauth-deadline precedent below:
+ * this feature reuses the existing alert system without adding new
+ * configuration surface.
+ */
+const UPSTREAM_ERROR_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * Errors of one status class needed inside UPSTREAM_ERROR_WINDOW_MS before an
+ * alert fires. A single 500 that failover retried successfully is noise; three
+ * in a quarter of an hour is a pattern.
+ */
+const UPSTREAM_ERROR_MIN_COUNT = 3;
+
+/**
+ * Paths that reach the proxy only because the HTTP API has no handler for
+ * them, and so get forwarded upstream and answered with a real error status.
+ *
+ * `/api/health` and `/api/version` are NOT liveness endpoints in this project:
+ * each call proxies to real accounts and returns 503 even when the service is
+ * fine (measured 2026-08-29; `mem:health-endpoints-not-health`). Counting them
+ * would make this alert fire continuously on a healthy install, so they are
+ * excluded both from the trigger and from the windowed count below.
+ *
+ * Exact matches only. `/api/version/check` and `/api/version/status` have real
+ * handlers in router.ts and never reach the proxy, so no prefix match is
+ * needed and a prefix would risk swallowing a future sibling.
+ */
+const PROXY_FALLTHROUGH_PATHS: ReadonlySet<string> = new Set([
+	"/api/health",
+	"/api/version",
+]);
+
+/** Status classes this alert groups by. */
+export type UpstreamErrorClass = "429" | "4xx" | "5xx";
+
+interface UpstreamErrorClassSpec {
+	/** SQL predicate over `r.status_code`; static text, never interpolated input. */
+	predicate: string;
+	severity: AlertEvent["severity"];
+	title: string;
+	label: string;
+}
+
+const UPSTREAM_ERROR_CLASSES: Record<
+	UpstreamErrorClass,
+	UpstreamErrorClassSpec
+> = {
+	// 429 is split out of 4xx deliberately: rate limiting is an operational
+	// signal about account capacity, while a 400 is a malformed client request.
+	// Collapsing them would bury a rate-limit storm under bad-request noise.
+	"429": {
+		predicate: "r.status_code = 429",
+		severity: "warning",
+		title: "Upstream rate limiting",
+		label: "rate-limited (429)",
+	},
+	"4xx": {
+		predicate:
+			"r.status_code >= 400 AND r.status_code < 500 AND r.status_code <> 429",
+		severity: "info",
+		title: "Upstream client errors",
+		label: "client error (4xx)",
+	},
+	"5xx": {
+		predicate: "r.status_code >= 500 AND r.status_code < 600",
+		severity: "critical",
+		title: "Upstream server errors",
+		label: "server error (5xx)",
+	},
+};
+
+/**
+ * Maps an HTTP status to the class this alert groups by, or null when the
+ * status is not an error worth alerting on.
+ */
+export function classifyUpstreamError(
+	statusCode: number | null | undefined,
+): UpstreamErrorClass | null {
+	if (statusCode == null || !Number.isFinite(statusCode)) return null;
+	if (statusCode === 429) return "429";
+	if (statusCode >= 500 && statusCode < 600) return "5xx";
+	if (statusCode >= 400 && statusCode < 500) return "4xx";
+	return null;
+}
+
+/** False for the proxy-fallthrough paths that 503 on a healthy install. */
+export function isAlertableErrorPath(path: string | null | undefined): boolean {
+	if (path == null) return true;
+	return !PROXY_FALLTHROUGH_PATHS.has(path);
+}
+
 interface AlertRow {
 	id: string;
 	timestamp: number;
@@ -488,9 +581,91 @@ export class AlertService {
 		alerts.push(
 			...(await this.buildAggregateAlerts(timestamp, request, config)),
 		);
+		const errorAlert = await this.buildUpstreamErrorAlert(
+			timestamp,
+			request,
+			config,
+		);
+		if (errorAlert) alerts.push(errorAlert);
 		for (const alert of alerts) {
 			await this.persistAndEmit(alert, config.webhookUrl);
 		}
+	}
+
+	/**
+	 * Raises one alert per (account, status class) once that pair has produced
+	 * UPSTREAM_ERROR_MIN_COUNT errors inside UPSTREAM_ERROR_WINDOW_MS.
+	 *
+	 * Grouping rationale: one alert per failed request is a notification flood
+	 * during a rate-limit storm, where a single account can fail hundreds of
+	 * times a minute. Grouping by account answers the operator's actual
+	 * question — which account is unhealthy — and grouping by status class
+	 * keeps a 429 storm distinguishable from a 500 storm on the same account.
+	 * Re-firing is then bounded by the existing cooldown bucket in
+	 * buildThresholdAlertId, so a storm lasting an hour raises one alert per
+	 * cooldownMinutes, not one per request.
+	 */
+	private async buildUpstreamErrorAlert(
+		timestamp: number,
+		request: RequestResponse,
+		config: AlertsConfigPayload,
+	): Promise<AlertEvent | null> {
+		const errorClass = classifyUpstreamError(request.statusCode);
+		if (!errorClass) return null;
+		if (!isAlertableErrorPath(request.path)) return null;
+		const spec = UPSTREAM_ERROR_CLASSES[errorClass];
+		const since = timestamp - UPSTREAM_ERROR_WINDOW_MS;
+		const accountId = request.accountUsed;
+		// Two variants rather than one query with an OR: `= ?` never matches
+		// NULL in SQL, so requests that failed before any account was chosen
+		// (every account rate-limited, for instance) would otherwise be counted
+		// against no group at all and never alert.
+		const accountPredicate =
+			accountId === null ? "r.account_used IS NULL" : "r.account_used = ?";
+		const params: (string | number)[] = [since];
+		if (accountId !== null) params.push(accountId);
+		const row = await this.db.get<{
+			cnt: number | string | null;
+			account_name: string | null;
+		}>(
+			`
+			SELECT COUNT(*) as cnt, MAX(a.name) as account_name
+			FROM requests r
+			LEFT JOIN accounts a ON a.id = r.account_used
+			WHERE r.timestamp >= ?
+				AND ${accountPredicate}
+				AND ${spec.predicate}
+				AND (r.path IS NULL OR r.path NOT IN ('/api/health', '/api/version'))
+		`,
+			params,
+		);
+		// COUNT(*) arrives as a string on PostgreSQL (BIGINT is stringified,
+		// Bun#22188), so coerce before comparing — the same coercion
+		// getUnacknowledgedCount uses.
+		const count = Number(row?.cnt) || 0;
+		if (count < UPSTREAM_ERROR_MIN_COUNT) return null;
+		const accountLabel = row?.account_name ?? accountId ?? "no account";
+		const windowMinutes = Math.round(UPSTREAM_ERROR_WINDOW_MS / 60000);
+		return {
+			id: buildThresholdAlertId(
+				"upstream_error",
+				`${encodeScopePart(accountId)}${GROUP_KEY_SEPARATOR}${errorClass}`,
+				timestamp,
+				config.cooldownMinutes,
+			),
+			timestamp,
+			type: "upstream_error",
+			severity: spec.severity,
+			title: spec.title,
+			message: `${count} ${spec.label} responses for account ${accountLabel} in the last ${windowMinutes} minutes (most recent: HTTP ${request.statusCode} on ${request.path}).`,
+			value: count,
+			threshold: UPSTREAM_ERROR_MIN_COUNT,
+			account: row?.account_name ?? accountId,
+			model: request.model ?? null,
+			project: request.project ?? null,
+			requestId: request.id,
+			acknowledged: false,
+		};
 	}
 
 	async listAlerts(limit = 100): Promise<AlertEvent[]> {

@@ -40,6 +40,14 @@ export const AlertsView = React.memo(() => {
 		return new Date(ts).toLocaleString();
 	}
 
+	// Severity has always been stored and returned but never rendered, so a
+	// critical upstream-error alert looked identical to an informational one.
+	function severityColor(severity: string): string {
+		if (severity === "critical") return "text-red-500";
+		if (severity === "info") return "text-sky-500";
+		return "text-amber-500";
+	}
+
 	return (
 		<div className="space-y-4">
 			<div className="flex items-center justify-between">
@@ -72,7 +80,9 @@ export const AlertsView = React.memo(() => {
 									<div className="flex items-start justify-between gap-3">
 										<div className="space-y-1">
 											<div className="flex items-center gap-2">
-												<TriangleAlert className="h-4 w-4 text-amber-500" />
+												<TriangleAlert
+													className={`h-4 w-4 ${severityColor(alert.severity)}`}
+												/>
 												<span className="font-medium">{alert.title}</span>
 											</div>
 											<p className="text-sm text-muted-foreground">
