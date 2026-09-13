@@ -1080,10 +1080,12 @@ export class Config extends EventEmitter {
 		return this.getUpstreamMaintainerToken().length > 0;
 	}
 
-	/** Persist the token, or clear it with an empty string. */
-	setUpstreamMaintainerToken(token: string): void {
-		this.set("upstream_maintainer_token", token);
-	}
+	// Deliberately no setter. Unlike pg_password, this value has no write path
+	// at all: the operator edits the config file (or sets the environment
+	// variable) and nothing reachable from the dashboard can set or overwrite it.
+	// The asymmetry is the point — the token authorizes a workflow dispatch on
+	// another repository, so it should not be installable by anything that can
+	// reach the API.
 
 	getPgSslMode(): "disable" | "require" | "verify-ca" | "verify-full" {
 		const fromEnv = process.env.PGSSLMODE as

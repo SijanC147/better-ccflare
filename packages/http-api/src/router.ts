@@ -285,10 +285,10 @@ export class APIRouter {
 		// docs/version-status-widget.md.
 		const selfUpdateEnabled =
 			process.env.BETTER_CCFLARE_ENABLE_SELF_UPDATE === "1";
-		// Read through Config on every request rather than captured here: the
-		// maintainer token is a config parameter the operator can set at runtime
-		// via POST /api/config/upstream-maintainer, and the router builds its
-		// handlers once at startup.
+		// Read through Config per request rather than captured here, so the
+		// handlers hold no copy of the secret. Config itself loads the file once
+		// at construction, so editing the config file still needs a restart —
+		// the same as every other value in it.
 		const getMaintainerToken = () => config.getUpstreamMaintainerToken();
 		const versionStatusService = new VersionStatusService({
 			currentVersion: getVersionSync(),
@@ -543,11 +543,10 @@ export class APIRouter {
 		this.handlers.set("POST:/api/upstream/sync-dispatch", () =>
 			upstreamDispatchHandler(),
 		);
+		// Read-only by design: the token is written to the config file by the
+		// operator, never through an endpoint. See docs/version-status-widget.md.
 		this.handlers.set("GET:/api/config/upstream-maintainer", () =>
 			upstreamMaintainerConfigHandlers.getUpstreamMaintainerConfig(),
-		);
-		this.handlers.set("POST:/api/config/upstream-maintainer", (req) =>
-			upstreamMaintainerConfigHandlers.setUpstreamMaintainerConfig(req),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());

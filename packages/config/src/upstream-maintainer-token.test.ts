@@ -50,12 +50,14 @@ describe("upstream maintainer token", () => {
 		expect(config.getUpstreamMaintainerToken()).toBe("github_pat_env");
 	});
 
-	it("persists and clears through the setter", () => {
+	it("has no setter, so nothing reachable from the API can install one", () => {
+		// Unlike pg_password, this value has no write path at all. The token
+		// authorizes a workflow dispatch on another repository, so the operator
+		// writes it into the config file and nothing else can.
 		const config = configWith({});
-		config.setUpstreamMaintainerToken("github_pat_set");
-		expect(config.hasUpstreamMaintainerToken()).toBe(true);
-		config.setUpstreamMaintainerToken("");
-		expect(config.hasUpstreamMaintainerToken()).toBe(false);
+		expect(
+			(config as unknown as Record<string, unknown>).setUpstreamMaintainerToken,
+		).toBeUndefined();
 	});
 
 	it("is absent from getAllSettings(), with the other secrets", () => {

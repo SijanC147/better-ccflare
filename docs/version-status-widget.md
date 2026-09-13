@@ -183,29 +183,52 @@ answers `404` and no button renders.
 #### Setting it
 
 The token is a configuration parameter, stored and read like every other secret
-in `packages/config` (the `pg_password` precedent): **environment first, then the
-persisted config file.**
+in `packages/config`: **environment first, then the persisted config file.**
 
-```bash
-# Through the API (an admin API key is required when auth is enabled)
-curl -X POST http://localhost:8080/api/config/upstream-maintainer \
-  -H "x-api-key: $BETTER_CCFLARE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"token":"github_pat_..."}'
-
-# Clear it again
-curl -X POST http://localhost:8080/api/config/upstream-maintainer \
-  -H "x-api-key: $BETTER_CCFLARE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"token":""}'
+```jsonc
+// ~/.config/better-ccflare/better-ccflare.json
+{
+  "upstream_maintainer_token": "github_pat_..."
+}
 ```
 
-It can equally be written straight into the config file as
-`upstream_maintainer_token`, or supplied as
-`BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN` in the server environment. The
-environment wins over the stored value, which is why
-`GET /api/config/upstream-maintainer` also reports `tokenFromEnvironment`: without
-it, clearing the stored token while the variable is set would look like a no-op.
+`BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN` in the server environment works too
+and wins over the stored value — which is why
+`GET /api/config/upstream-maintainer` also reports `tokenFromEnvironment`:
+without it, editing the stored token while the variable is set would look like a
+no-op.
+
+The config file is read once when the server starts, so **restart the server
+after editing it**. That is true of every value in the file, not just this one.
+
+**There is no setter endpoint, and the config layer has no setter method.** The
+operator writes the token; nothing reachable from the dashboard can install or
+overwrite it. `GET /api/config/upstream-maintainer` is read-only and returns
+booleans.
+
+> **Where the token lives, and who can read it.** The config file is
+> `~/.config/better-ccflare/better-ccflare.json` (or `$BETTER_CCFLARE_CONFIG_PATH`).
+> It is written with default permissions, which on this machine means **`0644` in
+> a `0755` directory — world-readable**. That is pre-existing behaviour and
+> already applies to `pg_password` and `local_control_secret`, but a GitHub token
+> is more portable than either, so it is worth stating plainly rather than
+> assuming. Tightening it is a deliberate choice for the repository owner to make;
+> nothing here changes the file's mode. An operator who would rather not put the
+> token on disk at all can use the environment variable instead.
+
+#### Why this is configuration and the self-update switch is not
+
+The two capabilities are gated differently on purpose.
+
+`BETTER_CCFLARE_ENABLE_SELF_UPDATE` authorizes **command execution** on the host,
+so it must not be settable by anything that can reach the API — it lives in the
+environment, where changing it needs access to the process, not an API key.
+
+The maintainer token authorizes a **workflow dispatch on another repository**,
+bounded by the controller's own protections (below). That is ordinary
+configuration, so it lives with the other secrets in the config file. Neither one
+is writable through an endpoint; the difference is that a token is something the
+user supplies, while an execution switch is something the host grants.
 
 #### What the token needs
 
@@ -233,8 +256,8 @@ config would defeat all of the above:
 
 | Endpoint | Finding |
 | --- | --- |
-| `GET /api/config` | Copies named fields into an allowlisted `ConfigResponse`; no spread |
-| `GET /api/config/upstream-maintainer` | `tokenSet` and `tokenFromEnvironment` booleans only |
+| `GET /api/config` | Copies named fields into an allowlisted `ConfigResponse` (`packages/types/src/stats.ts`), which has no token field; no spread |
+| `GET /api/config/upstream-maintainer` | `tokenSet` and `tokenFromEnvironment` booleans only; read-only, no setter |
 | `GET /api/config/postgres` | Same precedent: `passwordSet` boolean, never the password |
 | The other twelve `GET /api/config/*` routes | Each returns its own named fields |
 | `GET /api/system/info` | Package-manager and container detection only |

@@ -168,9 +168,9 @@ export function createVersionStatusHandler(
 		localCommit: string;
 		selfUpdateEnabled: boolean;
 		/**
-		 * Whether a maintainer token is configured. A function, not a boolean: the
-		 * operator can set or clear the token while the server runs, and the
-		 * dashboard must see that on its next poll.
+		 * Whether a maintainer token is configured. A function, not a boolean, so
+		 * the capability is derived from the config layer at request time rather
+		 * than frozen into the handler.
 		 */
 		isDispatchConfigured: () => boolean;
 		execPath?: string;
@@ -363,19 +363,19 @@ export function createSelfUpdateHandler(
  *
  * The controller token is the only switch: with none configured the endpoint
  * answers 404 and the dashboard offers no button. It is a config parameter the
- * operator sets, read through Config (environment first, then the persisted
- * config file, like every other secret in packages/config). It is never part of
- * a response body, never logged, and never reaches the browser — the dashboard
- * learns only the boolean.
+ * operator writes into the config file (or supplies in the environment), read
+ * through Config like every other secret in packages/config. There is no setter
+ * endpoint: nothing reachable from the dashboard can install or overwrite it.
+ * It is never part of a response body, never logged, and never reaches the
+ * browser — the dashboard learns only the boolean.
  */
 export function createUpstreamDispatchHandler(
 	authService: Pick<AuthService, "isAuthenticationEnabled">,
 	options: {
 		/**
-		 * Reads the configured token. A function, not a value: the token is a
-		 * config parameter the operator can set through
-		 * POST /api/config/upstream-maintainer while the server runs, and the
-		 * router builds this handler once at startup.
+		 * Reads the configured token. A function, not a value, so this handler
+		 * never holds a copy of the secret and the config layer stays the single
+		 * place it lives.
 		 */
 		getToken: () => string;
 		fetchImpl?: typeof fetch;
