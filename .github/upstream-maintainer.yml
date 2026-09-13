@@ -122,7 +122,12 @@ defaults:
       # Formula publishing of its own, would be textually clean here and still wrong:
       # two publishers racing the same immutable v* tag. Verified absent upstream on
       # 2026-09-11, so this does not misfire today.
-      - paths: ["**/*.yml", "**/*.yaml", "**/*.json", "**/*.ts", "**/*.md"]
+      # Scoped to code and configuration, deliberately NOT **/*.md. A prose mention of
+      # Hextap in an upstream changelog or acknowledgements file would permanently block
+      # every sync until someone edited this config, and forbidden_patterns has no
+      # `except`. The real two-publisher guard is the hextap-contract gate, which asserts
+      # exactly one workflow owns the v* trigger.
+      - paths: [".github/**", "scripts/**", "apps/**", "packages/**", "*.json"]
         # Spelled as a character class rather than with an inline (?i) flag, which the
         # JavaScript regular-expression engine the controller uses rejects outright.
         regex: '[Hh][Ee][Xx][Tt][Aa][Pp]'
