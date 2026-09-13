@@ -3,7 +3,7 @@ import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
 } from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
+import { Logger, openObserveShipsPayloads } from "@better-ccflare/logger";
 import type {
 	Account,
 	AgentAttributionSource,
@@ -181,7 +181,11 @@ export async function forwardToClient(
 	const responseHeadersObj = Object.fromEntries(response.headers.entries());
 
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
-	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
+	// Retaining the request body is not only about local storage: the
+	// OpenObserve exporter ships bodies without persisting them, and dropping
+	// the body here would leave it nothing to ship.
+	const shouldStorePayloads =
+		(ctx.config.getStorePayloads?.() ?? true) || openObserveShipsPayloads();
 
 	// Filter out:
 	//   - count_tokens requests on providers that synthesize or proxy advisory
