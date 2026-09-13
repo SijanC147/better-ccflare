@@ -155,6 +155,12 @@ export interface ConfigData {
 	// first access and persisted — unlike ProxyContext.internalProbeSecret,
 	// which is intentionally re-minted every server process start.
 	local_control_secret?: string;
+	// Token used to ask the upstream maintainer controller to open a sync PR
+	// (see docs/version-status-widget.md). Its presence is the feature's only
+	// switch: with no token set, POST /api/upstream/sync-dispatch answers 404 and
+	// the dashboard offers no button. Sensitive — handled like pg_password: never
+	// returned by an endpoint, never logged, and excluded from getAllSettings().
+	upstream_maintainer_token?: string;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -1049,6 +1055,38 @@ export class Config extends EventEmitter {
 		this.set("pg_password", password);
 	}
 
+	/**
+	 * Token for the upstream maintainer controller's repository_dispatch.
+	 *
+	 * Environment first, then the persisted config file, matching getPgPassword()
+	 * and every other secret here. Returns "" when unset, which is what the
+	 * dispatch endpoint reads as "feature off".
+	 *
+	 * The value is never returned by an API endpoint, never logged and never sent
+	 * to the browser — the dashboard only ever learns the boolean from
+	 * hasUpstreamMaintainerToken().
+	 */
+	getUpstreamMaintainerToken(): string {
+		return (
+			process.env.BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN ||
+			(typeof this.data.upstream_maintainer_token === "string"
+				? this.data.upstream_maintainer_token
+				: "")
+		);
+	}
+
+	/** Whether a token is configured, for reporting without revealing it. */
+	hasUpstreamMaintainerToken(): boolean {
+		return this.getUpstreamMaintainerToken().length > 0;
+	}
+
+	// Deliberately no setter. Unlike pg_password, this value has no write path
+	// at all: the operator edits the config file (or sets the environment
+	// variable) and nothing reachable from the dashboard can set or overwrite it.
+	// The asymmetry is the point — the token authorizes a workflow dispatch on
+	// another repository, so it should not be installable by anything that can
+	// reach the API.
+
 	getPgSslMode(): "disable" | "require" | "verify-ca" | "verify-full" {
 		const fromEnv = process.env.PGSSLMODE as
 			| "disable"
@@ -1247,9 +1285,23 @@ export class Config extends EventEmitter {
 		string,
 		string | number | boolean | ProviderModelDefaultOverrides | undefined
 	> {
+		// Secrets are stripped rather than spread. Today's only caller
+		// (handlers/config.ts getConfig) copies named fields into an allowlisted
+		// ConfigResponse, so nothing leaks yet — but the method is named as though
+		// it were safe to serialize, and the next caller to hand the whole object
+		// to a diagnostic or settings endpoint would ship pg_password and
+		// local_control_secret with it. Each sensitive value has its own accessor
+		// for the code that genuinely needs it.
+		const {
+			pg_password: _pgPassword,
+			local_control_secret: _localControlSecret,
+			upstream_maintainer_token: _upstreamMaintainerToken,
+			...safeData
+		} = this.data;
+
 		// Include current strategy (which might come from env)
 		return {
-			...this.data,
+			...safeData,
 			lb_strategy: this.getStrategy(),
 			default_agent_model: this.getDefaultAgentModel(),
 			data_retention_days: this.getDataRetentionDays(),

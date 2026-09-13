@@ -1,4 +1,8 @@
-import { validateNumber } from "@better-ccflare/core";
+import {
+	getCommitSync,
+	getVersionSync,
+	validateNumber,
+} from "@better-ccflare/core";
 import { BadRequest, Unauthorized } from "@better-ccflare/errors";
 import {
 	createAccountAddHandler,
@@ -76,24 +80,10 @@ import {
 	createSlotReorderHandler,
 	createSlotUpdateHandler,
 } from "./handlers/combos";
-import {
-	createProjectCreateHandler,
-	createProjectDeleteHandler,
-	createProjectGetHandler,
-	createProjectsDiscoverHandler,
-	createProjectsListHandler,
-	createProjectUpdateHandler,
-} from "./handlers/projects";
-import {
-	createWorktreeRuleCreateHandler,
-	createWorktreeRuleDeleteHandler,
-	createWorktreeRulesListHandler,
-	createWorktreeRuleTestHandler,
-	createWorktreeRuleUpdateHandler,
-} from "./handlers/worktree-rules";
 import { createConfigHandlers } from "./handlers/config";
 import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import { createRequestStorageHandlers } from "./handlers/config-request-storage";
+import { createUpstreamMaintainerConfigHandlers } from "./handlers/config-upstream-maintainer";
 import {
 	createHeapSnapshotHandler,
 	createHeapStatsHandler,
@@ -126,6 +116,14 @@ import {
 	createQwenReauthHandler,
 } from "./handlers/oauth";
 import {
+	createProjectCreateHandler,
+	createProjectDeleteHandler,
+	createProjectGetHandler,
+	createProjectsDiscoverHandler,
+	createProjectsListHandler,
+	createProjectUpdateHandler,
+} from "./handlers/projects";
+import {
 	createRequestPayloadHandler,
 	createRequestsDetailHandler,
 	createRequestsSummaryHandler,
@@ -146,7 +144,21 @@ import {
 } from "./handlers/token-health";
 import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createVersionCheckHandler } from "./handlers/version";
+import {
+	createSelfUpdateHandler,
+	createUpstreamDispatchHandler,
+	createVersionStatusHandler,
+} from "./handlers/version-status";
+import {
+	createWorktreeRuleCreateHandler,
+	createWorktreeRuleDeleteHandler,
+	createWorktreeRulesListHandler,
+	createWorktreeRuleTestHandler,
+	createWorktreeRuleUpdateHandler,
+} from "./handlers/worktree-rules";
 import { AuthService } from "./services/auth-service";
+import { MERGED_UPSTREAM_SHA } from "./services/fork-identity";
+import { VersionStatusService } from "./services/version-status-service";
 import type { APIContext } from "./types";
 import { errorResponse, jsonResponse } from "./utils/http-error";
 
@@ -267,7 +279,41 @@ export class APIRouter {
 		const requestsStreamHandler = createRequestsStreamHandler();
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
-		const versionCheckHandler = createVersionCheckHandler();
+		// Version / upstream-sync status. Both write capabilities are opt-in
+		// through the server environment only — never through RuntimeConfig,
+		// which the dashboard itself can POST to. See
+		// docs/version-status-widget.md.
+		const selfUpdateEnabled =
+			process.env.BETTER_CCFLARE_ENABLE_SELF_UPDATE === "1";
+		// Read through Config per request rather than captured here, so the
+		// handlers hold no copy of the secret. Config itself loads the file once
+		// at construction, so editing the config file still needs a restart —
+		// the same as every other value in it.
+		const getMaintainerToken = () => config.getUpstreamMaintainerToken();
+		const versionStatusService = new VersionStatusService({
+			currentVersion: getVersionSync(),
+			mergedSha: MERGED_UPSTREAM_SHA,
+			token: process.env.BETTER_CCFLARE_GITHUB_TOKEN || undefined,
+		});
+		const versionCheckHandler = createVersionCheckHandler(versionStatusService);
+		const versionStatusHandler = createVersionStatusHandler(
+			versionStatusService,
+			{
+				localVersion: getVersionSync(),
+				localCommit: getCommitSync(),
+				selfUpdateEnabled,
+				isDispatchConfigured: () => getMaintainerToken().length > 0,
+			},
+		);
+		const selfUpdateHandler = createSelfUpdateHandler(this.authService, {
+			enabled: selfUpdateEnabled,
+		});
+		const upstreamDispatchHandler = createUpstreamDispatchHandler(
+			this.authService,
+			{ getToken: getMaintainerToken },
+		);
+		const upstreamMaintainerConfigHandlers =
+			createUpstreamMaintainerConfigHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -486,6 +532,22 @@ export class APIRouter {
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
+		this.handlers.set("GET:/api/version/status", (_req, url) =>
+			versionStatusHandler(url),
+		);
+		// Registered unconditionally so a disabled capability answers 404 from
+		// inside the authenticated router. Leaving the key unset would make the
+		// path fall through handleRequest() to the proxy forwarder, which would
+		// spend a real upstream request on a 404.
+		this.handlers.set("POST:/api/admin/self-update", () => selfUpdateHandler());
+		this.handlers.set("POST:/api/upstream/sync-dispatch", () =>
+			upstreamDispatchHandler(),
+		);
+		// Read-only by design: the token is written to the config file by the
+		// operator, never through an endpoint. See docs/version-status-widget.md.
+		this.handlers.set("GET:/api/config/upstream-maintainer", () =>
+			upstreamMaintainerConfigHandlers.getUpstreamMaintainerConfig(),
+		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
 		this.handlers.set("GET:/api/analytics", (_req, url) => {

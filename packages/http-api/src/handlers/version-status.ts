@@ -1,0 +1,464 @@
+import { existsSync } from "node:fs";
+import {
+	Conflict,
+	Forbidden,
+	InternalServerError,
+	NotFound,
+	TooManyRequests,
+} from "@better-ccflare/errors";
+import { Logger } from "@better-ccflare/logger";
+import type { AuthService } from "../services/auth-service";
+import {
+	commitUrl,
+	FORK_REPO,
+	HOMEBREW_FORMULA,
+	MAINTAINER_REPO,
+	MERGED_UPSTREAM_SHA,
+	releaseUrl,
+	shortSha,
+	UPSTREAM_REPO,
+} from "../services/fork-identity";
+import type { VersionStatusService } from "../services/version-status-service";
+import { errorResponse, jsonResponse } from "../utils/http-error";
+
+const log = new Logger("VersionStatus");
+
+/**
+ * Process exit code used to hand control back to the supervisor after a
+ * successful self-update.
+ *
+ * Deliberately non-zero. The Homebrew service this fork ships installs a
+ * launchd plist with `KeepAlive { SuccessfulExit: false }`, which relaunches the
+ * binary only when it exits non-zero — `process.exit(0)`, as /api/admin/restart
+ * uses, would leave the service stopped. Self-update is gated on a Homebrew
+ * installation (see isHomebrewInstall), so the launchd posture is the one that
+ * applies whenever this code can run at all.
+ */
+const RESTART_EXIT_CODE = 75;
+
+/** Minimum gap between upstream-maintainer dispatches from this process. */
+const DISPATCH_COOLDOWN_MS = 5 * 60 * 1000;
+
+/** Wall-clock ceiling on a `brew upgrade` run. */
+const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000;
+
+export interface SelfUpdateEnvironment {
+	/** Absolute path of the running executable. */
+	execPath: string;
+	/** Spawns the upgrade; injected so tests never shell out. */
+	runUpgrade: () => Promise<{ exitCode: number; output: string }>;
+	/** Hands control back to the supervisor; injected for tests. */
+	scheduleRestart: () => void;
+}
+
+/**
+ * Strip credential shapes from subprocess output before it reaches a log.
+ *
+ * Defence in depth rather than the primary control: the subprocess environment
+ * is already an allowlist that excludes every token this process holds.
+ */
+export function redactSecrets(text: string): string {
+	return text
+		.replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "[redacted]")
+		.replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[redacted]")
+		.replace(/:\/\/[^@\s/]+@/g, "://[redacted]@");
+}
+
+/** The manual command an operator runs when self-update is unavailable. */
+export const MANUAL_UPDATE_COMMAND = `brew upgrade ${HOMEBREW_FORMULA}`;
+
+/**
+ * True when the running executable is *this formula's* Homebrew-installed
+ * binary.
+ *
+ * Checked against the executable path rather than a config value: a binary
+ * outside the Cellar was not installed by Homebrew, so `brew upgrade` would
+ * either do nothing or replace a different copy than the one serving this
+ * request.
+ *
+ * The formula name is part of every test on purpose. A bare `/Cellar/` or
+ * `/opt/homebrew/` prefix test also matches a Homebrew-installed Bun running
+ * this server from a source checkout (`process.execPath` is then
+ * `/opt/homebrew/Cellar/bun/<version>/bin/bun`), which would let the gate pass
+ * in development, upgrade an unrelated Cellar copy and exit a process with no
+ * supervisor behind it. Requiring the formula's own name means only the
+ * compiled, installed binary satisfies it.
+ */
+export function isHomebrewInstall(execPath: string): boolean {
+	return (
+		execPath.includes(`/Cellar/${HOMEBREW_FORMULA}/`) ||
+		execPath === `/opt/homebrew/bin/${HOMEBREW_FORMULA}` ||
+		execPath === `/usr/local/bin/${HOMEBREW_FORMULA}` ||
+		execPath === `/home/linuxbrew/.linuxbrew/bin/${HOMEBREW_FORMULA}` ||
+		execPath.startsWith(`/opt/homebrew/opt/${HOMEBREW_FORMULA}/`) ||
+		execPath.startsWith(`/usr/local/opt/${HOMEBREW_FORMULA}/`)
+	);
+}
+
+/**
+ * Absolute path of the `brew` executable, or null when none is present.
+ *
+ * Resolved from the known Homebrew prefixes rather than through `PATH`. A
+ * launchd user agent inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and the
+ * plist Homebrew generates for this formula sets only `BETTER_CCFLARE_LOG_DIR`,
+ * so a bare `brew` argv fails with "command not found" under exactly the
+ * service this capability is gated to — verified by running the upgrade under
+ * that environment.
+ */
+export function findBrewExecutable(
+	exists: (path: string) => boolean = existsSync,
+): string | null {
+	for (const candidate of [
+		"/opt/homebrew/bin/brew",
+		"/usr/local/bin/brew",
+		"/home/linuxbrew/.linuxbrew/bin/brew",
+	]) {
+		if (exists(candidate)) return candidate;
+	}
+	return null;
+}
+
+/** Default upgrade runner: a fixed argv, no shell, nothing interpolated. */
+async function spawnBrewUpgrade(): Promise<{
+	exitCode: number;
+	output: string;
+}> {
+	const brew = findBrewExecutable();
+	if (!brew) {
+		throw new Error("no brew executable found in any Homebrew prefix");
+	}
+	// Every element is a compile-time constant or a path from a fixed list. No
+	// request field reaches argv, and there is no shell, so there is nothing for
+	// a quoting bug to escape.
+	const child = Bun.spawn([brew, "upgrade", HOMEBREW_FORMULA], {
+		// An allowlist, not `...process.env`. Homebrew executes formula Ruby and
+		// git, and this process holds BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN and
+		// BETTER_CCFLARE_GITHUB_TOKEN; inheriting the whole environment would hand
+		// both to it. HOMEBREW_NO_AUTO_UPDATE stops the formula upgrade from
+		// dragging in a Homebrew self-update, which can take minutes and has
+		// nothing to do with this request.
+		env: {
+			PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+			HOME: process.env.HOME ?? "",
+			LANG: process.env.LANG ?? "C",
+			TMPDIR: process.env.TMPDIR ?? "/tmp",
+			HOMEBREW_NO_AUTO_UPDATE: "1",
+		},
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const timeout = setTimeout(() => child.kill(), UPGRADE_TIMEOUT_MS);
+	try {
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		return { exitCode, output: `${stdout}${stderr}`.trim().slice(-4000) };
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+export function createVersionStatusHandler(
+	service: VersionStatusService,
+	options: {
+		localVersion: string;
+		localCommit: string;
+		selfUpdateEnabled: boolean;
+		/**
+		 * Whether a maintainer token is configured. A function, not a boolean, so
+		 * the capability is derived from the config layer at request time rather
+		 * than frozen into the handler.
+		 */
+		isDispatchConfigured: () => boolean;
+		execPath?: string;
+	},
+) {
+	const execPath = options.execPath ?? process.execPath;
+	return async (url: URL): Promise<Response> => {
+		const force = url.searchParams.get("refresh") === "1";
+		const result = await service.getStatus(force);
+		// A development build reports "development" rather than a sha, which has
+		// neither a short form nor a commit page.
+		const isSha = /^[0-9a-f]{7,40}$/.test(options.localCommit);
+
+		return jsonResponse({
+			local: {
+				version: options.localVersion,
+				// Release notes for the running version. A release binary always
+				// carries a published tag (Hextap injects the git tag), so this
+				// resolves; a development build whose package.json version was
+				// never tagged is the one case where it can 404.
+				versionUrl: releaseUrl(
+					FORK_REPO,
+					options.localVersion.startsWith("v")
+						? options.localVersion
+						: `v${options.localVersion}`,
+				),
+				commit: options.localCommit,
+				commitShort: isSha ? shortSha(options.localCommit) : null,
+				commitUrl: isSha ? commitUrl(FORK_REPO, options.localCommit) : null,
+				mergedUpstreamSha: MERGED_UPSTREAM_SHA,
+				mergedUpstreamShaShort: shortSha(MERGED_UPSTREAM_SHA),
+				mergedUpstreamShaUrl: MERGED_UPSTREAM_SHA
+					? commitUrl(UPSTREAM_REPO, MERGED_UPSTREAM_SHA)
+					: null,
+				forkRepoUrl: `https://github.com/${FORK_REPO}`,
+				upstreamRepoUrl: `https://github.com/${UPSTREAM_REPO}`,
+			},
+			fork: result.snapshot?.fork ?? null,
+			upstream: result.snapshot?.upstream ?? null,
+			syncPr: result.snapshot?.syncPr ?? null,
+			capabilities: {
+				// Whether the buttons exist at all. Both are opt-in; see
+				// docs/version-status-widget.md.
+				selfUpdate: options.selfUpdateEnabled && isHomebrewInstall(execPath),
+				selfUpdateBlockedReason:
+					options.selfUpdateEnabled && !isHomebrewInstall(execPath)
+						? "not a Homebrew installation"
+						: null,
+				dispatch: options.isDispatchConfigured(),
+				manualUpdateCommand: MANUAL_UPDATE_COMMAND,
+			},
+			remote: {
+				available: result.snapshot !== null && !result.stale,
+				stale: result.stale,
+				error: result.error,
+				checkedAt: result.snapshot?.checkedAt ?? null,
+			},
+		});
+	};
+}
+
+/**
+ * POST /api/admin/self-update — run `brew upgrade` and hand control back to the
+ * supervisor.
+ *
+ * Four independent gates, all fail-closed:
+ *  1. `BETTER_CCFLARE_ENABLE_SELF_UPDATE=1` in the server's environment. Not a
+ *     RuntimeConfig field on purpose: the dashboard can POST config values, so a
+ *     config flag would let an authenticated dashboard user switch on command
+ *     execution at runtime. An environment variable needs operator access to the
+ *     process. Without it the endpoint answers 404, as if it did not exist.
+ *  2. Dashboard authentication must actually be enabled (at least one active API
+ *     key). Without that, an unauthenticated caller on the listening port could
+ *     trigger a package upgrade and a process restart.
+ *  3. The running executable must be inside a Homebrew prefix.
+ *  4. A fixed argv with no shell: ["brew", "upgrade", "better-ccflare"].
+ */
+export function createSelfUpdateHandler(
+	authService: AuthService,
+	options: {
+		enabled: boolean;
+		environment?: Partial<SelfUpdateEnvironment>;
+	},
+) {
+	const execPath = options.environment?.execPath ?? process.execPath;
+	const runUpgrade = options.environment?.runUpgrade ?? spawnBrewUpgrade;
+	// One upgrade at a time. Two overlapping POSTs would spawn two `brew upgrade`
+	// processes, and the exit scheduled 250ms after the first success would
+	// orphan the second mid-run.
+	let inFlight: Promise<Response> | null = null;
+	const scheduleRestart =
+		options.environment?.scheduleRestart ??
+		(() => {
+			setTimeout(() => {
+				log.info("Exiting after self-update so the supervisor relaunches");
+				process.exit(RESTART_EXIT_CODE);
+			}, 250);
+		});
+
+	const handle = async (): Promise<Response> => {
+		if (!options.enabled) {
+			return errorResponse(NotFound("Not found"));
+		}
+		if (!(await authService.isAuthenticationEnabled())) {
+			return errorResponse(
+				Forbidden(
+					"Self-update requires dashboard authentication to be enabled. " +
+						"Generate an API key first, or run manually: " +
+						MANUAL_UPDATE_COMMAND,
+				),
+			);
+		}
+		if (!isHomebrewInstall(execPath)) {
+			return errorResponse(
+				Conflict(
+					"Self-update is only supported for Homebrew installations. " +
+						`Run manually: ${MANUAL_UPDATE_COMMAND}`,
+				),
+			);
+		}
+		// Refuse before spawning rather than reporting a "command not found" as a
+		// failed upgrade.
+		if (
+			options.environment?.runUpgrade === undefined &&
+			!findBrewExecutable()
+		) {
+			return errorResponse(
+				Conflict(
+					"No brew executable was found in any Homebrew prefix. " +
+						`Run manually: ${MANUAL_UPDATE_COMMAND}`,
+				),
+			);
+		}
+
+		log.info("Self-update requested; running the Homebrew upgrade");
+		let outcome: { exitCode: number; output: string };
+		try {
+			outcome = await runUpgrade();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			log.error(`Self-update failed to start: ${message}`);
+			return errorResponse(
+				InternalServerError(`Upgrade could not be started: ${message}`),
+			);
+		}
+
+		if (outcome.exitCode !== 0) {
+			// The output goes to the server log, redacted, and not to the client.
+			// Homebrew echoes remote URLs and formula output, and this fork
+			// installs from a private tap, so a failed fetch can carry a
+			// credentialed remote into whatever reads the response.
+			log.error(
+				`Self-update failed with exit code ${outcome.exitCode}: ${redactSecrets(
+					outcome.output,
+				)}`,
+			);
+			return errorResponse(
+				InternalServerError(
+					`Upgrade failed with exit code ${outcome.exitCode}. ` +
+						"See the server log for the command output.",
+				),
+			);
+		}
+
+		log.info(
+			`Self-update succeeded; restarting. Output: ${redactSecrets(outcome.output)}`,
+		);
+		scheduleRestart();
+		return jsonResponse(
+			{
+				message: "Upgrade complete; restarting",
+				command: MANUAL_UPDATE_COMMAND,
+			},
+			202,
+		);
+	};
+
+	return async (): Promise<Response> => {
+		if (inFlight) return inFlight;
+		inFlight = handle().finally(() => {
+			inFlight = null;
+		});
+		return inFlight;
+	};
+}
+
+/**
+ * POST /api/upstream/sync-dispatch — ask the upstream maintainer controller to
+ * open a sync PR.
+ *
+ * The controller token is the only switch: with none configured the endpoint
+ * answers 404 and the dashboard offers no button. It is a config parameter the
+ * operator writes into the config file (or supplies in the environment), read
+ * through Config like every other secret in packages/config. There is no setter
+ * endpoint: nothing reachable from the dashboard can install or overwrite it.
+ * It is never part of a response body, never logged, and never reaches the
+ * browser — the dashboard learns only the boolean.
+ */
+export function createUpstreamDispatchHandler(
+	authService: Pick<AuthService, "isAuthenticationEnabled">,
+	options: {
+		/**
+		 * Reads the configured token. A function, not a value, so this handler
+		 * never holds a copy of the secret and the config layer stays the single
+		 * place it lives.
+		 */
+		getToken: () => string;
+		fetchImpl?: typeof fetch;
+		now?: () => number;
+		cooldownMs?: number;
+	},
+) {
+	const fetchImpl = options.fetchImpl ?? fetch;
+	const now = options.now ?? Date.now;
+	const cooldownMs = options.cooldownMs ?? DISPATCH_COOLDOWN_MS;
+	let lastDispatchAt = 0;
+
+	return async (): Promise<Response> => {
+		const token = options.getToken();
+		if (!token) {
+			return errorResponse(NotFound("Not found"));
+		}
+		// Same posture as self-update: an outward-facing side effect that spends
+		// the controller's token must not be reachable without authentication on
+		// a port this proxy already listens on.
+		if (!(await authService.isAuthenticationEnabled())) {
+			return errorResponse(
+				Forbidden(
+					"Dispatching an upstream sync requires dashboard authentication " +
+						"to be enabled. Generate an API key first.",
+				),
+			);
+		}
+
+		const elapsed = now() - lastDispatchAt;
+		if (lastDispatchAt !== 0 && elapsed < cooldownMs) {
+			const waitSeconds = Math.ceil((cooldownMs - elapsed) / 1000);
+			return errorResponse(
+				TooManyRequests(
+					`An upstream sync was dispatched recently; retry in ${waitSeconds}s`,
+				),
+			);
+		}
+
+		try {
+			const response = await fetchImpl(
+				`https://api.github.com/repos/${MAINTAINER_REPO}/dispatches`,
+				{
+					method: "POST",
+					headers: {
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": "better-ccflare-version-status",
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${token}`,
+					},
+					body: JSON.stringify({
+						event_type: "sync-upstream",
+						client_payload: { target: FORK_REPO },
+					}),
+					signal: AbortSignal.timeout(10_000),
+				},
+			);
+
+			if (response.status === 204 || response.ok) {
+				lastDispatchAt = now();
+				log.info(`Dispatched sync-upstream to ${MAINTAINER_REPO}`);
+				return jsonResponse(
+					{
+						message: "Upstream sync dispatched",
+						repository: MAINTAINER_REPO,
+					},
+					202,
+				);
+			}
+
+			// Report the status only. The response body of a failed dispatch can
+			// echo request details, and the token must never reach the client.
+			log.error(`Upstream dispatch rejected with status ${response.status}`);
+			return errorResponse(
+				InternalServerError(
+					`GitHub rejected the dispatch with status ${response.status}`,
+				),
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			log.error(`Upstream dispatch failed: ${message}`);
+			return errorResponse(InternalServerError(`Dispatch failed: ${message}`));
+		}
+	};
+}

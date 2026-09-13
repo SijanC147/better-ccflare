@@ -1,64 +1,49 @@
-import { Logger } from "@better-ccflare/logger";
+import type { VersionStatusService } from "../services/version-status-service";
 import {
 	errorResponse,
 	InternalServerError,
 	jsonResponse,
 } from "../utils/http-error";
 
-const log = new Logger("VersionHandler");
-
-// Cache the npm registry response to avoid excessive requests
-interface VersionCacheEntry {
-	version: string;
-	timestamp: number;
-}
-
-let versionCache: VersionCacheEntry | null = null;
-const CACHE_DURATION_MS = 60 * 60 * 1000; // 1 hour
-
-export function createVersionCheckHandler() {
+/**
+ * GET /api/version/check
+ *
+ * Reports the latest released version of **this fork**.
+ *
+ * It used to read https://registry.npmjs.org/better-ccflare/latest, which is
+ * upstream's npm package. This fork does not publish to npm: it releases as
+ * `v*` tags on SijanC147/better-ccflare plus a private Homebrew tap,
+ * and `package.json` deliberately lags the release (docs/release.md). Comparing
+ * the running fork version against upstream's npm version produced a verdict
+ * about two unrelated release lines, so the card could claim an update that did
+ * not exist or hide one that did.
+ *
+ * The response shape (`{ version, cached }`) is unchanged, as is the route and
+ * its static auth exemption — only the source of truth moved. Richer state
+ * (upstream gap, sync PR) lives on GET /api/version/status.
+ */
+export function createVersionCheckHandler(service: VersionStatusService) {
 	return async (): Promise<Response> => {
-		try {
-			// Check cache first
-			const now = Date.now();
-			if (versionCache && now - versionCache.timestamp < CACHE_DURATION_MS) {
-				return jsonResponse({
-					version: versionCache.version,
-					cached: true,
-				});
-			}
+		const result = await service.getStatus();
+		const latest = result.snapshot?.fork?.latestTag;
 
-			// Fetch latest version from npm registry
-			const response = await fetch(
-				"https://registry.npmjs.org/better-ccflare/latest",
-			);
-
-			if (!response.ok) {
-				throw new Error(`npm registry returned status ${response.status}`);
-			}
-
-			const data = (await response.json()) as { version?: string };
-
-			if (!data.version) {
-				throw new Error("Version not found in npm registry response");
-			}
-
-			// Update cache
-			versionCache = {
-				version: data.version,
-				timestamp: now,
-			};
-
-			return jsonResponse({
-				version: data.version,
-				cached: false,
-			});
-		} catch (error) {
-			log.error("Failed to check for updates from npm registry:", error);
-			const message = error instanceof Error ? error.message : String(error);
+		if (!latest) {
 			return errorResponse(
-				InternalServerError(`Update check failed: ${message}`),
+				InternalServerError(
+					`Update check failed: ${result.error ?? "no published release found"}`,
+				),
 			);
 		}
+
+		return jsonResponse({
+			// Trim the tag's leading "v" so the value stays a bare semver string,
+			// matching what the dashboard's comparison has always expected.
+			version: latest.replace(/^v/, ""),
+			// True when the value came from the stored snapshot rather than a fresh
+			// GitHub read. This route stays auth-exempt, so the snapshot TTL and
+			// in-flight de-duplication in VersionStatusService are what stop an
+			// unauthenticated caller from driving outbound requests.
+			cached: result.stale,
+		});
 	};
 }

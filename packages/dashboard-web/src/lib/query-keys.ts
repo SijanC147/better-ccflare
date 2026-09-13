@@ -63,4 +63,6 @@ export const queryKeys = {
 	// settings can never share a cache entry.
 	configFlag: (path: string) =>
 		[...queryKeys.all, "config", "flag", path] as const,
+	// Fork release state plus the upstream sync gap. One record, no parameter.
+	versionStatus: () => [...queryKeys.all, "version", "status"] as const,
 } as const;

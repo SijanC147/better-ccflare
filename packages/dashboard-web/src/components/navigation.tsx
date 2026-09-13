@@ -4,7 +4,6 @@ import {
 	Bot,
 	FileText,
 	FolderOpen,
-	GitBranch,
 	History,
 	Key,
 	LayoutDashboard,
@@ -13,29 +12,20 @@ import {
 	Menu,
 	PanelLeftClose,
 	PanelLeftOpen,
-	RefreshCw,
 	Settings,
 	Shield,
 	Users,
 	X,
 	Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { api } from "../api";
 import { useAlerts } from "../hooks/queries";
 import { cn } from "../lib/utils";
-import { commit, version } from "../lib/version";
-import { CopyButton } from "./CopyButton";
 import { ThemeToggle } from "./theme-toggle";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
-
-// Store update command globally
-let updateCommand: string = "npm install -g better-ccflare@latest";
-let detectedPackageManager: "npm" | "bun" | "unknown" = "npm";
-let isBinaryInstallation: boolean = false;
-let isDockerInstallation: boolean = false;
+import { VersionFooterLine, VersionStatusCards } from "./version-status";
 
 interface NavItem {
 	label: string;
@@ -69,15 +59,9 @@ export function Navigation({
 	onToggleCollapse,
 }: NavigationProps = {}) {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-	const [updateStatus, setUpdateStatus] = useState<
-		"idle" | "checking" | "available" | "current" | "error"
-	>("idle");
-	const [latestVersion, setLatestVersion] = useState<string>("");
-	const [updateError, setUpdateError] = useState<string | null>(null);
 	const { data: alertData } = useAlerts();
 	const unacknowledgedCount = alertData?.unacknowledgedCount ?? 0;
 	const location = useLocation();
-	const isMountedRef = useRef(true);
 
 	// Build nav items with the current alert badge
 	const navItems: NavItem[] = useMemo(() => {
@@ -109,236 +93,6 @@ export function Navigation({
 
 		return baseItems;
 	}, [unacknowledgedCount]);
-
-	// Cleanup on unmount to prevent memory leaks
-	useEffect(() => {
-		return () => {
-			isMountedRef.current = false;
-		};
-	}, []);
-
-	const detectPackageManager = async (): Promise<{
-		packageManager: "npm" | "bun" | "unknown";
-		isBinary: boolean;
-		isDocker: boolean;
-	}> => {
-		try {
-			// Check if the binary exists in bun's global path
-			try {
-				const response = await fetch("/api/system/package-manager");
-				if (response.ok) {
-					const data = await response.json();
-					isBinaryInstallation = data.isBinary || false;
-					isDockerInstallation = data.isDocker || false;
-					return {
-						packageManager: data.packageManager,
-						isBinary: data.isBinary || false,
-						isDocker: data.isDocker || false,
-					};
-				}
-			} catch {
-				// Fallback to client-side detection
-			}
-
-			// Fallback: check if user agent indicates bun (this is a weak signal)
-			const userAgent = navigator.userAgent;
-			if (userAgent.includes("Bun")) {
-				return { packageManager: "bun", isBinary: false, isDocker: false };
-			}
-
-			// Default to npm as it's more common
-			return { packageManager: "npm", isBinary: false, isDocker: false };
-		} catch (error) {
-			console.error("Error detecting package manager:", error);
-			return { packageManager: "npm", isBinary: false, isDocker: false }; // Default fallback
-		}
-	};
-
-	const getUpdateCommand = (
-		packageManager: "npm" | "bun" | "unknown",
-		isBinary: boolean = false,
-		isDocker: boolean = false,
-	): string => {
-		if (isDocker) {
-			// For Docker installations, provide instructions to pull latest image
-			return "docker pull ghcr.io/tombii/better-ccflare:latest";
-		}
-
-		if (isBinary) {
-			// For binary installations, provide instructions to download from GitHub releases
-			const platform = navigator.platform.toLowerCase();
-			let _arch = "x64";
-
-			// Detect architecture
-			if (platform.includes("arm") || platform.includes("aarch64")) {
-				_arch = "arm64";
-			}
-
-			let _os = "linux";
-			if (platform.includes("win")) {
-				_os = "windows";
-			} else if (platform.includes("mac")) {
-				_os = "darwin";
-			}
-
-			// Return GitHub releases URL instead of a command
-			return "Download latest binary from GitHub releases";
-		}
-
-		switch (packageManager) {
-			case "bun":
-				return "bun install -g better-ccflare@latest";
-			default:
-				return "npm install -g better-ccflare@latest";
-		}
-	};
-
-	/**
-	 * Compare two semantic versions
-	 * @returns true if latest > current (update available), false otherwise
-	 */
-	const compareVersions = (latest: string, current: string): boolean => {
-		const latestParts = latest.split(".").map(Number);
-		const currentParts = current.split(".").map(Number);
-
-		for (
-			let i = 0;
-			i < Math.max(latestParts.length, currentParts.length);
-			i++
-		) {
-			const latestPart = latestParts[i] || 0;
-			const currentPart = currentParts[i] || 0;
-
-			if (latestPart > currentPart) return true;
-			if (latestPart < currentPart) return false;
-		}
-
-		return false; // Versions are equal
-	};
-
-	/**
-	 * Check for available updates from npm registry
-	 * Uses localStorage to cache results and prevent excessive checks (max once per hour)
-	 * This function is called on component mount and then every hour via setInterval
-	 */
-	// biome-ignore lint/correctness/useExhaustiveDependencies: helper functions are stable and don't need to be dependencies
-	const checkForUpdates = useCallback(async () => {
-		if (!isMountedRef.current) return;
-
-		// Check localStorage for last check time to avoid excessive checks
-		const lastCheckTime = localStorage.getItem("updateCheckLastTime");
-		const now = Date.now();
-		const oneHour = 60 * 60 * 1000;
-
-		// Check cache to avoid excessive npm registry requests
-		// Recheck every hour regardless of status to keep version info fresh
-		if (lastCheckTime && now - Number.parseInt(lastCheckTime, 10) < oneHour) {
-			const cachedStatus = localStorage.getItem("updateCheckStatus");
-			const cachedVersion = localStorage.getItem("updateCheckVersion");
-
-			// Remove 'v' prefix from version for comparison
-			const currentVersion = version.replace(/^v/, "");
-
-			if (cachedStatus === "available" && cachedVersion) {
-				// Check if user has updated since cache was created
-				// If cached version <= current version, they've updated, so clear cache
-				if (!compareVersions(cachedVersion, currentVersion)) {
-					localStorage.removeItem("updateCheckStatus");
-					localStorage.removeItem("updateCheckVersion");
-					localStorage.removeItem("updateCheckLastTime");
-					// Fall through to do a fresh check
-				} else {
-					setUpdateStatus("available");
-					setLatestVersion(cachedVersion);
-					return;
-				}
-			}
-
-			if (cachedStatus === "current") {
-				setUpdateStatus("current");
-				return;
-			}
-		}
-
-		setUpdateStatus("checking");
-		setUpdateError(null);
-		try {
-			// Include the stored API key so the hourly update check still
-			// works on auth-enabled installs (Codex P3). The raw fetch bypassed
-			// the api wrapper that injects `x-api-key` automatically.
-			const apiKey = api.getApiKey();
-			const [response, packageInfo] = await Promise.all([
-				fetch("/api/version/check", {
-					headers: apiKey ? { "x-api-key": apiKey } : undefined,
-				}),
-				detectPackageManager(),
-			]);
-
-			const data = await response.json();
-			const latest = data.version;
-
-			// Only update state if component is still mounted
-			if (!isMountedRef.current) return;
-
-			setLatestVersion(latest);
-
-			// Remove 'v' prefix from version for comparison
-			const currentVersion = version.replace(/^v/, "");
-
-			// Use semantic version comparison: only show update if latest > current
-			if (compareVersions(latest, currentVersion)) {
-				setUpdateStatus("available");
-				updateCommand = getUpdateCommand(
-					packageInfo.packageManager,
-					packageInfo.isBinary,
-					packageInfo.isDocker,
-				);
-				detectedPackageManager = packageInfo.packageManager;
-				console.log(
-					`🚀 Update available: ${currentVersion} → ${latest}\nDetected package manager: ${packageInfo.packageManager}\nRun: ${updateCommand}`,
-				);
-
-				// Cache "available" status - will recheck after 1 hour for newer versions
-				localStorage.setItem("updateCheckStatus", "available");
-				localStorage.setItem("updateCheckVersion", latest);
-				localStorage.setItem("updateCheckLastTime", now.toString());
-			} else {
-				setUpdateStatus("current");
-				console.log(`✅ You're on the latest version (${currentVersion})`);
-
-				// Cache "current" status - will recheck after 1 hour
-				localStorage.setItem("updateCheckStatus", "current");
-				localStorage.setItem("updateCheckLastTime", now.toString());
-			}
-		} catch (error) {
-			// Only update state if component is still mounted
-			if (!isMountedRef.current) return;
-
-			setUpdateStatus("error");
-			setUpdateError(error instanceof Error ? error.message : String(error));
-			console.error("❌ Failed to check for updates:", error);
-		}
-	}, []);
-
-	// Automatic update check: run on mount and every hour
-	// biome-ignore lint/correctness/useExhaustiveDependencies: checkForUpdates is stable via useCallback
-	useEffect(() => {
-		// Check immediately on mount (when dashboard loads)
-		checkForUpdates();
-
-		// Set up hourly check
-		const intervalId = setInterval(
-			() => {
-				checkForUpdates();
-			},
-			60 * 60 * 1000,
-		); // 1 hour in milliseconds
-
-		// Cleanup interval on unmount
-		return () => {
-			clearInterval(intervalId);
-		};
-	}, []);
 
 	return (
 		<>
@@ -490,82 +244,18 @@ export function Navigation({
 								</p>
 							</div>
 
-							{/* Update Check */}
-							<div
-								className={cn(
-									"rounded-lg bg-muted/50 p-3",
-									updateStatus === "checking" && "opacity-50",
-								)}
-							>
-								<button
-									type="button"
-									onClick={checkForUpdates}
-									disabled={updateStatus === "checking"}
-									className="w-full transition-colors hover:bg-muted/50 -m-3 p-3 rounded-lg"
-								>
-									<div className="flex items-center gap-2 text-sm">
-										<RefreshCw
-											className={cn(
-												"h-4 w-4",
-												updateStatus === "checking" && "animate-spin",
-												updateStatus === "available" && "text-green-500",
-												updateStatus === "current" && "text-primary",
-												updateStatus === "error" && "text-red-500",
-											)}
-										/>
-										<span className="font-medium">
-											{updateStatus === "idle" && "Check for Updates"}
-											{updateStatus === "checking" && "Checking..."}
-											{updateStatus === "available" && "Update Available"}
-											{updateStatus === "current" && "Up to Date"}
-											{updateStatus === "error" && "Check Failed"}
-										</span>
-									</div>
-								</button>
-								{updateStatus === "available" && (
-									<div className="mt-2 space-y-1">
-										<p className="text-xs text-muted-foreground text-left">
-											{version.replace(/^v/, "")} → {latestVersion}
-										</p>
-										<div className="flex items-center gap-1">
-											<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
-												{updateCommand}
-											</code>
-											<CopyButton
-												value={updateCommand}
-												size="sm"
-												variant="ghost"
-												className="h-6 w-6 p-0"
-												title="Copy update command"
-											/>
-										</div>
-										<p className="text-xs text-muted-foreground text-left">
-											{isDockerInstallation
-												? "Detected: Docker 🐳"
-												: isBinaryInstallation
-													? "Detected: Binary Installation 📦"
-													: `Detected: ${detectedPackageManager} 📦`}
-										</p>
-									</div>
-								)}
-								{updateStatus === "current" && (
-									<p className="mt-1 text-xs text-muted-foreground text-left">
-										Version {version.replace(/^v/, "")}
-									</p>
-								)}
-								{updateStatus === "error" && updateError && (
-									<p className="mt-1 text-xs text-destructive text-left break-words">
-										{updateError}
-									</p>
-								)}
-							</div>
+							{/* Fork release + upstream sync status */}
+							<VersionStatusCards />
 
-							<div className="hidden lg:flex items-center justify-between">
-								<div className="flex items-center gap-2 text-xs text-muted-foreground">
-									<GitBranch className="h-3 w-3" />
-									<span title={`commit ${commit}`}>{version}</span>
+							{/* The identity line shows at every width: the sidebar is a
+							    fixed 256px drawer on mobile, so it has the same room
+							    there. The theme toggle stays desktop-only because the
+							    mobile header already carries one. */}
+							<div className="flex items-center justify-between gap-2">
+								<VersionFooterLine />
+								<div className="hidden lg:block">
+									<ThemeToggle />
 								</div>
-								<ThemeToggle />
 							</div>
 						</div>
 					)}

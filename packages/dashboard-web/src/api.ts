@@ -46,8 +46,8 @@ export type {
 	ProjectWithChildren,
 	RequestPayload,
 	RequestResponse,
-	WorktreeRule,
 	RequestTransformer,
+	WorktreeRule,
 } from "@better-ccflare/types";
 
 // Agent response interface
@@ -2855,6 +2855,72 @@ class API extends HttpClient {
 	async acknowledgeAllAlerts(): Promise<void> {
 		await this.post("/api/insights/alerts/acknowledge-all");
 	}
+
+	/** Fork release state, upstream sync gap and any open sync PR. */
+	async getVersionStatus(refresh = false): Promise<VersionStatusResponse> {
+		return this.get<VersionStatusResponse>(
+			`/api/version/status${refresh ? "?refresh=1" : ""}`,
+		);
+	}
+
+	/** Run the gated Homebrew self-update. The server restarts on success. */
+	async selfUpdate(): Promise<{ message: string; output?: string }> {
+		return this.post<{ message: string; output?: string }>(
+			"/api/admin/self-update",
+			{},
+		);
+	}
+
+	/** Ask the upstream maintainer controller to open a sync PR. */
+	async dispatchUpstreamSync(): Promise<{ message: string }> {
+		return this.post<{ message: string }>("/api/upstream/sync-dispatch", {});
+	}
+}
+
+export interface VersionStatusResponse {
+	local: {
+		version: string;
+		versionUrl: string;
+		commit: string;
+		commitShort: string | null;
+		commitUrl: string | null;
+		mergedUpstreamSha: string | null;
+		mergedUpstreamShaShort: string | null;
+		mergedUpstreamShaUrl: string | null;
+		forkRepoUrl: string;
+		upstreamRepoUrl: string;
+	};
+	fork: {
+		latestTag: string;
+		latestTagUrl: string;
+		updateAvailable: boolean;
+	} | null;
+	upstream: {
+		latestTag: string | null;
+		latestTagUrl: string | null;
+		mergedTag: string | null;
+		mergedTagUrl: string | null;
+		commitsBehind: number | null;
+	} | null;
+	syncPr: {
+		number: number;
+		url: string;
+		title: string;
+		headRef: string;
+		draft: boolean;
+	} | null;
+	capabilities: {
+		selfUpdate: boolean;
+		selfUpdateBlockedReason: string | null;
+		dispatch: boolean;
+		manualUpdateCommand: string;
+	};
+	remote: {
+		available: boolean;
+		stale: boolean;
+		error: string | null;
+		checkedAt: number | null;
+	};
 }
 
 export const api = new API();
