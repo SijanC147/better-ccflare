@@ -179,9 +179,16 @@ defaults:
           immutable release. Read docs/upstream-sync.md, then escalate via
           /ask-hextap-coordinator before any sync proceeds.
       # SemVer build metadata can never be part of release identity here: Hextap rejects
-      # it outright. Upstream's CCFLARE_BUILD_SUFFIX yields X.Y.Z+suffix. It exists
-      # upstream today in build-multi-arch.ts, which the fork does not use, so this rule
-      # is scoped to the files where it WOULD reach release identity.
+      # it outright. Upstream's CCFLARE_BUILD_SUFFIX yields X.Y.Z+suffix.
+      #
+      # This rule is scoped to the three files where the name does not appear in the fork
+      # at all, so it can only fire on a genuine new reach into release identity. It is NOT
+      # a general ban on the name, and it cannot be: upstream already uses the name in
+      # apps/cli/build-multi-arch.ts, a file the fork also has in diverged form and runs as
+      # `build:multi` from apps/cli/package.json. forbidden_patterns matches files at the
+      # UPSTREAM revision, so listing that path would fire on the next sync that touched it
+      # and never stop. The no-semver-build-metadata gate covers it instead, judging the
+      # MERGED result rather than upstream's tree.
       #
       # packages/dashboard-web/build.ts is deliberately NOT listed, though an earlier
       # draft listed it. The name is already present there in THIS fork, at HEAD, where
@@ -591,6 +598,40 @@ defaults:
             exit 1
           }
           echo "Dashboard reads both Hextap env vars, injects both defines, keeps the fork's version exports."
+
+      - name: no-semver-build-metadata
+        source: base
+        timeout_minutes: 2
+        run: |
+          # The invariant the forbidden_patterns rule cannot express. Hextap rejects SemVer
+          # build metadata, so no fork build entry point may inject X.Y.Z+suffix into the
+          # compile-time version define.
+          #
+          # A pattern rule reads upstream's tree, where the name already exists in
+          # apps/cli/build-multi-arch.ts, so it would block every sync forever. A gate reads
+          # the MERGED tree, so it fires only if the integration actually brought the
+          # suffix into one of these files. The fork has build-multi-arch.ts in diverged
+          # form, free of the name, and runs it as `build:multi`; upstream's copy injects
+          # the suffix into __BETTER_CCFLARE_VERSION__.
+          #
+          # packages/dashboard-web/build.ts is excluded on purpose: the fork uses the name
+          # there legitimately, to throw when it is combined with Hextap build identity.
+          rc=0
+          for f in apps/cli/build-multi-arch.ts apps/cli/build-standalone.ts \
+                   packages/core/src/build-identity.ts packages/core/src/version.ts; do
+            [ -f "$CANDIDATE/$f" ] || continue
+            if grep -qF 'CCFLARE_BUILD_SUFFIX' "$CANDIDATE/$f"; then
+              echo "FAIL $f now references CCFLARE_BUILD_SUFFIX:" >&2
+              grep -nF 'CCFLARE_BUILD_SUFFIX' "$CANDIDATE/$f" >&2
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "Hextap rejects SemVer build metadata, so X.Y.Z+suffix can never be release" >&2
+            echo "identity. See the standing resolution table in docs/upstream-sync.md." >&2
+            exit 1
+          }
+          echo "No fork build entry point injects SemVer build metadata."
 
       # The next three gates are the security regressions the v3.9.0 sync merged
       # WITHOUT a conflict. Each one was found by hand, in a file git reported as
