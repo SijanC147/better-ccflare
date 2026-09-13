@@ -76,7 +76,10 @@ defaults:
       # and adopting an upstream doc is a deliberate follow-up commit, not a sync outcome.
       - {glob: ".hextap.json", resolve: ours}
       - {glob: ".hextap/**", resolve: ours}
+      # Two globs, because `scripts/hextap-*` does not cover `scripts/test-hextap-build.ts`,
+      # which is part of the quality gate.
       - {glob: "scripts/hextap-*", resolve: ours}
+      - {glob: "scripts/*hextap*", resolve: ours}
       - {glob: "apps/cli/hextap-*", resolve: ours}
       - {glob: "packages/core/src/build-identity.ts", resolve: ours}
       - {glob: "CLAUDE.md", resolve: ours}
@@ -446,7 +449,11 @@ defaults:
           for pkg in "$CANDIDATE"/apps/*/package.json "$CANDIDATE"/packages/*/package.json; do
             [ -f "$pkg" ] || continue
             name=$(bun -e "console.log(require('$pkg').name)")
-            grep -qF "$name" "$CANDIDATE/bun.lock" || missing="$missing $name"
+            # Quoted, because an unquoted substring match is satisfied by a longer sibling:
+            # a new @better-ccflare/ui would have passed on the existing
+            # @better-ccflare/ui-common entry. Every workspace name appears quoted in
+            # bun.lock, verified against all of them.
+            grep -qF "\"$name\"" "$CANDIDATE/bun.lock" || missing="$missing $name"
           done
           [ -z "$missing" ] || {
             echo "FAIL workspace packages absent from bun.lock:$missing" >&2
@@ -545,6 +552,45 @@ defaults:
           grep -rqF 'project_id' "$CANDIDATE/packages/database/src/migrations-pg.ts" || { echo "FAIL project_id absent from PostgreSQL migrations; every migration must be ported" >&2; rc=1; }
           [ "$rc" -eq 0 ] || exit 1
           echo "Fork project-attribution features present on both database paths."
+
+      - name: dashboard-release-identity
+        source: base
+        timeout_minutes: 3
+        run: |
+          # Standing resolutions 3 and 4 in docs/upstream-sync.md had no gate and no path
+          # rule, only prompt text and the reviewer, while comparable invariants in
+          # packages/core got a dedicated gate. Upstream actively edits both files.
+          #
+          # Upstream's build.ts ignores the Hextap env vars and reads apps/cli/package.json
+          # instead, so a v3.8.2 release would embed 3.8.1 and fail test-hextap-build.ts
+          # with "dashboard did not embed the release version and commit". The dashboard is
+          # not covered by the build-identity gate, which reads packages/core only.
+          rc=0
+          b="$CANDIDATE/packages/dashboard-web/build.ts"
+          v="$CANDIDATE/packages/dashboard-web/src/lib/version.ts"
+          for f in "$b" "$v"; do
+            [ -f "$f" ] || { echo "FAIL $f is gone" >&2; exit 1; }
+          done
+          for token in BETTER_CCFLARE_BUILD_VERSION BETTER_CCFLARE_BUILD_COMMIT; do
+            grep -qF "process.env.$token" "$b" || { echo "FAIL build.ts no longer reads $token" >&2; rc=1; }
+          done
+          for define in __BETTER_CCFLARE_VERSION__ __BETTER_CCFLARE_COMMIT__; do
+            grep -qF "$define" "$b" || { echo "FAIL build.ts no longer injects the $define define" >&2; rc=1; }
+            grep -qE "declare const $define\b" "$v" || { echo "FAIL version.ts no longer declares $define" >&2; rc=1; }
+          done
+          # navigation.tsx imports both named exports, and displayVersion is the fork shape
+          # upstream's getVersion() would replace rather than extend.
+          grep -qE 'export function displayVersion\b' "$v" || { echo "FAIL version.ts no longer exports displayVersion" >&2; rc=1; }
+          for sym in version commit; do
+            grep -qE "export const $sym\b" "$v" || { echo "FAIL version.ts no longer exports $sym" >&2; rc=1; }
+          done
+          [ "$rc" -eq 0 ] || {
+            echo "A release would embed the wrong version in the dashboard and fail" >&2
+            echo "scripts/test-hextap-build.ts. See the standing resolutions in" >&2
+            echo "docs/upstream-sync.md; getVersion() is additive only." >&2
+            exit 1
+          }
+          echo "Dashboard reads both Hextap env vars, injects both defines, keeps the fork's version exports."
 
       # The next three gates are the security regressions the v3.9.0 sync merged
       # WITHOUT a conflict. Each one was found by hand, in a file git reported as
