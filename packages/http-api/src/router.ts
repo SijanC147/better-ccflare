@@ -126,6 +126,7 @@ import {
 	createProjectUpdateHandler,
 } from "./handlers/projects";
 import {
+	createRequestByIdHandler,
 	createRequestPayloadHandler,
 	createRequestsDetailHandler,
 	createRequestsSummaryHandler,
@@ -763,6 +764,21 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+		}
+
+		// One request by id. Registered AFTER /api/requests/payload/ on purpose:
+		// this prefix would otherwise swallow it, and every static /api/requests*
+		// route is already resolved by exact match before any of these branches.
+		if (
+			path.startsWith("/api/requests/") &&
+			!path.startsWith("/api/requests/payload/") &&
+			method === "GET"
+		) {
+			const requestId = path.slice("/api/requests/".length);
+			if (requestId && !requestId.includes("/")) {
+				const byIdHandler = createRequestByIdHandler(this.context.dbOps);
+				return await this.wrapHandler(() => byIdHandler(requestId))(req, url);
 			}
 		}
 
