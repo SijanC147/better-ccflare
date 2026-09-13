@@ -609,7 +609,12 @@ defaults:
             grep -qE "(process|Bun)\.env[.[]\"?$token" "$b" || { echo "FAIL build.ts no longer reads $token" >&2; rc=1; }
           done
           for define in __BETTER_CCFLARE_VERSION__ __BETTER_CCFLARE_COMMIT__; do
-            grep -qF "$define" "$b" || { echo "FAIL build.ts no longer injects the $define define" >&2; rc=1; }
+            # The occurrence must be on a line that is not a comment. Commenting the
+            # injection out rather than deleting it is a realistic conflict-resolution
+            # artifact, and a plain grep accepts it. Filtering comment lines catches that
+            # without anchoring to key position, which a reformat could move.
+            grep -F "$define" "$b" | grep -qvE '^[[:space:]]*(//|/\*|\*)' \
+              || { echo "FAIL build.ts no longer injects the $define define in live code" >&2; rc=1; }
             grep -qE "declare const $define\b" "$v" || { echo "FAIL version.ts no longer declares $define" >&2; rc=1; }
           done
           # navigation.tsx imports both named exports, and displayVersion is the fork shape
