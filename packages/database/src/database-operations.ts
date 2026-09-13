@@ -1212,6 +1212,20 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getPayload(id);
 	}
 
+	/** One request's summary row by id, or null when no such request exists. */
+	async getRequestById(id: string): Promise<{
+		id: string;
+		timestamp: number;
+		method: string;
+		path: string;
+		account_used: string | null;
+		status_code: number | null;
+		success: boolean;
+		response_time_ms: number | null;
+	} | null> {
+		return this.requests.getRequestById(id);
+	}
+
 	async listRequestPayloads(
 		limit = 50,
 	): Promise<Array<{ id: string; json: string }>> {
