@@ -822,6 +822,26 @@ export const useAlerts = () => {
 	});
 };
 
+/**
+ * Fork release state, upstream sync gap and any open sync PR.
+ *
+ * The server caches the underlying GitHub reads for 15 minutes, so polling more
+ * often than that only returns the stored snapshot. `retry: false` keeps a
+ * GitHub outage from re-requesting: the endpoint already answers 200 with the
+ * local identity and an explanatory error, so a failure here means the server
+ * itself is unreachable.
+ */
+export const useVersionStatus = () => {
+	return useQuery({
+		queryKey: queryKeys.versionStatus(),
+		queryFn: () => api.getVersionStatus(),
+		staleTime: 5 * 60_000,
+		refetchInterval: 15 * 60_000,
+		refetchIntervalInBackground: false,
+		retry: false,
+	});
+};
+
 export const useAcknowledgeAlert = () => {
 	const queryClient = useQueryClient();
 	return useMutation({

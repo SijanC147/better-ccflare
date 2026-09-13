@@ -232,12 +232,19 @@ RETRY_BACKOFF=2                        # Retry backoff multiplier
 # Storage
 STORE_PAYLOADS=false                   # Disable storing request/response bodies (reduces DB size and memory usage)
                                        # Token counts, costs, model, status and timing are still recorded
+
+# Dashboard version widget (all optional, all off by default)
+BETTER_CCFLARE_GITHUB_TOKEN=           # Raises GitHub's rate limit for the release/upstream checks; read-only, never returned to the browser
+BETTER_CCFLARE_ENABLE_SELF_UPDATE=     # Set to 1 to allow the dashboard to run `brew upgrade better-ccflare`; requires an API key and a Homebrew install
+BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN=  # Controller token that lets the dashboard request an upstream sync; requires an API key
 ```
 
 **Security Notes**:
 - Use `BETTER_CCFLARE_HOST=127.0.0.1` to bind only to localhost for better security
 - Never commit `.env` files containing sensitive values to version control
 - Use environment-specific configuration for production deployments
+
+📖 **See [docs/version-status-widget.md](docs/version-status-widget.md)** for what the sidebar version cards report and exactly how the two write capabilities are gated.
 
 📖 **See [docs/configuration.md](docs/configuration.md) for the complete list** — overload/rate-limit retry tuning, health endpoint detail, agent discovery, payload encryption at rest, model catalog refresh, PostgreSQL pooling, Codex prompt-cache keys, and more.
 

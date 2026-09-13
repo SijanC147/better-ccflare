@@ -1,4 +1,8 @@
-import { validateNumber } from "@better-ccflare/core";
+import {
+	getCommitSync,
+	getVersionSync,
+	validateNumber,
+} from "@better-ccflare/core";
 import { BadRequest, Unauthorized } from "@better-ccflare/errors";
 import {
 	createAccountAddHandler,
@@ -146,7 +150,14 @@ import {
 } from "./handlers/token-health";
 import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createVersionCheckHandler } from "./handlers/version";
+import {
+	createSelfUpdateHandler,
+	createUpstreamDispatchHandler,
+	createVersionStatusHandler,
+} from "./handlers/version-status";
 import { AuthService } from "./services/auth-service";
+import { MERGED_UPSTREAM_SHA } from "./services/fork-identity";
+import { VersionStatusService } from "./services/version-status-service";
 import type { APIContext } from "./types";
 import { errorResponse, jsonResponse } from "./utils/http-error";
 
@@ -267,7 +278,36 @@ export class APIRouter {
 		const requestsStreamHandler = createRequestsStreamHandler();
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
-		const versionCheckHandler = createVersionCheckHandler();
+		// Version / upstream-sync status. Both write capabilities are opt-in
+		// through the server environment only — never through RuntimeConfig,
+		// which the dashboard itself can POST to. See
+		// docs/version-status-widget.md.
+		const selfUpdateEnabled =
+			process.env.BETTER_CCFLARE_ENABLE_SELF_UPDATE === "1";
+		const maintainerToken =
+			process.env.BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN || undefined;
+		const versionStatusService = new VersionStatusService({
+			currentVersion: getVersionSync(),
+			mergedSha: MERGED_UPSTREAM_SHA,
+			token: process.env.BETTER_CCFLARE_GITHUB_TOKEN || undefined,
+		});
+		const versionCheckHandler = createVersionCheckHandler(versionStatusService);
+		const versionStatusHandler = createVersionStatusHandler(
+			versionStatusService,
+			{
+				localVersion: getVersionSync(),
+				localCommit: getCommitSync(),
+				selfUpdateEnabled,
+				dispatchEnabled: Boolean(maintainerToken),
+			},
+		);
+		const selfUpdateHandler = createSelfUpdateHandler(this.authService, {
+			enabled: selfUpdateEnabled,
+		});
+		const upstreamDispatchHandler = createUpstreamDispatchHandler(
+			this.authService,
+			{ token: maintainerToken },
+		);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -486,6 +526,17 @@ export class APIRouter {
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
+		this.handlers.set("GET:/api/version/status", (_req, url) =>
+			versionStatusHandler(url),
+		);
+		// Registered unconditionally so a disabled capability answers 404 from
+		// inside the authenticated router. Leaving the key unset would make the
+		// path fall through handleRequest() to the proxy forwarder, which would
+		// spend a real upstream request on a 404.
+		this.handlers.set("POST:/api/admin/self-update", () => selfUpdateHandler());
+		this.handlers.set("POST:/api/upstream/sync-dispatch", () =>
+			upstreamDispatchHandler(),
+		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
