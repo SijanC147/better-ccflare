@@ -1,6 +1,7 @@
 import { requestEvents, TIME_CONSTANTS } from "@better-ccflare/core";
 import {
 	sanitizeRequestHeaders,
+	sanitizeResponseHeaders,
 	withSanitizedProxyHeaders,
 } from "@better-ccflare/http-common";
 import { Logger, openObserveShipsPayloads } from "@better-ccflare/logger";
@@ -178,7 +179,13 @@ export async function forwardToClient(
 	const sanitizedReq = sanitizeRequestHeaders(requestHeaders);
 	const requestHeadersObj = Object.fromEntries(sanitizedReq.entries());
 
-	const responseHeadersObj = Object.fromEntries(response.headers.entries());
+	// Sanitized because this object is only ever used for analytics and for the
+	// OpenObserve exporter (see `responseHeaders` below), never for the response
+	// forwarded to the client. `set-cookie` from upstream is a session
+	// credential, and SB23-1759 is that it used to leave the box intact.
+	const responseHeadersObj = sanitizeResponseHeaders(
+		Object.fromEntries(response.headers.entries()),
+	);
 
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 	// Retaining the request body is not only about local storage: the

@@ -40,6 +40,34 @@ export function sanitizeRequestHeaders(original: Headers): Headers {
 	return h;
 }
 
+const RESPONSE_SECRET_HEADERS = new Set([
+	"set-cookie",
+	"authorization",
+	"proxy-authenticate",
+	"www-authenticate",
+]);
+
+/**
+ * Strip credential-bearing headers from an upstream RESPONSE before it is
+ * persisted for analytics or shipped to an external observability backend.
+ *
+ * The counterpart of `sanitizeRequestHeaders`, which the response side has
+ * lacked: an upstream `set-cookie` is a session credential, and shipping it off
+ * the box is a wider exposure than keeping it in the local payload table.
+ *
+ * Removes: set-cookie, authorization, proxy-authenticate, www-authenticate
+ */
+export function sanitizeResponseHeaders(
+	original: Record<string, string>,
+): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(original)) {
+		if (RESPONSE_SECRET_HEADERS.has(key.toLowerCase())) continue;
+		out[key] = value;
+	}
+	return out;
+}
+
 /**
  * Return a new Response with hop-by-hop / compression headers stripped.
  * Body & status are preserved.
