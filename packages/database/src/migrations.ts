@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Logger } from "@better-ccflare/logger";
+import { restrictDbFile } from "./file-modes";
 import { addPerformanceIndexes } from "./performance-indexes";
 
 const log = new Logger("DatabaseMigrations");
@@ -907,6 +908,16 @@ export function runMigrations(db: Database, dbPath?: string): void {
 							if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
 						}
 						db.exec(`VACUUM INTO '${escapedTempPath}'`);
+						// VACUUM INTO creates the copy at SQLite's own default, 0644
+						// masked by the umask. It does not inherit the source
+						// database's mode, so a 0600 database still produced the two
+						// world-readable .backup.* files measured on this machine.
+						// The copy holds every plaintext credential the source does.
+						//
+						// Before the rename, not after: rename preserves the mode it
+						// finds, so a file that reaches its final name at 0644 stays
+						// 0644 for as long as the window lasts.
+						restrictDbFile(tempBackupPath);
 						fs.renameSync(tempBackupPath, backupPath);
 						log.info(`Database backup created at: ${backupPath}`);
 						pruneOldBackups(absoluteSourcePath);
