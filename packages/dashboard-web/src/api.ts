@@ -50,6 +50,24 @@ export type {
 	WorktreeRule,
 } from "@better-ccflare/types";
 
+/** Largest response body the playground will render, in characters. */
+const RAW_BODY_LIMIT = 1_000_000;
+
+/** A response as the API playground reports it: never thrown, always shown. */
+export interface RawResponse {
+	status: number;
+	statusText: string;
+	headers: Record<string, string>;
+	/** Null when the body was deliberately not read — see `omitted`. */
+	body: string | null;
+	omitted: {
+		reason: "too-large" | "not-text";
+		contentType: string;
+		bytes: number | null;
+	} | null;
+	durationMs: number;
+}
+
 /** What `GET /api/config/openobserve` reports. The token is never returned. */
 export interface OpenObserveConfig {
 	/** Whether a base URL is set, which is the only switch. */
@@ -252,6 +270,109 @@ class API extends HttpClient {
 			}
 			throw error;
 		}
+	}
+
+	/**
+	 * Issue an arbitrary request and report what came back, for the API
+	 * playground.
+	 *
+	 * This deliberately does NOT go through `HttpClient.request`, for three
+	 * reasons the playground cannot live with:
+	 *
+	 *  - `HttpClient` throws on any non-2xx and discards the status and
+	 *    headers. A playground has to *show* a 404 or a 503, not raise it.
+	 *  - the client is constructed with `retries: 1`, so a 5xx on a mutating
+	 *    POST would fire it a second time. A silent double `POST
+	 *    /api/admin/restart` or `/api/stats/reset` is not acceptable from a
+	 *    tool whose whole job is firing arbitrary methods.
+	 *  - `request()` logs the URL at debug level. This fork accepts an
+	 *    `?api_key=` query fallback, so a logged URL can be a logged
+	 *    credential.
+	 *
+	 * Nothing here is logged: not the URL, not the body, not the status.
+	 * Request bodies on this path routinely carry `pg_password`,
+	 * `openobserve_token` and the GitHub token, and the dashboard can read
+	 * its own log stream.
+	 *
+	 * Kept from `request()`: the `x-api-key` header, and the `auth-required`
+	 * event on a 401 so the auth dialog still appears.
+	 */
+	async rawRequest(
+		method: string,
+		path: string,
+		options: { body?: string; signal?: AbortSignal } = {},
+	): Promise<RawResponse> {
+		const headers: Record<string, string> = {};
+		const apiKey = this.getApiKey();
+		if (apiKey) headers["x-api-key"] = apiKey;
+		if (options.body !== undefined && options.body !== "") {
+			headers["Content-Type"] = "application/json";
+		}
+
+		const startTime = Date.now();
+		const response = await fetch(path, {
+			method,
+			headers,
+			body: options.body === "" ? undefined : options.body,
+			signal: options.signal,
+		});
+		const durationMs = Date.now() - startTime;
+
+		if (response.status === 401) {
+			window.dispatchEvent(new CustomEvent("auth-required"));
+		}
+
+		const responseHeaders: Record<string, string> = {};
+		response.headers.forEach((value, key) => {
+			responseHeaders[key] = value;
+		});
+
+		const contentType = response.headers.get("content-type") ?? "";
+		const declaredLength = Number(response.headers.get("content-length"));
+		const isTextual =
+			contentType.includes("json") ||
+			contentType.includes("text") ||
+			contentType.includes("event-stream") ||
+			contentType === "";
+
+		// GET /api/debug/snapshot writes a heap dump. Never pull a response
+		// like that into a string just to render it.
+		if (!isTextual || (declaredLength && declaredLength > RAW_BODY_LIMIT)) {
+			const size = Number.isFinite(declaredLength) ? declaredLength : null;
+			return {
+				status: response.status,
+				statusText: response.statusText,
+				headers: responseHeaders,
+				body: null,
+				omitted: {
+					reason: isTextual ? "too-large" : "not-text",
+					contentType: contentType || "unknown",
+					bytes: size,
+				},
+				durationMs,
+			};
+		}
+
+		const text = await response.text();
+		if (text.length > RAW_BODY_LIMIT) {
+			return {
+				status: response.status,
+				statusText: response.statusText,
+				headers: responseHeaders,
+				body: `${text.slice(0, RAW_BODY_LIMIT)}\n\n… truncated at ${RAW_BODY_LIMIT} characters (${text.length} total).`,
+				omitted: null,
+				durationMs,
+			};
+		}
+
+		return {
+			status: response.status,
+			statusText: response.statusText,
+			headers: responseHeaders,
+			body: text,
+			omitted: null,
+			durationMs,
+		};
 	}
 
 	async getStats(opts?: {
