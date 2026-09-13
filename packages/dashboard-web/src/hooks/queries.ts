@@ -87,15 +87,37 @@ export const useTriggerIntegrityCheck = () => {
 	});
 };
 
-export const useAccounts = () => {
-	return useQuery({
+export interface AccountsQueryOptions {
+	// Keep polling while the tab is in the background. Off for every normal
+	// dashboard caller -- a hidden tab has no viewer, so the refetch is waste.
+	// The kiosk view (KioskTab) turns it on, because a background tab IS the
+	// normal state for an ambient display left on a spare monitor, and that is
+	// exactly the state React Query stops polling in by default.
+	//
+	// Deliberately scoped to this one query. The global default is not flipped,
+	// and the version-status query keeps refetchIntervalInBackground: false on
+	// purpose (PR #71 / SB23-1790): it polls GitHub every 15 minutes, and a
+	// background tab doing that is how a rate limit gets hit.
+	backgroundRefresh?: boolean;
+}
+
+/**
+ * Query options for the accounts list, as a pure value so the background-refresh
+ * behaviour can be asserted directly rather than inferred from a running query.
+ */
+export function accountsQueryOptions(options?: AccountsQueryOptions) {
+	return {
 		queryKey: queryKeys.accounts(),
 		queryFn: () => api.getAccounts(),
 		staleTime: 20000, // Consider data fresh for 20 seconds
 		refetchInterval: 60000, // Refresh every minute for usage data
-		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
+		refetchIntervalInBackground: options?.backgroundRefresh ?? false,
 		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
-	});
+	};
+}
+
+export const useAccounts = (options?: AccountsQueryOptions) => {
+	return useQuery(accountsQueryOptions(options));
 };
 
 export const useRoutingObservations = () => {

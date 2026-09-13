@@ -14,6 +14,7 @@ import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
 import { ApiKeysTab } from "./components/ApiKeysTab";
 import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
+import { KioskTab } from "./components/KioskTab";
 import { LogsTab } from "./components/LogsTab";
 import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
@@ -335,6 +336,36 @@ export function App() {
 							</p>
 						</div>
 					</div>
+				</ThemeProvider>
+			</QueryClientProvider>
+		);
+	}
+
+	// Kiosk view: an ambient fullscreen display for the pool capacity section,
+	// rendered here rather than as an entry in `routes` above, and that is
+	// load-bearing rather than stylistic. Everything in `routes` renders INSIDE
+	// the shell -- sidebar, page header, content padding -- which is exactly the
+	// chrome a kiosk must not have. Adding /kiosk to the array and letting it
+	// render through <Routes> would also put it behind the `currentRoute` header
+	// lookup, which expects every route to have a title and subtitle to display.
+	//
+	// The auth gate still applies (the kiosk reads /api/accounts like any other
+	// view), so this sits after the isCheckingAuth return and renders the auth
+	// dialog when a key is needed.
+	if (location.pathname === "/kiosk") {
+		return (
+			<QueryClientProvider client={queryClient}>
+				<ThemeProvider>
+					{isAuthenticated ? (
+						<KioskTab />
+					) : (
+						<div className="min-h-screen bg-background" />
+					)}
+					<ApiKeyAuthDialog
+						isOpen={showAuthDialog}
+						onAuthenticate={handleAuthenticate}
+						error={authError}
+					/>
 				</ThemeProvider>
 			</QueryClientProvider>
 		);
