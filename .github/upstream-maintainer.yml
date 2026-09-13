@@ -30,9 +30,10 @@ concurrency:
 defaults:
   target_branch: main
 
-  # Weekly, Monday 05:00 Europe/Malta. The minute field is required but ignored by the
-  # controller, which evaluates only hour and day. Upstream moves fast (85 commits in
-  # the fortnight after the last sync), but merge.mode is manual and a failed pair is
+  # Weekly, Monday 05:00 Europe/Malta. The controller evaluates hour, day-of-month, month
+  # and weekday; only the minute is ignored, so the run fires at some point in the 05:00
+  # hour on Mondays. Upstream moves fast (106 commits in the fortnight after the last
+  # sync), but merge.mode is manual and a failed pair is
   # not retried automatically, so a daily cadence would just queue behind a review.
   schedule:
     cron: "0 5 * * 1"
@@ -121,12 +122,14 @@ defaults:
     # `.github/**` is ALWAYS protected and cannot be un-protected. Upstream actively
     # develops nine live workflows against the fork's three. Under `halt`, every sync
     # touching any upstream workflow would stop before doing anything, which is every
-    # sync. `ours` keeps the fork's version and lets the run continue, which is exactly
-    # the calibration's standing rule for workflows: keep ours by default, record any
-    # adoption as a separate follow-up.
+    # sync. `ours` only suppresses that halt and lets the run continue. It does NOT keep
+    # anything: `assertAllowedChanges` takes no action under it at all. The keeping is done
+    # entirely by the `path_rules` block above, which is why those globs exist and why the
+    # two lists have to be read together. The standing rule for workflows is satisfied by
+    # the rule, not by this setting: keep ours by default, record any adoption separately.
     #
-    # This does mean upstream changes to the Hextap paths above would also be silently
-    # kept-ours rather than halting. That is acceptable only because upstream cannot
+    # This does mean upstream changes to the Hextap paths above do not halt the run. That
+    # is acceptable only because upstream cannot
     # reach them today, and the forbidden_patterns rule below is what catches the day
     # that stops being true.
     on_upstream_protected_change: ours
@@ -168,7 +171,11 @@ defaults:
       # every sync until someone edited this config, and forbidden_patterns has no
       # `except`. The real two-publisher guard is the hextap-contract gate, which asserts
       # exactly one workflow owns the v* trigger.
-      - paths: [".github/**", "scripts/**", "apps/**", "packages/**", "*.json"]
+      # `**/*.json`, not `*.json`: the controller compiles `*` to `[^/]*` and anchors the
+      # whole pattern, so `*.json` matches root-level JSON only and would have missed
+      # upstream's nested apps/cli/package.json and every packages/*/package.json, which is
+      # exactly where a tap or Formula reference would appear.
+      - paths: [".github/**", "scripts/**", "apps/**", "packages/**", "**/*.json"]
         # Spelled as a character class rather than with an inline (?i) flag, which the
         # JavaScript regular-expression engine the controller uses rejects outright.
         regex: '[Hh][Ee][Xx][Tt][Aa][Pp]'
@@ -190,16 +197,26 @@ defaults:
       # and never stop. The no-semver-build-metadata gate covers it instead, judging the
       # MERGED result rather than upstream's tree.
       #
-      # packages/dashboard-web/build.ts is deliberately NOT listed, though an earlier
-      # draft listed it. The name is already present there in THIS fork, at HEAD, where
-      # the code handles the contradiction itself: supplying both
-      # BETTER_CCFLARE_BUILD_VERSION and CCFLARE_BUILD_SUFFIX throws. Because the pattern
-      # already exists on both sides of that path, the rule made every upstream edit to
-      # that one file halt every future sync, with no `except` to relieve it. The local
-      # replay on 2026-09-13 proved it: prepare failed closed on real commits
-      # (4d27cb22..ea0e3320) before reaching the merge. The three files below are free of
-      # the name in this fork, so the rule fires only on a genuine new reach into release
-      # identity.
+      # How this is evaluated, because it is not what it looks like: forbidden_patterns is
+      # judged on the UPSTREAM tree only, never on the fork's. It lists every file at the
+      # upstream revision and reads each one there, so it rescans the whole upstream tree
+      # on every run and has nothing to do with which files the merge touched.
+      #
+      # That is why packages/dashboard-web/build.ts is deliberately NOT listed, though an
+      # earlier draft listed it: UPSTREAM's copy of that file carries the name, so the rule
+      # fired on every run and nothing a sync did could clear it, with no `except` to
+      # relieve it. The local replay on 2026-09-13 proved it, failing `prepare` closed on
+      # real commits (4d27cb22..ea0e3320) before reaching the merge. Upstream also carries
+      # the name in apps/cli/package.json, src/lib/version.ts, build-multi-arch.ts and
+      # docs/acknowledgements.md, so none of those may be listed either.
+      #
+      # The three files below are free of the name in upstream's tree, so the rule fires
+      # only when upstream genuinely reaches into release identity. Measured 2026-09-13:
+      # build-standalone.ts and build-identity.ts do not exist upstream at all, so in
+      # practice this rule can only ever fire on packages/core/src/version.ts. It is an
+      # early fail-closed on one file, not the real coverage. The real coverage is the
+      # no-semver-build-metadata gate, which judges the MERGED tree and so sees what the
+      # integration actually produced in every fork build entry point.
       - paths:
           - "apps/cli/build-standalone.ts"
           - "packages/core/src/build-identity.ts"
@@ -434,9 +451,16 @@ defaults:
             path="packages/database/src/$w.ts"
             [ -f "$CANDIDATE/$path" ] || { echo "FAIL missing $path" >&2; rc=1; }
           done
+          # The file must exist. `grep -q ... 2>/dev/null` on a missing file exits 2, which
+          # `if` treats as false, so a DELETED .gitignore passed this half silently. Every
+          # other gate here fails loudly on a missing file; this one did not.
+          [ -f "$CANDIDATE/.gitignore" ] || {
+            echo "FAIL .gitignore is gone, so nothing keeps the inline workers un-ignored." >&2
+            exit 1
+          }
           # Matched as a glob shape, not three exact names: `inline-*-worker.ts` ignores all
           # three and defeats an exact-name regex.
-          if grep -qE 'inline-[^/[:space:]]*worker' "$CANDIDATE/.gitignore" 2>/dev/null; then
+          if grep -qE 'inline-[^/[:space:]]*worker' "$CANDIDATE/.gitignore"; then
             echo "FAIL .gitignore now ignores an inline database worker." >&2
             echo "Upstream ignores these; this fork must keep all three tracked." >&2
             rc=1
@@ -578,8 +602,11 @@ defaults:
           for f in "$b" "$v"; do
             [ -f "$f" ] || { echo "FAIL $f is gone" >&2; exit 1; }
           done
+          # `(process|Bun)\.env` rather than a literal `process.env.`, because a resolver
+          # replaying the fork diff onto upstream's rewritten build.ts could legitimately
+          # land on Bun.env, and a gate that fails on that costs a repair round for nothing.
           for token in BETTER_CCFLARE_BUILD_VERSION BETTER_CCFLARE_BUILD_COMMIT; do
-            grep -qF "process.env.$token" "$b" || { echo "FAIL build.ts no longer reads $token" >&2; rc=1; }
+            grep -qE "(process|Bun)\.env[.[]\"?$token" "$b" || { echo "FAIL build.ts no longer reads $token" >&2; rc=1; }
           done
           for define in __BETTER_CCFLARE_VERSION__ __BETTER_CCFLARE_COMMIT__; do
             grep -qF "$define" "$b" || { echo "FAIL build.ts no longer injects the $define define" >&2; rc=1; }
@@ -588,8 +615,11 @@ defaults:
           # navigation.tsx imports both named exports, and displayVersion is the fork shape
           # upstream's getVersion() would replace rather than extend.
           grep -qE 'export function displayVersion\b' "$v" || { echo "FAIL version.ts no longer exports displayVersion" >&2; rc=1; }
+          # A barrel `export { version, commit }` is as valid as `export const version`, so
+          # both shapes satisfy this. The invariant is that navigation.tsx can import the
+          # name, not how the line is written.
           for sym in version commit; do
-            grep -qE "export const $sym\b" "$v" || { echo "FAIL version.ts no longer exports $sym" >&2; rc=1; }
+            grep -qE "export (const $sym\b|\{[^}]*\b$sym\b)" "$v" || { echo "FAIL version.ts no longer exports $sym" >&2; rc=1; }
           done
           [ "$rc" -eq 0 ] || {
             echo "A release would embed the wrong version in the dashboard and fail" >&2
