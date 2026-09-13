@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { restrictDbFiles } from "./file-modes";
 import { getLegacyDbPath, resolveDbPath } from "./paths";
 
 /**
@@ -29,7 +30,7 @@ export function migrateFromCcflare(): boolean {
 		// Ensure target directory exists
 		const newDbDir = dirname(newDbPath);
 		if (!existsSync(newDbDir)) {
-			mkdirSync(newDbDir, { recursive: true });
+			mkdirSync(newDbDir, { recursive: true, mode: 0o700 });
 		}
 
 		// Copy main database file
@@ -49,6 +50,12 @@ export function migrateFromCcflare(): boolean {
 			copyFileSync(shmPath, `${newDbPath}-shm`);
 			console.log(`✅ Migrated SHM file`);
 		}
+
+		// copyFileSync reproduces the source mode, and the legacy ccflare.db is
+		// 0644. Opening the database restricts it anyway, but that can be a
+		// separate process minutes later, so do not leave a copy of every
+		// plaintext credential world-readable in the meantime.
+		restrictDbFiles(newDbPath);
 
 		console.log(`
 ⚠️  Migration complete! Your ccflare data has been copied to better-ccflare.

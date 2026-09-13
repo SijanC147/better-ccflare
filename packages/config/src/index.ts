@@ -35,6 +35,7 @@ import {
 import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import { resolveConfigPath } from "./paths";
+import { getPlatformConfigDir } from "./paths-common";
 
 const log = new Logger("Config");
 
@@ -364,11 +365,21 @@ export class Config extends EventEmitter {
 			// exists, so the file would stay world-readable indefinitely if the
 			// permission migration only ran from saveConfig(). Do it on load.
 			this.restrictConfigFile();
+			this.restrictConfigDir();
 			this.sweepStaleTempFiles();
 		} else {
-			// Create config directory if it doesn't exist
+			// Create config directory if it doesn't exist.
+			//
+			// mode applies only to directories this call actually creates, and it is
+			// masked by the umask, so it is not a chmod: a directory that already
+			// exists at 0755 keeps 0755. restrictConfigDir() covers that case.
+			//
+			// With recursive: true the mode also lands on intermediate directories
+			// this call creates, so on a machine with no ~/.config yet that directory
+			// is created 0700 as well. It belongs to the same user either way.
 			const dir = dirname(this.configPath);
-			mkdirSync(dir, { recursive: true });
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
+			this.restrictConfigDir();
 
 			// Initialize with default config
 			this.data = {
@@ -416,6 +427,54 @@ export class Config extends EventEmitter {
 			}
 		} catch (error) {
 			log.warn(`Could not restrict config file permissions: ${error}`);
+		}
+	}
+
+	/**
+	 * Bring the configuration directory to 0700.
+	 *
+	 * PR #57 restricted the config file itself, but the directory holding it was
+	 * 0755 and the SQLite database beside it 0644, and that database stores
+	 * api_key, refresh_token and access_token as plaintext TEXT
+	 * (packages/database/src/migrations.ts:116-118). 0700 on the directory is the
+	 * one change that covers the database, its WAL and every .backup.* at once,
+	 * because it stops another local user traversing in at all.
+	 *
+	 * Only for the application's own directory. dirname() of a configured path can
+	 * be a directory the application does not own: with
+	 * BETTER_CCFLARE_CONFIG_PATH=/etc/better-ccflare.json it is /etc, and taking
+	 * that to 0700 locks every other user out of the machine. The gate is a string
+	 * comparison against getPlatformConfigDir() and deliberately nothing more —
+	 * an ownership check or a path resolver here is the shape that turned #57 into
+	 * fourteen rounds.
+	 *
+	 * A custom directory is left alone with an info log, so the operator who chose
+	 * it can set 0700 themselves.
+	 *
+	 * Warns rather than throws. chmod fails legitimately on a bind-mounted volume
+	 * or a directory owned by another user, and neither means the config is
+	 * unusable. It can also report success and change nothing, on Docker bind
+	 * mounts and FAT/exFAT; detecting that is SB23-1686 and is not done here.
+	 */
+	private restrictConfigDir(): void {
+		const dir = dirname(this.configPath);
+		if (dir !== getPlatformConfigDir()) {
+			log.info(
+				`Config directory ${dir} is not the default location, so its permissions were left alone. It holds the database and its plaintext credentials; set it to 0700 yourself.`,
+			);
+			return;
+		}
+		try {
+			const info = statSync(dir);
+			// Directories only. A non-directory here means something is badly wrong
+			// with the path; changing its mode would not help.
+			if (!info.isDirectory()) return;
+			if ((info.mode & 0o777) !== 0o700) {
+				chmodSync(dir, 0o700);
+				log.info("Restricted config directory permissions to 0700");
+			}
+		} catch (error) {
+			log.warn(`Could not restrict config directory permissions: ${error}`);
 		}
 	}
 

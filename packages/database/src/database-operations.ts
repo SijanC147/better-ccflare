@@ -30,6 +30,7 @@ import {
 	BunSqlAdapter,
 	PG_CLIENT_QUERY_TIMEOUT_MS,
 } from "./adapters/bun-sql-adapter";
+import { restrictDbFiles } from "./file-modes";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { ensureSchema, runMigrations } from "./migrations";
@@ -387,11 +388,27 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			const resolvedPath = dbPath ?? resolveDbPath();
 			this.resolvedDbPath = resolvedPath;
 
-			// Ensure the directory exists
+			// Ensure the directory exists. mode applies only when this call creates
+			// the directory; an existing one keeps what it has, and the Config class
+			// corrects that for the default location. Not corrected here: dirname()
+			// of BETTER_CCFLARE_DB_PATH can be a directory this application does not
+			// own, and /etc at 0700 locks every user out of the machine.
 			const dir = dirname(resolvedPath);
-			mkdirSync(dir, { recursive: true });
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
 
 			this.sqliteDb = new Database(resolvedPath, { create: true });
+
+			// The accounts table stores api_key, refresh_token and access_token as
+			// plaintext TEXT, so the database must not be readable by other local
+			// users. bun:sqlite creates it 0644 (masked by the umask), and the
+			// directory mode alone does not travel with the file if it is later
+			// copied or moved elsewhere.
+			//
+			// Before configureSqlite, which is what turns WAL on: SQLite's unix VFS
+			// gives a newly created -wal and -shm the main database file's mode, so
+			// fixing the database first means the WAL is born 0600 rather than being
+			// chmodded after it already exists at 0644.
+			restrictDbFiles(resolvedPath);
 
 			// Capture the persisted auto_vacuum mode BEFORE configureSqlite's
 			// leading PRAGMA flips the connection-local view. See the field
