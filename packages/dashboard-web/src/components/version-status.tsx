@@ -73,7 +73,14 @@ function Card({
 }
 
 /** The fork's own release state, and the button that acts on it. */
-function ForkCard({ status }: { status: VersionStatusResponse }) {
+/**
+ * Exported for tests only. The recheck control lived inside an early return
+ * that cannot be taken once a snapshot exists, so it never rendered in the one
+ * state that needed it (SB23-1790). That is unreachable code, not wrong code:
+ * it reads correctly in the source and a type-checker cannot see it. Pinning it
+ * per-state needs the component itself, not the fetching wrapper.
+ */
+export function ForkCard({ status }: { status: VersionStatusResponse }) {
 	const queryClient = useQueryClient();
 	const [updating, setUpdating] = useState(false);
 	const [rechecking, setRechecking] = useState(false);
