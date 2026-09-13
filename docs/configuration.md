@@ -598,13 +598,32 @@ If migrating from environment variables to file-based configuration:
 
 2. Export current configuration:
    ```bash
-   curl http://localhost:8080/api/config > ~/.config/better-ccflare/better-ccflare.json
+   curl http://localhost:8080/api/config > /tmp/ccflare-export.json
    ```
 
-3. Edit and format the file:
+   **Do not redirect this into the configuration file.** `GET /api/config` omits
+   `pg_password`, `local_control_secret` and `upstream_maintainer_token` by design, so
+   writing the response over an existing configuration file deletes all three from disk.
+   Export to a scratch path, then copy across only the fields you want, adding the secrets
+   by hand.
+
+   If the configuration file does not exist yet there is nothing to lose, but the exported
+   file still has no secrets in it and you will need to add them before those features work.
+
+3. Edit and format the file, in place:
    ```bash
-   jq '.' ~/.config/better-ccflare/better-ccflare.json > temp.json && mv temp.json ~/.config/better-ccflare/better-ccflare.json
+   jq '.' ~/.config/better-ccflare/better-ccflare.json > temp.json \
+     && cat temp.json > ~/.config/better-ccflare/better-ccflare.json \
+     && rm temp.json
    ```
+
+   `cat` into the existing file rather than `mv` over it. `mv` replaces the inode and the
+   destination takes the *source* file's mode, which resets the configuration file from
+   0600 to whatever your umask produces — usually 0644, world-readable, on a file holding
+   a database password and a GitHub token.
+
+   `cp` does not have this problem: it writes through to the existing file and keeps its
+   mode. Only `mv` and other rename-based replacements do.
 
 ### From Older Versions
 
