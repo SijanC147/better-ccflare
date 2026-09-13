@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Decide whether the files changed in this event can alter a CI job's result.
+#
+# Usage: scripts/ci-changed-paths <quality|contract>
+#
+# Reads BASE_SHA (required to skip anything) and optional HEAD_SHA, defaulting
+# HEAD_SHA to the checked-out commit. Writes `relevant=true|false` to
+# $GITHUB_OUTPUT, or stdout when that is unset, and prints the reasoning.
+#
+# Fail-safe by design: anything unexpected (no base SHA, a base commit this
+# clone cannot obtain, an unknown job name is the one exception and exits 2)
+# reports relevant=true so the job runs in full. Callers must therefore gate
+# steps on `!= 'false'`, never on `== 'true'`, so a missing output still runs.
+#
+# Inert path classes, verified against the tree rather than assumed: nothing
+# under docs/ or .claude/ and no *.md file is imported, bundled, or read by any
+# source file or test, so none of them can change a job's result. Everything
+# else is treated as relevant, which keeps files like biome.json, bunfig.toml,
+# tsconfig*, .gitignore, bun.lock, and .hextap/** on the relevant side without
+# having to enumerate them.
+#
+# The two jobs differ on .github/**. `Hextap release contract` runs
+# scripts/hextap-contract.test.ts, which reads the workflow files, so every
+# .github/** change is relevant to it. `Bun and release tooling` only cares
+# about .github/workflows/ci.yml, the file that defines it.
+set -euo pipefail
+
+job="${1:-}"
+case "$job" in
+quality | contract) ;;
+*)
+	echo "usage: $0 <quality|contract>" >&2
+	exit 2
+	;;
+esac
+
+output_file="${GITHUB_OUTPUT:-/dev/stdout}"
+
+run_everything() {
+	printf 'relevant=true\n' >>"$output_file"
+	printf '%s\n' "$1"
+	exit 0
+}
+
+base="${BASE_SHA:-}"
+head="${HEAD_SHA:-HEAD}"
+empty_sha="0000000000000000000000000000000000000000"
+
+if [ -z "$base" ] || [ "$base" = "$empty_sha" ]; then
+	run_everything "No base commit for this event; running every step."
+fi
+
+if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+	git fetch --no-tags --depth=1 origin "$base" >/dev/null 2>&1 || true
+fi
+
+if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+	run_everything "Base commit $base is not available in this clone; running every step."
+fi
+
+if ! git rev-parse --verify --quiet "${head}^{commit}" >/dev/null; then
+	run_everything "Head commit $head is not available in this clone; running every step."
+fi
+
+changed="$(git diff --name-only "$base" "$head")"
+
+if [ -z "$changed" ]; then
+	run_everything "Empty diff between $base and $head; running every step rather than guessing."
+fi
+
+relevant_paths="$(printf '%s\n' "$changed" | awk -v job="$job" '
+	$0 == "" { next }
+	$0 ~ /(^|\/)[^\/]*\.md$/ { next }
+	$0 ~ /^docs\// { next }
+	$0 ~ /^\.claude\// { next }
+	job == "quality" && $0 == ".github/workflows/ci.yml" { print; next }
+	job == "quality" && $0 ~ /^\.github\// { next }
+	{ print }
+')"
+
+if [ -n "$relevant_paths" ]; then
+	printf 'relevant=true\n' >>"$output_file"
+	echo "Changed paths that can alter this job's result:"
+	printf '%s\n' "$relevant_paths" | sed 's/^/  /'
+	exit 0
+fi
+
+printf 'relevant=false\n' >>"$output_file"
+echo "No changed path can alter this job's result; skipping the expensive steps."
+echo "Changed paths, all inert for this job:"
+printf '%s\n' "$changed" | sed 's/^/  /'
