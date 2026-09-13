@@ -299,6 +299,12 @@ export class VersionStatusService {
 			.filter((tag): tag is string => typeof tag === "string")
 			.slice(0, ANCESTRY_COMPARE_BUDGET);
 
+		// A compare that failed proves nothing about ancestry, so a walk that hit
+		// one must not be cached as a negative answer. Observed live: with the
+		// unauthenticated limit exhausted, the compares 403 and the fork would
+		// otherwise remember "no merged tag" for the rest of the process.
+		let sawFailure = false;
+
 		for (const tag of tags) {
 			const compare = await this.request<{ status?: string }>(
 				`/repos/${UPSTREAM_REPO}/compare/${encodeURIComponent(tag)}...${
@@ -312,7 +318,10 @@ export class VersionStatusService {
 				);
 				return null;
 			}
-			if (!compare.ok) continue;
+			if (!compare.ok) {
+				sawFailure = true;
+				continue;
+			}
 			const status = compare.data?.status;
 			if (status === "identical" || status === "ahead") {
 				this.mergedTag = tag;
@@ -320,6 +329,8 @@ export class VersionStatusService {
 				return tag;
 			}
 		}
+
+		if (sawFailure) return null;
 
 		// The release list came back and every compare in budget finished without
 		// a match, so the merged sha sits behind all of them. Cache the negative

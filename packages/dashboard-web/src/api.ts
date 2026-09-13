@@ -2880,6 +2880,7 @@ class API extends HttpClient {
 export interface VersionStatusResponse {
 	local: {
 		version: string;
+		versionUrl: string;
 		commit: string;
 		commitShort: string | null;
 		commitUrl: string | null;

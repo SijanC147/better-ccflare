@@ -247,9 +247,15 @@ export function Navigation({
 							{/* Fork release + upstream sync status */}
 							<VersionStatusCards />
 
-							<div className="hidden lg:flex items-center justify-between gap-2">
+							{/* The identity line shows at every width: the sidebar is a
+							    fixed 256px drawer on mobile, so it has the same room
+							    there. The theme toggle stays desktop-only because the
+							    mobile header already carries one. */}
+							<div className="flex items-center justify-between gap-2">
 								<VersionFooterLine />
-								<ThemeToggle />
+								<div className="hidden lg:block">
+									<ThemeToggle />
+								</div>
 							</div>
 						</div>
 					)}

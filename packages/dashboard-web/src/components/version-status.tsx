@@ -132,7 +132,10 @@ function ForkCard({ status }: { status: VersionStatusResponse }) {
 			>
 				<p className="mt-1 text-xs text-muted-foreground break-words">
 					Running{" "}
-					<Ref href={status.local.commitUrl} title={`commit ${commit}`}>
+					<Ref
+						href={status.local.versionUrl}
+						title={`release notes for ${version} (commit ${commit})`}
+					>
 						{version}
 					</Ref>
 					. {status.remote.error ?? "GitHub could not be reached."}
@@ -168,7 +171,10 @@ function ForkCard({ status }: { status: VersionStatusResponse }) {
 			}
 		>
 			<p className="mt-1 text-xs text-muted-foreground break-words">
-				<Ref href={status.local.commitUrl} title={`commit ${commit}`}>
+				<Ref
+					href={status.local.versionUrl}
+					title={`release notes for ${version} (commit ${commit})`}
+				>
 					{version}
 				</Ref>
 				{updateAvailable && status.fork ? (
@@ -255,7 +261,7 @@ function UpstreamCard({ status }: { status: VersionStatusResponse }) {
 				title={`Sync PR #${status.syncPr.number}`}
 			>
 				<p className="mt-1 text-xs text-muted-foreground break-words">
-					{status.syncPr.draft ? "Draft — " : ""}
+					{status.syncPr.draft ? "Draft: " : ""}
 					{status.syncPr.title}
 				</p>
 				<a
@@ -310,7 +316,11 @@ function UpstreamCard({ status }: { status: VersionStatusResponse }) {
 			<p className="mt-1 text-xs text-muted-foreground break-words">
 				<Ref
 					href={status.upstream.mergedTagUrl}
-					title={status.local.mergedUpstreamSha ?? undefined}
+					title={
+						status.upstream.mergedTag
+							? `upstream release ${status.upstream.mergedTag}, merged into this fork at ${status.local.mergedUpstreamSha}`
+							: undefined
+					}
 				>
 					{status.upstream.mergedTag ?? "untagged"}
 				</Ref>{" "}
@@ -372,8 +382,8 @@ export function VersionFooterLine() {
 		<div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
 			<GitBranch className="h-3 w-3 shrink-0" />
 			<Ref
-				href={status?.local.commitUrl ?? null}
-				title={`commit ${commit}`}
+				href={status?.local.versionUrl ?? null}
+				title={`release notes for ${version} (commit ${commit})`}
 				className="font-medium"
 			>
 				{version}

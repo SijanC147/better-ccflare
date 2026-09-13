@@ -191,6 +191,48 @@ describe("VersionStatusService", () => {
 		expect(compares).toBe(10);
 	});
 
+	it("does not cache a merged tag of null when a compare failed", async () => {
+		// Found live with the unauthenticated rate limit exhausted: the compares
+		// 403'd, and caching that as "no merged tag" made the card read
+		// "untagged merged" for the rest of the process even after GitHub
+		// recovered. A failed compare proves nothing about ancestry.
+		let clock = 1_000_000;
+		let comparesFail = true;
+		const routes: Array<[string, StubRoute]> = HAPPY_ROUTES.filter(
+			([needle]) => !needle.includes("/compare/v3.5"),
+		);
+		const { impl } = stubFetch(routes);
+		const fetchImpl = (async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url.includes("/compare/v3.5.81...")) {
+				return comparesFail
+					? new Response("{}", { status: 500 })
+					: new Response(JSON.stringify({ status: "ahead" }));
+			}
+			if (url.includes("/compare/v3.5.90...")) {
+				return comparesFail
+					? new Response("{}", { status: 500 })
+					: new Response(JSON.stringify({ status: "behind" }));
+			}
+			return impl(url);
+		}) as unknown as typeof fetch;
+
+		const service = new VersionStatusService({
+			currentVersion: "3.9.0",
+			mergedSha: MERGED_SHA,
+			fetchImpl,
+			now: () => clock,
+		});
+
+		const first = await service.getStatus();
+		expect(first.snapshot?.upstream?.mergedTag).toBeNull();
+
+		comparesFail = false;
+		clock += 60 * 60 * 1000;
+		const second = await service.getStatus();
+		expect(second.snapshot?.upstream?.mergedTag).toBe("v3.5.81");
+	});
+
 	it("serves the stored snapshot inside the refresh interval", async () => {
 		let clock = 1_000_000;
 		const { service, calls } = makeService(HAPPY_ROUTES, { now: () => clock });

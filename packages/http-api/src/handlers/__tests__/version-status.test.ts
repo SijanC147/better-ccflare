@@ -94,6 +94,10 @@ describe("GET /api/version/status", () => {
 		expect(body.local.commitUrl).toContain(
 			"github.com/SijanC147/better-ccflare/commit/",
 		);
+		// The version itself links to release notes, not to a commit.
+		expect(body.local.versionUrl).toBe(
+			"https://github.com/SijanC147/better-ccflare/releases/tag/v3.9.0",
+		);
 		expect(body.fork).toBeNull();
 		expect(body.upstream).toBeNull();
 		expect(body.remote.available).toBe(false);

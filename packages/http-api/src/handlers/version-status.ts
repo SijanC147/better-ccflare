@@ -13,6 +13,7 @@ import {
 	HOMEBREW_FORMULA,
 	MAINTAINER_REPO,
 	MERGED_UPSTREAM_SHA,
+	releaseUrl,
 	shortSha,
 	UPSTREAM_REPO,
 } from "../services/fork-identity";
@@ -108,15 +109,26 @@ export function createVersionStatusHandler(
 	return async (url: URL): Promise<Response> => {
 		const force = url.searchParams.get("refresh") === "1";
 		const result = await service.getStatus(force);
+		// A development build reports "development" rather than a sha, which has
+		// neither a short form nor a commit page.
+		const isSha = /^[0-9a-f]{7,40}$/.test(options.localCommit);
 
 		return jsonResponse({
 			local: {
 				version: options.localVersion,
+				// Release notes for the running version. A release binary always
+				// carries a published tag (Hextap injects the git tag), so this
+				// resolves; a development build whose package.json version was
+				// never tagged is the one case where it can 404.
+				versionUrl: releaseUrl(
+					FORK_REPO,
+					options.localVersion.startsWith("v")
+						? options.localVersion
+						: `v${options.localVersion}`,
+				),
 				commit: options.localCommit,
-				commitShort: shortSha(options.localCommit),
-				commitUrl: /^[0-9a-f]{7,40}$/.test(options.localCommit)
-					? commitUrl(FORK_REPO, options.localCommit)
-					: null,
+				commitShort: isSha ? shortSha(options.localCommit) : null,
+				commitUrl: isSha ? commitUrl(FORK_REPO, options.localCommit) : null,
 				mergedUpstreamSha: MERGED_UPSTREAM_SHA,
 				mergedUpstreamShaShort: shortSha(MERGED_UPSTREAM_SHA),
 				mergedUpstreamShaUrl: MERGED_UPSTREAM_SHA
