@@ -926,12 +926,74 @@ defaults:
       mention:
         - SijanC147
 
-  # Releases are deliberately human here. A release is a pushed annotated tag on
-  # protected main and nothing else starts one; v* tags are immutable, the sequence is
-  # RC-then-stable on the same commit, and the pre-tag version PR has to land first.
-  # See docs/release.md. Automating this would skip all of it.
+  # Releases stay human here, and this block does not change that. It produces a DRAFT
+  # release for review; a draft holds no tag at all until someone publishes it. Publishing
+  # is the human act, and it is not a documentation act: it creates the tag at the pinned
+  # commit, starts .github/workflows/hextap-release.yml, cuts a real release, and cannot be
+  # undone, because ruleset hextap/release-tags (21627514) forbids moving or deleting a v*
+  # tag. A mistake is fixed forward with a new version. See docs/release.md.
+  #
+  # Ordering matters and is the opposite of the old hand sequence. The controller can only
+  # draft while main still points at the merge commit the draft must be pinned to, so:
+  # wait for the draft, THEN land the manifest-bump PR, then retarget the draft, then
+  # publish. Bumping the manifests first moves main and there is no draft for that sync.
   release:
-    enabled: false
+    enabled: true
+    # The draft is the whole point. Never set this false here.
+    draft: true
+    # A human merges our sync PRs, which records the pair as `published` rather than
+    # `merged`. Without this the release stage skips every hand-merged sync silently.
+    on_manual_merge: true
+
+    # Gate the draft on main's own CI having passed at that commit. An empty `jobs` list
+    # falls back to validation.required_checks above, which already names exactly the two
+    # required checks, and the controller matches a job by its display name.
+    wait_for_main_validation:
+      workflow: ci.yml
+      jobs: []
+
+    version:
+      # MUST be fork-semver, and this is not a preference. The upstream-release scheme
+      # produces X.Y.Z+timestamp, and the Hextap toolkit refuses build metadata outright.
+      # From internal/release/metadata.go at 613f0d37, the commit hextap-release.yml pins:
+      #
+      #   // Build metadata is intentionally unsupported because release asset identity
+      #   // must map to exactly one tag and Formula version.
+      #   if strings.Contains(version, "+") { ... may not contain build metadata }
+      #
+      # So the wrong scheme here would create the tag, fire the v* workflow, and fail the
+      # release on a tag the ruleset forbids moving or deleting. The no-semver-build-metadata
+      # gate above enforces the same rule from this side. Upstream is also on an unrelated
+      # line, 3.5.x against this fork's 3.9.x, so deriving our tag from theirs would regress
+      # the version. Choosing the kind is what asks for a proposal; there is no separate
+      # switch, and the upstream-release variant accepts no bump keys at all.
+      kind: fork-semver
+
+      # Deliberately empty. A floor rule on a path that a normal sync touches anyway makes
+      # every proposal the same number, and a reviewer who sees the same answer every time
+      # stops reading it. Measured while this was built: an illustrative
+      # `packages/types/** -> major` rule matched seven files on the 106-commit sync that
+      # was correctly a MINOR release. Add a rule only when a real integration proves one
+      # is needed, and record the evidence here when you do.
+      floor_paths: []
+
+      guidance: >-
+        Judge the bump by what an existing install experiences, not by upstream's own
+        version numbers, which are unrelated to this fork's. Breaking means a database
+        migration that cannot be rolled back, a removed or renamed HTTP endpoint, a changed
+        CLI contract, or a config key that stops being honoured. A new provider, endpoint,
+        dashboard feature or account capability is a minor. Everything else, including
+        dependency bumps and upstream refactors with no external effect, is a patch. The
+        fork's own features are the ones to check hardest: project attribution, the Hextap
+        release path, and the auth exemptions.
+
+      note: >-
+        Publishing this draft creates the tag and cuts a real release. Before publishing:
+        land a PR setting this exact version in package.json and apps/cli/package.json,
+        since Hextap never writes them and a stale manifest misleads source-mode builds,
+        then retarget this draft at the resulting main commit. Consider cutting -rc.1 on
+        the same commit first and promoting to the stable tag once it is proven; that is
+        the documented sequence for this repository.
 
 upstreams:
   - repo: tombii/better-ccflare
