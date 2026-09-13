@@ -372,8 +372,12 @@ function UpstreamCard({ status }: { status: VersionStatusResponse }) {
 }
 
 /**
- * Sidebar footer line: this fork's release, then the upstream commit and tag it
- * carries. Every reference is a link to the repository it belongs to.
+ * Sidebar footer line: this fork's release and the upstream commit it carries.
+ * Both are links to the repository they belong to.
+ *
+ * The upstream release tag is deliberately absent. The card above already reads
+ * "<tag> merged", and repeating it here made the line long enough to collide
+ * with the theme toggle at the far right of the same row.
  */
 export function VersionFooterLine() {
 	// Shares the cache entry with VersionStatusCards, so this costs no request.
@@ -397,17 +401,6 @@ export function VersionFooterLine() {
 						className="font-mono"
 					>
 						{status.local.mergedUpstreamShaShort}
-					</Ref>
-				</>
-			) : null}
-			{status?.upstream?.mergedTag ? (
-				<>
-					<span aria-hidden="true">·</span>
-					<Ref
-						href={status.upstream.mergedTagUrl}
-						title={`upstream release ${status.upstream.mergedTag} merged into this fork`}
-					>
-						{status.upstream.mergedTag}
 					</Ref>
 				</>
 			) : null}
