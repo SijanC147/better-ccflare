@@ -953,13 +953,21 @@ defaults:
       jobs: []
 
     version:
-      propose: true
-      # MUST be fork-semver. The upstream-release scheme produces X.Y.Z+timestamp, and
-      # SemVer build metadata can never be release identity here: Hextap rejects it, which
-      # is what the no-semver-build-metadata gate above exists to enforce. Upstream is also
-      # on a different line entirely (3.5.x against this fork's 3.9.x), so deriving our tag
-      # from theirs would regress the version.
-      source: fork-semver
+      # MUST be fork-semver, and this is not a preference. The upstream-release scheme
+      # produces X.Y.Z+timestamp, and the Hextap toolkit refuses build metadata outright.
+      # From internal/release/metadata.go at 613f0d37, the commit hextap-release.yml pins:
+      #
+      #   // Build metadata is intentionally unsupported because release asset identity
+      #   // must map to exactly one tag and Formula version.
+      #   if strings.Contains(version, "+") { ... may not contain build metadata }
+      #
+      # So the wrong scheme here would create the tag, fire the v* workflow, and fail the
+      # release on a tag the ruleset forbids moving or deleting. The no-semver-build-metadata
+      # gate above enforces the same rule from this side. Upstream is also on an unrelated
+      # line, 3.5.x against this fork's 3.9.x, so deriving our tag from theirs would regress
+      # the version. Choosing the kind is what asks for a proposal; there is no separate
+      # switch, and the upstream-release variant accepts no bump keys at all.
+      kind: fork-semver
 
       # Deliberately empty. A floor rule on a path that a normal sync touches anyway makes
       # every proposal the same number, and a reviewer who sees the same answer every time
