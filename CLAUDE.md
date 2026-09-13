@@ -97,7 +97,7 @@ curl -X POST http://localhost:8081/v1/messages \
 
 Releases run on [Hextap](https://github.com/SijanC147/hextap-toolkit). `.github/workflows/release.yml` is gone; `.github/workflows/hextap-release.yml` is a thin caller pinned to toolkit `v0.4.2` / `613f0d37a0c84cff20a8e277fc5e9c374f9cbc26`. Never float that pin.
 
-A release is a pushed annotated tag on protected main — nothing else starts one. Prereleases (`v3.8.3-rc.1`) stop after GitHub publication; stable tags also update the private Homebrew tap.
+A release is a pushed `v*` tag on protected main — nothing else starts one. It does not have to be annotated: the workflow triggers on `push: tags: v*`, `v3.8.1` shipped on a lightweight tag, and a tag created by publishing a GitHub release is lightweight. See `docs/release.md`. Prereleases (`v3.8.3-rc.1`) stop after GitHub publication; stable tags also update the private Homebrew tap.
 
 `.hextap.json`, `.hextap/tap-registration.json`, and the tap's `Projects/better-ccflare.json` must stay **byte-identical**. No field is safe to edit unilaterally — it is a release and recovery boundary, and reformatting counts as a change.
 
