@@ -128,7 +128,7 @@ describe("GET /api/version/status", () => {
 			localVersion: "3.9.0",
 			localCommit: "3839c07d4f0f449a7b311c211d5fc6528aaaaaaa",
 			selfUpdateEnabled: false,
-			dispatchEnabled: false,
+			isDispatchConfigured: () => false,
 			execPath: LOCAL_EXEC,
 		});
 
@@ -163,7 +163,7 @@ describe("GET /api/version/status", () => {
 			localVersion: "3.9.0",
 			localCommit: "development",
 			selfUpdateEnabled: true,
-			dispatchEnabled: true,
+			isDispatchConfigured: () => true,
 			execPath: LOCAL_EXEC,
 		});
 		const body = (await (
@@ -185,7 +185,7 @@ describe("GET /api/version/status", () => {
 			localVersion: "3.9.0",
 			localCommit: "development",
 			selfUpdateEnabled: true,
-			dispatchEnabled: false,
+			isDispatchConfigured: () => false,
 			execPath: BREW_EXEC,
 		});
 		const body = (await (
@@ -335,16 +335,33 @@ describe("POST /api/upstream/sync-dispatch", () => {
 	it("answers 404 with no token configured", async () => {
 		const { fetchImpl, requests } = dispatchStub(204);
 		const handler = createUpstreamDispatchHandler(authStub(true), {
+			getToken: () => "",
 			fetchImpl,
 		});
 		expect((await handler()).status).toBe(404);
 		expect(requests).toHaveLength(0);
 	});
 
+	it("picks up a token configured after the handler was built", async () => {
+		// The token is a config parameter the operator can set while the server
+		// runs, but the router builds its handlers once at startup.
+		let token = "";
+		const { fetchImpl, requests } = dispatchStub(204);
+		const handler = createUpstreamDispatchHandler(authStub(true), {
+			getToken: () => token,
+			fetchImpl,
+		});
+		expect((await handler()).status).toBe(404);
+
+		token = TOKEN;
+		expect((await handler()).status).toBe(202);
+		expect(requests).toHaveLength(1);
+	});
+
 	it("refuses when dashboard authentication is off", async () => {
 		const { fetchImpl, requests } = dispatchStub(204);
 		const handler = createUpstreamDispatchHandler(authStub(false), {
-			token: TOKEN,
+			getToken: () => TOKEN,
 			fetchImpl,
 		});
 		expect((await handler()).status).toBe(403);
@@ -354,7 +371,7 @@ describe("POST /api/upstream/sync-dispatch", () => {
 	it("posts a fixed repository_dispatch payload to the controller", async () => {
 		const { fetchImpl, requests } = dispatchStub(204);
 		const handler = createUpstreamDispatchHandler(authStub(true), {
-			token: TOKEN,
+			getToken: () => TOKEN,
 			fetchImpl,
 		});
 		const response = await handler();
@@ -372,7 +389,7 @@ describe("POST /api/upstream/sync-dispatch", () => {
 	it("never returns or echoes the token", async () => {
 		const { fetchImpl } = dispatchStub(401);
 		const handler = createUpstreamDispatchHandler(authStub(true), {
-			token: TOKEN,
+			getToken: () => TOKEN,
 			fetchImpl,
 		});
 		const failed = await handler();
@@ -381,7 +398,7 @@ describe("POST /api/upstream/sync-dispatch", () => {
 
 		const { fetchImpl: okFetch } = dispatchStub(204);
 		const okHandler = createUpstreamDispatchHandler(authStub(true), {
-			token: TOKEN,
+			getToken: () => TOKEN,
 			fetchImpl: okFetch,
 		});
 		expect(await (await okHandler()).text()).not.toContain(TOKEN);
@@ -391,7 +408,7 @@ describe("POST /api/upstream/sync-dispatch", () => {
 		let clock = 1_000_000;
 		const { fetchImpl, requests } = dispatchStub(204);
 		const handler = createUpstreamDispatchHandler(authStub(true), {
-			token: TOKEN,
+			getToken: () => TOKEN,
 			fetchImpl,
 			now: () => clock,
 			cooldownMs: 60_000,
@@ -408,7 +425,7 @@ describe("POST /api/upstream/sync-dispatch", () => {
 	it("reports only the status when GitHub rejects the dispatch", async () => {
 		const { fetchImpl } = dispatchStub(403);
 		const handler = createUpstreamDispatchHandler(authStub(true), {
-			token: TOKEN,
+			getToken: () => TOKEN,
 			fetchImpl,
 		});
 		const response = await handler();

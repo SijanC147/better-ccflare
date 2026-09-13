@@ -167,7 +167,12 @@ export function createVersionStatusHandler(
 		localVersion: string;
 		localCommit: string;
 		selfUpdateEnabled: boolean;
-		dispatchEnabled: boolean;
+		/**
+		 * Whether a maintainer token is configured. A function, not a boolean: the
+		 * operator can set or clear the token while the server runs, and the
+		 * dashboard must see that on its next poll.
+		 */
+		isDispatchConfigured: () => boolean;
 		execPath?: string;
 	},
 ) {
@@ -214,7 +219,7 @@ export function createVersionStatusHandler(
 					options.selfUpdateEnabled && !isHomebrewInstall(execPath)
 						? "not a Homebrew installation"
 						: null,
-				dispatch: options.dispatchEnabled,
+				dispatch: options.isDispatchConfigured(),
 				manualUpdateCommand: MANUAL_UPDATE_COMMAND,
 			},
 			remote: {
@@ -356,15 +361,23 @@ export function createSelfUpdateHandler(
  * POST /api/upstream/sync-dispatch — ask the upstream maintainer controller to
  * open a sync PR.
  *
- * The controller token is the opt-in: with no
- * `BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN` in the server environment the
- * endpoint answers 404. The token is read from the environment only, is never
- * part of a response body, and is never logged.
+ * The controller token is the only switch: with none configured the endpoint
+ * answers 404 and the dashboard offers no button. It is a config parameter the
+ * operator sets, read through Config (environment first, then the persisted
+ * config file, like every other secret in packages/config). It is never part of
+ * a response body, never logged, and never reaches the browser — the dashboard
+ * learns only the boolean.
  */
 export function createUpstreamDispatchHandler(
 	authService: Pick<AuthService, "isAuthenticationEnabled">,
 	options: {
-		token?: string;
+		/**
+		 * Reads the configured token. A function, not a value: the token is a
+		 * config parameter the operator can set through
+		 * POST /api/config/upstream-maintainer while the server runs, and the
+		 * router builds this handler once at startup.
+		 */
+		getToken: () => string;
 		fetchImpl?: typeof fetch;
 		now?: () => number;
 		cooldownMs?: number;
@@ -376,7 +389,8 @@ export function createUpstreamDispatchHandler(
 	let lastDispatchAt = 0;
 
 	return async (): Promise<Response> => {
-		if (!options.token) {
+		const token = options.getToken();
+		if (!token) {
 			return errorResponse(NotFound("Not found"));
 		}
 		// Same posture as self-update: an outward-facing side effect that spends
@@ -411,7 +425,7 @@ export function createUpstreamDispatchHandler(
 						"X-GitHub-Api-Version": "2022-11-28",
 						"User-Agent": "better-ccflare-version-status",
 						"Content-Type": "application/json",
-						Authorization: `Bearer ${options.token}`,
+						Authorization: `Bearer ${token}`,
 					},
 					body: JSON.stringify({
 						event_type: "sync-upstream",

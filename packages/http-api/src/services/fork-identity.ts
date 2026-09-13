@@ -3,11 +3,18 @@ import mergelog from "../../../../MERGELOG.md" with { type: "text" };
 /**
  * Fork release and upstream-sync identity.
  *
- * This fork does not publish to npm. Releases are annotated `v*` git tags on
+ * This fork does not publish to npm. Releases are `v*` git tags on
  * SijanC147/better-ccflare plus a private Homebrew tap, and `package.json`
  * deliberately lags the release (see docs/release.md). Every identity constant
  * the version widget needs therefore lives here rather than being derived from
  * a package manifest.
+ *
+ * Nothing here assumes a tag is an annotated tag object. A tag created by
+ * publishing a GitHub release is lightweight, and the release workflow triggers
+ * on `push: tags: v*`, which fires for either kind. The widget only ever reads
+ * `tag_name` strings from the Releases API and hands them to the compare and
+ * release-notes endpoints, both of which resolve a name regardless of the
+ * underlying object type.
  */
 export const FORK_REPO = "SijanC147/better-ccflare";
 export const UPSTREAM_REPO = "tombii/better-ccflare";

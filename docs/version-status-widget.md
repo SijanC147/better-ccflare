@@ -18,7 +18,7 @@ belongs to.
 
 `GET /api/version/check` used to read
 `https://registry.npmjs.org/better-ccflare/latest`. That is **upstream's** npm
-package. This fork does not publish to npm: it releases as annotated `v*` tags on
+package. This fork does not publish to npm: it releases as `v*` tags on
 GitHub plus a private Homebrew tap, and `package.json` deliberately lags the
 release (`docs/release.md`). The card therefore compared the fork's `3.9.0`
 against upstream's npm line and produced a verdict about two unrelated release
@@ -166,7 +166,7 @@ then `brew services restart better-ccflare`. With it off, or on a non-Homebrew
 install, the card shows the manual command `brew upgrade better-ccflare` with a
 copy button instead.
 
-### Dispatching the upstream maintainer: `BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN`
+### Dispatching the upstream maintainer: the controller token
 
 `POST /api/upstream/sync-dispatch` sends a `repository_dispatch` to
 `SijanC147/upstream-maintainer`:
@@ -175,18 +175,81 @@ copy button instead.
 { "event_type": "sync-upstream", "client_payload": { "target": "SijanC147/better-ccflare" } }
 ```
 
-The body is a constant. The token comes from the server environment only, is
-never part of any response body, and is never logged — a rejected dispatch
-reports the HTTP status and nothing else, because a failure body can echo request
-detail. Presence of the token is the opt-in: without it the endpoint answers
-`404`. It must hold `Contents: write` on the controller repository. Dashboard
-authentication must be enabled here too, since this spends the controller's
-token, and one dispatch per five minutes is enforced in-process so a stuck button
-cannot hammer the controller.
+The body is a constant. **The token's presence is the feature's only switch.**
+There is no separate enable flag: configure a token and the endpoint works and
+the dashboard offers "Request upstream sync"; configure none and the endpoint
+answers `404` and no button renders.
 
-**To enable:** put the token in the service environment the same way as above
-(on this machine secrets live in `~/.config/zsh/zsh-secrets`, which is already
-sourced for every shell — reference the variable, never print it).
+#### Setting it
+
+The token is a configuration parameter, stored and read like every other secret
+in `packages/config` (the `pg_password` precedent): **environment first, then the
+persisted config file.**
+
+```bash
+# Through the API (an admin API key is required when auth is enabled)
+curl -X POST http://localhost:8080/api/config/upstream-maintainer \
+  -H "x-api-key: $BETTER_CCFLARE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"github_pat_..."}'
+
+# Clear it again
+curl -X POST http://localhost:8080/api/config/upstream-maintainer \
+  -H "x-api-key: $BETTER_CCFLARE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"token":""}'
+```
+
+It can equally be written straight into the config file as
+`upstream_maintainer_token`, or supplied as
+`BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN` in the server environment. The
+environment wins over the stored value, which is why
+`GET /api/config/upstream-maintainer` also reports `tokenFromEnvironment`: without
+it, clearing the stored token while the variable is set would look like a no-op.
+
+#### What the token needs
+
+A **fine-grained personal access token**, resource-scoped to
+`SijanC147/upstream-maintainer` alone, with one permission: **`Contents: write`**.
+That is the minimum GitHub's `POST /repos/{owner}/{repo}/dispatches` accepts. Do
+not grant it anything else, and do not point it at this repository.
+
+Two things bound what a leaked copy of it could do:
+
+- The controller's own `main` is protected with required reviews, so the token can
+  start a run but cannot change the code that runs.
+- The controller refuses any target that is not in its `TARGETS` variable, so the
+  token cannot aim a sync at an arbitrary repository.
+
+#### How it is handled
+
+The token is never returned by any endpoint, never appears in a response body,
+never reaches the browser and is never logged. The dashboard learns one boolean,
+`capabilities.dispatch`, and nothing else. A rejected dispatch reports the HTTP
+status alone, because a failure body can echo request detail.
+
+Endpoints checked for configuration echo, since a diagnostic route that dumped
+config would defeat all of the above:
+
+| Endpoint | Finding |
+| --- | --- |
+| `GET /api/config` | Copies named fields into an allowlisted `ConfigResponse`; no spread |
+| `GET /api/config/upstream-maintainer` | `tokenSet` and `tokenFromEnvironment` booleans only |
+| `GET /api/config/postgres` | Same precedent: `passwordSet` boolean, never the password |
+| The other twelve `GET /api/config/*` routes | Each returns its own named fields |
+| `GET /api/system/info` | Package-manager and container detection only |
+| `GET /api/health` | Named build fields and `config.getStrategy()` |
+| `GET /api/version/status` | Local identity, GitHub URLs, capability booleans |
+| `Config.getAllSettings()` | Now strips `upstream_maintainer_token`, `pg_password` and `local_control_secret` at the source |
+
+`getAllSettings()` previously spread the whole config object, so although no
+caller leaked anything today, the next one to hand it to a settings endpoint would
+have shipped `pg_password` and `local_control_secret` with it. The three secrets
+are excluded there now, and each has its own accessor for the code that needs it.
+
+Dashboard authentication must be enabled for a dispatch, since it spends the
+controller's token, and one dispatch per five minutes is enforced in-process so a
+stuck button cannot hammer the controller.
 
 When a sync PR is already open, the upstream card replaces itself with the PR
 number, its title and a link straight to it, and offers no dispatch button.
@@ -197,7 +260,8 @@ number, its title and a link straight to it, and offers no dispatch button.
 | --- | --- | --- |
 | Everything current | "Up to date", `v3.9.0` | "In sync with upstream", merged tag |
 | Fork release is newer | "Update available", `v3.9.0 → v3.9.1`, then either an "Install update" button or the manual command | unchanged |
-| Fork behind upstream | unchanged | "N commits behind upstream", merged tag and latest tag, plus "Request upstream sync" when enabled |
-| Sync PR open | unchanged | "Sync PR #52" with its title and a link to it |
+| Fork behind upstream, no token configured | unchanged | "N commits behind upstream", merged tag and latest tag, and **no button** |
+| Fork behind upstream, token configured | unchanged | The same, plus a "Request upstream sync" button; after a click it reads "Sync requested" with "The maintainer opens a PR when it finishes." |
+| Sync PR open (with or without a token) | unchanged | "Sync PR #52" with its title and a "Review pull request" link, and no dispatch button — the work is already queued |
 | GitHub unreachable | "Release check unavailable" with the local version and a Retry | "Upstream check unavailable" with the merged sha |
 | Status endpoint down | "Version check unavailable" with the compile-time version | not rendered |

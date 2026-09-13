@@ -80,24 +80,10 @@ import {
 	createSlotReorderHandler,
 	createSlotUpdateHandler,
 } from "./handlers/combos";
-import {
-	createProjectCreateHandler,
-	createProjectDeleteHandler,
-	createProjectGetHandler,
-	createProjectsDiscoverHandler,
-	createProjectsListHandler,
-	createProjectUpdateHandler,
-} from "./handlers/projects";
-import {
-	createWorktreeRuleCreateHandler,
-	createWorktreeRuleDeleteHandler,
-	createWorktreeRulesListHandler,
-	createWorktreeRuleTestHandler,
-	createWorktreeRuleUpdateHandler,
-} from "./handlers/worktree-rules";
 import { createConfigHandlers } from "./handlers/config";
 import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import { createRequestStorageHandlers } from "./handlers/config-request-storage";
+import { createUpstreamMaintainerConfigHandlers } from "./handlers/config-upstream-maintainer";
 import {
 	createHeapSnapshotHandler,
 	createHeapStatsHandler,
@@ -130,6 +116,14 @@ import {
 	createQwenReauthHandler,
 } from "./handlers/oauth";
 import {
+	createProjectCreateHandler,
+	createProjectDeleteHandler,
+	createProjectGetHandler,
+	createProjectsDiscoverHandler,
+	createProjectsListHandler,
+	createProjectUpdateHandler,
+} from "./handlers/projects";
+import {
 	createRequestPayloadHandler,
 	createRequestsDetailHandler,
 	createRequestsSummaryHandler,
@@ -155,6 +149,13 @@ import {
 	createUpstreamDispatchHandler,
 	createVersionStatusHandler,
 } from "./handlers/version-status";
+import {
+	createWorktreeRuleCreateHandler,
+	createWorktreeRuleDeleteHandler,
+	createWorktreeRulesListHandler,
+	createWorktreeRuleTestHandler,
+	createWorktreeRuleUpdateHandler,
+} from "./handlers/worktree-rules";
 import { AuthService } from "./services/auth-service";
 import { MERGED_UPSTREAM_SHA } from "./services/fork-identity";
 import { VersionStatusService } from "./services/version-status-service";
@@ -284,8 +285,11 @@ export class APIRouter {
 		// docs/version-status-widget.md.
 		const selfUpdateEnabled =
 			process.env.BETTER_CCFLARE_ENABLE_SELF_UPDATE === "1";
-		const maintainerToken =
-			process.env.BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN || undefined;
+		// Read through Config on every request rather than captured here: the
+		// maintainer token is a config parameter the operator can set at runtime
+		// via POST /api/config/upstream-maintainer, and the router builds its
+		// handlers once at startup.
+		const getMaintainerToken = () => config.getUpstreamMaintainerToken();
 		const versionStatusService = new VersionStatusService({
 			currentVersion: getVersionSync(),
 			mergedSha: MERGED_UPSTREAM_SHA,
@@ -298,7 +302,7 @@ export class APIRouter {
 				localVersion: getVersionSync(),
 				localCommit: getCommitSync(),
 				selfUpdateEnabled,
-				dispatchEnabled: Boolean(maintainerToken),
+				isDispatchConfigured: () => getMaintainerToken().length > 0,
 			},
 		);
 		const selfUpdateHandler = createSelfUpdateHandler(this.authService, {
@@ -306,8 +310,10 @@ export class APIRouter {
 		});
 		const upstreamDispatchHandler = createUpstreamDispatchHandler(
 			this.authService,
-			{ token: maintainerToken },
+			{ getToken: getMaintainerToken },
 		);
+		const upstreamMaintainerConfigHandlers =
+			createUpstreamMaintainerConfigHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -536,6 +542,12 @@ export class APIRouter {
 		this.handlers.set("POST:/api/admin/self-update", () => selfUpdateHandler());
 		this.handlers.set("POST:/api/upstream/sync-dispatch", () =>
 			upstreamDispatchHandler(),
+		);
+		this.handlers.set("GET:/api/config/upstream-maintainer", () =>
+			upstreamMaintainerConfigHandlers.getUpstreamMaintainerConfig(),
+		);
+		this.handlers.set("POST:/api/config/upstream-maintainer", (req) =>
+			upstreamMaintainerConfigHandlers.setUpstreamMaintainerConfig(req),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());

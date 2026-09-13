@@ -236,7 +236,8 @@ STORE_PAYLOADS=false                   # Disable storing request/response bodies
 # Dashboard version widget (all optional, all off by default)
 BETTER_CCFLARE_GITHUB_TOKEN=           # Raises GitHub's rate limit for the release/upstream checks; read-only, never returned to the browser
 BETTER_CCFLARE_ENABLE_SELF_UPDATE=     # Set to 1 to allow the dashboard to run `brew upgrade better-ccflare`; requires an API key and a Homebrew install
-BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN=  # Controller token that lets the dashboard request an upstream sync; requires an API key
+BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN=  # Controller token that lets the dashboard request an upstream sync. Usually set as a config
+                                       # parameter instead (POST /api/config/upstream-maintainer); its presence is the only switch
 ```
 
 **Security Notes**:

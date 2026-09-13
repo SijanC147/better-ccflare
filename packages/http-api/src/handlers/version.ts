@@ -12,7 +12,7 @@ import {
  *
  * It used to read https://registry.npmjs.org/better-ccflare/latest, which is
  * upstream's npm package. This fork does not publish to npm: it releases as
- * annotated `v*` tags on SijanC147/better-ccflare plus a private Homebrew tap,
+ * `v*` tags on SijanC147/better-ccflare plus a private Homebrew tap,
  * and `package.json` deliberately lags the release (docs/release.md). Comparing
  * the running fork version against upstream's npm version produced a verdict
  * about two unrelated release lines, so the card could claim an update that did
