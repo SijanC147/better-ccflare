@@ -233,6 +233,19 @@ defaults:
     # Every tool left at its default of false. In particular NOT shell: the design
     # otherwise prevents the resolver from executing code, and nothing about this repo
     # needs that. The gates run the code, in a container the agent cannot influence.
+    # Both of these were inert until SijanC147/upstream-maintainer#36, merged 2026-09-13.
+    # `max_repair_rounds` was parsed and range-checked 0-3 and then read by nothing: the
+    # two repair rounds were hard-coded jobs, so this value agreeing with the graph was
+    # coincidence. `repair_minutes` was never read either, because there was no repair
+    # role and every round ran the resolve path under a step-level kill of 8 minutes, so
+    # the 15 below was clipped to 8 and the 12 did nothing.
+    #
+    # They are real now. Each repair job is guarded on this number, so 0 skips both and 1
+    # allows only the first, and the validated maximum is 2 rather than 3, because the
+    # graph has exactly two repair jobs and Actions cannot generate more. The step kill is
+    # derived from the figure below, one minute above the session's own wall clock, so the
+    # outer kill can no longer be tighter than the inner budget. Effective here: step kills
+    # of 16, 13 and 11 minutes against inner budgets of 14m30s, 11m30s and 9m30s.
     max_repair_rounds: 2
     timeouts:
       resolve_minutes: 15
@@ -378,12 +391,15 @@ defaults:
           # Upstream bumps its version constantly; the fork sets versions deliberately
           # in a dedicated pre-tag PR. A sync must never move them.
           #
-          # Expect this gate to FAIL on nearly every sync, by design. Upstream bumps
-          # both manifests as part of its own release flow, so any sync spanning a
-          # release carries the bump in without a conflict. The repair is mechanical
-          # (restore both manifests to the base version), but it forces at least one of
-          # the two max_repair_rounds on nearly every sync, leaving one round for
-          # everything else. A failure here is routine, not evidence of a bad merge.
+          # This gate may fail on a sync that spans an upstream release, because upstream
+          # bumps both manifests in its own release flow and that arrives without a
+          # conflict. The repair is mechanical: restore both manifests to the base version.
+          #
+          # An earlier version of this comment predicted a failure on NEARLY EVERY sync.
+          # That was a guess and it was wrong. The first real run, 106 commits across
+          # 4d27cb22..ea0e3320, passed this gate, so upstream does not carry a version bump
+          # into every range. Treat a failure here as mechanical rather than as evidence of
+          # a bad merge, but do not treat it as expected.
           rc=0
           for manifest in package.json apps/cli/package.json; do
             before=$(bun -e "console.log(require('./$manifest').version)")
