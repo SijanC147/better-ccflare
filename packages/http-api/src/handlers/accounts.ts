@@ -3221,6 +3221,205 @@ export function createAccountAutoRefreshHandler(dbOps: DatabaseOperations) {
 }
 
 /**
+ * Providers whose credential is not an API key. Anthropic accounts hold OAuth
+ * tokens, Vertex AI uses Google Cloud application default credentials, and
+ * Bedrock reads a profile from ~/.aws. Writing an API key into one of these
+ * would overwrite a refresh token, so rotation is refused rather than applied.
+ */
+const NON_API_KEY_PROVIDERS = new Set(["anthropic", "vertex-ai", "bedrock"]);
+
+/**
+ * Providers that keep a provider-specific configuration in custom_endpoint
+ * instead of a base URL. Vertex AI stores {projectId, region} as JSON and
+ * Bedrock stores "bedrock:profile:region". Neither is a URL, so writing an
+ * endpoint for them would corrupt routing instead of failing, and this route
+ * refuses the field for those providers.
+ */
+const NON_URL_CUSTOM_ENDPOINT_PROVIDERS = new Set(["vertex-ai", "bedrock"]);
+
+/** Expiry the creation routes give an API-key credential: one year. */
+const API_KEY_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Create a handler that updates an existing account's provider settings.
+ *
+ * This replaces DELETE-then-add as the way to correct a credential, which
+ * discarded the account id, its statistics, its priority and every session
+ * pinned to that id.
+ *
+ * The update is partial: a field absent from the body leaves the stored value
+ * alone. `customEndpoint` sent as null or an empty string clears the column.
+ * `apiKey` is the exception — an empty value is rejected rather than treated as
+ * a clear, because an account with no credential cannot serve a request.
+ *
+ * No credential is ever returned. The response reports an `apiKeySet` boolean
+ * computed in SQL from a SELECT that does not name any token column, the shape
+ * `GET /api/config/postgres` and `GET /api/config/openobserve` already use.
+ */
+export function createAccountProviderSettingsUpdateHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			// This body can carry an API key. Never log it, at any level.
+			const body = (await req.json()) as Record<string, unknown>;
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{
+				name: string;
+				provider: string | null;
+			}>("SELECT name, provider FROM accounts WHERE id = ?", [accountId]);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			const provider = account.provider ?? "anthropic";
+			const assignments: string[] = [];
+			const values: (string | number | null)[] = [];
+			const updated: string[] = [];
+
+			if (body.apiKey !== undefined) {
+				if (NON_API_KEY_PROVIDERS.has(provider)) {
+					return errorResponse(
+						BadRequest(
+							`Provider '${provider}' does not authenticate with an API key`,
+						),
+					);
+				}
+
+				const apiKey = validateString(body.apiKey, "apiKey", {
+					required: false,
+					transform: sanitizers.trim,
+				});
+
+				if (!apiKey) {
+					return errorResponse(
+						BadRequest(
+							"apiKey cannot be empty. Remove the account instead of clearing its credential.",
+						),
+					);
+				}
+
+				// The creation routes write the key to all three token columns and set a
+				// one-year expiry. A rotation that touched only api_key would leave the
+				// proxy authenticating with the stale copy in access_token.
+				assignments.push(
+					"api_key = ?",
+					"refresh_token = ?",
+					"access_token = ?",
+					"expires_at = ?",
+				);
+				values.push(apiKey, apiKey, apiKey, Date.now() + API_KEY_LIFETIME_MS);
+				updated.push("apiKey");
+			}
+
+			if (body.customEndpoint !== undefined) {
+				if (NON_URL_CUSTOM_ENDPOINT_PROVIDERS.has(provider)) {
+					return errorResponse(
+						BadRequest(
+							`Provider '${provider}' keeps its own configuration in custom_endpoint and cannot take a base URL`,
+						),
+					);
+				}
+
+				const raw = validateString(body.customEndpoint, "customEndpoint", {
+					required: false,
+					transform: sanitizers.trim,
+				});
+
+				// The URL is checked here rather than inside the transform so a bad
+				// value answers 400. A transform that throws surfaces as a 500, which
+				// is what the single-field custom-endpoint route does today.
+				let customEndpoint: string | null = null;
+				if (raw) {
+					try {
+						new URL(raw);
+					} catch {
+						return errorResponse(
+							BadRequest("customEndpoint must be a valid URL"),
+						);
+					}
+					customEndpoint = raw;
+				}
+
+				assignments.push("custom_endpoint = ?");
+				values.push(customEndpoint);
+				updated.push("customEndpoint");
+			}
+
+			if (assignments.length === 0) {
+				return errorResponse(
+					BadRequest(
+						"No provider settings supplied. Send apiKey, customEndpoint, or both.",
+					),
+				);
+			}
+
+			values.push(accountId);
+			await db.run(
+				`UPDATE accounts SET ${assignments.join(", ")} WHERE id = ?`,
+				values,
+			);
+
+			if (updated.includes("apiKey")) {
+				// A rotated credential must not keep serving from a cache holding the
+				// value it replaced.
+				clearAccountRefreshCache(accountId);
+				usageCache.delete(accountId);
+			}
+
+			// Log which fields changed, never their values.
+			log.info(
+				`Updated provider settings for account ${accountId}: ${updated.join(", ")}`,
+			);
+
+			// This SELECT deliberately does not name api_key, refresh_token or
+			// access_token. Reporting a boolean computed in SQL means there is no line
+			// anyone can delete later that starts returning the credential.
+			const refreshed = await db.get<{
+				id: string;
+				name: string;
+				provider: string | null;
+				priority: number;
+				custom_endpoint: string | null;
+				api_key_set: number;
+			}>(
+				`SELECT
+					id, name, provider, COALESCE(priority, 0) AS priority, custom_endpoint,
+					CASE WHEN api_key IS NOT NULL AND api_key != '' THEN 1 ELSE 0 END AS api_key_set
+				FROM accounts WHERE id = ?`,
+				[accountId],
+			);
+
+			return jsonResponse({
+				success: true,
+				updated,
+				account: {
+					id: accountId,
+					name: refreshed?.name ?? account.name,
+					provider: refreshed?.provider ?? provider,
+					priority: refreshed?.priority ?? 0,
+					customEndpoint: refreshed?.custom_endpoint ?? null,
+					apiKeySet: refreshed?.api_key_set === 1,
+				},
+			});
+		} catch (error) {
+			// Validation messages name a field, never a value.
+			log.error("Account provider settings update error:", error);
+			if (error instanceof ValidationError) {
+				return errorResponse(BadRequest(error.message));
+			}
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update provider settings"),
+			);
+		}
+	};
+}
+
+/**
  * Create an account custom endpoint update handler
  */
 export function createAccountCustomEndpointUpdateHandler(

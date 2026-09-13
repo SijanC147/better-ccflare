@@ -17,6 +17,7 @@ import {
 	createAccountPauseHandler,
 	createAccountPeakHoursPauseHandler,
 	createAccountPriorityUpdateHandler,
+	createAccountProviderSettingsUpdateHandler,
 	createAccountRefreshUsageHandler,
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
@@ -937,6 +938,19 @@ export class APIRouter {
 				);
 				return await this.wrapHandler((req) =>
 					modelFallbacksHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Account provider settings update (PATCH /api/accounts/:accountId).
+			// Registered after every sub-path branch above, each of which matches on
+			// endsWith(...) with POST, so this cannot swallow a sibling. Guarded on
+			// parts.length === 4 the same way the removal branch below is, and the
+			// same shape as PATCH /api/agents/:id.
+			if (parts.length === 4 && method === "PATCH") {
+				const providerSettingsHandler =
+					createAccountProviderSettingsUpdateHandler(this.context.dbOps);
+				return await this.wrapHandler((req) =>
+					providerSettingsHandler(req, accountId),
 				)(req, url);
 			}
 
