@@ -76,6 +76,7 @@ function Card({
 function ForkCard({ status }: { status: VersionStatusResponse }) {
 	const queryClient = useQueryClient();
 	const [updating, setUpdating] = useState(false);
+	const [rechecking, setRechecking] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const pollRef = useRef<number | null>(null);
 
@@ -118,10 +119,47 @@ function ForkCard({ status }: { status: VersionStatusResponse }) {
 		}
 	}, [status.local.version, waitForRestart]);
 
+	/**
+	 * Force the server past its 15-minute snapshot TTL and write the answer
+	 * straight into the cache.
+	 *
+	 * `invalidateQueries` would refetch without `?refresh=1`, spending a second
+	 * request to read back the snapshot this one just stored.
+	 */
 	const refresh = useCallback(async () => {
-		await api.getVersionStatus(true);
-		queryClient.invalidateQueries({ queryKey: queryKeys.versionStatus() });
+		setRechecking(true);
+		setError(null);
+		try {
+			const next = await api.getVersionStatus(true);
+			queryClient.setQueryData(queryKeys.versionStatus(), next);
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setRechecking(false);
+		}
 	}, [queryClient]);
+
+	/**
+	 * The recheck control, shown in every state.
+	 *
+	 * A stale snapshot renders a version number that looks authoritative, so the
+	 * widget has to admit both that the number is old and why the last refresh
+	 * failed. The server backs off for a minute after a total failure and honours
+	 * a rate-limit reset regardless of `force`, so a recheck can legitimately
+	 * return the same stale snapshot; saying so is the difference between this
+	 * button and a placebo.
+	 */
+	const recheckButton = (
+		<button
+			type="button"
+			onClick={refresh}
+			disabled={rechecking}
+			className="mt-2 flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-primary disabled:opacity-50"
+		>
+			<RefreshCw className={cn("h-3 w-3 shrink-0", rechecking && "animate-spin")} />
+			{rechecking ? "Checking…" : "Check again"}
+		</button>
+	);
 
 	if (!status.remote.available && !status.fork) {
 		return (
@@ -140,14 +178,10 @@ function ForkCard({ status }: { status: VersionStatusResponse }) {
 					</Ref>
 					. {status.remote.error ?? "GitHub could not be reached."}
 				</p>
-				<button
-					type="button"
-					onClick={refresh}
-					className="mt-2 flex items-center gap-1 text-xs text-muted-foreground hover:text-primary"
-				>
-					<RefreshCw className="h-3 w-3" />
-					Retry
-				</button>
+				{recheckButton}
+				{error ? (
+					<p className="mt-2 text-xs text-destructive break-words">{error}</p>
+				) : null}
 			</Card>
 		);
 	}
@@ -190,6 +224,15 @@ function ForkCard({ status }: { status: VersionStatusResponse }) {
 				) : null}
 				{status.remote.stale ? " (cached)" : null}
 			</p>
+
+			{status.remote.stale ? (
+				<p className="mt-1 text-xs text-amber-500 break-words">
+					{status.remote.error ??
+						"The last check of GitHub failed; this is the previous result."}
+				</p>
+			) : null}
+
+			{recheckButton}
 
 			{updateAvailable ? (
 				status.capabilities.selfUpdate ? (
