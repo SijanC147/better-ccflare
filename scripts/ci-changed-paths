@@ -19,10 +19,13 @@
 # tsconfig*, .gitignore, bun.lock, and .hextap/** on the relevant side without
 # having to enumerate them.
 #
-# The two jobs differ on .github/**. `Hextap release contract` runs
-# scripts/hextap-contract.test.ts, which reads the workflow files, so every
-# .github/** change is relevant to it. `Bun and release tooling` only cares
-# about .github/workflows/ci.yml, the file that defines it.
+# The two jobs differ on .github/**. `Bun and release tooling` runs the whole
+# `bun test` suite, which includes scripts/hextap-contract.test.ts: that test
+# reads ci.yml and hextap-release.yml and asserts the exact list of files in
+# .github/workflows, so every .github/workflows/** change is relevant to it.
+# Nothing it runs reads anything else under .github/, so the rest is inert for
+# it. `Hextap release contract` treats all of .github/** as relevant, which is
+# pure conservatism on the release boundary rather than a measured dependency.
 set -euo pipefail
 
 job="${1:-}"
@@ -73,7 +76,7 @@ relevant_paths="$(printf '%s\n' "$changed" | awk -v job="$job" '
 	$0 ~ /(^|\/)[^\/]*\.md$/ { next }
 	$0 ~ /^docs\// { next }
 	$0 ~ /^\.claude\// { next }
-	job == "quality" && $0 == ".github/workflows/ci.yml" { print; next }
+	job == "quality" && $0 ~ /^\.github\/workflows\// { print; next }
 	job == "quality" && $0 ~ /^\.github\// { next }
 	{ print }
 ')"

@@ -32,6 +32,9 @@ jobs:
       # by paths-ignore never reports them, which would block such a PR
       # forever. The jobs always run and always report; only the expensive
       # steps below are skipped, so a docs-only PR still goes green, fast.
+      # `bun test` here includes scripts/hextap-contract.test.ts, which asserts
+      # the exact file list of .github/workflows, so every change in there is
+      # relevant to this job even though most of .github/** is not.
       - name: Detect result-affecting changes
         id: changes
         env:
@@ -86,8 +89,8 @@ jobs:
           persist-credentials: false
 
       # Same reasoning as the other job: never path-filter the trigger, only
-      # the steps. This job also treats every .github/** change as relevant,
-      # because scripts/hextap-contract.test.ts reads the workflow files.
+      # the steps. This job treats every .github/** change as relevant, which
+      # is conservatism on the release boundary, not a measured dependency.
       - name: Detect result-affecting changes
         id: changes
         env:
