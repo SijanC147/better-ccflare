@@ -346,6 +346,8 @@ describe.skipIf(!livePgAvailable)(
 				getRequestRetentionDays: () => 30,
 				getDataRetentionDays: () => 7,
 				getStorePayloads: () => true,
+				// Read eagerly when the router builds VersionStatusService.
+				getGithubReadToken: () => "",
 			} as unknown as Config;
 
 			// AlertService touches no external state until start() is called,

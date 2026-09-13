@@ -53,6 +53,8 @@ describe("APIRouter — GET /api/sessions/:sessionId/account (#318)", () => {
 		const config = {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
+			// Read eagerly when the router builds VersionStatusService.
+			getGithubReadToken: () => "",
 		} as unknown as Config;
 		const alertService = {
 			listAlerts: async () => [],
