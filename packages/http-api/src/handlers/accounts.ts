@@ -49,8 +49,14 @@ import type {
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
+	RequestTransformer,
 } from "@better-ccflare/types";
-import { requiresSessionDurationTracking } from "@better-ccflare/types";
+import {
+	computeReauthDeadline,
+	isEligibleForReauthDeadline,
+	REQUEST_TRANSFORMERS,
+	requiresSessionDurationTracking,
+} from "@better-ccflare/types";
 import type { AccountResponse } from "../types";
 import {
 	computeRateLimitStatusDisplay,
@@ -76,6 +82,9 @@ const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
 	// a faithful mirror of the union and cannot silently null the value if a
 	// future path ever persists it.
 	"windowless_429",
+	// 403 permission_error: the account's organization forbids the request. This
+	// one IS written to accounts.rate_limited_reason — the account is benched.
+	"org_permission_denied",
 ]);
 
 function toRateLimitReason(v: string | null): RateLimitReason | null {
@@ -304,10 +313,12 @@ export function createAccountsListHandler(
 			peak_hours_pause_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
+			request_transformer: RequestTransformer | null;
 			cross_region_mode: string | null;
 			model_fallbacks: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
+			last_manual_reauth_at: number | null;
 			requires_reauth: 0 | 1;
 		}>(
 			`
@@ -340,10 +351,12 @@ export function createAccountsListHandler(
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 
 					model_mappings,
+					request_transformer,
 					cross_region_mode,
 					model_fallbacks,
 					billing_type,
 					pause_reason,
+					last_manual_reauth_at,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -670,6 +683,18 @@ export function createAccountsListHandler(
 					}
 				}
 
+				const reauthDeadline = computeReauthDeadline({
+					eligible: isEligibleForReauthDeadline({
+						provider: account.provider,
+						refreshToken: account.refresh_token,
+						accessToken: account.access_token,
+					}),
+					lastManualReauthAt:
+						account.last_manual_reauth_at != null
+							? Number(account.last_manual_reauth_at)
+							: null,
+				});
+
 				return {
 					id: account.id,
 					name: account.name,
@@ -682,6 +707,13 @@ export function createAccountsListHandler(
 					created: new Date(Number(account.created_at)).toISOString(),
 					paused: account.paused === 1,
 					requiresReauth: account.requires_reauth === 1,
+					lastManualReauthAt:
+						account.last_manual_reauth_at != null
+							? Number(account.last_manual_reauth_at)
+							: null,
+					reauthDeadlineStatus: reauthDeadline?.status ?? null,
+					daysUntilReauthRequired: reauthDeadline?.daysUntilDeadline ?? null,
+					hoursUntilReauthRequired: reauthDeadline?.hoursUntilDeadline ?? null,
 					pauseReason: account.pause_reason ?? null,
 					priority: Number(account.priority) || 0,
 					tokenStatus: account.token_valid ? "valid" : "expired",
@@ -712,6 +744,7 @@ export function createAccountsListHandler(
 					peakHoursPauseEnabled: account.peak_hours_pause_enabled === 1,
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
+					requestTransformer: account.request_transformer,
 					usageUtilization,
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
@@ -3353,6 +3386,59 @@ export function createAccountModelMappingsUpdateHandler(
 				error instanceof Error
 					? error
 					: new Error("Failed to update model mappings"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account request transformer update handler.
+ */
+export function createAccountRequestTransformerUpdateHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const { requestTransformer }: { requestTransformer: unknown } =
+				await req.json();
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ provider: string | null }>(
+				"SELECT provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+			if (account.provider !== "openai-compatible") {
+				return errorResponse(
+					BadRequest(
+						"Request transformers are only available for openai-compatible accounts",
+					),
+				);
+			}
+			if (
+				requestTransformer !== null &&
+				(typeof requestTransformer !== "string" ||
+					!REQUEST_TRANSFORMERS.includes(
+						requestTransformer as (typeof REQUEST_TRANSFORMERS)[number],
+					))
+			) {
+				return errorResponse(BadRequest("Invalid request transformer"));
+			}
+
+			await db.run("UPDATE accounts SET request_transformer = ? WHERE id = ?", [
+				requestTransformer,
+				accountId,
+			]);
+
+			return jsonResponse({ success: true, requestTransformer });
+		} catch (error) {
+			log.error("Account request transformer update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update request transformer"),
 			);
 		}
 	};

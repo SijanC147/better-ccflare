@@ -54,6 +54,7 @@ export {
 	ERROR_MESSAGES,
 	INTERNAL_PROBE_SECRET_HEADER,
 	isInternalProbe,
+	markTrustedNativeResponses,
 	type ProxyContext,
 	TIMING,
 } from "./proxy-types";
@@ -73,11 +74,14 @@ export {
 } from "./routing-observations";
 export {
 	checkAllAccountsHealth,
+	checkReauthDeadline,
 	checkRefreshTokenHealth,
+	computeReauthDeadline,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
 	getOAuthErrorMessage,
 	isRefreshTokenLikelyExpired,
+	type ReauthDeadlineStatus,
 	type TokenHealthReport,
 	type TokenHealthStatus,
 } from "./token-health-monitor";

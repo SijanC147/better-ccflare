@@ -17,6 +17,7 @@ import {
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
+	createAccountRequestTransformerUpdateHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
 	createAlibabaCodingPlanAccountAddHandler,
@@ -109,6 +110,7 @@ import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
 import {
 	createModelsHandler,
+	createModelsPreviewHandler,
 	createModelsRefreshHandler,
 } from "./handlers/models";
 import {
@@ -588,8 +590,12 @@ export class APIRouter {
 		// Model catalog routes
 		const modelsHandler = createModelsHandler(this.context);
 		const modelsRefreshHandler = createModelsRefreshHandler(this.context);
+		const modelsPreviewHandler = createModelsPreviewHandler();
 		this.handlers.set("GET:/api/models", (_req, url) => modelsHandler(url));
 		this.handlers.set("POST:/api/models/refresh", () => modelsRefreshHandler());
+		this.handlers.set("POST:/api/models/preview", (req) =>
+			modelsPreviewHandler(req),
+		);
 	}
 
 	/**
@@ -811,6 +817,15 @@ export class APIRouter {
 				);
 				return await this.wrapHandler((req) =>
 					modelMappingsHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Account request transformer update
+			if (path.endsWith("/request-transformer") && method === "POST") {
+				const requestTransformerHandler =
+					createAccountRequestTransformerUpdateHandler(this.context.dbOps);
+				return await this.wrapHandler((req) =>
+					requestTransformerHandler(req, accountId),
 				)(req, url);
 			}
 

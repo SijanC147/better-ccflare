@@ -84,7 +84,7 @@ describe("Codex transform — continuation nudge behavior", () => {
 		expect(nudges(body.input)).toBe(1);
 	});
 
-	test("nudge does NOT fire for a replayed Skill result in mid-history", async () => {
+	test("nudge stays at its original boundary for a replayed Skill result in mid-history", async () => {
 		const body = await transform({
 			model: "claude-opus-4-8",
 			max_tokens: 10,
@@ -110,7 +110,7 @@ describe("Codex transform — continuation nudge behavior", () => {
 				{ role: "user", content: "thanks, continue" },
 			],
 		});
-		expect(nudges(body.input)).toBe(0);
+		expect(nudges(body.input)).toBe(1);
 	});
 
 	// REVEAL: whether concurrent Skill invocations in one turn each get a nudge,

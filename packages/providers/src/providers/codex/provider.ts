@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	isForceAccountModelEnabled,
 	mapModelName,
@@ -14,8 +14,23 @@ import {
 import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import { resolveProviderModelDefault } from "../../provider-model-defaults";
-import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import type {
+	RateLimitInfo,
+	TokenRefreshResult,
+	UpstreamObservationContext,
+} from "../../types";
 import { drainReader, drainReaderWithDeadline } from "../../utils/stream-drain";
+import {
+	CODEX_CACHE_DIAGNOSTICS_ENV,
+	CodexCacheDiagnostics,
+} from "./cache-diagnostics";
+import {
+	type CacheFacts,
+	cacheDigest,
+	persistCacheTelemetry,
+	sanitizeCacheFacts,
+} from "./cache-telemetry";
+import { observeCodexWire } from "./cache-wire";
 import {
 	CodexStreamLiveness,
 	type CodexStreamLivenessOptions,
@@ -23,6 +38,15 @@ import {
 import { normalizeCodexInputUsage } from "./usage";
 
 const log = new Logger("CodexProvider");
+
+function recordCacheLifecycle(facts: CacheFacts): void {
+	log.info("Codex cache observation lifecycle", sanitizeCacheFacts(facts));
+	persistCacheTelemetry(facts, (dropped) =>
+		log.warn("Codex cache telemetry persistence failure", {
+			dropped_events: dropped,
+		}),
+	);
+}
 
 /**
  * Enabled by default: attaches an OpenAI prompt_cache_key to converted
@@ -39,11 +63,22 @@ const log = new Logger("CodexProvider");
 export const CODEX_PROMPT_CACHE_KEY_ENV = "CCFLARE_CODEX_PROMPT_CACHE_KEY";
 /** "conversation" (default) or "session"; see derivePromptCacheKey. */
 export const CODEX_CACHE_KEY_MODE_ENV = "CCFLARE_CODEX_CACHE_KEY_MODE";
+/**
+ * Set to "0" to make Codex's synthetic count_tokens endpoint return a typed
+ * Anthropic-shaped error instead of a character-based estimate. Anthropic-
+ * compatible clients (e.g. Claude Code) already degrade gracefully to a local
+ * estimate on a count_tokens error, so this costs them nothing and lets an
+ * operator fail the route closed on purpose instead of exposing an estimate
+ * that downstream consumers may treat as authoritative.
+ */
+export const CODEX_SYNTHETIC_COUNT_TOKENS_ENV =
+	"CCFLARE_CODEX_SYNTHETIC_COUNT_TOKENS";
 
 const INTERNAL_HEADERS = [
 	"x-better-ccflare-request-id",
 	"x-better-ccflare-request-stream",
 	"x-better-ccflare-codex-custom-tools",
+	"x-better-ccflare-native-responses",
 ];
 
 function sanitizeResponseHeaders(headers: Headers): Headers {
@@ -67,7 +102,7 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.149.1";
+export const CODEX_VERSION = "0.154.0";
 /** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
 const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
@@ -257,20 +292,74 @@ interface CodexTool {
 
 interface CodexRequest {
 	model: string;
-	input: (CodexMessage | CodexFunctionCallItem | CodexFunctionCallOutputItem)[];
+	input: (
+		| CodexMessage
+		| CodexFunctionCallItem
+		| CodexFunctionCallOutputItem
+		| Record<string, unknown>
+	)[];
 	stream: boolean;
 	store: boolean;
 	max_output_tokens?: number;
-	reasoning?: { effort: string; context?: string };
+	reasoning?: { effort: string; summary?: unknown; context?: unknown };
 	instructions?: string;
 	tools?: CodexTool[];
 	prompt_cache_key?: string;
-	tool_choice?:
-		| "auto"
-		| "required"
-		| "none"
-		| { type: "function"; name: string };
+	prompt_cache_options?: {
+		mode?: "explicit";
+		ttl?: "30m";
+		comparison_response_id?: string;
+	};
+	previous_response_id?: string;
+	tool_choice?: string | Record<string, unknown>;
 	parallel_tool_calls?: boolean;
+	text?: unknown;
+	temperature?: unknown;
+	top_p?: unknown;
+	truncation?: unknown;
+	include?: unknown;
+	metadata?: unknown;
+	service_tier?: unknown;
+	context_management?: unknown;
+	stream_options?: unknown;
+	client_metadata?: unknown;
+	access_programs?: unknown;
+}
+
+type ContinuationResult =
+	| "cold"
+	| "hit"
+	| "expired"
+	| "config_mismatch"
+	| "prefix_mismatch";
+
+interface ContinuationState {
+	responseId: string;
+	replayPrefixDigests: string[];
+	configDigest: string;
+	expiresAt: number;
+	generation: number;
+}
+
+interface PendingContinuation {
+	legacyProjection?: boolean;
+	continuationSuppressed?: boolean;
+	laneKey: string;
+	inputDigests: string[];
+	configDigest: string;
+	result: ContinuationResult;
+	inputItemCount: number;
+	suffixItemCount: number;
+	createdAt: number;
+	baseGeneration: number | null;
+	stablePrefixDigest: string;
+	sessionDigest: string;
+	previousResponsePresent: boolean;
+	cacheControlsApplied: boolean;
+	terminalCandidate?: {
+		responseId: string;
+		outputDigests: string[];
+	};
 }
 
 // ── Anthropic request types ───────────────────────────────────────────────────
@@ -429,6 +518,9 @@ export interface CodexProviderOptionsForTests {
 	streamHeartbeatIntervalMs?: number;
 	streamRawSilenceTimeoutMs?: number;
 	streamDrainDeadlineMs?: number;
+	continuationTtlMs?: number;
+	continuationMaxLanes?: number;
+	now?: () => number;
 }
 
 /**
@@ -445,20 +537,51 @@ export interface CodexProviderOptionsForTests {
  * @better-ccflare/providers, so the reverse import would be circular.
  */
 export const CODEX_STREAM_DRAIN_DEADLINE_MS = 30_000;
+const CODEX_CONTINUATION_TTL_MS = 30 * 60 * 1000;
+const CODEX_CONTINUATION_MAX_LANES = 2_048;
 
 export class CodexProvider extends BaseProvider {
 	name = "codex";
+	private readonly cacheDiagnostics = new CodexCacheDiagnostics(
+		(facts) => {
+			log.info("Codex outgoing cache diagnostics", sanitizeCacheFacts(facts));
+			persistCacheTelemetry(facts, (dropped) =>
+				log.warn("Codex cache telemetry persistence failure", {
+					dropped_events: dropped,
+				}),
+			);
+		},
+		Date.now,
+		recordCacheLifecycle,
+	);
 	private readonly streamLivenessOptions: CodexStreamLivenessOptions;
 	private readonly streamDrainDeadlineMs: number;
+	private readonly continuationTtlMs: number;
+	private readonly continuationMaxLanes: number;
+	private readonly now: () => number;
+	private readonly continuationByLane = new Map<string, ContinuationState>();
+	private continuationGeneration = 0;
+	private readonly messagesContinuationRejected = new Map<string, number>();
+	private readonly pendingContinuationByRequest = new Map<
+		string,
+		PendingContinuation
+	>();
 
 	constructor(options: CodexProviderOptionsForTests = {}) {
 		super();
+		if (process.env[CODEX_CACHE_DIAGNOSTICS_ENV] === "1")
+			recordCacheLifecycle({ event: "observer_ready" });
 		this.streamLivenessOptions = {
 			heartbeatIntervalMs: options.streamHeartbeatIntervalMs,
 			rawSilenceTimeoutMs: options.streamRawSilenceTimeoutMs,
 		};
 		this.streamDrainDeadlineMs =
 			options.streamDrainDeadlineMs ?? CODEX_STREAM_DRAIN_DEADLINE_MS;
+		this.continuationTtlMs =
+			options.continuationTtlMs ?? CODEX_CONTINUATION_TTL_MS;
+		this.continuationMaxLanes =
+			options.continuationMaxLanes ?? CODEX_CONTINUATION_MAX_LANES;
+		this.now = options.now ?? Date.now;
 	}
 	// Fallback map: proxy-operations.ts injects x-better-ccflare-request-id and
 	// x-better-ccflare-request-stream into the upstream response before calling
@@ -467,7 +590,12 @@ export class CodexProvider extends BaseProvider {
 	// and the 529 in-place retry path (which doesn't re-tag those headers).
 	private requestStreamById = new Map<
 		string,
-		{ stream: boolean; hasCustomTools: boolean; ts: number }
+		{
+			stream: boolean;
+			hasCustomTools: boolean;
+			nativeResponses: boolean;
+			ts: number;
+		}
 	>();
 
 	private sweepRequestStreamById(): void {
@@ -594,9 +722,23 @@ export class CodexProvider extends BaseProvider {
 		newHeaders.delete("x-api-key");
 		newHeaders.delete("host");
 
-		// Remove internal proxy headers.
+		// These describe the client's connection to this proxy, not the proxy's
+		// connection to Codex. Ingress cookies belong to the proxy's domain;
+		// makeProxyRequest adds any host-scoped ChatGPT cookies separately.
+		newHeaders.delete("cookie");
+		newHeaders.delete("cdn-loop");
+		newHeaders.delete("forwarded");
+		newHeaders.delete("x-real-ip");
+
+		// Remove internal proxy headers (x-better-ccflare-*) and headers
+		// supplied by ingress proxies/CDNs (cf-*, x-forwarded-*) — none of
+		// these describe the proxy's own connection to Codex.
 		for (const key of [...newHeaders.keys()]) {
-			if (key.startsWith("x-better-ccflare-")) {
+			if (
+				key.startsWith("x-better-ccflare-") ||
+				key.startsWith("cf-") ||
+				key.startsWith("x-forwarded-")
+			) {
 				newHeaders.delete(key);
 			}
 		}
@@ -611,6 +753,58 @@ export class CodexProvider extends BaseProvider {
 		newHeaders.set("originator", "codex_cli_rs");
 
 		return newHeaders;
+	}
+
+	observeRequest(headers: Headers, nativeResponses: boolean) {
+		if (process.env[CODEX_CACHE_DIAGNOSTICS_ENV] !== "1") return;
+		const facts: CacheFacts = {
+			ingress_digest: cacheDigest(randomUUID()),
+			path: nativeResponses ? "native" : "legacy",
+		};
+		for (const [header, field] of [
+			["x-better-ccflare-gateway-request-digest", "gateway_request_digest"],
+			["x-better-ccflare-gateway-attempt-digest", "gateway_attempt_digest"],
+		]) {
+			const value = headers.get(header);
+			facts[field] = value && /^[0-9a-f]{64}$/.test(value) ? value : null;
+		}
+		recordCacheLifecycle({ ...facts, event: "request_received" });
+		return {
+			bindRequestId(requestId: string) {
+				facts.request_digest = cacheDigest(requestId);
+				recordCacheLifecycle({ ...facts, event: "request_identified" });
+			},
+			response(response: Response) {
+				recordCacheLifecycle({
+					...facts,
+					event: "request_headers",
+					status_code: response.status,
+					refusal_reason:
+						response.headers.get("x-better-ccflare-pool-status") === "exhausted"
+							? "pool_exhausted"
+							: null,
+				});
+				return response;
+			},
+			error(_error: unknown) {
+				recordCacheLifecycle({ ...facts, event: "request_error" });
+			},
+		};
+	}
+
+	async observeUpstream(request: Request, context: UpstreamObservationContext) {
+		if (
+			process.env[CODEX_CACHE_DIAGNOSTICS_ENV] !== "1" ||
+			request.method === "GET"
+		)
+			return;
+		return observeCodexWire(
+			this.cacheDiagnostics,
+			request,
+			context,
+			(source) =>
+				this.extractSessionId(source as unknown as AnthropicRequest) ?? null,
+		);
 	}
 
 	async transformRequestBody(
@@ -642,9 +836,34 @@ export class CodexProvider extends BaseProvider {
 			this.sweepRequestStreamById();
 			const body = (await request.json()) as AnthropicRequest;
 			if (isSyntheticCountTokens) {
+				if (process.env[CODEX_SYNTHETIC_COUNT_TOKENS_ENV] === "0") {
+					return this.createSyntheticErrorResponse(
+						request,
+						501,
+						"not_implemented_error",
+						"Codex does not support count_tokens; synthetic estimates are disabled (CCFLARE_CODEX_SYNTHETIC_COUNT_TOKENS=0).",
+					);
+				}
 				return this.createSyntheticCountTokensResponse(request, body);
 			}
 			const isSubscriptionEndpoint = isCodexSubscriptionEndpoint(account);
+			const requestId = request.headers.get("x-better-ccflare-request-id");
+			const nativeResponses =
+				request.headers.get("x-better-ccflare-native-responses") === "true";
+			// Extract internal passthrough metadata. The object itself is untrusted
+			// unless the in-process Responses adapter marked this as a native request.
+			const suppliedPassthrough = body.__better_ccflare_codex_passthrough as
+				| Record<string, unknown>
+				| undefined;
+			// The legacy gateway bridge has supported an explicit cache routing
+			// hint since 3.5.71. Preserve that one non-executing field, including
+			// an empty opt-out, while keeping native input, continuation identity,
+			// response IDs, model, and every other execution control trust-gated.
+			const passthrough = nativeResponses
+				? suppliedPassthrough
+				: typeof suppliedPassthrough?.prompt_cache_key === "string"
+					? { prompt_cache_key: suppliedPassthrough.prompt_cache_key }
+					: undefined;
 			if (
 				isSubscriptionEndpoint &&
 				typeof body.max_tokens === "number" &&
@@ -657,13 +876,33 @@ export class CodexProvider extends BaseProvider {
 					`Codex subscription endpoint does not support max_tokens: ${body.max_tokens}.`,
 				);
 			}
-
-			const requestId = request.headers.get("x-better-ccflare-request-id");
-			// Extract internal passthrough metadata.
-			const passthrough = body.__better_ccflare_codex_passthrough as
-				| Record<string, unknown>
-				| undefined;
+			if (
+				isSubscriptionEndpoint &&
+				passthrough &&
+				Object.hasOwn(passthrough, "max_output_tokens")
+			) {
+				return this.createSyntheticErrorResponse(
+					request,
+					400,
+					"invalid_request_error",
+					"Native Responses max_output_tokens is not supported by the canonical Codex subscription endpoint.",
+				);
+			}
 			delete body.__better_ccflare_codex_passthrough;
+			// The passthrough object is part of the public JSON body and is therefore
+			// attacker-controlled. Native execution fields require the proxy's
+			// in-process trust bit; the legacy path admits only the cache hint above.
+			log.info("Codex native continuation admission diagnostics", {
+				nativeResponses,
+				requestIdPresent: typeof requestId === "string" && requestId.length > 0,
+				continuationRequested:
+					passthrough?.continuation_strategy === "previous_response_id",
+				authenticatedCallerPresent:
+					typeof passthrough?.caller_identity_digest === "string" &&
+					passthrough.caller_identity_digest.length > 0,
+				accountIdentityPresent:
+					typeof account?.id === "string" && account.id.length > 0,
+			});
 			const codexBody = this.convertToCodexFormat(
 				body,
 				account,
@@ -671,6 +910,89 @@ export class CodexProvider extends BaseProvider {
 				isSubscriptionEndpoint,
 				passthrough,
 			);
+			if (
+				nativeResponses &&
+				passthrough?.continuation_strategy === "previous_response_id"
+			) {
+				// Controlled continuation never trusts a caller-supplied response ID.
+				// prepareNativeContinuation will restore one only after every trusted
+				// identity and exact replay-prefix check succeeds.
+				delete codexBody.previous_response_id;
+				if (requestId) {
+					this.prepareNativeContinuation(
+						codexBody,
+						request.headers,
+						account,
+						requestId,
+						passthrough.caller_identity_digest,
+						passthrough.cache_controls_applied,
+					);
+				}
+			}
+
+			const messagesModels =
+				process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION_MODELS;
+			if (
+				!nativeResponses &&
+				process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION === "1" &&
+				(messagesModels === undefined ||
+					messagesModels
+						.split(",")
+						.map((model) => model.trim())
+						.includes(codexBody.model))
+			) {
+				const caller = request.headers.get(
+					"x-better-ccflare-authenticated-caller",
+				);
+				// Opting a custom Responses endpoint into this bridge also opts it
+				// into GPT cache controls; ordinary custom-endpoint traffic is unchanged.
+				if (
+					caller &&
+					/^[0-9a-f]{64}$/.test(caller) &&
+					codexBody.prompt_cache_key === undefined
+				) {
+					codexBody.prompt_cache_key = this.derivePromptCacheKey(
+						body,
+						codexBody.instructions ?? "",
+						codexBody.input,
+						account,
+						true,
+					);
+				}
+				if (
+					requestId &&
+					caller &&
+					/^[0-9a-f]{64}$/.test(caller) &&
+					account?.id &&
+					codexBody.prompt_cache_key
+				) {
+					// The serving adapter owns the cache standard. Claude signatures and
+					// cache_control objects never enter the Responses request.
+					codexBody.prompt_cache_options = { ttl: "30m" };
+					if (codexBody.instructions) {
+						codexBody.input.unshift({
+							role: "developer",
+							content: [
+								{
+									type: "input_text",
+									text: codexBody.instructions,
+									prompt_cache_breakpoint: { mode: "explicit" },
+								},
+							],
+						} as unknown as CodexMessage);
+						codexBody.instructions = "";
+					}
+					this.prepareNativeContinuation(
+						codexBody,
+						request.headers,
+						account,
+						requestId,
+						caller,
+						true,
+						true,
+					);
+				}
+			}
 
 			// Only custom (non-function) tools can produce custom_tool_call output;
 			// let processResponse skip buffering when none were declared. Responses
@@ -689,11 +1011,16 @@ export class CodexProvider extends BaseProvider {
 				this.requestStreamById.set(requestId, {
 					stream: body.stream === true,
 					hasCustomTools,
+					nativeResponses,
 					ts: Date.now(),
 				});
 			}
 
 			const newHeaders = new Headers(request.headers);
+			// Proxy-owned correlation is needed only while preparing the transformed
+			// request. Do not disclose it to the upstream Responses service.
+			newHeaders.delete("x-better-ccflare-request-id");
+			newHeaders.delete("x-better-ccflare-authenticated-caller");
 			newHeaders.set("content-type", "application/json");
 			newHeaders.set(
 				"x-better-ccflare-request-stream",
@@ -702,6 +1029,10 @@ export class CodexProvider extends BaseProvider {
 			newHeaders.set(
 				"x-better-ccflare-codex-custom-tools",
 				hasCustomTools ? "true" : "false",
+			);
+			newHeaders.set(
+				"x-better-ccflare-native-responses",
+				nativeResponses ? "true" : "false",
 			);
 			newHeaders.delete("content-length");
 
@@ -742,7 +1073,7 @@ export class CodexProvider extends BaseProvider {
 			return this.transformModelsListResponse(response);
 		}
 
-		const contentType = response.headers.get("content-type");
+		const contentType = response.headers.get("content-type")?.toLowerCase();
 		const requestId = response.headers.get("x-better-ccflare-request-id");
 		const fallbackEntry = requestId
 			? this.requestStreamById.get(requestId)
@@ -773,10 +1104,30 @@ export class CodexProvider extends BaseProvider {
 				: headerCustomTools === "false"
 					? false
 					: (fallbackEntry?.hasCustomTools ?? false);
+		const headerNativeResponses = response.headers.get(
+			"x-better-ccflare-native-responses",
+		);
+		const nativeResponses =
+			headerNativeResponses === "true"
+				? true
+				: headerNativeResponses === "false"
+					? false
+					: (fallbackEntry?.nativeResponses ?? false);
 		// Not deleted: an in-place 529 retry re-invokes processResponse and needs
 		// this entry too. sweepRequestStreamById reclaims it after 30s instead.
 		const isEventStream = contentType?.includes("text/event-stream") ?? false;
 		if (isEventStream) {
+			// Requests accepted on /v1/responses already speak the upstream wire
+			// format. Keep their response IDs, cache diagnostics, and continuation
+			// metadata intact instead of converting Responses -> Anthropic ->
+			// Responses a second time.
+			if (nativeResponses) {
+				return this.buildNativeResponsesPassthroughResponse(
+					response,
+					requestId,
+					response.ok,
+				);
+			}
 			// No custom tools declared, so no custom_tool_call is possible: skip
 			// buffering and stream straight through.
 			if (!mightHaveCustomToolCalls) {
@@ -816,6 +1167,22 @@ export class CodexProvider extends BaseProvider {
 
 		if (response.ok && response.body !== null) {
 			const probeText = await response.text();
+			if (nativeResponses) {
+				const continuationResult = requestId
+					? this.pendingContinuationByRequest.get(requestId)
+					: undefined;
+				this.observeNativeJsonResponse(requestId, probeText);
+				return this.buildNativeResponsesPassthroughResponse(
+					new Response(probeText, {
+						status: response.status,
+						statusText: response.statusText,
+						headers: response.headers,
+					}),
+					requestId,
+					false,
+					continuationResult,
+				);
+			}
 			const trimmed = probeText.trimStart();
 			const isSseLike = trimmed.startsWith("event:");
 
@@ -833,7 +1200,9 @@ export class CodexProvider extends BaseProvider {
 						response,
 					);
 				}
-				const headers = sanitizeResponseHeaders(response.headers);
+				// Keep internal request correlation through the internal SSE rebuild.
+				// The final public response sanitizes these headers after conversion.
+				const headers = new Headers(response.headers);
 				headers.set("content-type", "text/event-stream");
 				const sseResponse = new Response(probeText, {
 					status: response.status,
@@ -870,6 +1239,726 @@ export class CodexProvider extends BaseProvider {
 		headers.set("content-type", "text/event-stream");
 		headers.set("x-better-ccflare-codex-response-format", "responses-api");
 		return new Response(body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
+	}
+
+	private canonicalizeForDigest(value: unknown): unknown {
+		if (Array.isArray(value)) {
+			return value.map((item) => this.canonicalizeForDigest(item));
+		}
+		if (!value || typeof value !== "object") return value;
+		const source = value as Record<string, unknown>;
+		const canonical: Record<string, unknown> = {};
+		for (const key of Object.keys(source).sort()) {
+			canonical[key] = this.canonicalizeForDigest(source[key]);
+		}
+		return canonical;
+	}
+
+	private digest(value: unknown): string {
+		return createHash("sha256")
+			.update(JSON.stringify(this.canonicalizeForDigest(value)))
+			.digest("hex");
+	}
+
+	/**
+	 * Canonical replay shape produced by the pinned generic pi Responses adapter.
+	 * It cannot replay output-text annotations, preserves a reasoning item as its
+	 * opaque signed item, emits function calls without `status`, and coalesces an
+	 * assistant message's output/refusal text into one output_text block. Only
+	 * those known lossy fields are normalized; unknown item kinds stay exact and
+	 * therefore fail cold if the client does not replay them byte-equivalently.
+	 */
+	private normalizeReplayItemForDigest(value: unknown): unknown {
+		if (!value || typeof value !== "object" || Array.isArray(value))
+			return value;
+		const item = value as Record<string, unknown>;
+		if (item.type === "function_call") {
+			return {
+				type: "function_call",
+				id: item.id,
+				call_id: item.call_id,
+				name: item.name,
+				arguments: item.arguments,
+			};
+		}
+		if (item.type !== "message" || item.role !== "assistant") return value;
+		if (!Array.isArray(item.content)) return value;
+		let text = "";
+		for (const rawBlock of item.content) {
+			if (!rawBlock || typeof rawBlock !== "object") return value;
+			const block = rawBlock as Record<string, unknown>;
+			if (block.type === "output_text" && typeof block.text === "string") {
+				text += block.text;
+			} else if (
+				block.type === "refusal" &&
+				typeof block.refusal === "string"
+			) {
+				text += block.refusal;
+			} else {
+				return value;
+			}
+		}
+		return {
+			type: "message",
+			role: "assistant",
+			id: item.id,
+			status: item.status ?? "completed",
+			phase: item.phase,
+			content: [{ type: "output_text", text }],
+		};
+	}
+
+	private replayItemDigest(value: unknown): string {
+		return this.digest(this.normalizeReplayItemForDigest(value));
+	}
+
+	private orderedDigest(digests: string[], domain: string): string {
+		return this.digest({ domain, digests });
+	}
+
+	private hasExactlyOneExplicitPromptCacheBreakpoint(value: unknown): boolean {
+		let count = 0;
+		let exact = true;
+		const inspect = (candidate: unknown): void => {
+			if (Array.isArray(candidate)) {
+				for (const item of candidate) inspect(item);
+				return;
+			}
+			if (!candidate || typeof candidate !== "object") return;
+			const record = candidate as Record<string, unknown>;
+			if (Object.hasOwn(record, "prompt_cache_breakpoint")) {
+				count++;
+				const breakpoint = record.prompt_cache_breakpoint;
+				if (
+					!breakpoint ||
+					typeof breakpoint !== "object" ||
+					Array.isArray(breakpoint) ||
+					Object.keys(breakpoint).length !== 1 ||
+					(breakpoint as Record<string, unknown>).mode !== "explicit"
+				) {
+					exact = false;
+				}
+			}
+			for (const [key, child] of Object.entries(record)) {
+				if (key !== "prompt_cache_breakpoint") inspect(child);
+			}
+		};
+		inspect(value);
+		return exact && count === 1;
+	}
+
+	private hasExactPromptCacheOptions(value: unknown): boolean {
+		return (
+			value !== null &&
+			typeof value === "object" &&
+			!Array.isArray(value) &&
+			Object.keys(value).length === 1 &&
+			(value as Record<string, unknown>).ttl === "30m"
+		);
+	}
+
+	private continuationConfigDigest(body: CodexRequest): string {
+		const effectivePromptCacheOptions =
+			body.prompt_cache_options &&
+			Object.keys(body.prompt_cache_options).length > 0
+				? body.prompt_cache_options
+				: undefined;
+		return this.digest({
+			instructions: body.instructions,
+			tools: body.tools,
+			tool_choice: body.tool_choice,
+			parallel_tool_calls: body.parallel_tool_calls,
+			reasoning: body.reasoning,
+			store: body.store,
+			prompt_cache_key: body.prompt_cache_key,
+			prompt_cache_options: effectivePromptCacheOptions,
+			max_output_tokens: body.max_output_tokens,
+			text: body.text,
+			temperature: body.temperature,
+			top_p: body.top_p,
+			truncation: body.truncation,
+			include: body.include,
+			metadata: body.metadata,
+			service_tier: body.service_tier,
+			context_management: body.context_management,
+		});
+	}
+
+	private normalizeContinuationSession(
+		headers: Headers,
+		body: CodexRequest,
+	): string | null {
+		const raw = headers.get("session-id") ?? body.prompt_cache_key;
+		if (typeof raw !== "string") return null;
+		const normalized = raw.trim();
+		if (normalized.length === 0) return null;
+		return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+			normalized,
+		)
+			? normalized.toLowerCase()
+			: normalized;
+	}
+
+	private sweepContinuationState(now: number): void {
+		for (const [lane, expires] of this.messagesContinuationRejected) {
+			if (expires <= now) this.messagesContinuationRejected.delete(lane);
+		}
+		while (this.messagesContinuationRejected.size > this.continuationMaxLanes) {
+			const oldest = this.messagesContinuationRejected.keys().next().value;
+			if (oldest === undefined) break;
+			this.messagesContinuationRejected.delete(oldest);
+		}
+		for (const [key, state] of this.continuationByLane) {
+			if (state.expiresAt <= now) this.continuationByLane.delete(key);
+		}
+		for (const [requestId, pending] of this.pendingContinuationByRequest) {
+			if (pending.createdAt + this.continuationTtlMs <= now) {
+				this.pendingContinuationByRequest.delete(requestId);
+			}
+		}
+		while (this.continuationByLane.size > this.continuationMaxLanes) {
+			const oldest = this.continuationByLane.keys().next().value;
+			if (typeof oldest !== "string") break;
+			this.continuationByLane.delete(oldest);
+		}
+		while (
+			this.pendingContinuationByRequest.size >
+			this.continuationMaxLanes * 2
+		) {
+			const oldest = this.pendingContinuationByRequest.keys().next().value;
+			if (typeof oldest !== "string") break;
+			this.pendingContinuationByRequest.delete(oldest);
+		}
+	}
+
+	private prepareNativeContinuation(
+		body: CodexRequest,
+		headers: Headers,
+		account: Account | undefined,
+		requestId: string,
+		callerIdentityDigest: unknown,
+		cacheControlsApplied: unknown,
+		legacyProjection = false,
+	): void {
+		// On a controlled request the gateway, not the caller, owns the chain.
+		// Never let a caller-provided response ID survive an inability to prepare
+		// the authenticated, exact-prefix continuation state.
+		delete body.previous_response_id;
+		if (
+			!account?.id ||
+			typeof callerIdentityDigest !== "string" ||
+			!/^[0-9a-f]{64}$/.test(callerIdentityDigest)
+		) {
+			return;
+		}
+		const session = this.normalizeContinuationSession(headers, body);
+		if (!session) return;
+		const now = this.now();
+		const sessionDigest = this.digest({
+			domain: "better-ccflare:codex-session:v1",
+			callerIdentityDigest,
+			session,
+		});
+		const laneKey = this.digest({
+			accountId: account.id,
+			protocol: legacyProjection ? "messages" : "responses",
+			model: body.model,
+			callerIdentityDigest,
+			sessionDigest,
+		});
+		const previousBeforeSweep = this.continuationByLane.get(laneKey);
+		const previousExpired =
+			previousBeforeSweep !== undefined && previousBeforeSweep.expiresAt <= now;
+		this.sweepContinuationState(now);
+		const inputDigests = body.input.map((item) => this.replayItemDigest(item));
+		const configDigest = this.continuationConfigDigest(body);
+		// Cache-control attestation describes the logical full request admitted by
+		// the adapter. On a continuation hit the stable prefix (and therefore its
+		// developer breakpoint) is intentionally elided from the upstream suffix,
+		// so measure it before any continuation slicing occurs.
+		const originalBreakpointIsExact =
+			this.hasExactlyOneExplicitPromptCacheBreakpoint(body.input);
+		const continuationSuppressed =
+			legacyProjection && this.messagesContinuationRejected.has(laneKey);
+		const previous = continuationSuppressed
+			? undefined
+			: this.continuationByLane.get(laneKey);
+		let result: ContinuationResult = "cold";
+		let suffixStart = 0;
+		if (previousExpired) {
+			result = "expired";
+		} else if (previous) {
+			if (previous.configDigest !== configDigest) {
+				result = "config_mismatch";
+			} else {
+				const exactPrefix =
+					inputDigests.length > previous.replayPrefixDigests.length &&
+					previous.replayPrefixDigests.every(
+						(digest, index) => inputDigests[index] === digest,
+					);
+				if (exactPrefix) {
+					result = "hit";
+					suffixStart = previous.replayPrefixDigests.length;
+					body.input = body.input.slice(suffixStart);
+					body.previous_response_id = previous.responseId;
+					// Refresh LRU order only after a verified exact match.
+					this.continuationByLane.delete(laneKey);
+					this.continuationByLane.set(laneKey, previous);
+				} else {
+					result = "prefix_mismatch";
+				}
+			}
+		}
+		const stablePrefixDigests =
+			result === "hit" && previous
+				? previous.replayPrefixDigests
+				: inputDigests;
+		this.pendingContinuationByRequest.set(requestId, {
+			continuationSuppressed,
+			legacyProjection,
+			laneKey,
+			inputDigests,
+			configDigest,
+			result,
+			inputItemCount: inputDigests.length,
+			suffixItemCount: inputDigests.length - suffixStart,
+			createdAt: now,
+			baseGeneration: previous?.generation ?? null,
+			stablePrefixDigest: this.orderedDigest(
+				stablePrefixDigests,
+				"better-ccflare:codex-stable-prefix:v1",
+			),
+			sessionDigest,
+			previousResponsePresent: result === "hit",
+			cacheControlsApplied:
+				cacheControlsApplied === true &&
+				this.hasExactPromptCacheOptions(body.prompt_cache_options) &&
+				originalBreakpointIsExact,
+		});
+		this.sweepContinuationState(now);
+		log.info("Codex continuation diagnostics", {
+			result,
+			inputItemCount: inputDigests.length,
+			suffixItemCount: inputDigests.length - suffixStart,
+		});
+	}
+
+	async recoverMessagesContinuation(
+		response: Response,
+		originalRequest: Request,
+		account: Account,
+	): Promise<Request | null> {
+		const requestId = originalRequest.headers.get(
+			"x-better-ccflare-request-id",
+		);
+		const pending = requestId
+			? this.pendingContinuationByRequest.get(requestId)
+			: undefined;
+		if (
+			!requestId ||
+			!pending?.legacyProjection ||
+			pending.result !== "hit" ||
+			![400, 404].includes(response.status)
+		)
+			return null;
+		let error: { code?: unknown; param?: unknown; type?: unknown } | undefined;
+		try {
+			error = ((await response.clone().json()) as { error?: typeof error })
+				.error;
+		} catch {
+			return null;
+		}
+		if (
+			error?.code !== "previous_response_not_found" &&
+			error?.code !== "invalid_previous_response_id" &&
+			!(
+				error?.param === "previous_response_id" &&
+				error?.type === "invalid_request_error"
+			)
+		)
+			return null;
+		// The endpoint may not retain store=false responses over HTTP. Preserve
+		// the session with one full-history retry, without changing retention,
+		// account, model, or attempting the same rejected chain on every turn.
+		const current = this.continuationByLane.get(pending.laneKey);
+		if ((current?.generation ?? null) === pending.baseGeneration) {
+			this.continuationByLane.delete(pending.laneKey);
+			this.messagesContinuationRejected.set(
+				pending.laneKey,
+				this.now() + this.continuationTtlMs,
+			);
+		}
+		this.pendingContinuationByRequest.delete(requestId);
+		log.info("Codex Messages continuation rejected; retrying full history", {
+			result: "previous_response_not_found",
+		});
+		return this.transformRequestBody(originalRequest, account);
+	}
+
+	private projectedOutputDigests(
+		output: unknown[],
+		legacy: boolean,
+	): string[] | null {
+		if (!legacy) return output.map((item) => this.replayItemDigest(item));
+		const content: AnthropicContentBlock[] = [];
+		for (const raw of output) {
+			if (!raw || typeof raw !== "object") return null;
+			const item = raw as Record<string, unknown>;
+			if (item.type === "reasoning") continue; // retained by upstream response ID
+			if (
+				item.type === "message" &&
+				item.role === "assistant" &&
+				Array.isArray(item.content)
+			) {
+				for (const rawBlock of item.content) {
+					const block = rawBlock as Record<string, unknown>;
+					if (
+						!block ||
+						block.type !== "output_text" ||
+						typeof block.text !== "string"
+					)
+						return null;
+					content.push({ type: "text", text: block.text });
+				}
+			} else if (
+				item.type === "function_call" &&
+				typeof item.call_id === "string" &&
+				typeof item.name === "string" &&
+				typeof item.arguments === "string"
+			) {
+				try {
+					content.push({
+						type: "tool_use",
+						id: item.call_id,
+						name: item.name,
+						input: JSON.parse(item.arguments),
+					});
+				} catch {
+					return null;
+				}
+			} else return null;
+		}
+		return this.convertMessage({ role: "assistant", content }).map((item) =>
+			this.replayItemDigest(item),
+		);
+	}
+
+	private commitNativeContinuation(
+		requestId: string | null,
+		responseId: unknown,
+		responseOutput: unknown,
+	): void {
+		if (
+			!requestId ||
+			typeof responseId !== "string" ||
+			responseId.length === 0
+		) {
+			return;
+		}
+		if (!Array.isArray(responseOutput)) {
+			this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		this.commitNativeContinuationDigests(
+			requestId,
+			responseId,
+			responseOutput.map((item) => this.replayItemDigest(item)),
+		);
+	}
+
+	private commitNativeContinuationDigests(
+		requestId: string,
+		responseId: string,
+		outputDigests: string[],
+	): void {
+		const pending = this.pendingContinuationByRequest.get(requestId);
+		if (!pending) return;
+		this.pendingContinuationByRequest.delete(requestId);
+		if (
+			pending.continuationSuppressed ||
+			this.messagesContinuationRejected.has(pending.laneKey)
+		)
+			return;
+		const current = this.continuationByLane.get(pending.laneKey);
+		if ((current?.generation ?? null) !== pending.baseGeneration) {
+			// Another request advanced/replaced this lane after preparation. A late
+			// terminal event must not roll the chain back (last-completion-wins).
+			return;
+		}
+		this.continuationByLane.delete(pending.laneKey);
+		this.continuationByLane.set(pending.laneKey, {
+			responseId,
+			replayPrefixDigests: [...pending.inputDigests, ...outputDigests],
+			configDigest: pending.configDigest,
+			expiresAt: this.now() + this.continuationTtlMs,
+			generation: ++this.continuationGeneration,
+		});
+		this.sweepContinuationState(this.now());
+	}
+
+	private observeNativeTerminalEvent(
+		requestId: string | null,
+		eventText: string,
+	): void {
+		let eventName = "";
+		const dataLines: string[] = [];
+		for (const line of eventText.split(/\r?\n/)) {
+			if (line.startsWith("event:")) {
+				eventName = line.slice("event:".length).trim();
+			} else if (line.startsWith("data:")) {
+				const value = line.slice("data:".length);
+				dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
+			}
+		}
+		// The SSE algorithm joins repeated data fields with a literal newline.
+		// Keeping that framing matters for standards-compliant emitters and also
+		// makes this parser agree with the adapter's buffered-response parser.
+		const dataText = dataLines.join("\n");
+		// The stream's standard terminator, not a lifecycle event. It always
+		// legally follows response.completed, so it must never be treated as
+		// ambiguous trailing data or invalidate an already-observed checkpoint.
+		if (dataText === "[DONE]") return;
+		let data:
+			| {
+					type?: unknown;
+					response?: { id?: unknown; status?: unknown; output?: unknown };
+			  }
+			| undefined;
+		if (dataText) {
+			try {
+				data = JSON.parse(dataText) as typeof data;
+			} catch {
+				// A malformed event makes the stream ambiguous even if a completion
+				// candidate appeared earlier. Fail closed and never advance the chain.
+				if (requestId) this.pendingContinuationByRequest.delete(requestId);
+				return;
+			}
+		}
+		const dataType = typeof data?.type === "string" ? data.type : "";
+		if (eventName && dataType && eventName !== dataType) {
+			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		if (
+			dataText &&
+			requestId &&
+			this.pendingContinuationByRequest.get(requestId)?.terminalCandidate
+		) {
+			// response.completed must be the final data-bearing event. Anything
+			// after it makes the terminal checkpoint ambiguous, even if that later
+			// event is otherwise a valid non-terminal lifecycle event.
+			this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		const isFailureTerminal = (type: string): boolean =>
+			type === "response.failed" || type === "response.incomplete";
+		if (isFailureTerminal(eventName) || isFailureTerminal(dataType)) {
+			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		const claimsCompleted =
+			eventName === "response.completed" || dataType === "response.completed";
+		if (!claimsCompleted || !data) {
+			return;
+		}
+		if (data.response?.status !== "completed") {
+			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		if (!requestId) return;
+		const pending = this.pendingContinuationByRequest.get(requestId);
+		if (!pending) return;
+		const responseId = data.response?.id;
+		const output = data.response?.output;
+		if (
+			pending.terminalCandidate ||
+			typeof responseId !== "string" ||
+			responseId.length === 0 ||
+			!Array.isArray(output)
+		) {
+			// Multiple terminal completions or malformed terminal state are
+			// ambiguous. Never choose one and advance a continuation chain.
+			this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		const outputDigests = this.projectedOutputDigests(
+			output,
+			pending.legacyProjection === true,
+		);
+		if (!outputDigests) {
+			this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		pending.terminalCandidate = { responseId, outputDigests };
+	}
+
+	private finalizeNativeContinuationStream(
+		requestId: string | null,
+		cleanEof: boolean,
+	): void {
+		if (!requestId) return;
+		const pending = this.pendingContinuationByRequest.get(requestId);
+		if (!pending) return;
+		if (!cleanEof || !pending.terminalCandidate) {
+			this.pendingContinuationByRequest.delete(requestId);
+			return;
+		}
+		this.commitNativeContinuationDigests(
+			requestId,
+			pending.terminalCandidate.responseId,
+			pending.terminalCandidate.outputDigests,
+		);
+	}
+
+	private observeNativeJsonResponse(
+		requestId: string | null,
+		responseText: string,
+	): void {
+		try {
+			const response = JSON.parse(responseText) as {
+				id?: unknown;
+				status?: unknown;
+				output?: unknown;
+			};
+			if (response.status === "completed") {
+				this.commitNativeContinuation(requestId, response.id, response.output);
+			} else if (requestId) {
+				this.pendingContinuationByRequest.delete(requestId);
+			}
+		} catch {
+			// A malformed upstream body is not a successful continuation checkpoint.
+			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+		}
+	}
+
+	private buildNativeResponsesPassthroughResponse(
+		response: Response,
+		requestId: string | null,
+		observeStream = true,
+		continuationSnapshot?: PendingContinuation,
+	): Response {
+		const pending = requestId
+			? this.pendingContinuationByRequest.get(requestId)
+			: undefined;
+		const diagnostics = continuationSnapshot ?? pending;
+		if (!response.ok && response.status !== 529 && requestId) {
+			this.pendingContinuationByRequest.delete(requestId);
+		}
+		const headers = sanitizeResponseHeaders(response.headers);
+		for (const attestationHeader of [
+			"x-better-ccflare-codex-continuation",
+			"x-better-ccflare-transport-used",
+			"x-better-ccflare-continuation-used",
+			"x-better-ccflare-previous-response-present",
+			"x-better-ccflare-stable-prefix-digest",
+			"x-better-ccflare-session-digest",
+			"x-better-ccflare-continuation-result",
+			"x-better-ccflare-cache-controls-applied",
+		]) {
+			headers.delete(attestationHeader);
+		}
+		headers.set("x-better-ccflare-codex-response-format", "responses-api");
+		const transportUsed = response.headers
+			.get("content-type")
+			?.toLowerCase()
+			.includes("text/event-stream")
+			? "sse"
+			: "http";
+		headers.set("x-better-ccflare-transport-used", transportUsed);
+		if (diagnostics) {
+			headers.set("x-better-ccflare-codex-continuation", diagnostics.result);
+			headers.set("x-better-ccflare-continuation-result", diagnostics.result);
+			headers.set(
+				"x-better-ccflare-continuation-used",
+				diagnostics.result === "hit" ? "true" : "false",
+			);
+			headers.set(
+				"x-better-ccflare-previous-response-present",
+				diagnostics.previousResponsePresent ? "true" : "false",
+			);
+			headers.set(
+				"x-better-ccflare-stable-prefix-digest",
+				diagnostics.stablePrefixDigest,
+			);
+			headers.set("x-better-ccflare-session-digest", diagnostics.sessionDigest);
+			headers.set(
+				"x-better-ccflare-cache-controls-applied",
+				diagnostics.cacheControlsApplied ? "true" : "false",
+			);
+		}
+		log.info("Codex continuation response diagnostics", {
+			transportUsed,
+			continuationUsed: diagnostics?.result === "hit",
+			previousResponsePresent: diagnostics?.previousResponsePresent ?? false,
+			stablePrefixDigestPresent: diagnostics !== undefined,
+			sessionDigestPresent: diagnostics !== undefined,
+		});
+		if (!observeStream || !response.body) {
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}
+		const decoder = new TextDecoder();
+		let buffer = "";
+		const observeDelimitedEvents = (): void => {
+			const events = buffer.split(/\r?\n\r?\n/);
+			buffer = events.pop() ?? "";
+			for (const event of events) {
+				this.observeNativeTerminalEvent(requestId, event);
+			}
+		};
+		const upstreamReader = response.body.getReader();
+		let settled = false;
+		const failClosed = (): void => {
+			if (settled) return;
+			settled = true;
+			this.finalizeNativeContinuationStream(requestId, false);
+		};
+		const observed = new ReadableStream<Uint8Array>(
+			{
+				pull: async (controller) => {
+					try {
+						const { done, value } = await upstreamReader.read();
+						if (done) {
+							buffer += decoder.decode();
+							observeDelimitedEvents();
+							// A partial final event is truncation, even if it resembles a completed
+							// response. Promote only when the downstream consumer observes a clean
+							// upstream EOF; cancellation and transport errors fail closed below.
+							settled = true;
+							this.finalizeNativeContinuationStream(
+								requestId,
+								buffer.trim().length === 0,
+							);
+							controller.close();
+							return;
+						}
+						buffer += decoder.decode(value, { stream: true });
+						observeDelimitedEvents();
+						controller.enqueue(value);
+					} catch (error) {
+						failClosed();
+						controller.error(error);
+					}
+				},
+				cancel: async (reason) => {
+					failClosed();
+					try {
+						await upstreamReader.cancel(reason);
+					} catch {
+						// Continuation state is already removed; cancellation is best-effort.
+					}
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		return new Response(observed, {
 			status: response.status,
 			statusText: response.statusText,
 			headers,
@@ -1427,9 +2516,11 @@ export class CodexProvider extends BaseProvider {
 		instructions: string,
 		input: readonly unknown[],
 		account?: Account,
+		controlledMessagesEndpoint = false,
 	): string | undefined {
 		if (process.env[CODEX_PROMPT_CACHE_KEY_ENV] === "0") return undefined;
-		if (!isOpenAiPromptCacheEndpoint(account)) return undefined;
+		if (!controlledMessagesEndpoint && !isOpenAiPromptCacheEndpoint(account))
+			return undefined;
 		const sessionId = this.extractSessionId(body);
 		if (!sessionId) return undefined;
 		// Digests are truncated to 48 hex chars so the full key fits the API's
@@ -1484,43 +2575,43 @@ export class CodexProvider extends BaseProvider {
 		const instructions = this.extractSystemPrompt(body.system);
 
 		// Convert messages
-		const input: CodexRequest["input"] = [];
+		const nativeInput = Array.isArray(passthrough?.native_input)
+			? structuredClone(passthrough.native_input)
+			: null;
+		const input: CodexRequest["input"] = nativeInput
+			? (nativeInput as CodexRequest["input"])
+			: [];
 		const skillCallIds = new Set<string>();
-		let skillCompletedInFinalMessage = false;
-		for (const [msgIndex, msg] of body.messages.entries()) {
+		for (const msg of nativeInput ? [] : body.messages) {
+			let skillCompletedInMessage = false;
 			for (const item of this.convertMessage(msg)) {
 				input.push(item);
 				if ("type" in item && item.type === "function_call") {
-					if (item.name === "Skill") {
-						skillCallIds.add(item.call_id);
-					}
+					if (item.name === "Skill") skillCallIds.add(item.call_id);
 				} else if (
 					"type" in item &&
 					item.type === "function_call_output" &&
-					skillCallIds.has(item.call_id)
+					skillCallIds.delete(item.call_id)
 				) {
-					skillCallIds.delete(item.call_id);
-					if (msgIndex === body.messages.length - 1) {
-						skillCompletedInFinalMessage = true;
-					}
+					skillCompletedInMessage = true;
 				}
 			}
-		}
-		// A Skill result in the active turn means new instructions just loaded.
-		// Native Claude continues on its own; Codex often stops, so append one
-		// nudge. Tail placement keeps the cached prefix stable, and firing on
-		// any final-turn Skill result (not only a trailing one) covers parallel
-		// fan-out turns that mix Skill and other tool results.
-		if (skillCompletedInFinalMessage) {
-			input.push({
-				role: "user",
-				content: [
-					{
-						type: "input_text",
-						text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
-					},
-				],
-			});
+			// Reconstruct the same guidance at the same historical boundary on
+			// every replay. Emitting it only for the final message removes a
+			// previously sent input item when the caller appends another turn,
+			// breaking the reusable prefix. One nudge per message also handles
+			// parallel Skill results without multiplying continuation requests.
+			if (skillCompletedInMessage) {
+				input.push({
+					role: "user",
+					content: [
+						{
+							type: "input_text",
+							text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+						},
+					],
+				});
+			}
 		}
 
 		// Convert tools
@@ -1538,7 +2629,7 @@ export class CodexProvider extends BaseProvider {
 
 		// Preserve original reasoning settings.
 		const passthroughReasoning = passthrough?.reasoning as
-			| { effort?: string; context?: string }
+			| { effort?: string; summary?: unknown; context?: unknown }
 			| undefined;
 		const reasoningEffort =
 			passthroughReasoning?.effort ?? body.reasoning?.effort;
@@ -1564,14 +2655,21 @@ export class CodexProvider extends BaseProvider {
 			store:
 				typeof passthrough?.store === "boolean" ? passthrough.store : false,
 			reasoning: {
+				...(passthroughReasoning?.summary === undefined
+					? {}
+					: { summary: passthroughReasoning.summary }),
 				effort: reasoningResolution.effort ?? "medium",
-				context: "all_turns",
+				context:
+					passthroughReasoning && Object.hasOwn(passthroughReasoning, "context")
+						? passthroughReasoning.context
+						: "all_turns",
 			},
 		};
 
 		// Restore Responses Lite tools first.
 		const passthroughAdditionalTools = passthrough?.additional_tools;
 		if (
+			!nativeInput &&
 			Array.isArray(passthroughAdditionalTools) &&
 			passthroughAdditionalTools.length > 0
 		) {
@@ -1583,7 +2681,14 @@ export class CodexProvider extends BaseProvider {
 				)[]),
 			);
 		}
+		const nativeMaxOutputTokens = passthrough?.max_output_tokens;
 		if (
+			typeof nativeMaxOutputTokens === "number" &&
+			Number.isInteger(nativeMaxOutputTokens) &&
+			nativeMaxOutputTokens > 0
+		) {
+			codexRequest.max_output_tokens = nativeMaxOutputTokens;
+		} else if (
 			!isSubscriptionEndpoint &&
 			typeof body.max_tokens === "number" &&
 			Number.isFinite(body.max_tokens)
@@ -1595,7 +2700,10 @@ export class CodexProvider extends BaseProvider {
 			}
 		}
 
-		codexRequest.instructions = instructions || "You are a helpful assistant.";
+		codexRequest.instructions =
+			typeof passthrough?.native_instructions === "string"
+				? passthrough.native_instructions
+				: instructions || "You are a helpful assistant.";
 		// Prefer the original cache key, then use the derived key.
 		const originalCacheKey =
 			typeof passthrough?.prompt_cache_key === "string"
@@ -1611,11 +2719,44 @@ export class CodexProvider extends BaseProvider {
 		if (promptCacheKey) {
 			codexRequest.prompt_cache_key = promptCacheKey;
 		}
-		const explicitToolChoice = this.convertToolChoice(
-			body.tool_choice,
-			tools ?? [],
-		);
-		if (explicitToolChoice) {
+		const promptCacheOptions = passthrough?.prompt_cache_options;
+		if (promptCacheOptions && typeof promptCacheOptions === "object") {
+			codexRequest.prompt_cache_options = promptCacheOptions as NonNullable<
+				CodexRequest["prompt_cache_options"]
+			>;
+		}
+		for (const field of [
+			"text",
+			"temperature",
+			"top_p",
+			"truncation",
+			"include",
+			"metadata",
+			"service_tier",
+			"context_management",
+			"stream_options",
+			"client_metadata",
+			"access_programs",
+		] as const) {
+			if (passthrough?.[field] !== undefined) {
+				codexRequest[field] = passthrough[field];
+			}
+		}
+		if (
+			typeof passthrough?.previous_response_id === "string" &&
+			passthrough.previous_response_id.length > 0
+		) {
+			codexRequest.previous_response_id = passthrough.previous_response_id;
+		}
+		const passthroughToolChoice = passthrough?.tool_choice;
+		const explicitToolChoice =
+			typeof passthroughToolChoice === "string" ||
+			(passthroughToolChoice !== null &&
+				typeof passthroughToolChoice === "object" &&
+				!Array.isArray(passthroughToolChoice))
+				? (passthroughToolChoice as string | Record<string, unknown>)
+				: this.convertToolChoice(body.tool_choice, tools ?? []);
+		if (explicitToolChoice !== undefined) {
 			codexRequest.tool_choice = explicitToolChoice;
 		} else if (tools?.some((t) => t.name === "StructuredOutput")) {
 			// Claude Code schema agents provide a StructuredOutput tool but do not set
@@ -1630,9 +2771,8 @@ export class CodexProvider extends BaseProvider {
 		if (body.tool_choice?.disable_parallel_tool_use === true) {
 			codexRequest.parallel_tool_calls = false;
 		}
-		// Responses Lite requires explicit false.
-		if (passthrough?.parallel_tool_calls === false) {
-			codexRequest.parallel_tool_calls = false;
+		if (typeof passthrough?.parallel_tool_calls === "boolean") {
+			codexRequest.parallel_tool_calls = passthrough.parallel_tool_calls;
 		}
 		// Preserve the original tool list.
 		const passthroughTools = passthrough?.tools;
@@ -1737,7 +2877,7 @@ export class CodexProvider extends BaseProvider {
 					const { done, value } = await reader.read();
 					if (done) break;
 					pending += value;
-					const parts = pending.split("\n");
+					const parts = pending.split(/\r?\n/);
 					pending = parts.pop() ?? "";
 					for (const line of parts) {
 						processLine(line);
@@ -1840,7 +2980,7 @@ export class CodexProvider extends BaseProvider {
 			stop_sequence: null,
 			usage,
 		};
-		const headers = sanitizeResponseHeaders(response.headers);
+		const headers = sanitizeResponseHeaders(transformed.headers);
 		headers.set("content-type", "application/json");
 		return new Response(JSON.stringify(jsonPayload), {
 			status: response.status,
@@ -1860,6 +3000,12 @@ export class CodexProvider extends BaseProvider {
 				`[codex:model-debug] request_id=${requestId} transformStreamingResponse initial fallback model=gpt-5.4 until response.created arrives`,
 			);
 		}
+		const controlledMessages =
+			response.ok &&
+			this.pendingContinuationByRequest.get(requestId)?.legacyProjection ===
+				true;
+		if (!response.ok && response.status !== 529)
+			this.pendingContinuationByRequest.delete(requestId);
 		const state: StreamState = {
 			buffer: "",
 			messageId: `msg_${crypto.randomUUID().replace(/-/g, "").substring(0, 24)}`,
@@ -1877,7 +3023,19 @@ export class CodexProvider extends BaseProvider {
 			sawToolUse: false,
 		};
 
-		const headers = sanitizeResponseHeaders(response.headers);
+		const headers = controlledMessages
+			? new Headers(
+					this.buildNativeResponsesPassthroughResponse(
+						new Response(null, {
+							status: response.status,
+							headers: response.headers,
+						}),
+						requestId,
+						false,
+					).headers,
+				)
+			: sanitizeResponseHeaders(response.headers);
+		headers.delete("x-better-ccflare-codex-response-format");
 		headers.set("content-type", "text/event-stream");
 
 		const { readable, writable } = new TransformStream<
@@ -1889,6 +3047,9 @@ export class CodexProvider extends BaseProvider {
 		const decoder = new TextDecoder();
 		const streamLiveness = new CodexStreamLiveness(this.streamLivenessOptions);
 
+		// Hold only the two terminal frames until upstream EOF. Claude clients may
+		// cancel at message_stop, so emitting it earlier would lose every checkpoint.
+		const terminalFrames: Uint8Array[] = [];
 		const writeSSE = async (event: string, data: unknown) => {
 			const payload =
 				typeof data === "object" && data !== null
@@ -1930,6 +3091,13 @@ export class CodexProvider extends BaseProvider {
 				payload.delta = delta;
 			}
 			const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+			if (
+				controlledMessages &&
+				(event === "message_delta" || event === "message_stop")
+			) {
+				terminalFrames.push(encoder.encode(line));
+				return;
+			}
 			await writer.write(encoder.encode(line));
 			streamLiveness.recordDownstreamWrite();
 		};
@@ -1965,6 +3133,7 @@ export class CodexProvider extends BaseProvider {
 		const processEvents = async () => {
 			const reader = response.body?.getReader();
 			let upstreamCancelStarted = false;
+			let cleanEof = false;
 			let upstreamDrainPromise: Promise<void> | null = null;
 
 			// `reader.cancel()` is a documented no-op on every released Bun
@@ -2004,6 +3173,8 @@ export class CodexProvider extends BaseProvider {
 			const cancelUpstreamOnce = (_reason: unknown): void => {
 				if (upstreamCancelStarted || !reader) return;
 				upstreamCancelStarted = true;
+				if (controlledMessages)
+					this.finalizeNativeContinuationStream(requestId, false);
 				upstreamDrainPromise = drainUpstream();
 				upstreamDrainPromise.catch(() => undefined);
 			};
@@ -2018,7 +3189,7 @@ export class CodexProvider extends BaseProvider {
 						// alive to the Anthropic client and to any intermediary idle
 						// timeout. A ping carries no content and cannot disturb the
 						// message/content-block sequence.
-						if (state.hasSentTerminalEvents) break;
+						if (state.hasSentTerminalEvents && !controlledMessages) break;
 						if (streamLiveness.canEmitHeartbeat()) {
 							await writeSSE("ping", { type: "ping" });
 							streamLiveness.recordDownstreamWrite();
@@ -2052,23 +3223,30 @@ export class CodexProvider extends BaseProvider {
 					if (outcome.type === "upstream_error") throw outcome.error;
 
 					const { value, done } = outcome.result;
-					if (done) break;
+					if (done) {
+						cleanEof = state.buffer.trim().length === 0;
+						break;
+					}
 
 					state.buffer += decoder.decode(value, { stream: true });
 
 					// Process complete SSE events in buffer
 					while (true) {
-						const newlineIdx = state.buffer.indexOf("\n\n");
-						if (newlineIdx === -1) break;
+						const boundary = state.buffer.match(/\r?\n\r?\n/);
+						if (!boundary || boundary.index === undefined) break;
 
-						const eventText = state.buffer.slice(0, newlineIdx);
-						state.buffer = state.buffer.slice(newlineIdx + 2);
+						const eventText = state.buffer.slice(0, boundary.index);
+						state.buffer = state.buffer.slice(
+							boundary.index + boundary[0].length,
+						);
 
+						if (controlledMessages)
+							this.observeNativeTerminalEvent(requestId, eventText);
 						const eventLine = eventText
-							.split("\n")
+							.split(/\r?\n/)
 							.find((l) => l.startsWith("event:"));
 						const dataLine = eventText
-							.split("\n")
+							.split(/\r?\n/)
 							.find((l) => l.startsWith("data:"));
 
 						if (!eventLine || !dataLine) continue;
@@ -2092,7 +3270,7 @@ export class CodexProvider extends BaseProvider {
 							writeSSE,
 							ensureMessageStart,
 						);
-						if (state.hasSentTerminalEvents) {
+						if (state.hasSentTerminalEvents && !controlledMessages) {
 							streamLiveness.stop();
 							cancelUpstreamOnce("Codex terminal response received");
 							break;
@@ -2143,7 +3321,20 @@ export class CodexProvider extends BaseProvider {
 				// streamDrainDeadlineMs / drainAbort — while writer.close() proceeds
 				// immediately, matching the fire-and-forget pattern used by
 				// cancelAfterForcedClose in anthropic-terminal-recovery.ts.
-				await writer.close();
+				try {
+					if (controlledMessages) {
+						const success =
+							cleanEof && !upstreamCancelStarted && !state.upstreamError;
+						if (success) {
+							for (const frame of terminalFrames) await writer.write(frame);
+						}
+						this.finalizeNativeContinuationStream(requestId, success);
+					}
+					await writer.close();
+				} catch {
+					if (controlledMessages)
+						this.finalizeNativeContinuationStream(requestId, false);
+				}
 			}
 		};
 
@@ -2584,4 +3775,16 @@ export class CodexProvider extends BaseProvider {
 				break;
 		}
 	}
+}
+
+/** Provider-specific recovery, kept out of the generic Provider interface. */
+export async function recoverCodexMessagesContinuation(
+	provider: unknown,
+	response: Response,
+	originalRequest: Request,
+	account: Account,
+): Promise<Request | null> {
+	return provider instanceof CodexProvider
+		? provider.recoverMessagesContinuation(response, originalRequest, account)
+		: null;
 }

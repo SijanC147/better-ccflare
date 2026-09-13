@@ -168,6 +168,9 @@ describe("CacheKeepaliveScheduler", () => {
 	});
 
 	afterEach(() => {
+		// Restore the captured native implementation. Assigning undefined does
+		// not make Bun recreate fetch between files in a monolithic `bun test`
+		// process and poisons every later transport suite.
 		globalThis.fetch = originalFetch;
 		resetStore();
 	});

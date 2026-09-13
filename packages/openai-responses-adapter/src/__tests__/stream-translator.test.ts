@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { logBus } from "@better-ccflare/logger";
+import { getTranslatedToolName } from "../custom-tools";
 import { translateAnthropicStreamToResponses } from "../stream-translator";
 
 async function collectSseEvents(
@@ -6,10 +8,10 @@ async function collectSseEvents(
 ): Promise<Array<{ event: string; data: unknown }>> {
 	const text = await response.text();
 	const events: Array<{ event: string; data: unknown }> = [];
-	const rawEvents = text.split("\n\n").filter((s) => s.trim().length > 0);
+	const rawEvents = text.split(/\r?\n\r?\n/).filter((s) => s.trim().length > 0);
 
 	for (const rawEvent of rawEvents) {
-		const lines = rawEvent.split("\n");
+		const lines = rawEvent.split(/\r?\n/);
 		let eventType = "message";
 		let dataStr = "";
 		for (const line of lines) {
@@ -39,6 +41,211 @@ function sseEvent(type: string, data: unknown): string {
 }
 
 describe("translateAnthropicStreamToResponses", () => {
+	test("namespaced custom and function calls restore name and namespace in SSE", async () => {
+		const events = [
+			sseEvent("message_start", { message: { id: "msg_namespaces" } }),
+		];
+		for (const [index, name, namespace, input] of [
+			[0, "exec", "functions", { input: "text(1)" }],
+			[1, "wait", "clock", { duration_ms: 10 }],
+		] as const) {
+			events.push(
+				sseEvent("content_block_start", {
+					index,
+					content_block: {
+						type: "tool_use",
+						id: `call_${index}`,
+						name: getTranslatedToolName(name, namespace),
+						input: {},
+					},
+				}),
+				sseEvent("content_block_delta", {
+					index,
+					delta: {
+						type: "input_json_delta",
+						partial_json: JSON.stringify(input),
+					},
+				}),
+				sseEvent("content_block_stop", { index }),
+			);
+		}
+		events.push(sseEvent("message_stop", {}));
+		const parsed = await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream(events),
+				"resp_namespaces",
+				"gpt-6-astra",
+				[
+					{
+						type: "namespace",
+						name: "functions",
+						tools: [{ type: "custom", name: "exec" }],
+					},
+					{
+						type: "namespace",
+						name: "clock",
+						tools: [{ type: "function", name: "wait" }],
+					},
+				],
+			),
+		);
+		for (const eventType of [
+			"response.output_item.added",
+			"response.output_item.done",
+		]) {
+			const items = parsed.filter((event) => event.event === eventType);
+			expect(items[0].data).toMatchObject({
+				item: {
+					type: "custom_tool_call",
+					name: "exec",
+					namespace: "functions",
+				},
+			});
+			expect(items[1].data).toMatchObject({
+				item: { type: "function_call", name: "wait", namespace: "clock" },
+			});
+		}
+		expect(parsed.at(-1)?.data).toMatchObject({
+			response: {
+				output: [
+					{
+						type: "custom_tool_call",
+						name: "exec",
+						namespace: "functions",
+						input: "text(1)",
+					},
+					{
+						type: "function_call",
+						name: "wait",
+						namespace: "clock",
+						arguments: '{"duration_ms":10}',
+					},
+				],
+			},
+		});
+	});
+
+	test("custom tool SSE decodes split JSON escapes into raw input and complete output", async () => {
+		const patch =
+			'*** Begin Patch\n*** Add File: hello.txt\n+"héllo" \\ 🚀\n*** End Patch';
+		const json = JSON.stringify({ input: patch }).replace(
+			"🚀",
+			"\\ud83d\\ude80",
+		);
+		const events = [
+			sseEvent("message_start", {
+				message: { id: "msg_custom", usage: { input_tokens: 12 } },
+			}),
+			sseEvent("content_block_start", {
+				index: 0,
+				content_block: {
+					type: "tool_use",
+					id: "call_patch",
+					name: "apply_patch",
+					input: {},
+				},
+			}),
+			...Array.from(json, (partial_json) =>
+				sseEvent("content_block_delta", {
+					index: 0,
+					delta: { type: "input_json_delta", partial_json },
+				}),
+			),
+			sseEvent("content_block_stop", { index: 0 }),
+			sseEvent("message_delta", { usage: { output_tokens: 30 } }),
+			sseEvent("message_stop", {}),
+		];
+		const parsed = await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream(events),
+				"resp_custom",
+				"gpt-5.4",
+				[{ type: "custom", name: "apply_patch" }],
+			),
+		);
+		expect(parsed.map((event) => event.event)).toEqual([
+			"response.created",
+			"response.in_progress",
+			"response.output_item.added",
+			"response.custom_tool_call_input.delta",
+			"response.custom_tool_call_input.done",
+			"response.output_item.done",
+			"response.completed",
+		]);
+		expect(parsed[2].data).toMatchObject({
+			item: {
+				type: "custom_tool_call",
+				call_id: "call_patch",
+				name: "apply_patch",
+				input: "",
+			},
+		});
+		expect(parsed[3].data).toMatchObject({
+			delta: patch,
+			call_id: "call_patch",
+		});
+		expect(parsed[4].data).toMatchObject({ input: patch });
+		const completedItem = {
+			type: "custom_tool_call",
+			id: "resp_custom_ctc_0",
+			call_id: "call_patch",
+			name: "apply_patch",
+			input: patch,
+			status: "completed",
+		};
+		expect(parsed[5].data).toMatchObject({ item: completedItem });
+		expect(parsed[6].data).toMatchObject({
+			response: { output: [completedItem] },
+		});
+	});
+
+	test("custom tool SSE accepts initial input and fails malformed input without completing a call", async () => {
+		for (const input of [
+			{ input: "" },
+			{ input: "complete patch" },
+			{ input: 42 },
+		]) {
+			const parsed = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					makeAnthropicStream([
+						sseEvent("message_start", { message: { id: "msg_custom" } }),
+						sseEvent("content_block_start", {
+							index: 0,
+							content_block: {
+								type: "tool_use",
+								id: "call_patch",
+								name: "apply_patch",
+								input,
+							},
+						}),
+						sseEvent("content_block_stop", { index: 0 }),
+						sseEvent("message_stop", {}),
+					]),
+					"resp_custom",
+					"gpt-5.4",
+					[{ type: "custom", name: "apply_patch" }],
+				),
+			);
+			if (typeof input.input === "string") {
+				expect(
+					parsed.find((event) => event.event === "response.output_item.done")
+						?.data,
+				).toMatchObject({
+					item: { type: "custom_tool_call", input: input.input },
+				});
+				expect(parsed.at(-1)?.event).toBe("response.completed");
+			} else {
+				expect(parsed.at(-1)?.event).toBe("response.failed");
+				expect(
+					parsed.some((event) => event.event === "response.output_item.done"),
+				).toBe(false);
+				expect(
+					parsed.some((event) => event.event === "response.completed"),
+				).toBe(false);
+			}
+		}
+	});
+
 	test("simple text streaming — correct event sequence and content", async () => {
 		const events = [
 			sseEvent("message_start", {
@@ -348,5 +555,142 @@ describe("translateAnthropicStreamToResponses", () => {
 		expect(resp.id).toBe("resp_004");
 		expect(resp.model).toBe("test-model");
 		expect(resp.status).toBe("completed");
+	});
+
+	test("malformed upstream SSE diagnostics never log payload content", async () => {
+		const payloadMarker = "PRIVATE_PROMPT_MARKER_MUST_NOT_BE_LOGGED";
+		const logs: unknown[] = [];
+		const listener = (event: unknown) => logs.push(event);
+		logBus.on("log", listener);
+		try {
+			const upstream = new Response(
+				`event: content_block_delta\ndata: {"secret":"${payloadMarker}"\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+			await translateAnthropicStreamToResponses(
+				upstream,
+				"resp_malformed",
+				"gpt-5.6-sol",
+			).text();
+		} finally {
+			logBus.off("log", listener);
+		}
+		expect(JSON.stringify(logs)).toContain(
+			"Failed to parse upstream SSE event data",
+		);
+		expect(JSON.stringify(logs)).not.toContain(payloadMarker);
+	});
+	test("translates a CRLF-framed upstream stream", async () => {
+		// An upstream that terminates SSE frames with \r\n\r\n contains no
+		// literal "\n\n", so a literal split finds no boundary: every event
+		// stays buffered until flush and only the last one survives.
+		const events = [
+			sseEvent("message_start", {
+				type: "message_start",
+				message: {
+					id: "msg_crlf",
+					model: "claude-3-5-sonnet",
+					usage: { input_tokens: 11, output_tokens: 0 },
+				},
+			}),
+			sseEvent("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "text", text: "" },
+			}),
+			sseEvent("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "text_delta", text: "hello" },
+			}),
+			sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+			sseEvent("message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: { output_tokens: 3 },
+			}),
+			sseEvent("message_stop", { type: "message_stop" }),
+		].map((e) => e.replace(/\n/g, "\r\n"));
+
+		const body = `${events.join("\r\n\r\n")}\r\n\r\n`;
+		const upstream = new Response(body, {
+			headers: { "Content-Type": "text/event-stream" },
+		});
+
+		const translated = translateAnthropicStreamToResponses(upstream, "gpt-5");
+		const got = await collectSseEvents(translated);
+		const types = got.map((e) => e.event);
+
+		expect(types).toContain("response.created");
+		expect(types).toContain("response.output_text.delta");
+		expect(types).toContain("response.completed");
+
+		const delta = got.find((e) => e.event === "response.output_text.delta");
+		expect((delta?.data as { delta?: string })?.delta).toBe("hello");
+	});
+
+	test("flushes a final frame with no trailing delimiter", async () => {
+		// Every other fixture's body ends with "\n\n", so the last frame is
+		// always drained by transform(). Omit it here so the last frame stays
+		// in lineBuffer until flush() and exercises the flush-only code path.
+		// End on message_delta (not message_stop): message_stop carries no
+		// data of its own, so a broken flush would still pass by falling back
+		// to emitDone()'s defaults. message_delta's output_tokens only reaches
+		// the final usage if this trailing, undelimited frame is actually
+		// parsed and processed rather than silently dropped.
+		const events = [
+			sseEvent("message_start", {
+				type: "message_start",
+				message: {
+					id: "msg_noeof",
+					usage: { input_tokens: 5, output_tokens: 0 },
+				},
+			}),
+			sseEvent("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "text", text: "" },
+			}),
+			sseEvent("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "text_delta", text: "hi" },
+			}),
+			sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+			sseEvent("message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: { output_tokens: 7 },
+			}),
+		];
+
+		// No trailing "\n\n" after the last event.
+		const body = events.join("\n\n");
+		const upstream = new Response(body, {
+			headers: { "Content-Type": "text/event-stream" },
+		});
+
+		const translated = translateAnthropicStreamToResponses(upstream, "gpt-5");
+		const got = await collectSseEvents(translated);
+		const types = got.map((e) => e.event);
+
+		expect(types).toContain("response.created");
+		expect(types).toContain("response.output_text.delta");
+		expect(types).toContain("response.completed");
+
+		const delta = got.find((e) => e.event === "response.output_text.delta");
+		expect((delta?.data as { delta?: string })?.delta).toBe("hi");
+
+		// Proves the trailing, undelimited message_delta frame was actually
+		// parsed by flush() rather than dropped — output_tokens would be 0
+		// (emitDone()'s default) if that frame never reached processEvent().
+		const doneEvent = got.find((e) => e.event === "response.completed");
+		const usage = (
+			(doneEvent?.data as Record<string, unknown>).response as Record<
+				string,
+				unknown
+			>
+		).usage as Record<string, number>;
+		expect(usage.output_tokens).toBe(7);
 	});
 });

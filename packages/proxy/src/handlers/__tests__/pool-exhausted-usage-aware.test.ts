@@ -250,6 +250,7 @@ describe("Zai pool-exhausted snapshot pairing", () => {
 				resetAt: tokensLimitResetMs,
 				type: "tokens_limit",
 			},
+			tokens_limit_weekly: null,
 		};
 		const account = makeAccount({ provider: "zai" });
 		const snapshot = getRepresentativeUsageSnapshotForProvider(zaiUsage, "zai");
@@ -300,6 +301,7 @@ describe("Zai pool-exhausted snapshot pairing", () => {
 				resetAt: Date.now() + 3_600_000,
 				type: "tokens_limit",
 			},
+			tokens_limit_weekly: null,
 		};
 		const snapshot = getRepresentativeUsageSnapshotForProvider(zaiUsage, "zai");
 
@@ -329,6 +331,7 @@ describe("Zai pool-exhausted snapshot pairing", () => {
 				resetAt: laterResetMs,
 				type: "tokens_limit",
 			},
+			tokens_limit_weekly: null,
 		};
 		const account = makeAccount({ provider: "zai" });
 		const snapshot = getRepresentativeUsageSnapshotForProvider(zaiUsage, "zai");
@@ -375,6 +378,7 @@ describe("Zai pool-exhausted snapshot pairing", () => {
 				resetAt: Date.now() + 3_600_000,
 				type: "tokens_limit",
 			},
+			tokens_limit_weekly: null,
 		};
 		const snapshot = getRepresentativeUsageSnapshotForProvider(zaiUsage, "zai");
 

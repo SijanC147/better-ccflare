@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
+import { getRequestTools } from "./custom-tools";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
@@ -13,23 +14,355 @@ const TERMINAL_RESPONSE_EVENT_TYPES = new Set([
 	"response.failed",
 ]);
 
+const NATIVE_RESPONSES_HEADER = "x-better-ccflare-native-responses";
+const CONTINUATION_HEADER = "x-better-ccflare-codex-continuation";
+const CACHE_MODE_HEADER = "x-better-ccflare-prompt-cache-mode";
+const CACHE_TTL_HEADER = "x-better-ccflare-prompt-cache-ttl";
+const CACHE_BREAKPOINT_HEADER = "x-better-ccflare-prompt-cache-breakpoint";
+const MAX_PROMPT_CACHE_BREAKPOINTS = 4;
+const CACHE_DIAGNOSTIC_TYPES = new Set(["cache_hit", "cache_miss"]);
+const CACHE_DIAGNOSTIC_REASONS = new Set([
+	"prefix_changed",
+	"cache_expired",
+	"cache_disabled",
+	"not_cacheable",
+]);
+const SUPPORTED_RESPONSES_REQUEST_FIELDS = new Set([
+	"model",
+	"input",
+	"instructions",
+	"tools",
+	"tool_choice",
+	"parallel_tool_calls",
+	"stream",
+	"reasoning",
+	"previous_response_id",
+	"max_output_tokens",
+	"store",
+	"prompt_cache_key",
+	"prompt_cache_options",
+	"text",
+	"temperature",
+	"top_p",
+	"truncation",
+	"include",
+	"metadata",
+	"service_tier",
+	"context_management",
+	"stream_options",
+	"client_metadata",
+	"access_programs",
+]);
+const NATIVE_GENERATION_FIELDS = [
+	"text",
+	"temperature",
+	"top_p",
+	"truncation",
+	"include",
+	"metadata",
+	"service_tier",
+	"context_management",
+	"max_output_tokens",
+	"stream_options",
+	"client_metadata",
+	"access_programs",
+] as const satisfies readonly (keyof ResponsesRequest)[];
+
+type CacheDiagnostic = {
+	type?: string;
+	reason?: string;
+	cache_missed_tokens?: number;
+	comparison_reusable_tokens?: number;
+};
+
+function countPromptCacheBreakpoints(value: unknown): number {
+	if (Array.isArray(value)) {
+		return value.reduce(
+			(total, item) => total + countPromptCacheBreakpoints(item),
+			0,
+		);
+	}
+	if (!value || typeof value !== "object") return 0;
+	const record = value as Record<string, unknown>;
+	let total = Object.hasOwn(record, "prompt_cache_breakpoint") ? 1 : 0;
+	for (const [key, child] of Object.entries(record)) {
+		if (key !== "prompt_cache_breakpoint") {
+			total += countPromptCacheBreakpoints(child);
+		}
+	}
+	return total;
+}
+
+function hasExactlyOneExplicitPromptCacheBreakpoint(value: unknown): boolean {
+	let count = 0;
+	let exact = true;
+	const inspect = (candidate: unknown): void => {
+		if (Array.isArray(candidate)) {
+			for (const item of candidate) inspect(item);
+			return;
+		}
+		if (!candidate || typeof candidate !== "object") return;
+		const record = candidate as Record<string, unknown>;
+		if (Object.hasOwn(record, "prompt_cache_breakpoint")) {
+			count++;
+			const breakpoint = record.prompt_cache_breakpoint;
+			if (
+				!breakpoint ||
+				typeof breakpoint !== "object" ||
+				Array.isArray(breakpoint) ||
+				Object.keys(breakpoint).length !== 1 ||
+				(breakpoint as Record<string, unknown>).mode !== "explicit"
+			) {
+				exact = false;
+			}
+		}
+		for (const [key, child] of Object.entries(record)) {
+			if (key !== "prompt_cache_breakpoint") inspect(child);
+		}
+	};
+	inspect(value);
+	return exact && count === 1;
+}
+
+function addDeveloperBreakpoint(body: ResponsesRequest): ResponsesRequest {
+	if (!Array.isArray(body.input)) {
+		throw new Error("developer cache breakpoint requires array input");
+	}
+	const input = structuredClone(body.input);
+	const existingCount = countPromptCacheBreakpoints(input);
+	for (let itemIndex = input.length - 1; itemIndex >= 0; itemIndex--) {
+		const item = input[itemIndex] as unknown as Record<string, unknown>;
+		// The pinned generic pi Responses adapter emits the system prompt as
+		// `{ role: "developer", content: "..." }` (without `type: "message"`).
+		// Accept both that shape and the fully typed Responses item.
+		if (
+			(item.type !== undefined && item.type !== "message") ||
+			item.role !== "developer"
+		) {
+			continue;
+		}
+		const content = item.content;
+		if (typeof content === "string") {
+			if (existingCount >= MAX_PROMPT_CACHE_BREAKPOINTS) {
+				throw new Error("developer cache breakpoint budget is exhausted");
+			}
+			item.type ??= "message";
+			item.content = [
+				{
+					type: "input_text",
+					text: content,
+					prompt_cache_breakpoint: { mode: "explicit" },
+				},
+			];
+			return { ...body, input } as ResponsesRequest;
+		}
+		if (!Array.isArray(content)) continue;
+		for (
+			let contentIndex = content.length - 1;
+			contentIndex >= 0;
+			contentIndex--
+		) {
+			const block = content[contentIndex];
+			if (
+				block &&
+				typeof block === "object" &&
+				((block as Record<string, unknown>).type === "input_text" ||
+					(block as Record<string, unknown>).type === "output_text")
+			) {
+				const target = block as Record<string, unknown>;
+				if (
+					!Object.hasOwn(target, "prompt_cache_breakpoint") &&
+					existingCount >= MAX_PROMPT_CACHE_BREAKPOINTS
+				) {
+					throw new Error("developer cache breakpoint budget is exhausted");
+				}
+				target.prompt_cache_breakpoint ??= {
+					mode: "explicit",
+				};
+				return { ...body, input } as ResponsesRequest;
+			}
+		}
+	}
+	throw new Error("developer cache breakpoint boundary was not found");
+}
+
+function applyPromptCacheControls(
+	body: ResponsesRequest,
+	headers: Headers,
+): ResponsesRequest {
+	let controlled = body;
+	const mode = headers.get(CACHE_MODE_HEADER)?.toLowerCase();
+	const ttl = headers.get(CACHE_TTL_HEADER)?.toLowerCase();
+	const suppliedOptions = controlled.prompt_cache_options as
+		| {
+				mode?: string;
+				ttl?: "30m";
+				comparison_response_id?: string;
+		  }
+		| undefined;
+	if (
+		mode === "implicit" ||
+		mode === "explicit" ||
+		ttl === "30m" ||
+		suppliedOptions?.mode === "implicit"
+	) {
+		const options = { ...(suppliedOptions ?? {}) };
+		// Some clients serialize the conceptual default as `implicit`, but the
+		// wire schema only accepts `explicit`; normalize it even without a route
+		// override so the proxy never forwards an invalid enum value.
+		if (options.mode === "implicit") delete options.mode;
+		if (mode === "implicit") {
+			// The API's only explicit enum value is `explicit`; implicit is the
+			// default and must be expressed by omitting the mode property.
+			delete options.mode;
+		} else if (mode === "explicit") {
+			options.mode = "explicit";
+		}
+		if (ttl === "30m") options.ttl = "30m";
+		controlled = {
+			...controlled,
+			prompt_cache_options: options as ResponsesRequest["prompt_cache_options"],
+		};
+	}
+	if (headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() === "developer") {
+		controlled = addDeveloperBreakpoint(controlled);
+	}
+	return controlled;
+}
+
+function logCacheRequestDiagnostics(body: ResponsesRequest, headers: Headers) {
+	const suppliedMode = body.prompt_cache_options?.mode as unknown;
+	const suppliedTtl = body.prompt_cache_options?.ttl as unknown;
+	log.info("Codex cache request diagnostics", {
+		transportRequested: body.stream === true ? "sse" : "http",
+		previousResponseRequested:
+			typeof body.previous_response_id === "string" &&
+			body.previous_response_id.length > 0,
+		continuationStrategy:
+			headers.get(CONTINUATION_HEADER) === "previous_response_id"
+				? "previous_response_id"
+				: "none",
+		cacheMode:
+			suppliedMode === undefined
+				? "implicit"
+				: suppliedMode === "explicit"
+					? "explicit"
+					: "invalid",
+		cacheTtl:
+			suppliedTtl === undefined
+				? "default"
+				: suppliedTtl === "30m"
+					? "30m"
+					: "invalid",
+		breakpointCount: countPromptCacheBreakpoints(body.input),
+		comparisonResponseIdPresent:
+			typeof body.prompt_cache_options?.comparison_response_id === "string" &&
+			body.prompt_cache_options.comparison_response_id.length > 0,
+	});
+}
+
+function logCacheCallerDiagnostics(apiKeyId?: string | null): void {
+	log.info("Codex cache caller diagnostics", {
+		authenticatedCallerPresent:
+			typeof apiKeyId === "string" && apiKeyId.length > 0,
+	});
+}
+
+function logCacheResponseDiagnostics(response: Record<string, unknown>): void {
+	const diagnostics = response.prompt_cache_diagnostics as
+		| CacheDiagnostic
+		| undefined;
+	if (!diagnostics || typeof diagnostics !== "object") return;
+	const diagnosticType =
+		typeof diagnostics.type === "string" &&
+		CACHE_DIAGNOSTIC_TYPES.has(diagnostics.type)
+			? diagnostics.type
+			: "unknown";
+	const diagnosticReason =
+		typeof diagnostics.reason === "string" &&
+		CACHE_DIAGNOSTIC_REASONS.has(diagnostics.reason)
+			? diagnostics.reason
+			: "unknown";
+	log.info("Codex cache response diagnostics", {
+		type: diagnosticType,
+		reason: diagnosticReason,
+		cacheMissedTokens:
+			typeof diagnostics.cache_missed_tokens === "number"
+				? diagnostics.cache_missed_tokens
+				: null,
+		comparisonReusableTokens:
+			typeof diagnostics.comparison_reusable_tokens === "number"
+				? diagnostics.comparison_reusable_tokens
+				: null,
+	});
+}
+
+function exactPromptCacheControlsApplied(
+	body: ResponsesRequest,
+	headers: Headers,
+): boolean {
+	const options = body.prompt_cache_options as unknown;
+	const exactOptions =
+		options !== null &&
+		typeof options === "object" &&
+		!Array.isArray(options) &&
+		Object.keys(options).length === 1 &&
+		(options as Record<string, unknown>).ttl === "30m";
+	return (
+		headers.get(CACHE_MODE_HEADER)?.toLowerCase() === "implicit" &&
+		headers.get(CACHE_TTL_HEADER)?.toLowerCase() === "30m" &&
+		headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() === "developer" &&
+		exactOptions &&
+		hasExactlyOneExplicitPromptCacheBreakpoint(body.input)
+	);
+}
+
+function inspectNativeResponsesStream(
+	body: ReadableStream<Uint8Array> | null,
+): ReadableStream<Uint8Array> | null {
+	if (!body) return null;
+	const decoder = new TextDecoder();
+	let pending = "";
+	return body.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				controller.enqueue(chunk);
+				pending += decoder.decode(chunk, { stream: true });
+				const events = pending.split(/\r?\n\r?\n/);
+				pending = events.pop() ?? "";
+				for (const event of events) {
+					const terminal = extractTerminalNativeResponse(`${event}\n\n`);
+					if (terminal) logCacheResponseDiagnostics(terminal);
+				}
+			},
+			flush() {
+				pending += decoder.decode();
+				const terminal = extractTerminalNativeResponse(pending);
+				if (terminal) logCacheResponseDiagnostics(terminal);
+			},
+		}),
+	);
+}
+
 function extractTerminalNativeResponse(
 	sseText: string,
 ): Record<string, unknown> | null {
-	const rawEvents = sseText.split("\n\n");
+	const rawEvents = sseText.split(/\r?\n\r?\n/);
 	for (let i = rawEvents.length - 1; i >= 0; i--) {
 		const rawEvent = rawEvents[i];
 		if (!rawEvent.trim()) continue;
 
 		let eventType = "";
-		let dataStr = "";
-		for (const line of rawEvent.split("\n")) {
+		const dataLines: string[] = [];
+		for (const line of rawEvent.split(/\r?\n/)) {
 			if (line.startsWith("event:")) {
 				eventType = line.slice("event:".length).trim();
 			} else if (line.startsWith("data:")) {
-				dataStr = line.slice("data:".length).trim();
+				const value = line.slice("data:".length);
+				dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
 			}
 		}
+		const dataStr = dataLines.join("\n");
 		if (!dataStr) continue;
 
 		try {
@@ -93,9 +426,51 @@ export async function handleResponsesRequest(
 			{ status: 400, headers: { "Content-Type": "application/json" } },
 		);
 	}
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "Request body must be a JSON object",
+				},
+			}),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+	}
+	const unsupportedFields = Object.keys(body).filter(
+		(field) => !SUPPORTED_RESPONSES_REQUEST_FIELDS.has(field),
+	);
+	if (unsupportedFields.length > 0) {
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: `Unsupported Responses request field(s): ${unsupportedFields.sort().join(", ")}`,
+				},
+			}),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+	}
+	if (
+		body.max_output_tokens !== undefined &&
+		(!Number.isInteger(body.max_output_tokens) || body.max_output_tokens <= 0)
+	) {
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "max_output_tokens must be a positive integer",
+				},
+			}),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+	}
 
 	// 2. Validate & normalise `input` — OpenAI Responses API allows a plain string
-	if (!body || (typeof body.input !== "string" && !Array.isArray(body.input))) {
+	if (typeof body.input !== "string" && !Array.isArray(body.input)) {
 		return new Response(
 			JSON.stringify({
 				type: "error",
@@ -119,11 +494,21 @@ export async function handleResponsesRequest(
 			],
 		};
 	}
-
-	// `previous_response_id` is intentionally ignored. Codex only sends this
-	// field over its WebSocket path (see codex-rs/core/src/client.rs:get_incremental_items).
-	// For regular HTTP /v1/responses requests Codex always includes the full
-	// conversation history in `input`, so there is nothing to resolve here.
+	try {
+		body = applyPromptCacheControls(body, req.headers);
+	} catch (error) {
+		const message =
+			error instanceof Error ? error.message : "invalid cache controls";
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			}),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+	}
+	logCacheRequestDiagnostics(body, req.headers);
+	logCacheCallerDiagnostics(apiKeyId);
 
 	// 3. Generate response ID
 	const responseId = `resp_${crypto.randomBytes(12).toString("hex")}`;
@@ -140,8 +525,10 @@ export async function handleResponsesRequest(
 	// accounting (session governor, load-balancer session affinity).
 	const sessionKey =
 		(typeof body.prompt_cache_key === "string" && body.prompt_cache_key) ||
+		req.headers.get("session-id") ||
 		req.headers.get("session_id") ||
 		req.headers.get("x-session-id") ||
+		req.headers.get("x-better-ccflare-session-id") ||
 		null;
 	if (sessionKey && !anthropicBody.metadata) {
 		anthropicBody.metadata = { user_id: `codex-responses-${sessionKey}` };
@@ -151,6 +538,24 @@ export async function handleResponsesRequest(
 	const messagesUrl = new URL(url.toString());
 	messagesUrl.pathname = "/v1/messages";
 	const syntheticHeaders = new Headers(req.headers);
+	const forwardedSessionId =
+		req.headers.get("session-id") ??
+		req.headers.get("x-better-ccflare-session-id");
+	const forwardedClientRequestId =
+		req.headers.get("x-client-request-id") ??
+		req.headers.get("x-better-ccflare-client-request-id");
+	if (forwardedSessionId)
+		syntheticHeaders.set("session-id", forwardedSessionId);
+	if (forwardedClientRequestId) {
+		syntheticHeaders.set("x-client-request-id", forwardedClientRequestId);
+	}
+	syntheticHeaders.delete("x-better-ccflare-session-id");
+	syntheticHeaders.delete("x-better-ccflare-client-request-id");
+	syntheticHeaders.delete(CONTINUATION_HEADER);
+	syntheticHeaders.delete(CACHE_MODE_HEADER);
+	syntheticHeaders.delete(CACHE_TTL_HEADER);
+	syntheticHeaders.delete(CACHE_BREAKPOINT_HEADER);
+	syntheticHeaders.set(NATIVE_RESPONSES_HEADER, "true");
 	syntheticHeaders.set("content-type", "application/json");
 	syntheticHeaders.delete("content-length");
 	// Body is now decompressed plain JSON — remove the original encoding hint.
@@ -164,17 +569,55 @@ export async function handleResponsesRequest(
 	syntheticHeaders.set("x-better-ccflare-exclude-providers", "anthropic-oauth");
 	// Preserve Codex-only fields.
 	const codexPassthrough: Record<string, unknown> = {};
+	if (typeof apiKeyId === "string" && apiKeyId.length > 0) {
+		// Bind gateway-managed continuation to the authenticated front-door key
+		// without retaining or forwarding the key record ID itself.
+		codexPassthrough.caller_identity_digest = crypto
+			.createHash("sha256")
+			.update("better-ccflare:caller-api-key:v1\0")
+			.update(apiKeyId)
+			.digest("hex");
+	}
+	if (exactPromptCacheControlsApplied(body, req.headers)) {
+		codexPassthrough.cache_controls_applied = true;
+	}
 	if (body.model !== undefined) codexPassthrough.model = body.model;
 	if (body.reasoning !== undefined) codexPassthrough.reasoning = body.reasoning;
 	if (body.prompt_cache_key !== undefined)
 		codexPassthrough.prompt_cache_key = body.prompt_cache_key;
+	if (body.prompt_cache_options !== undefined)
+		codexPassthrough.prompt_cache_options = body.prompt_cache_options;
+	if (body.previous_response_id !== undefined)
+		codexPassthrough.previous_response_id = body.previous_response_id;
+	if (req.headers.get(CONTINUATION_HEADER) === "previous_response_id") {
+		codexPassthrough.continuation_strategy = "previous_response_id";
+	}
+	// Preserve the native item structure for Codex accounts. This retains
+	// content-level prompt_cache_breakpoint markers and makes incremental
+	// previous_response_id requests lossless. Non-Codex failover still receives
+	// the translated Anthropic messages; its generic model mapper strips this
+	// provider-private side channel.
+	codexPassthrough.native_input = body.input;
+	if (body.instructions !== undefined)
+		codexPassthrough.native_instructions = body.instructions;
 	if (body.tools !== undefined) codexPassthrough.tools = body.tools;
+	if (body.tool_choice !== undefined)
+		codexPassthrough.tool_choice = body.tool_choice;
 	if (body.parallel_tool_calls !== undefined)
 		codexPassthrough.parallel_tool_calls = body.parallel_tool_calls;
 	if (body.store !== undefined) codexPassthrough.store = body.store;
+	for (const field of NATIVE_GENERATION_FIELDS) {
+		if (body[field] !== undefined) codexPassthrough[field] = body[field];
+	}
 	// Preserve Responses Lite tools.
 	const additionalToolsItems = Array.isArray(body.input)
-		? body.input.filter((item: any) => item.type === "additional_tools")
+		? body.input.filter(
+				(item) =>
+					typeof item === "object" &&
+					item !== null &&
+					(item as unknown as Record<string, unknown>).type ===
+						"additional_tools",
+			)
 		: [];
 	if (additionalToolsItems.length > 0) {
 		codexPassthrough.additional_tools = additionalToolsItems;
@@ -205,6 +648,7 @@ export async function handleResponsesRequest(
 			ctx,
 			apiKeyId,
 			apiKeyName,
+			{ trustedNativeResponses: true },
 		);
 	} catch (err) {
 		const statusCode =
@@ -229,45 +673,46 @@ export async function handleResponsesRequest(
 		);
 	}
 
-	// 7. Translate non-200 Anthropic errors to OpenAI error shape
+	// 7. Normalize upstream errors, including native Codex/FastAPI errors.
 	if (anthropicResp.status !== 200) {
-		let errorBody: { error: { message: string; type: string; code: string } };
 		const contentType = anthropicResp.headers.get("content-type") ?? "";
-		if (contentType.includes("application/json")) {
+		let message = `Upstream request failed with HTTP ${anthropicResp.status}. Check the proxy request logs for the upstream account and response.`;
+		let type = "api_error";
+		let code = type;
+		if (
+			contentType.includes("application/json") ||
+			contentType.includes("+json")
+		) {
 			try {
-				const anthropicError = (await anthropicResp.json()) as {
-					type?: string;
-					error?: { type?: string; message?: string };
-				};
-				const errType = anthropicError?.error?.type ?? "api_error";
-				errorBody = {
-					error: {
-						message: anthropicError?.error?.message ?? "Unknown error",
-						type: errType,
-						code: errType,
-					},
-				};
+				const upstream = (await anthropicResp.json()) as Record<
+					string,
+					unknown
+				> | null;
+				const nested = upstream?.error;
+				const error =
+					nested !== null && typeof nested === "object"
+						? (nested as Record<string, unknown>)
+						: undefined;
+				const candidate =
+					error?.message ?? upstream?.detail ?? upstream?.message ?? nested;
+				if (typeof candidate === "string" && candidate.trim())
+					message = candidate;
+				if (typeof error?.type === "string") type = error.type;
+				code = typeof error?.code === "string" ? error.code : type;
 			} catch {
-				errorBody = {
-					error: {
-						message: "Unknown error",
-						type: "api_error",
-						code: "api_error",
-					},
-				};
+				// Keep a useful status-based error when the upstream body is malformed.
 			}
-		} else {
-			errorBody = {
-				error: {
-					message: "Unknown error",
-					type: "api_error",
-					code: "api_error",
-				},
-			};
 		}
-		return new Response(JSON.stringify(errorBody), {
+		return new Response(JSON.stringify({ error: { message, type, code } }), {
 			status: anthropicResp.status,
-			headers: { "Content-Type": "application/json" },
+			headers: (() => {
+				const headers = new Headers(anthropicResp.headers);
+				headers.delete("x-better-ccflare-codex-response-format");
+				headers.delete("content-length");
+				headers.delete("content-encoding");
+				headers.set("content-type", "application/json");
+				return headers;
+			})(),
 		});
 	}
 
@@ -280,15 +725,31 @@ export async function handleResponsesRequest(
 		if (body.stream) {
 			const headers = new Headers(anthropicResp.headers);
 			headers.delete("x-better-ccflare-codex-response-format");
-			return new Response(anthropicResp.body, {
+			return new Response(inspectNativeResponsesStream(anthropicResp.body), {
 				status: anthropicResp.status,
 				headers,
 			});
 		}
-		// Client expects a JSON body, not SSE framing.
-		const sseText = await anthropicResp.text();
-		const nativeResponse = extractTerminalNativeResponse(sseText);
+		// Client expects a JSON body. Native providers may answer either JSON or
+		// SSE even for a non-streaming caller; preserve JSON directly and unwrap
+		// only an actually event-stream response.
+		const responseText = await anthropicResp.text();
+		const upstreamContentType =
+			anthropicResp.headers.get("content-type")?.toLowerCase() ?? "";
+		let nativeResponse: Record<string, unknown> | null = null;
+		if (upstreamContentType.includes("text/event-stream")) {
+			nativeResponse = extractTerminalNativeResponse(responseText);
+		} else {
+			try {
+				nativeResponse = JSON.parse(responseText) as Record<string, unknown>;
+			} catch {
+				nativeResponse = null;
+			}
+		}
 		if (!nativeResponse) {
+			const headers = new Headers(anthropicResp.headers);
+			headers.delete("x-better-ccflare-codex-response-format");
+			headers.set("content-type", "application/json");
 			return new Response(
 				JSON.stringify({
 					error: {
@@ -297,12 +758,16 @@ export async function handleResponsesRequest(
 						code: "api_error",
 					},
 				}),
-				{ status: 502, headers: { "Content-Type": "application/json" } },
+				{ status: 502, headers },
 			);
 		}
+		logCacheResponseDiagnostics(nativeResponse);
+		const headers = new Headers(anthropicResp.headers);
+		headers.delete("x-better-ccflare-codex-response-format");
+		headers.set("content-type", "application/json");
 		return new Response(JSON.stringify(nativeResponse), {
 			status: 200,
-			headers: { "Content-Type": "application/json" },
+			headers,
 		});
 	}
 
@@ -312,6 +777,7 @@ export async function handleResponsesRequest(
 			anthropicResp,
 			responseId,
 			body.model,
+			getRequestTools(body),
 		);
 	}
 
@@ -331,11 +797,27 @@ export async function handleResponsesRequest(
 			{ status: 502, headers: { "Content-Type": "application/json" } },
 		);
 	}
-	const translated = translateAnthropicResponseToResponses(
-		respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
-		responseId,
-		body.model,
-	);
+	let translated: ReturnType<typeof translateAnthropicResponseToResponses>;
+	try {
+		translated = translateAnthropicResponseToResponses(
+			respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
+			responseId,
+			body.model,
+			getRequestTools(body),
+		);
+	} catch {
+		return new Response(
+			JSON.stringify({
+				error: {
+					message:
+						"Failed to translate upstream response: invalid tool input or response body",
+					type: "invalid_response_error",
+					code: "invalid_response_error",
+				},
+			}),
+			{ status: 502, headers: { "Content-Type": "application/json" } },
+		);
+	}
 	return new Response(JSON.stringify(translated), {
 		status: 200,
 		headers: { "Content-Type": "application/json" },

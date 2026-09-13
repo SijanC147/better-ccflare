@@ -22,6 +22,7 @@ import type {
 	Project,
 	RequestPayload,
 	RequestResponse,
+	RequestTransformer,
 	StatsWithAccounts,
 	UsageHistoryResponse,
 	WorktreeRule,
@@ -46,6 +47,7 @@ export type {
 	RequestPayload,
 	RequestResponse,
 	WorktreeRule,
+	RequestTransformer,
 } from "@better-ccflare/types";
 
 // Agent response interface
@@ -408,6 +410,43 @@ class API extends HttpClient {
 				url,
 				data,
 			);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async previewOpenAICompatibleModels(data: {
+		apiKey: string;
+		endpoint: string;
+	}): Promise<{
+		provider: string;
+		models: Array<{ id: string; displayName: string; source: string }>;
+		fetchedAt: number;
+		source: string;
+	}> {
+		const startTime = Date.now();
+		const url = "/api/models/preview";
+
+		this.logger.debug(`→ POST ${url}`, { data: { endpoint: data.endpoint } });
+
+		try {
+			const response = await this.post<{
+				provider: string;
+				models: Array<{ id: string; displayName: string; source: string }>;
+				fetchedAt: number;
+				source: string;
+			}>(url, data);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
 			return response;
@@ -1506,6 +1545,32 @@ class API extends HttpClient {
 			await this.post(url, {
 				modelMappings,
 			});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async updateAccountRequestTransformer(
+		accountId: string,
+		requestTransformer: RequestTransformer | null,
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/request-transformer`;
+
+		this.logger.debug(`→ POST ${url}`, { requestTransformer });
+
+		try {
+			await this.post(url, { requestTransformer });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
 		} catch (error) {
