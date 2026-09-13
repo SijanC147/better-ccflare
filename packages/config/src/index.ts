@@ -1,7 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+	chmodSync,
+	closeSync,
+	existsSync,
+	fchmodSync,
+	fchownSync,
+	fsyncSync,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import {
 	DEFAULT_AGENT_MODEL,
 	DEFAULT_STRATEGY,
@@ -19,6 +37,22 @@ import { validatePathOrThrow } from "@better-ccflare/security";
 import { resolveConfigPath } from "./paths";
 
 const log = new Logger("Config");
+
+/**
+ * How old a leftover save temp file must be before a sweep removes it. A newer
+ * one may be a save in flight in another process; deleting it would only force
+ * that process onto the in-place write path.
+ */
+const TEMP_FILE_STALE_AFTER_MS = 60_000;
+
+/**
+ * Escape a literal for use inside a RegExp. The config's basename is
+ * user-supplied via BETTER_CCFLARE_CONFIG_PATH and normally contains a dot, so
+ * it cannot go into a pattern unescaped.
+ */
+function escapeForRegExp(literal: string): string {
+	return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function parseEnabledEnvFlag(value: string | undefined): boolean | undefined {
 	if (value === undefined) return undefined;
@@ -286,13 +320,33 @@ export class Config extends EventEmitter {
 
 	private loadConfig(): void {
 		if (existsSync(this.configPath)) {
+			// Gate the READ on the same trust check as the write. A refused path is
+			// one another local user controls, so parsing it adopts their values:
+			// measured, an attacker-supplied local_control_secret came back from
+			// getLocalControlSecret(), which is an authentication bypass on the local
+			// control endpoint rather than a disclosure. pg_host and pg_password
+			// pointing at a database they own are the same shape. Refusing the write
+			// alone is the worst of both, because the process keeps running on a
+			// config an attacker supplied.
+			const trusted = this.writeTarget();
+			if (trusted === null) {
+				// writeTarget() has already said why, at error level.
+				this.data = {};
+				return;
+			}
 			try {
-				const content = readFileSync(this.configPath, "utf8");
+				const content = readFileSync(trusted, "utf8");
 				this.data = JSON.parse(content) as ConfigData;
 			} catch (error) {
 				log.error(`Failed to parse config file: ${error}`);
 				this.data = {};
 			}
+			// An upgrade from a version that wrote 0644 may never write a setting
+			// again, because getLocalControlSecret() returns early once the secret
+			// exists, so the file would stay world-readable indefinitely if the
+			// permission migration only ran from saveConfig(). Do it on load.
+			this.restrictConfigFile();
+			this.sweepStaleTempFiles();
 		} else {
 			// Create config directory if it doesn't exist
 			const dir = dirname(this.configPath);
@@ -306,12 +360,374 @@ export class Config extends EventEmitter {
 		}
 	}
 
-	private saveConfig(): void {
+	/**
+	 * Bring an existing config file to 0600. The file holds pg_password,
+	 * local_control_secret and upstream_maintainer_token, so it must not be
+	 * readable by other local users, and versions before this wrote it 0644.
+	 *
+	 * Only chmods when the mode is actually wrong, and warns rather than errors:
+	 * chmod fails legitimately on a bind-mounted volume (docs/deployment.md
+	 * documents the config on a Docker volume) or on a file owned by another
+	 * user, and neither case means the config is unusable.
+	 *
+	 * Acts on writeTarget(), which refuses to follow a symlink whose directory
+	 * another local user can write. chmod follows links, so without that refusal
+	 * a planted link turns this into a tool for changing an unrelated file's mode:
+	 * measured, an 0755 file the link pointed at became 0600.
+	 */
+	private restrictConfigFile(): void {
+		const target = this.writeTarget();
+		if (target === null) return;
 		try {
-			const content = JSON.stringify(this.data, null, 2);
-			writeFileSync(this.configPath, content, "utf8");
+			const info = statSync(target);
+			// Regular files only. A config path that names a directory by mistake
+			// would otherwise have its execute bits stripped, which locks the
+			// operator out of the directory and everything under it: measured, a
+			// directory at the config path went 0755 to 0600 and the
+			// better-ccflare.db beside it became unreachable, to the point that
+			// removing the directory afterwards failed with ENOTEMPTY.
+			if (!info.isFile()) {
+				log.error(
+					`The config path ${target} is not a regular file, so its permissions were left alone. Point BETTER_CCFLARE_CONFIG_PATH at a file.`,
+				);
+				return;
+			}
+			if ((info.mode & 0o777) !== 0o600) {
+				chmodSync(target, 0o600);
+				log.info("Restricted config file permissions to 0600");
+			}
+		} catch (error) {
+			log.warn(`Could not restrict config file permissions: ${error}`);
+		}
+	}
+
+	/**
+	 * Remove temp files left by a crashed save. They are 0600, so this is not a
+	 * disclosure, but they hold pg_password and the maintainer PAT and nothing
+	 * else would ever delete them.
+	 *
+	 * Only plain files matching our own prefix, and only ones older than a
+	 * minute: a newer one may be a save in flight in another process, and
+	 * deleting it would cost that process only the atomic rename, because its
+	 * rename then fails ENOENT and it writes in place instead.
+	 *
+	 * Derived from writeTarget(), not from configPath: saveByRename() creates the
+	 * temp beside the resolved target, so for a symlinked config both the
+	 * directory and the basename differ from the configured path.
+	 *
+	 * That is also why the name must match the full UUID shape and not merely the
+	 * prefix. For a symlinked config the directory being swept belongs to the
+	 * user, not to this application, and a prefix test deletes their own files:
+	 * measured, `real.json.tmp-manual-backup-do-not-delete` was unlinked. Only
+	 * names this code can actually have produced are removed. Names from the
+	 * earlier pid-based scheme are deliberately left behind for the same reason,
+	 * since a directory we do not own is no place to guess.
+	 */
+	private sweepStaleTempFiles(): void {
+		const target = this.writeTarget();
+		if (target === null) return;
+		const dir = dirname(target);
+		// Lowercase hex only, because that is what randomUUID() produces. If the
+		// generator in saveByRename() ever changes, this must change with it. The
+		// failure direction is safe: a mismatch leaves clutter, never deletes.
+		const ours = new RegExp(
+			`^${escapeForRegExp(basename(target))}\\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+		);
+		const cutoff = Date.now() - TEMP_FILE_STALE_AFTER_MS;
+		try {
+			for (const entry of readdirSync(dir)) {
+				if (!ours.test(entry)) continue;
+				const stale = join(dir, entry);
+				try {
+					const info = lstatSync(stale);
+					if (!info.isFile()) continue;
+					if (info.mtimeMs > cutoff) continue;
+					unlinkSync(stale);
+				} catch {
+					// Gone already, or not ours to remove. Either way, nothing to do.
+				}
+			}
+		} catch (error) {
+			log.warn(`Could not sweep stale config temp files: ${error}`);
+		}
+	}
+
+	/**
+	 * Resolve the path to write. A symlinked config is the normal dotfiles
+	 * arrangement, and renaming over the link would replace it with a regular
+	 * file and orphan the real target, so write through it instead. Measured
+	 * before this existed: the link became a regular file on the first save and
+	 * the target never saw another write.
+	 *
+	 * The resolved path is deliberately NOT passed back through
+	 * validatePathOrThrow. Re-validating would reject a link into a dotfiles
+	 * directory, which is the arrangement this exists to support. Do not "harden"
+	 * this without replacing the dotfiles support.
+	 *
+	 * Returns null when the configured path is a symlink and its directory is
+	 * writable by group or other. Planting a link then needs no privilege and no
+	 * race, and following it would write every secret to a file the planter chose
+	 * and let a chmod change an unrelated file's mode. That is the only case where
+	 * a link is refused, so an ordinary dotfiles link in a 0755 home directory
+	 * still works. A caller seeing null must not read, write or chmod anything.
+	 */
+	/**
+	 * Walk the link chain by hand and check the trust of every directory it
+	 * passes through, returning what a save should write or null to refuse.
+	 *
+	 * This walk is the only resolver, deliberately. realpathSync resolves the
+	 * whole chain and never says what it passed through, so delegating to it for
+	 * the common case would leave the intermediate hops unexamined. It also fails
+	 * outright when the final target is missing, which is the case that most needs
+	 * resolving.
+	 *
+	 * Every hop, not just the first and the last. An attacker who controls one
+	 * intermediate link controls the destination, including destinations that pass
+	 * a check on the landing directory: measured with
+	 * safe/config.json (0700) -> shared/mid.json (1777) -> private/authorized_keys
+	 * (0700 and ours), both of those directories passed and the victim file was
+	 * overwritten with the config, destroying the key. There is no disclosure,
+	 * since the result is 0600 and ours, but it is an arbitrary file overwrite
+	 * anywhere we can write, with a target of their choosing. Which link they
+	 * control makes no difference, so every one is checked.
+	 *
+	 * Bounded at 40 hops. Beyond that it is a cycle and is refused rather than
+	 * falling back to the configured path, because that fallback would rename over
+	 * the first link and destroy a link the operator manages, which is the
+	 * destructive behaviour this walk exists to prevent, just relocated. The bound
+	 * refuses nothing the kernel would have resolved: Linux gives up at 40 nested
+	 * links and macOS at 32.
+	 */
+	private resolveLinkChain(): string | null {
+		let current: string = this.configPath;
+		for (let hop = 0; hop < 40; hop++) {
+			// One message per refusal, naming the hop that failed, rather than one
+			// per directory examined: the predicate itself stays silent.
+			if (!this.directoryIsTrusted(dirname(current))) {
+				log.error(
+					`Refusing the config path ${this.configPath}: ${current} sits in a directory owned by another user or writable by other local users, so it cannot be trusted with secrets. Move the config somewhere only you can write, or replace the link with a regular file.`,
+				);
+				return null;
+			}
+			let info: ReturnType<typeof lstatSync>;
+			try {
+				info = lstatSync(current);
+			} catch {
+				// Does not exist: this is the end of the chain and what to create.
+				return current;
+			}
+			if (!info.isSymbolicLink()) return current;
+			try {
+				current = resolve(dirname(current), readlinkSync(current));
+			} catch {
+				return current;
+			}
+		}
+		// Refuse, rather than falling back to the configured path. Falling back
+		// would rename over the first link and destroy a link the operator manages,
+		// which is the destructive behaviour the chain walk exists to prevent, just
+		// relocated to the cycle case. A cycle has no valid target. The bound
+		// refuses nothing the kernel would have resolved: Linux gives up at 40
+		// nested links and macOS at 32.
+		log.error(
+			`The config path ${this.configPath} has more than 40 symlink hops, which is a cycle; refusing to read or write it`,
+		);
+		return null;
+	}
+
+	private writeTarget(): string | null {
+		let link: ReturnType<typeof lstatSync>;
+		try {
+			link = lstatSync(this.configPath);
+		} catch {
+			// Nothing there yet. Write where we were told.
+			return this.configPath;
+		}
+		if (!link.isSymbolicLink()) return this.configPath;
+
+		// POSIX mode bits do not describe Windows ACLs. Stats.mode there is
+		// synthesised from the read-only attribute, and directories commonly
+		// expose group and other write bits, so the trust check below would call
+		// every private directory untrusted and refuse to persist anything through
+		// a junction. Unverified on Windows, which neither author nor reviewer has:
+		// argued from Node deriving st_mode from FILE_ATTRIBUTE_READONLY.
+		if (process.platform === "win32") {
+			try {
+				return realpathSync(this.configPath);
+			} catch {
+				return this.configPath;
+			}
+		}
+
+		// The walk checks the configured path's own directory, every hop, and the
+		// directory the chain lands in, and refuses with one message naming the
+		// offending hop.
+		return this.resolveLinkChain();
+	}
+
+	/**
+	 * A directory is trusted when it is ours (or root's, so a root-owned /etc
+	 * stays legitimate) and not writable by group or other.
+	 *
+	 * Ownership as well as mode, because statSync follows links: the mode alone is
+	 * the mode of whatever the component points at, so an attacker who can write a
+	 * shared directory pre-creates an intermediate component as a link to a 0700
+	 * directory of their own and the mode test passes on their behalf. Measured
+	 * with /tmp/ccflare/config.json, the dirname mode read 700 and the link was
+	 * followed.
+	 */
+	private directoryIsTrusted(dir: string): boolean {
+		try {
+			const info = statSync(dir);
+			const uid = process.getuid?.();
+			const ownedByUs =
+				uid === undefined || info.uid === uid || info.uid === 0;
+			return ownedByUs && (info.mode & 0o022) === 0;
+		} catch {
+			// Silent: the walk reports one message naming the hop that failed.
+			return false;
+		}
+	}
+
+	private saveConfig(): void {
+		const content = JSON.stringify(this.data, null, 2);
+		const target = this.writeTarget();
+		if (target === null) {
+			// An untrusted symlink. Writing through it hands the secrets to whoever
+			// planted it, and renaming over it destroys a link that may be the
+			// user's own. Neither is better than not persisting, and writeTarget()
+			// has already said why at error level.
+			log.error("Config not saved: the configured path cannot be trusted");
+			return;
+		}
+		if (this.saveByRename(target, content)) return;
+		// The rename path needs a writable *directory*. A root-owned directory
+		// holding a config chmodded for the service user is a documented layout
+		// (docs/configuration.md:113, docs/troubleshooting.md:836), and there the
+		// temp file cannot be created at all. Fall back to writing in place so the
+		// save still happens, and say so: the in-place write is the weaker path.
+		//
+		// This is not a hole in the 0600 goal, and the reason is not local. An
+		// in-place write cannot set the mode of a file that already exists, so it
+		// would ordinarily republish the secret at whatever mode the file had.
+		// restrictConfigFile() on the load path has already brought the file to
+		// 0600 before any save runs, so it inherits 0600. The 0644 window returns
+		// only if that load-time chmod also failed, and that warns.
+		try {
+			writeFileSync(target, content, { encoding: "utf8", mode: 0o600 });
 		} catch (error) {
 			log.error(`Failed to save config file: ${error}`);
+			return;
+		}
+		this.restrictConfigFile();
+		log.warn(
+			"Saved the config by writing in place because the atomic replace failed; " +
+				"a reader holding the file open from before this save can still see it",
+		);
+	}
+
+	/**
+	 * Write a new 0600 file and rename it over the config rather than truncating
+	 * in place. Three reasons, all about secrets:
+	 *   - writeFileSync's mode applies only on creation, so an in-place write to
+	 *     an existing 0644 file publishes the NEW secret at 0644 until a chmod
+	 *     lands, and a crash in between leaves it exposed for good.
+	 *   - truncating keeps the inode, so a descriptor opened while the file was
+	 *     0644 keeps reading every later save. Rename swaps the inode and leaves
+	 *     that reader on the unlinked old file.
+	 *   - rename is atomic, so a process crash mid-write cannot leave a partial
+	 *     config. fsync before the rename buys integrity, not durability: it
+	 *     removes the hazard of the rename becoming durable while the data blocks
+	 *     are not, which would bring the config back zero-length or stale, and
+	 *     ext4's flush on replace-via-rename is a heuristic rather than a
+	 *     guarantee. The last save can still be lost to power loss, because the
+	 *     containing directory is never synced. That is the safe direction: the
+	 *     previous config comes back whole.
+	 *
+	 * The temp name is random and created with O_EXCL, never a predictable one
+	 * overwritten with writeFileSync. A predictable sibling is attacker-plantable
+	 * when the config's directory is writable by another local user: writeFileSync
+	 * follows an existing symlink, so the secrets would be written to a file the
+	 * attacker chose and can read. O_EXCL refuses to follow and refuses to reuse.
+	 *
+	 * Either defence alone closes that, which is why no test can exercise both:
+	 * a test cannot pre-plant a file at a path it cannot predict, so the random
+	 * name is what makes O_EXCL unobservable. Strengthening one hides the other.
+	 *
+	 * Returns false without logging an error when the caller should fall back.
+	 */
+	/**
+	 * Give the temp file the existing config's owner, so a rename does not change
+	 * who owns the config. Returns false when it cannot, which makes the caller
+	 * fall back to an in-place write.
+	 *
+	 * True when there is nothing to preserve (no existing file, or it is already
+	 * ours), and on Windows, where chown is meaningless and process.getuid does
+	 * not exist.
+	 */
+	private preserveOwnership(fd: number, target: string): void {
+		if (process.platform === "win32") return;
+		let existing: ReturnType<typeof statSync>;
+		try {
+			existing = statSync(target);
+		} catch {
+			// First write: there is no previous owner to keep.
+			return;
+		}
+		const uid = process.getuid?.();
+		const gid = process.getgid?.();
+		if (uid === undefined || gid === undefined) return;
+		if (existing.uid === uid && existing.gid === gid) return;
+		try {
+			fchownSync(fd, existing.uid, existing.gid);
+		} catch (error) {
+			// One log for one cause: the caller reports the refused rename, so this
+			// throws its reason rather than warning and letting the caller warn too.
+			throw new Error(
+				`cannot give the new config file its previous owner ${existing.uid}:${existing.gid}: ${error}`,
+			);
+		}
+	}
+
+	private saveByRename(target: string, content: string): boolean {
+		const tmpPath = `${target}.tmp-${randomUUID()}`;
+		try {
+			// "wx" is O_WRONLY|O_CREAT|O_EXCL: fails if the path exists at all,
+			// including as a symlink, so neither a planted link nor a collision
+			// can redirect this write.
+			const fd = openSync(tmpPath, "wx", 0o600);
+			try {
+				writeFileSync(fd, content, "utf8");
+				// The create mode above is masked by umask: measured, under umask 0277
+				// it produces 0400, which the rename would carry onto the config and
+				// break every later write. Set through the descriptor rather than the
+				// path, because a path-based chmod follows a symlink and the window
+				// between write and chmod is enough for one to appear in a directory
+				// another user can write.
+				fchmodSync(fd, 0o600);
+				// The temp inode belongs to whoever is writing, and the rename
+				// discards the old file's ownership. An administrator running the CLI
+				// as root against a config owned by the service account would leave
+				// it root-owned and 0600, so the service could no longer read it on
+				// the next restart. The in-place write preserved ownership, so this
+				// has to as well: copy the existing owner onto the descriptor, and if
+				// that is not permitted, refuse the rename so the caller writes in
+				// place rather than changing who owns the config.
+				this.preserveOwnership(fd, target);
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
+			renameSync(tmpPath, target);
+			return true;
+		} catch (error) {
+			log.warn(`Could not replace the config file atomically: ${error}`);
+			try {
+				if (existsSync(tmpPath)) unlinkSync(tmpPath);
+			} catch (cleanupError) {
+				log.warn(`Failed to remove temporary config file: ${cleanupError}`);
+			}
+			return false;
 		}
 	}
 
@@ -564,8 +980,26 @@ export class Config extends EventEmitter {
 		if (!existsSync(this.configPath)) {
 			return undefined;
 		}
+		// Same trust gate as loadConfig(). This is a second reader of the same
+		// path, and it is the sharper one: adopting an attacker's
+		// local_control_secret is an authentication bypass on the local control
+		// endpoint, not a disclosure. Measured while gating only loadConfig(),
+		// getLocalControlSecret() still returned the attacker's value through here.
+		const trusted = this.writeTarget();
+		if (trusted === null) {
+			// Say what the refusal costs, not just that it happened. The caller
+			// generates a fresh secret, which keeps the endpoint authenticated with
+			// a value the attacker does not know, but the save is refused too, so
+			// the secret is ephemeral and rotates on every restart. Without this
+			// line that presents as an intermittent auth bug rather than a security
+			// refusal.
+			log.error(
+				"The local control secret cannot be persisted while the config path is untrusted, so it changes on every restart and clients must obtain it again after each one",
+			);
+			return undefined;
+		}
 		try {
-			const content = readFileSync(this.configPath, "utf8");
+			const content = readFileSync(trusted, "utf8");
 			const parsed = JSON.parse(content) as ConfigData;
 			const value = parsed.local_control_secret;
 			return typeof value === "string" && value.length > 0 ? value : undefined;
