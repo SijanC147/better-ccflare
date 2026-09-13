@@ -7,7 +7,12 @@
 	},
 	"files": {
 		"ignoreUnknown": false,
-		"includes": ["apps/**", "packages/**"]
+		"includes": [
+			"apps/**",
+			"packages/**",
+			"!**/inline-*worker.ts",
+			"!packages/dashboard-web/dist/**"
+		]
 	},
 	"formatter": {
 		"enabled": true,
