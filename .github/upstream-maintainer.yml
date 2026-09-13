@@ -51,6 +51,44 @@ defaults:
       # tag's tracked tree, because the clean-tree gate uses --untracked-files=no.
       - {glob: ".gitignore", resolve: ours}
 
+      # Everything below keeps the fork's version of a path the fork owns. These are NOT
+      # a convenience: they are the only mechanism that does it.
+      #
+      # Measured in the controller's source on 2026-09-13: `protected_paths` has exactly
+      # one consumer, `assertAllowedChanges` in src/policy.ts, and it acts only when
+      # `on_upstream_protected_change` is `halt`. With `ours` the controller takes no
+      # action at all, and the merge treats a protected path like any other file. The
+      # local replay showed it: upstream's edits to `CLAUDE.md` came out as a conflict for
+      # the resolver, and upstream's DELETION of `.github/workflows/pr-review.yml.disabled`
+      # produced a delete/modify that aborted the whole run before any agent saw it,
+      # because only marked textual conflicts can be handled automatically.
+      #
+      # `resolve: ours` is applied by git before the resolver runs, so it costs no repair
+      # round, and it handles the deleted-on-one-side case: a path absent from the base is
+      # removed rather than taken from upstream. That is also what the standing resolution
+      # for `.github/workflows/release.yml` requires (`git rm`, never restore a second
+      # release publisher).
+      #
+      # The cost, stated plainly: upstream improvements to a shared file under these globs
+      # are dropped silently, and a NEW upstream file under them never lands. 33 of the 36
+      # files under `docs/` exist upstream too, so this freezes them. That is the standing
+      # resolution in docs/upstream-sync.md ("fork-customized", "keep ours by default"),
+      # and adopting an upstream doc is a deliberate follow-up commit, not a sync outcome.
+      - {glob: ".hextap.json", resolve: ours}
+      - {glob: ".hextap/**", resolve: ours}
+      - {glob: "scripts/hextap-*", resolve: ours}
+      - {glob: "apps/cli/hextap-*", resolve: ours}
+      - {glob: "packages/core/src/build-identity.ts", resolve: ours}
+      - {glob: "CLAUDE.md", resolve: ours}
+      - {glob: "README.md", resolve: ours}
+      - {glob: "MERGELOG.md", resolve: ours}
+      - {glob: "docs/**", resolve: ours}
+      # The fork owns 3 live workflows against upstream's ~10 and disables the rest by
+      # renaming them `*.yml.disabled`, so upstream workflow changes arrive as new live
+      # files or as modifies against a renamed file. Keeping ours wholesale is the
+      # documented default; adoption is recorded as a follow-up.
+      - {glob: ".github/**", resolve: ours}
+
   policy:
     # Target paths the integration may not change. .github/** and
     # .github/upstream-maintainer.yml are always appended by the controller.
@@ -141,11 +179,21 @@ defaults:
       # it outright. Upstream's CCFLARE_BUILD_SUFFIX yields X.Y.Z+suffix. It exists
       # upstream today in build-multi-arch.ts, which the fork does not use, so this rule
       # is scoped to the files where it WOULD reach release identity.
+      #
+      # packages/dashboard-web/build.ts is deliberately NOT listed, though an earlier
+      # draft listed it. The name is already present there in THIS fork, at HEAD, where
+      # the code handles the contradiction itself: supplying both
+      # BETTER_CCFLARE_BUILD_VERSION and CCFLARE_BUILD_SUFFIX throws. Because the pattern
+      # already exists on both sides of that path, the rule made every upstream edit to
+      # that one file halt every future sync, with no `except` to relieve it. The local
+      # replay on 2026-09-13 proved it: prepare failed closed on real commits
+      # (4d27cb22..ea0e3320) before reaching the merge. The three files below are free of
+      # the name in this fork, so the rule fires only on a genuine new reach into release
+      # identity.
       - paths:
           - "apps/cli/build-standalone.ts"
           - "packages/core/src/build-identity.ts"
           - "packages/core/src/version.ts"
-          - "packages/dashboard-web/build.ts"
         regex: 'CCFLARE_BUILD_SUFFIX'
         message: >-
           Upstream has routed CCFLARE_BUILD_SUFFIX into the build-identity or dashboard
