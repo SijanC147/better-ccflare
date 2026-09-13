@@ -188,6 +188,55 @@ describe("AlertService upstream_error alerts", () => {
 		expect(await service.listAlerts()).toHaveLength(0);
 	});
 
+	/*
+	 * The two cases below close mutations that survived the merge gate on PR #80
+	 * (SB23-1825). Both predicates were correct and neither was fault-sensitive,
+	 * so either could have been removed by a refactor without a test failing.
+	 */
+
+	it("does not count errors older than the window toward the threshold", async () => {
+		// UPSTREAM_ERROR_WINDOW_MS is 15 minutes. Setting it to 0 changed no test
+		// result, which meant no fixture straddled the boundary and the clause was
+		// never the deciding factor in any assertion.
+		const beyondWindow = NOW - 16 * 60 * 1000;
+		insertRequest("old1", 500, { timestamp: beyondWindow });
+		insertRequest("old2", 500, { timestamp: beyondWindow });
+		insertRequest("fresh", 500);
+		await service.evaluateRequest(makeSummary({ id: "fresh" }));
+		// Three 500s exist, but only one is inside the window, so the threshold
+		// of three is not met.
+		expect(await service.listAlerts()).toHaveLength(0);
+	});
+
+	it("counts errors inside the window that are not the triggering request", async () => {
+		// The companion to the case above: same shape, timestamps moved inside the
+		// boundary, so the alert must fire. Without this, a window of Infinity
+		// would also pass the test above.
+		const insideWindow = NOW - 14 * 60 * 1000;
+		insertRequest("in1", 500, { timestamp: insideWindow });
+		insertRequest("in2", 500, { timestamp: insideWindow });
+		insertRequest("fresh", 500);
+		await service.evaluateRequest(makeSummary({ id: "fresh" }));
+		expect(await service.listAlerts()).toHaveLength(1);
+	});
+
+	it("counts 429s separately from other 4xx in the windowed SQL, not only in the classifier", async () => {
+		// classifyUpstreamError already pins the 429/4xx split, but the windowed
+		// count restates the same rule as SQL (`status_code <> 429` in the 4xx
+		// predicate). Deleting that clause left all 14 tests green: the rule lives
+		// in two places and only one was asserted.
+		//
+		// Two 400s and one 429 on one account. If 429 folded into 4xx the 4xx
+		// class would reach three and fire; split, neither class reaches the
+		// threshold and nothing fires.
+		insertRequest("c1", 400);
+		insertRequest("c2", 400);
+		insertRequest("c3", 429);
+		await service.evaluateRequest(makeSummary({ id: "c3", statusCode: 429 }));
+		await service.evaluateRequest(makeSummary({ id: "c2", statusCode: 400 }));
+		expect(await service.listAlerts()).toHaveLength(0);
+	});
+
 	it("excludes health-probe rows from the count for a real failing path", async () => {
 		for (let i = 0; i < 10; i++) {
 			insertRequest(`h${i}`, 503, { path: "/api/health" });
