@@ -16,6 +16,8 @@ const REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const ANCESTRY_RELEASE_PAGE_SIZE = 30;
 /** Hard cap on compare calls spent resolving the merged tag. */
 const ANCESTRY_COMPARE_BUDGET = 10;
+/** Quiet period after a refresh in which every GitHub call failed. */
+const FAILURE_BACKOFF_MS = 60 * 1000;
 
 export interface ForkStatus {
 	/** Latest published release tag of this fork, e.g. "v3.9.0". */
@@ -118,6 +120,7 @@ export class VersionStatusService {
 	private snapshot: RemoteSnapshot | null = null;
 	private lastError: string | null = null;
 	private rateLimitedUntil = 0;
+	private lastFailureAt = 0;
 	private inFlight: Promise<VersionStatusResult> | null = null;
 	/** Merged-tag resolution is fixed for the process lifetime once known. */
 	private mergedTagResolved = false;
@@ -153,6 +156,22 @@ export class VersionStatusService {
 				error: `GitHub rate limit exceeded; retrying after ${new Date(
 					this.rateLimitedUntil,
 				).toISOString()}`,
+			};
+		}
+		// Back off after a total failure. The snapshot TTL above cannot cover this
+		// case: with no snapshot to serve, every call would otherwise fire a fresh
+		// round of outbound requests, and /api/version/check reaches this service
+		// without authentication. A DNS failure, timeout or 5xx sets no rate-limit
+		// header, so this is the only thing bounding that.
+		if (
+			!force &&
+			this.lastFailureAt !== 0 &&
+			now - this.lastFailureAt < FAILURE_BACKOFF_MS
+		) {
+			return {
+				snapshot: this.snapshot,
+				stale: this.snapshot !== null,
+				error: this.lastError,
 			};
 		}
 		if (this.inFlight) return this.inFlight;
@@ -252,6 +271,7 @@ export class VersionStatusService {
 		if (fork === null && upstream === null && !pulls.ok) {
 			// Nothing usable came back. Keep the previous snapshot if we have one.
 			this.lastError = errors[0] ?? "GitHub is unreachable";
+			this.lastFailureAt = this.now();
 			log.warn(`Version status refresh failed: ${this.lastError}`);
 			return {
 				snapshot: this.snapshot,
@@ -260,6 +280,7 @@ export class VersionStatusService {
 			};
 		}
 
+		this.lastFailureAt = 0;
 		this.snapshot = { fork, upstream, syncPr, checkedAt: this.now() };
 		this.lastError = errors.length > 0 ? (errors[0] ?? null) : null;
 		return { snapshot: this.snapshot, stale: false, error: this.lastError };

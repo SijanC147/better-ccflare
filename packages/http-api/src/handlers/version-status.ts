@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import {
 	Conflict,
 	Forbidden,
@@ -70,14 +71,45 @@ export function isHomebrewInstall(execPath: string): boolean {
 	);
 }
 
+/**
+ * Absolute path of the `brew` executable, or null when none is present.
+ *
+ * Resolved from the known Homebrew prefixes rather than through `PATH`. A
+ * launchd user agent inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and the
+ * plist Homebrew generates for this formula sets only `BETTER_CCFLARE_LOG_DIR`,
+ * so a bare `brew` argv fails with "command not found" under exactly the
+ * service this capability is gated to — verified by running the upgrade under
+ * that environment.
+ */
+export function findBrewExecutable(
+	exists: (path: string) => boolean = existsSync,
+): string | null {
+	for (const candidate of [
+		"/opt/homebrew/bin/brew",
+		"/usr/local/bin/brew",
+		"/home/linuxbrew/.linuxbrew/bin/brew",
+	]) {
+		if (exists(candidate)) return candidate;
+	}
+	return null;
+}
+
 /** Default upgrade runner: a fixed argv, no shell, nothing interpolated. */
 async function spawnBrewUpgrade(): Promise<{
 	exitCode: number;
 	output: string;
 }> {
-	// Every element is a compile-time constant. No request field reaches argv,
-	// and there is no shell, so there is nothing for a quoting bug to escape.
-	const child = Bun.spawn(["brew", "upgrade", HOMEBREW_FORMULA], {
+	const brew = findBrewExecutable();
+	if (!brew) {
+		throw new Error("no brew executable found in any Homebrew prefix");
+	}
+	// Every element is a compile-time constant or a path from a fixed list. No
+	// request field reaches argv, and there is no shell, so there is nothing for
+	// a quoting bug to escape.
+	const child = Bun.spawn([brew, "upgrade", HOMEBREW_FORMULA], {
+		// Upgrading the formula must not drag in a Homebrew self-update, which
+		// can take minutes and has nothing to do with this request.
+		env: { ...process.env, HOMEBREW_NO_AUTO_UPDATE: "1" },
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -212,6 +244,19 @@ export function createSelfUpdateHandler(
 			return errorResponse(
 				Conflict(
 					"Self-update is only supported for Homebrew installations. " +
+						`Run manually: ${MANUAL_UPDATE_COMMAND}`,
+				),
+			);
+		}
+		// Refuse before spawning rather than reporting a "command not found" as a
+		// failed upgrade.
+		if (
+			options.environment?.runUpgrade === undefined &&
+			!findBrewExecutable()
+		) {
+			return errorResponse(
+				Conflict(
+					"No brew executable was found in any Homebrew prefix. " +
 						`Run manually: ${MANUAL_UPDATE_COMMAND}`,
 				),
 			);

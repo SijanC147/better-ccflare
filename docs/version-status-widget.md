@@ -93,10 +93,27 @@ the supervisor. Four independent gates, all fail-closed:
 3. The running executable must live inside a Homebrew prefix, else `409`. A
    binary outside the Cellar was not installed by Homebrew, so `brew upgrade`
    would replace a different copy than the one serving the request.
-4. The command is `Bun.spawn(["brew", "upgrade", "better-ccflare"])`. Every
-   element is a compile-time constant, no request field reaches argv, and there
-   is no shell, so there is nothing for a quoting bug to escape. The formula name
-   is kept byte-identical to `.hextap.json` `formula.name`.
+4. The command is `Bun.spawn([<brew>, "upgrade", "better-ccflare"])`. Every
+   element is a compile-time constant or a path from a fixed list, no request
+   field reaches argv, and there is no shell, so there is nothing for a quoting
+   bug to escape. The formula name is kept byte-identical to `.hextap.json`
+   `formula.name`.
+
+`<brew>` is an absolute path resolved from the known Homebrew prefixes
+(`/opt/homebrew/bin/brew`, `/usr/local/bin/brew`,
+`/home/linuxbrew/.linuxbrew/bin/brew`), not the bare name. A launchd user agent
+inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and the plist Homebrew generates
+for this formula sets only `BETTER_CCFLARE_LOG_DIR`, so a bare `brew` argv fails
+with "command not found" under exactly the service this capability is gated to.
+Running the upgrade under that environment confirmed both halves: the bare name
+is not found, the absolute path runs. When no brew executable is present the
+handler answers `409` before spawning anything. The child also gets
+`HOMEBREW_NO_AUTO_UPDATE=1`, so upgrading the formula does not drag in a
+Homebrew self-update.
+
+`brew upgrade` does not restart services of its own accord (`upgrade.rb` has no
+service handling; `brew services restart` is a separate user-invoked command), so
+the upgrade is not interrupted by its own side effects.
 
 On success the process exits with code **75**, not 0. The Homebrew service this
 fork ships installs a launchd plist with `KeepAlive { SuccessfulExit: false }`,

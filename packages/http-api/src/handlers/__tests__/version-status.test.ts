@@ -14,6 +14,7 @@ import {
 	createSelfUpdateHandler,
 	createUpstreamDispatchHandler,
 	createVersionStatusHandler,
+	findBrewExecutable,
 	isHomebrewInstall,
 	MANUAL_UPDATE_COMMAND,
 } from "../version-status";
@@ -65,6 +66,23 @@ describe("isHomebrewInstall", () => {
 	it("rejects anything else", () => {
 		expect(isHomebrewInstall(LOCAL_EXEC)).toBe(false);
 		expect(isHomebrewInstall("/usr/local/bin/better-ccflare")).toBe(false);
+	});
+});
+
+describe("findBrewExecutable", () => {
+	// Verified live: under a launchd-like PATH (/usr/bin:/bin:/usr/sbin:/sbin) a
+	// bare `brew` argv fails with "command not found", while the absolute path
+	// runs. The Homebrew-generated plist for this formula sets only
+	// BETTER_CCFLARE_LOG_DIR, so the service inherits that PATH.
+	it("returns the first prefix that exists", () => {
+		expect(findBrewExecutable((path) => path === "/usr/local/bin/brew")).toBe(
+			"/usr/local/bin/brew",
+		);
+		expect(findBrewExecutable(() => true)).toBe("/opt/homebrew/bin/brew");
+	});
+
+	it("returns null when no prefix has brew", () => {
+		expect(findBrewExecutable(() => false)).toBeNull();
 	});
 });
 

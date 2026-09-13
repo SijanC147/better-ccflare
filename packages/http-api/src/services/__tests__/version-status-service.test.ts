@@ -244,6 +244,35 @@ describe("VersionStatusService", () => {
 		expect(second.stale).toBe(false);
 	});
 
+	it("backs off after a total failure instead of re-requesting every call", async () => {
+		// /api/version/check is auth-exempt and reaches this service, so with no
+		// snapshot to serve and no rate-limit header to read, nothing else bounds
+		// the outbound requests an unauthenticated caller can drive.
+		let clock = 1_000_000;
+		const { impl, calls } = stubFetch([
+			["api.github.com", { throws: "network down" }],
+		]);
+		const service = new VersionStatusService({
+			currentVersion: "3.9.0",
+			mergedSha: MERGED_SHA,
+			fetchImpl: impl,
+			now: () => clock,
+		});
+
+		await service.getStatus();
+		const afterFirst = calls.length;
+		expect(afterFirst).toBeGreaterThan(0);
+
+		clock += 10_000;
+		const second = await service.getStatus();
+		expect(calls.length).toBe(afterFirst);
+		expect(second.error).toContain("network down");
+
+		clock += 60_000; // past the backoff
+		await service.getStatus();
+		expect(calls.length).toBeGreaterThan(afterFirst);
+	});
+
 	it("returns no snapshot and an error when GitHub is unreachable", async () => {
 		const { service } = makeService([
 			["api.github.com", { throws: "getaddrinfo ENOTFOUND api.github.com" }],
