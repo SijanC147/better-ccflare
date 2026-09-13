@@ -54,3 +54,7 @@ _archive.worktrees/
 _archive
 docs/plans/
 .tmp/
+
+# Local MCP server registrations. Never tracked: the format holds live
+# credentials as literal header and env values (SB23-688).
+.mcp.json
