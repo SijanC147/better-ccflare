@@ -71,7 +71,7 @@ export interface VersionStatusServiceOptions {
 	 * GitHub token used only to raise the rate limit. Never returned by an
 	 * endpoint and never logged.
 	 */
-	token?: string;
+	token?: string | (() => string | undefined);
 	refreshIntervalMs?: number;
 }
 
@@ -112,7 +112,12 @@ export function isNewerVersion(latest: string, current: string): boolean {
 export class VersionStatusService {
 	private readonly fetchImpl: typeof fetch;
 	private readonly now: () => number;
-	private readonly token: string | undefined;
+	/**
+	 * Resolved per request, not captured. The dashboard can save a token, and a
+	 * value captured at construction would leave the service unauthenticated
+	 * until the process restarted, which makes a settings field look broken.
+	 */
+	private readonly readToken: () => string | undefined;
 	private readonly refreshIntervalMs: number;
 	private readonly currentVersion: string;
 	private readonly mergedSha: string | null;
@@ -129,7 +134,8 @@ export class VersionStatusService {
 	constructor(options: VersionStatusServiceOptions) {
 		this.fetchImpl = options.fetchImpl ?? fetch;
 		this.now = options.now ?? Date.now;
-		this.token = options.token;
+		const token = options.token;
+		this.readToken = typeof token === "function" ? token : () => token;
 		this.refreshIntervalMs = options.refreshIntervalMs ?? REFRESH_INTERVAL_MS;
 		this.currentVersion = options.currentVersion;
 		this.mergedSha = options.mergedSha;
@@ -137,7 +143,7 @@ export class VersionStatusService {
 
 	/** True when a token is configured, for reporting without revealing it. */
 	hasToken(): boolean {
-		return Boolean(this.token);
+		return Boolean(this.readToken());
 	}
 
 	async getStatus(force = false): Promise<VersionStatusResult> {
@@ -378,7 +384,8 @@ export class VersionStatusService {
 			"X-GitHub-Api-Version": "2022-11-28",
 			"User-Agent": "better-ccflare-version-status",
 		};
-		if (this.token) headers.Authorization = `Bearer ${this.token}`;
+		const token = this.readToken();
+		if (token) headers.Authorization = `Bearer ${token}`;
 
 		try {
 			const response = await this.fetchImpl(`${GITHUB_API}${path}`, {

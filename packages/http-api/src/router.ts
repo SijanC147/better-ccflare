@@ -81,6 +81,7 @@ import {
 	createSlotUpdateHandler,
 } from "./handlers/combos";
 import { createConfigHandlers } from "./handlers/config";
+import { createGithubTokenConfigHandlers } from "./handlers/config-github-token";
 import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import { createRequestStorageHandlers } from "./handlers/config-request-storage";
 import { createUpstreamMaintainerConfigHandlers } from "./handlers/config-upstream-maintainer";
@@ -293,7 +294,11 @@ export class APIRouter {
 		const versionStatusService = new VersionStatusService({
 			currentVersion: getVersionSync(),
 			mergedSha: MERGED_UPSTREAM_SHA,
-			token: process.env.BETTER_CCFLARE_GITHUB_TOKEN || undefined,
+			// Environment or the 0600 config file. The service is constructed once,
+			// so a token added to the file needs a restart, the same as pg_password.
+			// A getter, not a value: the dashboard can save a token and the next
+			// refresh must use it without waiting for a restart.
+			token: () => config.getGithubReadToken() || undefined,
 		});
 		const versionCheckHandler = createVersionCheckHandler(versionStatusService);
 		const versionStatusHandler = createVersionStatusHandler(
@@ -314,6 +319,7 @@ export class APIRouter {
 		);
 		const upstreamMaintainerConfigHandlers =
 			createUpstreamMaintainerConfigHandlers(config);
+		const githubTokenConfigHandlers = createGithubTokenConfigHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -547,6 +553,13 @@ export class APIRouter {
 		// operator, never through an endpoint. See docs/version-status-widget.md.
 		this.handlers.set("GET:/api/config/upstream-maintainer", () =>
 			upstreamMaintainerConfigHandlers.getUpstreamMaintainerConfig(),
+		);
+		// Writable, unlike the maintainer token above: no scopes, public reads only.
+		this.handlers.set("GET:/api/config/github-token", () =>
+			githubTokenConfigHandlers.getGithubTokenConfig(),
+		);
+		this.handlers.set("POST:/api/config/github-token", (req) =>
+			githubTokenConfigHandlers.updateGithubTokenConfig(req),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
