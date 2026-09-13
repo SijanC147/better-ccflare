@@ -72,7 +72,7 @@ New tables go in `ensureSchemaPg()` AND `runMigrationsPg()` (`CREATE TABLE IF NO
 
 **Server**:
 - First run: `bun run build`
-- Dev: `bun start --serve --port 8081` (test on 8081, not production 8082)
+- Dev: `bun start --serve --port 8081` (test on 8081). **The Homebrew service listens on 8080**, verified 2026-09-13 with `lsof -nP -iTCP -sTCP:LISTEN`. This file said 8082 for months and that was wrong in the dangerous direction: an agent told 8082 is production reads 8080 as free and binds a test server on top of the live one
 - Startup ~15s; wait before testing
 
 **Account management**:
