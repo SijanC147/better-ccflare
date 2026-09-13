@@ -410,6 +410,25 @@ export class AuthService {
 			return true;
 		}
 
+		// OAuth endpoints.
+		// Read-only status polling (GET /api/oauth/{qwen,codex}/status/*) stays
+		// exempt — it returns transient setup progress only, no secrets or
+		// mutation, and the setup UI polls it before an API key may exist.
+		// Token-mutating endpoints (init / reauth / callback) are NOT exempt:
+		// when no API keys exist authenticateRequest() still allows them
+		// (initial account setup, via the isAuthenticationEnabled() check
+		// below); once authentication is enabled they fall through to
+		// API-key validation and authorizeEndpoint(), which only grants admin
+		// keys access to non-proxy paths. This closes the unauthenticated
+		// token-overwrite vector.
+		if (path.startsWith("/api/oauth")) {
+			const isReadOnlyStatus =
+				method === "GET" &&
+				(path.startsWith("/api/oauth/qwen/status/") ||
+					path.startsWith("/api/oauth/codex/status/"));
+			return isReadOnlyStatus;
+		}
+
 		// API key management: Only allow initial key creation without auth if no keys exist
 		// All other operations require authentication
 		if (path.startsWith("/api/api-keys")) {
@@ -419,24 +438,6 @@ export class AuthService {
 			}
 			// All other API key operations require authentication
 			return false;
-		}
-
-		// OAuth endpoints.
-		// Read-only status polling (GET /api/oauth/{qwen,codex}/status/*) stays
-		// exempt — it returns transient setup progress only, no secrets or
-		// mutation, and the setup UI polls it before an API key may exist.
-		// Token-mutating endpoints (init / reauth / callback) are NOT exempt:
-		// when no API keys exist authenticateRequest() still allows them
-		// (initial account setup); once authentication is enabled they fall
-		// through to API-key validation and authorizeEndpoint(), which only
-		// grants admin keys access to non-proxy paths. This closes the
-		// unauthenticated token-overwrite vector (Codex P1).
-		if (path.startsWith("/api/oauth")) {
-			const isReadOnlyStatus =
-				method === "GET" &&
-				(path.startsWith("/api/oauth/qwen/status/") ||
-					path.startsWith("/api/oauth/codex/status/"));
-			return isReadOnlyStatus;
 		}
 
 		// Proxy endpoints (/v1/*, /messages/*, etc.) require authentication if

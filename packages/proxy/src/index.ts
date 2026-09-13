@@ -41,11 +41,13 @@ export {
 export {
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
+	checkReauthDeadline,
 	checkRefreshTokenHealth,
 	clearAccountRefreshCache,
 	clearAutoRefreshTrackingForAccount,
 	clearFamilyExhaustionForAccount,
 	clearPendingRotation,
+	computeReauthDeadline,
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
@@ -54,6 +56,7 @@ export {
 	getUsageThrottleUntil,
 	getValidAccessToken,
 	isRefreshTokenLikelyExpired,
+	type ReauthDeadlineStatus,
 	type RoutingObservation,
 	type RoutingObservationAccount,
 	refreshCodexUsageForAccount,
@@ -88,9 +91,11 @@ export {
 export type {
 	OpenAICompatibleModelEntry,
 	OpenAICompatibleModelListing,
+	OpenAICompatibleModelPreview,
 } from "./openai-compatible-model-catalog";
 export {
 	clearOpenAICompatibleModelCacheForAccount,
+	fetchOpenAICompatibleModelsPreview,
 	getOpenAICompatibleModels,
 } from "./openai-compatible-model-catalog";
 export {

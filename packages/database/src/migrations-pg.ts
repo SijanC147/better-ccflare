@@ -86,12 +86,14 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			session_request_count INTEGER DEFAULT 0,
 			paused INTEGER DEFAULT 0,
 			rate_limit_reset BIGINT,
+			rate_limit_reset_at BIGINT,
 			rate_limit_status TEXT,
 			rate_limit_remaining INTEGER,
 			auto_fallback_enabled INTEGER DEFAULT 0,
 			custom_endpoint TEXT,
 			auto_refresh_enabled INTEGER DEFAULT 0,
 			model_mappings TEXT,
+			request_transformer TEXT,
 			model_fallbacks TEXT,
 			cross_region_mode TEXT DEFAULT 'geographic',
 			auto_pause_on_overage_enabled INTEGER DEFAULT 0,
@@ -100,6 +102,7 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			requires_reauth INTEGER DEFAULT 0,
 			billing_type TEXT DEFAULT NULL,
 			refresh_token_issued_at BIGINT,
+			last_manual_reauth_at BIGINT,
 			rate_limited_reason TEXT,
 			rate_limited_at BIGINT,
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
@@ -660,6 +663,7 @@ async function collapseAccountDuplicatesPreservingStatePg(
 			   pause_reason = COALESCE(pause_reason, ${pgFreshest("pause_reason")}),
 			   rate_limited_reason = COALESCE(rate_limited_reason, ${pgFreshest("rate_limited_reason")}),
 			   model_mappings = COALESCE(model_mappings, ${pgFreshest("model_mappings")}),
+			   request_transformer = COALESCE(request_transformer, ${pgFreshest("request_transformer")}),
 			   model_fallbacks = COALESCE(model_fallbacks, ${pgFreshest("model_fallbacks")}),
 			   cross_region_mode = COALESCE(cross_region_mode, ${pgFreshest("cross_region_mode")}),
 			   billing_type = COALESCE(billing_type, ${pgFreshest("billing_type")})
@@ -743,6 +747,11 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		},
 		{
 			table: "accounts",
+			column: "request_transformer",
+			definition: "ALTER TABLE accounts ADD COLUMN request_transformer TEXT",
+		},
+		{
+			table: "accounts",
 			column: "model_fallbacks",
 			definition: "ALTER TABLE accounts ADD COLUMN model_fallbacks TEXT",
 		},
@@ -772,6 +781,12 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		},
 		{
 			table: "accounts",
+			column: "last_manual_reauth_at",
+			definition:
+				"ALTER TABLE accounts ADD COLUMN last_manual_reauth_at BIGINT",
+		},
+		{
+			table: "accounts",
 			column: "rate_limited_reason",
 			definition: "ALTER TABLE accounts ADD COLUMN rate_limited_reason TEXT",
 		},
@@ -779,6 +794,11 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			table: "accounts",
 			column: "rate_limited_at",
 			definition: "ALTER TABLE accounts ADD COLUMN rate_limited_at BIGINT",
+		},
+		{
+			table: "accounts",
+			column: "rate_limit_reset_at",
+			definition: "ALTER TABLE accounts ADD COLUMN rate_limit_reset_at BIGINT",
 		},
 		{
 			table: "accounts",

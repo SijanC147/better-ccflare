@@ -31,7 +31,11 @@ import {
 	getRepresentativeXaiWindow,
 	type XaiUsageData,
 } from "./xai-usage-fetcher";
-import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
+import {
+	fetchZaiUsageData,
+	type ZaiUsageData,
+	type ZaiUsageWindow,
+} from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
 
@@ -186,6 +190,27 @@ export function extractWeeklyResetTime(
 	if (!resetsAt) return null;
 	const ms = new Date(resetsAt).getTime();
 	return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Extract the weekly_all (all-models weekly) window utilization percentage.
+ * Mirrors {@link extractWeeklyResetTime}'s field precedence so both read the
+ * same window — unlike {@link getRepresentativeUtilization}, which returns
+ * the max across ALL windows (five_hour included) and so cannot be used to
+ * detect a weekly-window-specific reset.
+ */
+export function extractWeeklyUtilization(
+	data: AnyUsageData,
+	provider: string,
+): number | null {
+	if (provider !== "anthropic" && provider !== "codex") return null;
+	const d = data as UsageData;
+	return (
+		d.seven_day?.utilization ??
+		(Array.isArray(d.limits)
+			? (d.limits.find((l) => l?.kind === "weekly_all")?.percent ?? null)
+			: null)
+	);
 }
 
 /**
@@ -411,6 +436,31 @@ export function getRepresentativeWindow(
 	return representativeWindow(usage, true);
 }
 
+/**
+ * The zai token window (5-hour or weekly) with the highest utilization —
+ * shared by utilization, reset, and snapshot derivation so all three agree on
+ * which window is "the" representative one. Ties prefer the later reset: the
+ * account isn't actually available again until every exhausted window
+ * clears, so picking the earlier one would report recovery too soon.
+ */
+function getWinningZaiTokenWindow(
+	usage: ZaiUsageData,
+): ZaiUsageWindow | null {
+	const candidates = [usage.tokens_limit, usage.tokens_limit_weekly].filter(
+		(window): window is ZaiUsageWindow => window !== null,
+	);
+	if (candidates.length === 0) return null;
+	return candidates.reduce((prev, current) => {
+		if (current.percentage !== prev.percentage) {
+			return current.percentage > prev.percentage ? current : prev;
+		}
+		if (current.resetAt === null || prev.resetAt === null) {
+			return prev.resetAt === null ? prev : current;
+		}
+		return current.resetAt > prev.resetAt ? current : prev;
+	});
+}
+
 function utilizationForProvider(
 	data: AnyUsageData | null | undefined,
 	provider: string,
@@ -452,6 +502,7 @@ function utilizationForProvider(
 			const candidates = [
 				zai.time_limit?.percentage ?? null,
 				zai.tokens_limit?.percentage ?? null,
+				zai.tokens_limit_weekly?.percentage ?? null,
 			].filter((v): v is number => v !== null);
 			return candidates.length > 0 ? Math.max(...candidates) : null;
 		}
@@ -610,11 +661,15 @@ export function getRepresentativeUsageResetMs(
 				// resets_at so the staleness guard still has a real reset time.
 				return getRepresentativeLimitResetMs(data as UsageData, windowName);
 			}
-			case "zai":
-				return extractUsageResetMs(
-					data,
-					(data as ZaiUsageData).tokens_limit ? "tokens_limit" : null,
-				);
+			case "zai": {
+				// Must pick the SAME window utilizationForProvider's zai branch
+				// picked as the max, or a resetMs from a window that isn't the
+				// one driving `utilization` lets isUsageExhausted's staleness
+				// guard clear the account once the *wrong* window's reset
+				// passes, while the actually-exhausted window is still capped.
+				const winner = getWinningZaiTokenWindow(data as ZaiUsageData);
+				return winner?.resetAt ?? null;
+			}
 			case "nanogpt":
 				return extractUsageResetMs(
 					data,
@@ -667,7 +722,11 @@ export function getRepresentativeUsageSnapshotForProvider(
 ): { utilization: number; resetMs: number | null } | null {
 	if (provider === "zai") {
 		const zai = data as ZaiUsageData;
-		const candidates = [zai.time_limit, zai.tokens_limit].filter(
+		const candidates = [
+			zai.time_limit,
+			zai.tokens_limit,
+			zai.tokens_limit_weekly,
+		].filter(
 			(window): window is NonNullable<typeof window> => window !== null,
 		);
 		if (candidates.length === 0) return null;
@@ -718,6 +777,10 @@ class UsageCache {
 	private capacityRestoredCallbacks = new Map<
 		string,
 		(accountId: string) => void
+	>();
+	private staleWeeklyResetCallbacks = new Map<
+		string,
+		(accountId: string, observedAt: number) => void
 	>();
 	private snapshotCallbacks = new Map<
 		string,
@@ -804,6 +867,7 @@ class UsageCache {
 		customEndpoint?: string | null,
 		onWindowReset?: (accountId: string) => void,
 		onCapacityRestored?: (accountId: string) => void,
+		onStaleWeeklyReset?: (accountId: string, observedAt: number) => void,
 		onSnapshot?: (accountId: string, data: UsageData) => void,
 	) {
 		// Check if provider supports usage tracking
@@ -849,6 +913,11 @@ class UsageCache {
 			this.capacityRestoredCallbacks.set(accountId, onCapacityRestored);
 		} else {
 			this.capacityRestoredCallbacks.delete(accountId);
+		}
+		if (onStaleWeeklyReset) {
+			this.staleWeeklyResetCallbacks.set(accountId, onStaleWeeklyReset);
+		} else {
+			this.staleWeeklyResetCallbacks.delete(accountId);
 		}
 		if (onSnapshot) {
 			this.snapshotCallbacks.set(accountId, onSnapshot);
@@ -918,6 +987,7 @@ class UsageCache {
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
 			this.capacityRestoredCallbacks.delete(accountId);
+			this.staleWeeklyResetCallbacks.delete(accountId);
 			this.snapshotCallbacks.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
 			this.cache.delete(accountId);
@@ -1145,6 +1215,26 @@ class UsageCache {
 						const capacityCallback =
 							this.capacityRestoredCallbacks.get(accountId);
 						if (capacityCallback) capacityCallback(accountId);
+					}
+					// Detect an out-of-band weekly reset: the seven_day window shows 0%
+					// utilization with resets_at unknown while the DB's rate_limit_reset
+					// may still hold a stale future timestamp from an earlier 429. That
+					// stale value defeats AutoRefreshScheduler's probe gate and pins the
+					// account last in strict drain-soonest ranking indefinitely (#443).
+					// Scoped to the weekly window specifically (not the account-wide max
+					// utilization) so a busy five_hour session window doesn't mask a
+					// reset seven_day window.
+					const weeklyResetAt = extractWeeklyResetTime(
+						result.data as UsageData,
+						"anthropic",
+					);
+					const weeklyUtilization = extractWeeklyUtilization(
+						result.data as UsageData,
+						"anthropic",
+					);
+					if (weeklyUtilization === 0 && weeklyResetAt === null) {
+						const staleCb = this.staleWeeklyResetCallbacks.get(accountId);
+						if (staleCb) staleCb(accountId, Date.now());
 					}
 					const window = getRepresentativeWindow(result.data as UsageData);
 					log.debug(

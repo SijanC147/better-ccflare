@@ -1,3 +1,85 @@
+// Manual reauthentication deadline thresholds. This is the canonical source
+// for this arithmetic — packages/proxy/src/handlers/token-health-monitor.ts
+// imports computeReauthDeadline / isEligibleForReauthDeadline from here
+// rather than maintaining its own copy.
+export const REAUTH_MANUAL_DEADLINE_MS = 28 * 24 * 60 * 60 * 1000; // 28 days
+export const REAUTH_DEADLINE_WARNING_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+export const REAUTH_DEADLINE_CRITICAL_THRESHOLD_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+export interface ReauthDeadlineStatus {
+	status: "ok" | "warning" | "critical" | "expired";
+	message: string;
+	deadlineAt: number;
+	daysUntilDeadline: number;
+	hoursUntilDeadline: number;
+}
+
+/**
+ * True only for a genuine Claude OAuth account: provider is "anthropic",
+ * both a refresh_token and access_token are present, and they're not the
+ * same value (excludes API-key-in-both-fields accounts created for
+ * zai/minimax/deepseek/etc via the dashboard's "add account" flow).
+ */
+export function isEligibleForReauthDeadline(fields: {
+	provider: string | null;
+	refreshToken: string | null;
+	accessToken: string | null;
+}): boolean {
+	return (
+		(fields.provider ?? "anthropic") === "anthropic" &&
+		!!fields.refreshToken &&
+		!!fields.accessToken &&
+		fields.refreshToken !== fields.accessToken
+	);
+}
+
+/**
+ * Predicts when a Claude OAuth account will need its next MANUAL
+ * reauthentication, based on the empirically observed ~28-day deadline
+ * from the last manual reauth. Returns null when not eligible (not a
+ * Claude OAuth account) OR when lastManualReauthAt is null — there is
+ * deliberately NO fallback to account creation date: an account that
+ * hasn't been manually reauthenticated since this feature shipped has
+ * an unknown deadline, not an assumed-expired one.
+ */
+export function computeReauthDeadline(params: {
+	eligible: boolean;
+	lastManualReauthAt: number | null;
+	now?: number;
+}): ReauthDeadlineStatus | null {
+	if (!params.eligible || params.lastManualReauthAt == null) return null;
+	const now = params.now ?? Date.now();
+	const deadlineAt = params.lastManualReauthAt + REAUTH_MANUAL_DEADLINE_MS;
+	const msLeft = deadlineAt - now;
+	const daysUntilDeadline = Math.ceil(msLeft / (24 * 60 * 60 * 1000));
+	const hoursUntilDeadline = Math.ceil(msLeft / (60 * 60 * 1000));
+
+	let status: ReauthDeadlineStatus["status"];
+	let message: string;
+	if (msLeft <= 0) {
+		status = "expired";
+		const daysOverdue = Math.floor(-msLeft / (24 * 60 * 60 * 1000));
+		message = `Manual reauthentication deadline passed ~${daysOverdue} day(s) ago — re-authenticate immediately`;
+	} else if (msLeft <= REAUTH_DEADLINE_CRITICAL_THRESHOLD_MS) {
+		status = "critical";
+		message = `Re-authentication required within ~${hoursUntilDeadline} hour(s)`;
+	} else if (msLeft <= REAUTH_DEADLINE_WARNING_THRESHOLD_MS) {
+		status = "warning";
+		message = `Re-authentication required within ~${daysUntilDeadline} day(s)`;
+	} else {
+		status = "ok";
+		message = `Re-authentication not required for ~${daysUntilDeadline} day(s)`;
+	}
+
+	return {
+		status,
+		message,
+		deadlineAt,
+		daysUntilDeadline,
+		hoursUntilDeadline,
+	};
+}
+
 export type RateLimitReason =
 	| "upstream_429_with_reset"
 	/** @deprecated written by ccflare ≤ v3.5.x when no-reset 429s used a 5h ban.
@@ -30,7 +112,22 @@ export type RateLimitReason =
 	 *  request identically, and retries spanning 11s never once cleared it. The
 	 *  account is NOT benched — the request fails over and the account stays in
 	 *  rotation. */
-	| "windowless_429";
+	| "windowless_429"
+	/** Anthropic 403 `permission_error` — the account's ORGANIZATION forbids the
+	 *  request (OAuth disabled org-wide, Claude Code subscription access turned
+	 *  off by an admin). Nothing about the account's own quota is wrong, but it
+	 *  cannot serve any request until an admin changes a setting upstream, so it
+	 *  is benched like an exhausted window and the request fails over. Unlike
+	 *  `out_of_credits` / `extra_usage_exhausted` this is account-wide, not
+	 *  scoped to a model or surface, so it DOES count as a circuit failure.
+	 *  Not time-bounded: the bench will expire and the single-flight recovery
+	 *  probe will rediscover the 403 until the org setting actually changes. */
+	| "org_permission_denied";
+
+export const REQUEST_TRANSFORMERS = [
+	"max-tokens-to-max-completion-tokens",
+] as const;
+export type RequestTransformer = (typeof REQUEST_TRANSFORMERS)[number];
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
@@ -111,7 +208,10 @@ export interface ZaiUsageWindow {
 
 export interface ZaiUsageData {
 	time_limit: ZaiUsageWindow | null;
+	/** Short token window (5-hour on current plans) — the nearest reset. */
 	tokens_limit: ZaiUsageWindow | null;
+	/** Long token window (weekly on current plans), null on single-window plans. */
+	tokens_limit_weekly: ZaiUsageWindow | null;
 }
 
 // Usage data types for Kilo accounts
@@ -205,11 +305,13 @@ export interface AccountRow {
 	peak_hours_pause_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
+	request_transformer?: RequestTransformer | null;
 	cross_region_mode?: string | null; // Bedrock cross-region inference mode
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	last_manual_reauth_at?: number | null; // Timestamp of the last MANUAL reauthentication (CLI --reauthenticate or dashboard OAuth callback); NOT updated by automatic token refresh
 	consecutive_rate_limits?: number | null;
 }
 
@@ -243,11 +345,13 @@ export interface Account {
 	peak_hours_pause_enabled: boolean;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
+	request_transformer: RequestTransformer | null;
 	cross_region_mode: string | null; // Bedrock cross-region inference mode
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	last_manual_reauth_at: number | null; // Timestamp of the last MANUAL reauthentication; NOT updated by automatic token refresh
 	consecutive_rate_limits: number;
 }
 
@@ -290,6 +394,7 @@ export interface AccountResponse {
 	peakHoursPauseEnabled?: boolean;
 	customEndpoint: string | null;
 	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
+	requestTransformer: RequestTransformer | null;
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
@@ -302,6 +407,10 @@ export interface AccountResponse {
 	billingType?: string | null;
 	sessionStats: SessionStats | null;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
+	lastManualReauthAt: number | null;
+	reauthDeadlineStatus: "ok" | "warning" | "critical" | "expired" | null;
+	daysUntilReauthRequired: number | null;
+	hoursUntilReauthRequired: number | null;
 }
 
 // UI display type - used in CLI and web dashboard
@@ -433,11 +542,13 @@ export function toAccount(row: AccountRow): Account {
 		peak_hours_pause_enabled: !!row.peak_hours_pause_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
+		request_transformer: row.request_transformer ?? null,
 		cross_region_mode: row.cross_region_mode || null,
 		model_fallbacks: row.model_fallbacks || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
+		last_manual_reauth_at: toNumOrNull(row.last_manual_reauth_at),
 		consecutive_rate_limits: toNum(row.consecutive_rate_limits),
 	};
 }
@@ -490,6 +601,19 @@ export function toAccountResponse(account: Account): AccountResponse {
 		}
 	}
 
+	// Manual reauthentication deadline (Claude OAuth accounts only, and only
+	// once they've been manually reauthenticated at least once under this
+	// feature — see computeReauthDeadline's doc comment for why there is no
+	// createdAt fallback).
+	const reauthDeadline = computeReauthDeadline({
+		eligible: isEligibleForReauthDeadline({
+			provider: account.provider,
+			refreshToken: account.refresh_token,
+			accessToken: account.access_token,
+		}),
+		lastManualReauthAt: account.last_manual_reauth_at,
+	});
+
 	return {
 		id: account.id,
 		name: account.name,
@@ -523,6 +647,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		peakHoursPauseEnabled: account.peak_hours_pause_enabled,
 		customEndpoint: account.custom_endpoint,
 		modelMappings,
+		requestTransformer: account.request_transformer,
 		usageUtilization: null, // Will be filled in by API handler from cache
 		usageWindow: null, // Will be filled in by API handler from cache
 		usageData: null, // Will be filled in by API handler from cache
@@ -535,6 +660,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 		billingType: account.billing_type,
 		sessionStats: null,
 		isPrimary: false,
+		lastManualReauthAt: account.last_manual_reauth_at,
+		reauthDeadlineStatus: reauthDeadline?.status ?? null,
+		daysUntilReauthRequired: reauthDeadline?.daysUntilDeadline ?? null,
+		hoursUntilReauthRequired: reauthDeadline?.hoursUntilDeadline ?? null,
 	};
 }
 

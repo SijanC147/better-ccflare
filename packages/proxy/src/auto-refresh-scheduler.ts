@@ -425,12 +425,14 @@ export class AutoRefreshScheduler {
 				peak_hours_pause_enabled: false,
 				custom_endpoint: accountRow.custom_endpoint,
 				model_mappings: null,
+				request_transformer: null,
 				cross_region_mode: null,
 				model_fallbacks: null,
 				billing_type: null,
 				pause_reason: null,
 				refresh_token_issued_at: null,
 				consecutive_rate_limits: 0,
+				last_manual_reauth_at: null,
 			};
 
 			// Emit request start event for analytics
@@ -641,8 +643,8 @@ export class AutoRefreshScheduler {
 				// Update rate limit fields from unified headers
 				if (rateLimitInfo.resetTime) {
 					await this.db.run(
-						"UPDATE accounts SET rate_limit_reset = ?, rate_limited_until = NULL WHERE id = ?",
-						[rateLimitInfo.resetTime, accountRow.id],
+						"UPDATE accounts SET rate_limit_reset = ?, rate_limit_reset_at = ?, rate_limited_until = NULL WHERE id = ?",
+						[rateLimitInfo.resetTime, Date.now(), accountRow.id],
 					);
 
 					// Update our tracking with the NEW rate_limit_reset from the API
@@ -983,12 +985,14 @@ export class AutoRefreshScheduler {
 					peak_hours_pause_enabled: false,
 					custom_endpoint: row.custom_endpoint,
 					model_mappings: null,
+					request_transformer: null,
 					cross_region_mode: null,
 					model_fallbacks: null,
 					billing_type: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
+					last_manual_reauth_at: null,
 				};
 
 				// Use refreshAccessTokenSafe to get deduplication and backoff handling
@@ -1173,12 +1177,14 @@ export class AutoRefreshScheduler {
 					peak_hours_pause_enabled: false,
 					custom_endpoint: row.custom_endpoint,
 					model_mappings: null,
+					request_transformer: null,
 					cross_region_mode: null,
 					model_fallbacks: null,
 					billing_type: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
+					last_manual_reauth_at: null,
 				};
 
 				// Register in refreshInFlight so concurrent request-triggered refreshes join this one

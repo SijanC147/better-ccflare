@@ -139,6 +139,10 @@ describe("NanoGPT Pricing", () => {
 		resetNanoGPTPricingCacheForTest();
 		// Restore all mocks to clean up between tests
 		vi.restoreAllMocks();
+		// These tests replace the global directly rather than through spyOn.
+		// restoreAllMocks therefore cannot recover Bun's native fetch and may
+		// leave later test files with an undefined or stale mock.
+		global.fetch = originalFetch;
 	});
 
 	it("should fetch NanoGPT pricing data successfully", async () => {

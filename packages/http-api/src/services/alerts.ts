@@ -10,7 +10,9 @@ import {
 } from "@better-ccflare/core";
 import type { BunSqlAdapter } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
+import { checkReauthDeadline } from "@better-ccflare/proxy";
 import type {
+	Account,
 	AlertEvent,
 	AlertsConfigPayload,
 	AlertType,
@@ -247,18 +249,48 @@ export class AlertService {
 	private readonly requestListener: (event: RequestEvt) => void;
 	private readonly authFailureListener: (event: AuthFailureEvt) => void;
 	private readonly configChangeListener: ({ key }: { key: string }) => void;
+	private readonly getAccounts: () => Promise<Account[]>;
 	private anomalyTimer: ReturnType<typeof setInterval> | null = null;
+	private reauthDeadlineTimer: ReturnType<typeof setInterval> | null = null;
+	private stopped = false;
 
-	constructor(db: BunSqlAdapter, config: Config) {
+	constructor(
+		db: BunSqlAdapter,
+		config: Config,
+		// Defaults to an empty accessor so existing call sites (and tests) that
+		// construct AlertService without a third argument keep compiling; the
+		// reauth-deadline timer below then simply has nothing to check.
+		getAccounts: () => Promise<Account[]> = () => Promise.resolve([]),
+	) {
 		this.db = db;
 		this.config = config;
+		this.getAccounts = getAccounts;
 		this.requestListener = (event) => {
 			if (event.type === "summary") {
-				void this.evaluateRequest(event.payload);
+				// Alert evaluation runs the aggregate-threshold queries below,
+				// which can reject (e.g. a PG statement-timeout during a DB
+				// slowdown, #451). This listener is invoked from an async event
+				// handler, so an unhandled rejection here would crash the proxy
+				// with exit code 1 — catch and log instead.
+				this.evaluateRequest(event.payload).catch((error) => {
+					log.error(
+						`Alert evaluation failed for request ${event.payload.id}: ${(error as Error).message}`,
+					);
+				});
 			}
 		};
 		this.authFailureListener = (event) => {
-			void this.handleAuthFailure(event);
+			// Same rationale as the requestListener above: handleAuthFailure
+			// calls persistAndEmit, whose cooldown pre-check (`SELECT id FROM
+			// alerts`) runs outside persistAndEmit's own try/catch and can
+			// reject on a PG timeout (#451). This listener is invoked from an
+			// async event handler, so an unhandled rejection here would crash
+			// the proxy with exit code 1 — catch and log instead.
+			this.handleAuthFailure(event).catch((error) => {
+				log.error(
+					`Auth-failure alert evaluation failed for account ${event.accountId}: ${(error as Error).message}`,
+				);
+			});
 		};
 		this.configChangeListener = ({ key }: { key: string }) => {
 			if (
@@ -271,19 +303,34 @@ export class AlertService {
 	}
 
 	start(): void {
+		this.stopped = false;
 		requestEvents.on("event", this.requestListener);
 		this.config.on("change", this.configChangeListener);
 		authFailureEvents.on("event", this.authFailureListener);
 		this.restartAnomalyTimer();
+		this.restartReauthDeadlineTimer();
+		// Perform an initial check immediately rather than waiting a full hour
+		// for the first interval tick to fire (mirrors token-health-service's
+		// startHealthChecks, which does the same for the token-health timer).
+		this.handleReauthDeadlines().catch((error) => {
+			log.error(
+				`Initial reauth-deadline check failed: ${(error as Error).message}`,
+			);
+		});
 	}
 
 	stop(): void {
+		this.stopped = true;
 		requestEvents.off("event", this.requestListener);
 		this.config.off("change", this.configChangeListener);
 		authFailureEvents.off("event", this.authFailureListener);
 		if (this.anomalyTimer) {
 			clearInterval(this.anomalyTimer);
 			this.anomalyTimer = null;
+		}
+		if (this.reauthDeadlineTimer) {
+			clearInterval(this.reauthDeadlineTimer);
+			this.reauthDeadlineTimer = null;
 		}
 	}
 
@@ -313,6 +360,104 @@ export class AlertService {
 		await this.persistAndEmit(alert, config.webhookUrl);
 	}
 
+	private async handleReauthDeadlines(): Promise<void> {
+		if (this.stopped) return;
+		let accounts: Account[];
+		try {
+			accounts = await this.getAccounts();
+		} catch (error) {
+			log.error(
+				`Failed to fetch accounts for reauth-deadline check: ${(error as Error).message}`,
+			);
+			return;
+		}
+		const config = getAlertsConfig(this.config);
+		for (const account of accounts) {
+			if (account.requires_reauth) continue; // already hard-locked; covered by the existing auth_failure alert
+			try {
+				const result = checkReauthDeadline(account);
+				if (!result || result.status === "ok") continue;
+				// "expired" (deadline already passed) is treated as equally urgent as
+				// "critical" (deadline imminent) — same severity, same cooldown
+				// cadence. It covers accounts with a recorded manual reauth whose
+				// predicted deadline has passed. Accounts without that timestamp have
+				// an unknown deadline and are already skipped above (checkReauthDeadline
+				// / computeReauthDeadline return null) — there is no fallback to
+				// created_at.
+				const isUrgent =
+					result.status === "critical" || result.status === "expired";
+				if (this.stopped) return;
+				const timestamp = Date.now();
+				// Critical/expired-tier alerts re-fire at most once per hour (the
+				// deadline is imminent or already past, so staleness matters);
+				// warning-tier re-fires at most once per day, so accounts sitting in
+				// "warning" for its ~2.5-day span (3 days down to 12 hours before the
+				// deadline) don't spam an alert per hourly timer tick.
+				const bucketMinutes = isUrgent ? 60 : 1440;
+				const title =
+					result.status === "expired"
+						? "Reauthentication deadline passed"
+						: "Reauthentication deadline approaching";
+				const alert: AlertEvent = {
+					id: buildThresholdAlertId(
+						"reauth_deadline_warning",
+						`${account.id}:${result.status}`,
+						timestamp,
+						bucketMinutes,
+					),
+					timestamp,
+					type: "reauth_deadline_warning",
+					severity: isUrgent ? "critical" : "warning",
+					title,
+					message: `Account ${account.name} (${account.provider}) ${result.message} — run: bun run cli --reauthenticate "${account.name}"`,
+					value:
+						result.status === "critical" || result.status === "expired"
+							? result.hoursUntilDeadline
+							: result.daysUntilDeadline,
+					threshold: null,
+					account: account.name,
+					model: null,
+					project: null,
+					requestId: null,
+					acknowledged: false,
+				};
+				await this.persistAndEmit(alert, config.webhookUrl);
+			} catch (error) {
+				// Isolate one account's failure (e.g. a PG statement timeout inside
+				// persistAndEmit, #451) so it cannot abort the whole sweep — without
+				// this, every account after the failing one in iteration order would
+				// silently miss its reauth-deadline check for this cycle.
+				log.error(
+					`Reauth-deadline check failed for account ${account.name}: ${(error as Error).message}`,
+				);
+			}
+		}
+	}
+
+	private restartReauthDeadlineTimer(): void {
+		if (this.reauthDeadlineTimer) {
+			clearInterval(this.reauthDeadlineTimer);
+			this.reauthDeadlineTimer = null;
+		}
+		// No config.anomalyEnabled-style toggle here by design — this feature
+		// intentionally reuses the existing alert system without adding new
+		// configuration surface, so the check always runs.
+		this.reauthDeadlineTimer = setInterval(
+			() => {
+				// Same rationale as the anomaly timer below: this callback fires an
+				// async function with no caller to await it, so an unhandled
+				// rejection (e.g. a PG timeout, or getAccounts() throwing) would
+				// otherwise crash the proxy.
+				this.handleReauthDeadlines().catch((error) => {
+					log.error(
+						`Reauth-deadline evaluation failed: ${(error as Error).message}`,
+					);
+				});
+			},
+			60 * 60 * 1000,
+		);
+	}
+
 	private restartAnomalyTimer(): void {
 		if (this.anomalyTimer) {
 			clearInterval(this.anomalyTimer);
@@ -322,7 +467,13 @@ export class AlertService {
 		if (!config.anomalyEnabled) return;
 		this.anomalyTimer = setInterval(
 			() => {
-				void this.evaluateAnomalies();
+				// Same rationale as evaluateRequest above: this timer callback
+				// fires an async function with no caller to await it, so an
+				// unhandled rejection (e.g. a PG timeout on the anomaly window
+				// query, #451) would otherwise crash the proxy.
+				this.evaluateAnomalies().catch((error) => {
+					log.error(`Anomaly evaluation failed: ${(error as Error).message}`);
+				});
 			},
 			config.anomalyIntervalMinutes * 60 * 1000,
 		);

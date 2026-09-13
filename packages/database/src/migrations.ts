@@ -123,7 +123,9 @@ export function ensureSchema(db: Database): void {
 			total_requests INTEGER DEFAULT 0,
 			priority INTEGER DEFAULT 0,
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
-			requires_reauth INTEGER DEFAULT 0
+			requires_reauth INTEGER DEFAULT 0,
+			last_manual_reauth_at INTEGER,
+			request_transformer TEXT
 		)
 	`);
 
@@ -655,6 +657,7 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 		   pause_reason = COALESCE(pause_reason, ${freshest("pause_reason")}),
 		   rate_limited_reason = COALESCE(rate_limited_reason, ${freshest("rate_limited_reason")}),
 		   model_mappings = COALESCE(model_mappings, ${freshest("model_mappings")}),
+		   request_transformer = COALESCE(request_transformer, ${freshest("request_transformer")}),
 		   model_fallbacks = COALESCE(model_fallbacks, ${freshest("model_fallbacks")}),
 		   cross_region_mode = COALESCE(cross_region_mode, ${freshest("cross_region_mode")}),
 		   billing_type = COALESCE(billing_type, ${freshest("billing_type")})
@@ -969,6 +972,14 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added rate_limit_reset column to accounts table");
 		}
 
+		// Add rate_limit_reset_at column if it doesn't exist
+		if (!initialAccountsColumnNames.includes("rate_limit_reset_at")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN rate_limit_reset_at INTEGER",
+			).run();
+			log.info("Added rate_limit_reset_at column to accounts table");
+		}
+
 		// Add rate_limit_status column if it doesn't exist
 		if (!initialAccountsColumnNames.includes("rate_limit_status")) {
 			db.prepare(
@@ -1021,6 +1032,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added model_mappings column to accounts table");
 		}
 
+		if (!initialAccountsColumnNames.includes("request_transformer")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN request_transformer TEXT",
+			).run();
+			log.info("Added request_transformer column to accounts table");
+		}
+
 		// Add cross_region_mode column for Bedrock cross-region inference configuration
 		if (!initialAccountsColumnNames.includes("cross_region_mode")) {
 			db.prepare(
@@ -1050,6 +1068,16 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE accounts ADD COLUMN refresh_token_issued_at INTEGER",
 			).run();
 			log.info("Added refresh_token_issued_at column to accounts table");
+		}
+
+		// Add last_manual_reauth_at column to track when a human last manually reauthenticated
+		// (distinct from refresh_token_issued_at, which is also bumped by silent auto-refresh —
+		// see reauthenticateAccount() and OAuthFlow.completeReauth())
+		if (!initialAccountsColumnNames.includes("last_manual_reauth_at")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN last_manual_reauth_at INTEGER",
+			).run();
+			log.info("Added last_manual_reauth_at column to accounts table");
 		}
 
 		// Add auto_pause_on_overage_enabled column for Anthropic accounts
@@ -1144,6 +1172,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					custom_endpoint TEXT,
 					auto_refresh_enabled INTEGER DEFAULT 0,
 					model_mappings TEXT,
+					request_transformer TEXT,
 					cross_region_mode TEXT DEFAULT 'geographic',
 					model_fallbacks TEXT,
 					auto_pause_on_overage_enabled INTEGER DEFAULT 0,
@@ -1171,7 +1200,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					rate_limited_until, session_start, session_request_count,
 					paused, rate_limit_reset, rate_limit_status, rate_limit_remaining,
 					auto_fallback_enabled, custom_endpoint, auto_refresh_enabled,
-					model_mappings, cross_region_mode, model_fallbacks,
+					model_mappings, request_transformer, cross_region_mode, model_fallbacks,
 					auto_pause_on_overage_enabled, pause_reason,
 					billing_type, refresh_token_issued_at, peak_hours_pause_enabled,
 					rate_limited_reason, rate_limited_at, requires_reauth
@@ -1520,9 +1549,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       rate_limited_until, session_start, session_request_count, paused,
 			       rate_limit_reset, rate_limit_status, rate_limit_remaining,
 			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
-			       cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
-		       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
-		       rate_limited_at, requires_reauth
+			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
+			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
+			       rate_limited_at, requires_reauth
 			FROM accounts
 		`).run();
 
