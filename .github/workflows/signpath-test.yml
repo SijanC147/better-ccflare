@@ -7,13 +7,28 @@ jobs:
   sign:
     name: Test-sign Windows binary
     runs-on: ubuntu-latest
+    # read, not write. Nothing in this job writes to the repository: it builds,
+    # uploads two artifacts and submits a signing request. `contents: write`
+    # granted a token that can push to the repo to a job that also holds
+    # SIGNPATH_API_TOKEN, so a compromised step in any of the six third-party
+    # actions below could have committed. `actions: read` stays — the SignPath
+    # action reads the uploaded artifact through the Actions API.
     permissions:
-      contents: write
+      contents: read
       actions: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          # Explicit rather than implied. On workflow_dispatch this is the ref
+          # the dispatcher selected, so whoever can run this workflow chooses
+          # what gets test-signed. That is the intended capability — the point
+          # is to test-sign a branch before release — but it should be visible
+          # in the file rather than left to the default. The signing policy is
+          # `test-signing`, not release signing, which bounds what a signature
+          # from this workflow asserts.
+          ref: ${{ github.ref }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
