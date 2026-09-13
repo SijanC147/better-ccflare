@@ -11,6 +11,10 @@ import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";
 import { drainReader } from "../../utils/stream-drain";
 
+// The API version Anthropic requires on every request. Same value
+// model-catalog.ts and auto-refresh-scheduler.ts pin for their own fetches.
+const ANTHROPIC_VERSION = "2023-06-01";
+
 // Hard rate limit statuses that should block account usage
 const HARD_LIMIT_STATUSES = new Set([
 	"rate_limited",
@@ -414,6 +418,16 @@ export class AnthropicProvider extends BaseProvider {
 		// Remove host header
 		newHeaders.delete("host");
 
+		// Anthropic rejects every request without anthropic-version, including
+		// GET /v1/models, with HTTP 400 "anthropic-version: header is required".
+		// Native SDK clients always send it; an OpenAI-compatible client never
+		// does, so supply the same version model-catalog.ts and
+		// auto-refresh-scheduler.ts already pin. A client that sent its own
+		// version keeps it.
+		if (!newHeaders.has("anthropic-version")) {
+			newHeaders.set("anthropic-version", ANTHROPIC_VERSION);
+		}
+
 		return newHeaders;
 	}
 
@@ -680,11 +694,108 @@ export class AnthropicProvider extends BaseProvider {
 			headers,
 		});
 
+		// A model listing an OpenAI client asked for has to come back in the
+		// OpenAI shape; a native Anthropic client keeps Anthropic's.
+		if (
+			response.headers.get("x-better-ccflare-request-path") === "/v1/models" &&
+			!requestHeaders?.has("anthropic-version")
+		) {
+			return this.transformModelsListResponse(sanitizedResponse);
+		}
+
 		// Add OpenAI-compatible finish_reason alongside Anthropic's stop_reason
 		return this.transformStreamToOpenAIFormat(
 			sanitizedResponse,
 			requestHeaders,
 		);
+	}
+
+	/**
+	 * Anthropic's `GET /v1/models` page rendered in the OpenAI listing shape.
+	 *
+	 * Anthropic answers `{data: [{id, display_name, created_at, type}],
+	 * has_more, first_id, last_id}`; an OpenAI client wants
+	 * `{object: "list", data: [{id, object: "model", created, owned_by}]}`.
+	 * We translate rather than serve a local listing so the answer stays the
+	 * live entitlement of the account that was routed to, not a table of ours
+	 * that goes stale (`packages/http-api/src/handlers/models.ts` documents why
+	 * a vendor's catalogue is not the same claim).
+	 *
+	 * `display_name`, `created_at` and `has_more` survive as extra fields:
+	 * `ingestModelsListing` in `packages/proxy/src/model-catalog.ts` reads all
+	 * three off this very body when it is teed, and OpenAI clients ignore keys
+	 * they do not know.
+	 *
+	 * Anything that is not a 200 JSON body is passed through untouched — an
+	 * error still has to reach the client as the error it was.
+	 */
+	private async transformModelsListResponse(
+		response: Response,
+	): Promise<Response> {
+		if (!response.ok) return response;
+		if (
+			!response.headers.get("content-type")?.toLowerCase().includes("json")
+		) {
+			return response;
+		}
+
+		let body: {
+			data?: Array<{
+				id?: string;
+				display_name?: string;
+				created_at?: string;
+			}>;
+			has_more?: boolean;
+			first_id?: string | null;
+			last_id?: string | null;
+		};
+		try {
+			body = await response.clone().json();
+		} catch (error) {
+			log.warn("Could not parse the /v1/models body as JSON:", error);
+			return response;
+		}
+
+		if (!Array.isArray(body.data)) return response;
+
+		const translated = {
+			object: "list",
+			data: body.data
+				.filter((model) => typeof model.id === "string" && model.id.length > 0)
+				.map((model) => {
+					const createdMs = model.created_at
+						? Date.parse(model.created_at)
+						: Number.NaN;
+					return {
+						id: model.id as string,
+						object: "model",
+						created: Number.isNaN(createdMs)
+							? 0
+							: Math.floor(createdMs / 1000),
+						owned_by: "anthropic",
+						// Kept for the model-catalog ingester, which reads these
+						// names off the proxied body.
+						display_name: model.display_name ?? model.id,
+						created_at: model.created_at ?? null,
+					};
+				}),
+			has_more: body.has_more ?? false,
+			first_id: body.first_id ?? null,
+			last_id: body.last_id ?? null,
+		};
+
+		const headers = new Headers(response.headers);
+		// The re-serialized body has a different length, and was already
+		// decoded — a stale content-length or content-encoding truncates it.
+		headers.delete("content-length");
+		headers.delete("content-encoding");
+		headers.set("content-type", "application/json");
+
+		return new Response(JSON.stringify(translated), {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
 	}
 
 	async extractTierInfo(response: Response): Promise<number | null> {
