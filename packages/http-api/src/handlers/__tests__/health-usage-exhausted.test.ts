@@ -228,6 +228,7 @@ describe("createHealthHandler — pool.usage_exhausted in the response", () => {
 				resetAt: Date.now() - 60_000,
 				type: "tokens",
 			},
+			tokens_limit_weekly: null,
 		});
 
 		const handler = createHealthHandler(
@@ -260,6 +261,7 @@ describe("createHealthHandler — pool.usage_exhausted in the response", () => {
 				resetAt: Date.now() + 3_600_000,
 				type: "tokens",
 			},
+			tokens_limit_weekly: null,
 		});
 
 		const handler = createHealthHandler(

@@ -156,6 +156,7 @@ describe("getRepresentativeUsageResetMs — shared provider-aware reset derivati
 				resetAt,
 				type: "tokens",
 			},
+			tokens_limit_weekly: null,
 		};
 		expect(getRepresentativeUsageResetMs(data, "zai")).toBe(resetAt);
 	});
