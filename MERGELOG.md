@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: 4d27cb226f383a39e12aea530e83d2f9896999ce -->
+<!-- last-sync-sha: ea0e332097ed8f6b2d214f0433ec1024752afadd -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-09-13 | main | `4d27cb22..ea0e3320` | 106 | resolved by the maintainer App | merge (two-parent) | pass (4,275 tests, 2 macOS-only fail) | [#52](https://github.com/SijanC147/better-ccflare/pull/52) |
 | 2026-08-27 | main | `412e6326..4d27cb22` | 624 | 37 files / 72 hunks | merge --no-ff | pass (3967 tests, 11 inherited-upstream fail) | [#41](https://github.com/SijanC147/better-ccflare/pull/41) |
 | 2026-07-03 | main | `ab677460..412e6326` | 206 | 23 files | merge --no-ff | pass (1960 tests, 0 fail) | [#33](https://github.com/SijanC147/better-ccflare/pull/33) |
 | 2026-05-19 | main | `5cdabaa8..ab677460` | 125 | 15 files | merge --no-ff | pass (1582 tests, 0 fail) | [#32](https://github.com/SijanC147/better-ccflare/pull/32) |
@@ -19,6 +20,101 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-09-13 — upstream `4d27cb22..ea0e3320` (106 commits)
+
+**PR:** [#52](https://github.com/SijanC147/better-ccflare/pull/52) · **Strategy:** two-parent merge
+**Scale:** 121 files changed · 98 taken verbatim from upstream · 23 genuinely merged · +16,335 / −404
+**Resolver:** the **upstream maintainer GitHub App**, not a hand `/sync-upstream` run
+**Controller run:** https://github.com/SijanC147/upstream-maintainer/actions/runs/34742022926
+
+First sync resolved by the maintainer App rather than by hand. The `last-sync-sha` marker above
+is normally owned by `/sync-upstream`; it was advanced manually for this entry because the App
+does not yet write it. A future sync should not read the marker's provenance as a hand sync.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `bun install --frozen-lockfile` | pass |
+| `bun run typecheck` | 0 errors |
+| `bun test` | 4,217 pass / 56 skip / 2 fail of 4,275 — both failures macOS-only (see below) |
+
+The 23 genuinely-merged files are where the fork's own work meets upstream's. The 98 verbatim
+files carry no fork edits at all and equal upstream's blobs byte for byte.
+
+### Upstream features arriving
+
+- **`POST /api/models/preview`** — live model discovery for the account wizard. Routed at
+  `packages/http-api/src/router.ts:596`; handler in `handlers/models.ts:222`. Note it is POST,
+  and there is no `handlers/models-preview.ts` — only a test file by that name.
+- **`POST /api/accounts/:id/request-transformer`** — per-account transformer update, routed in
+  the accountId-scoped block at `packages/http-api/src/router.ts:824`.
+- **Per-account request transformer** (`packages/proxy/src/handlers/account-request-transformer.ts`)
+  — applied before forwarding, with a recovery retry that re-forwards a transformed request.
+  That retry is the 16th `cancelDiscardedResponseBody` drain site (see below).
+- **Three new `accounts` columns** — `request_transformer` (TEXT), `last_manual_reauth_at`
+  (INTEGER / BIGINT) and `rate_limit_reset_at` (INTEGER / BIGINT). **Mirrored into both
+  migration paths**, as CLAUDE.md requires: `ensureSchema()` + `runMigrations()` in
+  `migrations.ts`, and `ensureSchemaPg()` + the `columnsToAdd` array in `migrations-pg.ts`.
+- **`services/auth-service.ts`** — moves the `/api/oauth` block above the `/api/api-keys` block
+  and rewords the surrounding comment. The two path prefixes are disjoint, so **the set of
+  exempt endpoints is unchanged** by the reorder; it neither widens nor narrows. The fork's
+  Codex P1 hardening survives intact: the only `/api/oauth` exemption is still read-only GET
+  status polling, and both `/api/oauth/qwen/status/` and `/api/oauth/codex/status/` literals are
+  present. The reworded comment drops the "Codex P1" attribution; the guard itself is the same.
+
+  Measured against **upstream's** copy rather than ours, the same file reads as a narrowing:
+  `git diff ea0e3320 e0581dc3` on it shows the merge kept the fork's rejection of upstream's
+  blanket `/api/oauth` and non-`/api` fallthrough exemptions, and kept `STREAM_TOKEN_PATHS` for
+  the SSE endpoints (#379). Both readings are correct under their own baseline — no change to
+  the exemption set relative to our `main`, narrower than upstream's.
+
+### Upstream ships tests that fail against upstream's own source
+
+**Read this before the next sync.** Upstream's CI runs only a Docker build and a push-on-main
+workflow — there is **no test suite gate** — so upstream's own tree is red on its own tests and
+nobody there notices. Arriving tests therefore cannot be trusted to pass, and the fork has to
+repair them on arrival. This sync needed 11 such fixes, all to tests, no source changed:
+
+| Test | Cause |
+|---|---|
+| `bun-leak-273-regression` call-site count | upstream's source has 16 drain sites, its test still demanded 15 |
+| `OAuthFlow.completeReauth` claude-oauth UPDATE | `last_manual_reauth_at` became the fifth bind, moving the account id to position 6; the test still read `params[4]` as the id |
+| `AccountRepository requires_reauth` (3 cases) | hand-written `CREATE TABLE` fixture lacked the three new columns, so `findById` failed with `no such column: request_transformer` |
+| `Zai pool-exhausted snapshot pairing` (4), `rate-limit-status` zai reset, `health-usage-exhausted` zai staleness guard | fixtures omitted `tokens_limit_weekly`, a **required** field of `ZaiUsageData` |
+
+The zai group is worth remembering. `usage-fetcher.ts` narrows those windows with a
+`window !== null` type predicate, which is sound against the declared type but lets `undefined`
+through when a fixture omits the field; `current.percentage` then throws inside `reduce`,
+swallowed into `null` in `getRepresentativeUsageResetMs` and propagated in
+`getRepresentativeUsageSnapshotForProvider`. Fixed in the **fixtures**, not the source: the
+production fetcher (`zai-usage-fetcher.ts:83`) always populates the field and the usage cache is
+in-memory and fed only by that fetcher, so the defect is latent-only — and `usage-fetcher.ts` is
+byte-identical to upstream, where a fork edit would conflict on every future sync.
+
+**Why tsc never caught it:** `tsconfig.json` excludes `**/__tests__` and `*.test.ts`. Test
+fixtures can therefore violate a declared interface silently, in this repo and upstream's.
+
+### The 2 remaining failures are the known macOS-only pair
+
+`packages/agents/src/__tests__/discovery-workspace-isolation.test.ts` — both
+`AgentRegistry — injected workspace persistence` cases. The registry stores `/var/folders/…`
+where the assertion expects `fs.realpathSync`'s `/private/var/folders/…`. macOS symlink
+resolution, not a defect; passes on Linux CI. Documented in CLAUDE.md. **Do not "fix" these by
+loosening the assertion.**
+
+One further failure appeared in one run only: `SQLITE_IOERR_VNODE` from a
+`PRAGMA wal_checkpoint` during SQLite close in teardown. Not reproduced on rerun — consistent
+with **SB23-314**, not with anything this merge changed.
+
+### Notes
+
+- Local Bun was 1.4.2 against CI's pinned 1.3.14. Tests and typecheck are unaffected; only
+  `brew hextap validate --build` requires the exact pin.
+- No Hextap file, workflow, or generated worker was touched by this sync.
+
+---
 
 ## 2026-08-27 — upstream `412e6326..4d27cb22` (624 commits)
 
