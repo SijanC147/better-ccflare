@@ -1547,6 +1547,25 @@ export class Config extends EventEmitter {
 		return this.getGithubReadToken().length > 0;
 	}
 
+	/**
+	 * Unlike upstream_maintainer_token, this one HAS a write path, and the
+	 * asymmetry is deliberate. A no-scope token that reads public releases is
+	 * worth roughly nothing if an authenticated dashboard user installs one,
+	 * while the maintainer token authorizes a workflow dispatch on another
+	 * repository. pg_password is settable from the dashboard for the same
+	 * reason: the value is already the operator's to choose.
+	 *
+	 * An empty string clears it.
+	 */
+	setGithubReadToken(token: string): void {
+		this.set("github_read_token", token);
+	}
+
+	/** Whether the environment is supplying it, so the UI can say the stored value is inert. */
+	githubReadTokenFromEnvironment(): boolean {
+		return Boolean(process.env.BETTER_CCFLARE_GITHUB_TOKEN);
+	}
+
 	// Deliberately no setter. Unlike pg_password, this value has no write path
 	// at all: the operator edits the config file (or sets the environment
 	// variable) and nothing reachable from the dashboard can set or overwrite it.

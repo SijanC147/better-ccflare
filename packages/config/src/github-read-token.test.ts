@@ -76,10 +76,34 @@ describe("github read token", () => {
 		expect(config.getUpstreamMaintainerToken()).toBe("");
 	});
 
-	it("has no setter, so nothing reachable from the API can install one", () => {
+	it("round-trips through the setter the dashboard uses", () => {
 		const config = configWith({});
-		expect(
-			(config as unknown as Record<string, unknown>).setGithubReadToken,
-		).toBeUndefined();
+		config.setGithubReadToken("ghp_from_ui");
+		expect(config.getGithubReadToken()).toBe("ghp_from_ui");
+		expect(config.hasGithubReadToken()).toBe(true);
+	});
+
+	it("clears on an empty string, which is how the dashboard removes it", () => {
+		const config = configWith({ github_read_token: "ghp_file" });
+		config.setGithubReadToken("");
+		expect(config.getGithubReadToken()).toBe("");
+		expect(config.hasGithubReadToken()).toBe(false);
+	});
+
+	it("has a setter where the maintainer token deliberately does not", () => {
+		// The asymmetry is the security argument, so assert it rather than
+		// leaving it to a comment: this token needs no scopes and reads public
+		// data, while the maintainer token authorizes a workflow dispatch.
+		const config = configWith({});
+		const asRecord = config as unknown as Record<string, unknown>;
+		expect(typeof asRecord.setGithubReadToken).toBe("function");
+		expect(asRecord.setUpstreamMaintainerToken).toBeUndefined();
+	});
+
+	it("reports when the environment is overriding the stored value", () => {
+		const config = configWith({ github_read_token: "ghp_file" });
+		expect(config.githubReadTokenFromEnvironment()).toBe(false);
+		process.env[ENV_KEY] = "ghp_env";
+		expect(config.githubReadTokenFromEnvironment()).toBe(true);
 	});
 });

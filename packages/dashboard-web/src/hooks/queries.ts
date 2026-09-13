@@ -498,6 +498,26 @@ export const useSetRetention = () => {
 	});
 };
 
+export const useGithubTokenConfig = () => {
+	return useQuery({
+		queryKey: ["github-token-config"],
+		queryFn: () => api.getGithubTokenConfig(),
+	});
+};
+
+export const useSetGithubToken = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (token: string) => api.setGithubToken(token),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["github-token-config"] });
+			// The widget reads the token per request, so the next status refresh
+			// already uses it. Invalidate so the card stops showing the old error.
+			queryClient.invalidateQueries({ queryKey: queryKeys.versionStatus() });
+		},
+	});
+};
+
 export const useRequestStorage = () => {
 	return useQuery({
 		queryKey: ["request-storage"],

@@ -2752,6 +2752,27 @@ class API extends HttpClient {
 		}
 	}
 
+	// GitHub token for the version widget. Deliberately not logged: the sibling
+	// Postgres methods log the request body at debug, which would put the token
+	// in the log stream the dashboard itself can read.
+	async getGithubTokenConfig(): Promise<{
+		tokenSet: boolean;
+		tokenFromEnvironment: boolean;
+	}> {
+		const url = "/api/config/github-token";
+		this.logger.debug(`→ GET ${url}`);
+		return await this.get<{ tokenSet: boolean; tokenFromEnvironment: boolean }>(
+			url,
+		);
+	}
+
+	/** Empty string clears the stored token. The value is never logged. */
+	async setGithubToken(token: string): Promise<void> {
+		const url = "/api/config/github-token";
+		this.logger.debug(`→ POST ${url} (token redacted)`);
+		await this.post(url, { token });
+	}
+
 	// PostgreSQL configuration
 	async getPostgresConfig(): Promise<{
 		enabled: boolean;

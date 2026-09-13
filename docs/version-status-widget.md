@@ -85,8 +85,14 @@ an hour **per IP** with every other tool on the machine, and exhausting it is
 what makes the sidebar report "Release check unavailable, GitHub rate limit
 exceeded". With a token the limit is 5,000.
 
-It is read like every other secret here, **environment first, then the persisted
-config file**:
+Set it in **Settings, GitHub token**, which writes it to the config file and
+takes effect on the next refresh without a restart. It is the one secret here the
+dashboard may write, and the reason is the scope: a token that reads public
+releases is worth nothing to an authenticated dashboard user who already has the
+dashboard. `upstream_maintainer_token` stays read-only for the opposite reason.
+
+Or set it by hand, read like every other secret here, **environment first, then
+the persisted config file**:
 
 ```jsonc
 // ~/.config/better-ccflare/better-ccflare.json
@@ -105,8 +111,10 @@ on every `brew services` action. The config file is 0600 and survives both.
 reads public releases and commits; `upstream_maintainer_token` authorizes a
 `repository_dispatch` on another repository. Do not reuse one for the other.
 
-Either way the service reads it once at construction, so adding it to the file
-needs a restart, the same as `pg_password`.
+The service resolves the token per request rather than capturing it at
+construction, so a token saved in the dashboard is used by the next refresh. A
+token added to the file by hand while the process is running still needs a
+restart, because `Config` loads the file once.
 
 ## The two capabilities that execute something
 
