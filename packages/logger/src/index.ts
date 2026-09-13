@@ -1,6 +1,6 @@
-import { EventEmitter } from "node:events";
 import type { LogEvent } from "@better-ccflare/types";
 import { logFileWriter } from "./file-writer";
+import { logBus } from "./log-bus";
 
 export enum LogLevel {
 	DEBUG = 0,
@@ -11,12 +11,7 @@ export enum LogLevel {
 
 export type LogFormat = "pretty" | "json";
 
-// Event emitter for log streaming
-export const logBus = new EventEmitter();
-
-// Set a more generous max listeners limit for SSE connections
-// This allows for more concurrent SSE connections while still providing protection
-logBus.setMaxListeners(200);
+export { logBus } from "./log-bus";
 
 // Error's name/message/stack are non-enumerable, so JSON.stringify(err) returns "{}".
 // Convert Errors to plain objects before they flow into formatMessage / LogEvent /
@@ -238,3 +233,12 @@ export class Logger {
 // Default logger instance
 export const log = new Logger();
 export { logFileWriter } from "./file-writer";
+export {
+	configureOpenObserve,
+	flush as flushOpenObserve,
+	openObserveBufferSizes,
+	openObserveEnabled,
+	type OpenObserveSettings,
+	openObserveShipsPayloads,
+	shipRequestRecord,
+} from "./openobserve";

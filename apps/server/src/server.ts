@@ -35,7 +35,12 @@ import {
 	SessionDrainSoonestStrategy,
 	SessionStrategy,
 } from "@better-ccflare/load-balancer";
-import { Logger, setConsoleLogging } from "@better-ccflare/logger";
+import {
+	configureOpenObserve,
+	flushOpenObserve,
+	Logger,
+	setConsoleLogging,
+} from "@better-ccflare/logger";
 import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
@@ -1234,6 +1239,12 @@ export default async function startServer(options?: {
 	strategy.initialize?.(strategyStore);
 	currentStrategy = strategy;
 
+	// A getter, not a snapshot: an endpoint edited through the dashboard or the
+	// config file takes effect without a restart, the same way store_payloads
+	// does. With no base URL configured this returns null and the exporter
+	// never opens a connection.
+	configureOpenObserve(() => config.getOpenObserveSettings());
+
 	await initProxy(
 		() => config.getStorePayloads(),
 		() => config.getRequestStorageHeadersOnly(),
@@ -2358,6 +2369,10 @@ async function handleGracefulShutdown(signal: string) {
 		// end-of-stream analytics messages. Drain it so its DB writes flush
 		// into the AsyncDbWriter queue before we dispose that.
 		await drainUsageCollector();
+		// The exporter buffers in memory only, so anything still queued is lost
+		// at exit unless it is posted now. Failures are already swallowed and
+		// warned about inside, so this cannot hold up shutdown.
+		await flushOpenObserve();
 		await shutdown();
 		console.log("✅ Shutdown complete");
 		process.exit(0);

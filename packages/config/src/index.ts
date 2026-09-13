@@ -32,7 +32,7 @@ import {
 	validateNumber,
 	validateString,
 } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import { resolveConfigPath } from "./paths";
 
@@ -199,6 +199,20 @@ export interface ConfigData {
 	// hour to 5,000. Needs no scopes: it only reads public releases and commits.
 	// Sensitive all the same, excluded from getAllSettings() with the others.
 	github_read_token?: string;
+	// OpenObserve log and request shipping. The endpoint being set is the
+	// feature's switch: with no base URL, nothing is shipped and no connection
+	// is made. openobserve_ship_payloads is a second, independent switch,
+	// because shipping request and response bodies off the box is a different
+	// decision from shipping log lines.
+	openobserve_url?: string;
+	openobserve_org?: string;
+	openobserve_user?: string;
+	// Sensitive — handled like pg_password: never returned by an endpoint,
+	// never logged, and excluded from getAllSettings().
+	openobserve_token?: string;
+	openobserve_log_stream?: string;
+	openobserve_request_stream?: string;
+	openobserve_ship_payloads?: boolean;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -1566,6 +1580,117 @@ export class Config extends EventEmitter {
 		return Boolean(process.env.BETTER_CCFLARE_GITHUB_TOKEN);
 	}
 
+	/**
+	 * OpenObserve shipping. Environment first, then the persisted config file,
+	 * matching every other external endpoint here.
+	 *
+	 * The base URL is the switch: empty means the exporter never runs and never
+	 * opens a connection. Returns null in that case so callers cannot
+	 * accidentally ship to a half-configured endpoint.
+	 *
+	 * The token is sensitive. It is excluded from getAllSettings(), never
+	 * returned by an endpoint and never logged.
+	 */
+	getOpenObserveSettings(): OpenObserveSettings | null {
+		const baseUrl = (
+			process.env.BETTER_CCFLARE_OPENOBSERVE_URL ||
+			(typeof this.data.openobserve_url === "string"
+				? this.data.openobserve_url
+				: "")
+		).trim();
+		if (!baseUrl) return null;
+
+		const org = (
+			process.env.BETTER_CCFLARE_OPENOBSERVE_ORG ||
+			(typeof this.data.openobserve_org === "string"
+				? this.data.openobserve_org
+				: "") ||
+			"default"
+		).trim();
+		if (!org) return null;
+
+		const shipPayloadsEnv = process.env.BETTER_CCFLARE_OPENOBSERVE_SHIP_PAYLOADS;
+		const shipPayloads =
+			shipPayloadsEnv !== undefined
+				? shipPayloadsEnv === "true" || shipPayloadsEnv === "1"
+				: this.data.openobserve_ship_payloads === true;
+
+		return {
+			baseUrl,
+			org,
+			user: (
+				process.env.BETTER_CCFLARE_OPENOBSERVE_USER ||
+				(typeof this.data.openobserve_user === "string"
+					? this.data.openobserve_user
+					: "")
+			).trim(),
+			token:
+				process.env.BETTER_CCFLARE_OPENOBSERVE_TOKEN ||
+				(typeof this.data.openobserve_token === "string"
+					? this.data.openobserve_token
+					: ""),
+			logStream: (
+				process.env.BETTER_CCFLARE_OPENOBSERVE_LOG_STREAM ||
+				(typeof this.data.openobserve_log_stream === "string"
+					? this.data.openobserve_log_stream
+					: "") ||
+				"better_ccflare_logs"
+			).trim(),
+			requestStream: (
+				process.env.BETTER_CCFLARE_OPENOBSERVE_REQUEST_STREAM ||
+				(typeof this.data.openobserve_request_stream === "string"
+					? this.data.openobserve_request_stream
+					: "") ||
+				"better_ccflare_requests"
+			).trim(),
+			shipPayloads,
+		};
+	}
+
+	/** Whether a token is configured, for reporting without revealing it. */
+	hasOpenObserveToken(): boolean {
+		return this.getOpenObserveToken().length > 0;
+	}
+
+	private getOpenObserveToken(): string {
+		return (
+			process.env.BETTER_CCFLARE_OPENOBSERVE_TOKEN ||
+			(typeof this.data.openobserve_token === "string"
+				? this.data.openobserve_token
+				: "")
+		);
+	}
+
+	/** Whether the environment is supplying the token, so the UI can say a stored value is inert. */
+	openObserveTokenFromEnvironment(): boolean {
+		return Boolean(process.env.BETTER_CCFLARE_OPENOBSERVE_TOKEN);
+	}
+
+	/**
+	 * Settable from the dashboard for the same reason pg_password is: the value
+	 * is the operator's own to choose, and it authorizes nothing but writes into
+	 * their own OpenObserve org. An empty string clears it.
+	 */
+	setOpenObserveToken(token: string): void {
+		this.set("openobserve_token", token);
+	}
+
+	setOpenObserveEndpoint(settings: {
+		url: string;
+		org: string;
+		user: string;
+		logStream: string;
+		requestStream: string;
+		shipPayloads: boolean;
+	}): void {
+		this.set("openobserve_url", settings.url);
+		this.set("openobserve_org", settings.org);
+		this.set("openobserve_user", settings.user);
+		this.set("openobserve_log_stream", settings.logStream);
+		this.set("openobserve_request_stream", settings.requestStream);
+		this.set("openobserve_ship_payloads", settings.shipPayloads);
+	}
+
 	// Deliberately no setter. Unlike pg_password, this value has no write path
 	// at all: the operator edits the config file (or sets the environment
 	// variable) and nothing reachable from the dashboard can set or overwrite it.
@@ -1783,6 +1908,7 @@ export class Config extends EventEmitter {
 			local_control_secret: _localControlSecret,
 			upstream_maintainer_token: _upstreamMaintainerToken,
 			github_read_token: _githubReadToken,
+			openobserve_token: _openobserveToken,
 			...safeData
 		} = this.data;
 

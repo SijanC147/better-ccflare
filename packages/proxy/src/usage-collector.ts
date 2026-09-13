@@ -4,7 +4,12 @@ import {
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import { AsyncDbWriter, DatabaseOperations } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
+import {
+	Logger,
+	openObserveEnabled,
+	openObserveShipsPayloads,
+	shipRequestRecord,
+} from "@better-ccflare/logger";
 import {
 	type AgentAttributionSource,
 	NO_ACCOUNT_ID,
@@ -67,6 +72,49 @@ interface PreparedPayload {
 }
 
 const log = new Logger("UsageCollector");
+
+/**
+ * Turn a serialized payload snapshot into the fields an OpenObserve request
+ * record carries.
+ *
+ * Bodies are stored base64 and are decoded to text here, because a base64 blob
+ * is unsearchable. Headers and bodies are shipped as strings and never as
+ * nested objects: OpenObserve flattens nested JSON into columns, and a
+ * conversation's `messages[]` array would explode the stream's schema.
+ *
+ * Request headers were already stripped of authorization, x-api-key and cookie
+ * by sanitizeRequestHeaders before they reached the collector.
+ */
+function decodePayloadForShipping(
+	payloadJson: string,
+): Record<string, unknown> | null {
+	try {
+		const parsed = JSON.parse(payloadJson) as {
+			request?: { headers?: unknown; body?: string | null };
+			response?: { status?: number; headers?: unknown; body?: string | null };
+		};
+		const decodeBody = (body: string | null | undefined): string | undefined => {
+			if (!body) return undefined;
+			return Buffer.from(body, "base64").toString("utf-8");
+		};
+		const stringifyHeaders = (headers: unknown): string | undefined => {
+			if (!headers) return undefined;
+			try {
+				return JSON.stringify(headers);
+			} catch {
+				return undefined;
+			}
+		};
+		return {
+			requestHeaders: stringifyHeaders(parsed.request?.headers),
+			requestBody: decodeBody(parsed.request?.body),
+			responseHeaders: stringifyHeaders(parsed.response?.headers),
+			responseBody: decodeBody(parsed.response?.body),
+		};
+	} catch {
+		return null;
+	}
+}
 
 // Limits to prevent unbounded growth
 const MAX_REQUESTS_MAP_SIZE = 10000;
@@ -572,7 +620,7 @@ export class UsageCollector {
 			state.billingType = planProviders.has(msg.providerName) ? "plan" : "api";
 		}
 
-		if (this.getStorePayloads()) {
+		if (this.shouldRetainPayload()) {
 			const requestBodyBytes = msg.requestBody
 				? Buffer.byteLength(msg.requestBody)
 				: 0;
@@ -617,7 +665,7 @@ export class UsageCollector {
 			return;
 		}
 
-		const storePayloads = this.getStorePayloads();
+		const storePayloads = this.shouldRetainPayload();
 		if (!storePayloads && !state.payloadReleased) {
 			this.releaseRequestPayload(state);
 		}
@@ -937,8 +985,20 @@ export class UsageCollector {
 		});
 
 		const requestId = startMessage.requestId;
+		// Bodies for the OpenObserve record are taken here, at the exact point
+		// the payload is either handed to the database or dropped. When
+		// store_payloads is off the snapshot is released immediately after, so
+		// nothing this ships is ever written to disk.
+		let shippedBodies: Record<string, unknown> | null = null;
 		if (preparedPayload) {
-			this.enqueuePreparedPayload(requestId, preparedPayload);
+			if (openObserveShipsPayloads()) {
+				shippedBodies = decodePayloadForShipping(preparedPayload.json);
+			}
+			if (this.getStorePayloads()) {
+				this.enqueuePreparedPayload(requestId, preparedPayload);
+			} else {
+				this.releasePreparedPayload(preparedPayload);
+			}
 			preparedPayload = null;
 		}
 
@@ -1004,12 +1064,32 @@ export class UsageCollector {
 			streamTerminalState: toStreamTerminalState(msg.streamTerminalState),
 		};
 
+		if (openObserveEnabled()) {
+			shipRequestRecord({
+				...summary,
+				worktreePath: startMessage.worktreePath ?? undefined,
+				projectId: startMessage.projectId ?? undefined,
+				...(shippedBodies ?? {}),
+			});
+		}
+
 		// Notify cacheBodyStore and emit summary for real-time updates
 		cacheBodyStore.onSummary(
 			startMessage.requestId,
 			state.usage.cacheCreationInputTokens,
 		);
 		this.onSummary(summary);
+	}
+
+	/**
+	 * Whether the request/response bodies must be kept in memory to the end of
+	 * the lifecycle. Local persistence is one reason; shipping them to
+	 * OpenObserve is the other, and it is independent — with store_payloads off
+	 * and shipping on, the bodies are held only long enough to be posted and
+	 * are never written to the database.
+	 */
+	private shouldRetainPayload(): boolean {
+		return this.getStorePayloads() || openObserveShipsPayloads();
 	}
 
 	private releaseRequestPayload(state: RequestState): void {
@@ -1030,13 +1110,17 @@ export class UsageCollector {
 		state: RequestState,
 		msg: EndMessage,
 	): PreparedPayload | null {
-		if (!this.getStorePayloads() || state.payloadReleased) return null;
+		if (!this.shouldRetainPayload() || state.payloadReleased) return null;
 
 		const { startMessage } = state;
 		// Fork feature: headers-only storage strips request/response bodies but
 		// still persists headers + metadata for the request-detail view. Both
 		// bodies are dropped, so they contribute nothing to the size estimates.
-		const headersOnly = this.getHeadersOnly();
+		//
+		// It is a sub-mode of store_payloads, so it must not strip bodies when
+		// the only reason this payload exists is that OpenObserve shipping asked
+		// for it.
+		const headersOnly = this.getStorePayloads() && this.getHeadersOnly();
 		const estimatedRequestBytes = headersOnly
 			? 0
 			: (startMessage.requestBody?.length ?? 0);
