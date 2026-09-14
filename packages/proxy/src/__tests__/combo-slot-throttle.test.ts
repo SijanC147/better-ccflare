@@ -280,10 +280,27 @@ describe("isSlotThrottled — the rule itself", () => {
 describe("combo slot selection honours the per-slot throttle", () => {
 	const realDateNow = Date.now;
 
-	function withFrozenClock<T>(fn: () => T): T {
+	/**
+	 * Freezes `Date.now` for the whole of `fn`, including its async tail.
+	 *
+	 * `return await` rather than `return` is load-bearing. Without the `await`,
+	 * `fn()` hands back a pending promise, the `finally` restores the real clock
+	 * straight away, and every `Date.now()` after the first `await` inside the
+	 * callee reads the wall clock instead of NOW. `selectAccountsForRequest` is
+	 * async, so that covered a few microseconds of an assertion that claimed to
+	 * pin the clock.
+	 *
+	 * It failed the way that shape always fails: silently, until the uncovered
+	 * part started mattering. The slot rule is `resetMs - now >= min`, and with
+	 * `resetMs = NOW + 4h` and `min = 1h` the tests below passed only while the
+	 * real clock was before NOW + 3h. They passed at 14:10Z on 2026-09-14, and
+	 * failed at 15:09Z on identical source. NOW is a fixed date, so it would not
+	 * have recovered (SB23-1997).
+	 */
+	async function withFrozenClock<T>(fn: () => T | Promise<T>): Promise<T> {
 		Date.now = () => NOW;
 		try {
-			return fn();
+			return await fn();
 		} finally {
 			Date.now = realDateNow;
 		}
