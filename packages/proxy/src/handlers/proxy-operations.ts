@@ -1941,6 +1941,7 @@ export async function proxyWithAccount(
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						project: requestMeta.project,
+						cwdHint: requestMeta.cwdHint ?? null,
 						clientSessionId: requestMeta.clientSessionId ?? null,
 						query: url.search || null,
 						projectAttributionSource:
