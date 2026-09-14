@@ -26,46 +26,137 @@ export interface PeakOccurrence {
 	active: boolean;
 }
 
+/** The calendar and clock fields of `ts` as read in `timeZone`. */
+interface ZonedParts {
+	year: number;
+	month: number;
+	day: number;
+	hour: number;
+	minute: number;
+	second: number;
+}
+
+function zonedParts(ts: number, timeZone: string): ZonedParts {
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone,
+		// `hour12: false` renders midnight as hour 24 in some engines; h23 does not.
+		hourCycle: "h23",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+	}).formatToParts(new Date(ts));
+	const read = (type: Intl.DateTimeFormatPartTypes): number =>
+		Number(parts.find((part) => part.type === type)?.value);
+	return {
+		year: read("year"),
+		month: read("month"),
+		day: read("day"),
+		hour: read("hour"),
+		minute: read("minute"),
+		second: read("second"),
+	};
+}
+
+/**
+ * The offset of `timeZone` at `ts`, in milliseconds: the zone's wall clock minus
+ * UTC. `America/Los_Angeles` yields -7h on PDT and -8h otherwise.
+ *
+ * This is the only place the offset is ever produced, and it is always produced
+ * for a specific instant. Writing `-7` or `-8` anywhere is the bug this module
+ * was rewritten to remove.
+ */
+function zoneOffsetMs(ts: number, timeZone: string): number {
+	const p = zonedParts(ts, timeZone);
+	const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+	// The formatted parts carry no milliseconds, so compare against whole seconds.
+	return asUtc - Math.floor(ts / 1000) * 1000;
+}
+
+/**
+ * The instant at which `hour:00:00` strikes on the given calendar date in
+ * `timeZone`.
+ *
+ * Two passes: the first guesses with the offset in force at the same wall clock
+ * read as UTC, the second re-reads the offset at that guess. The pair disagree
+ * only when a DST shift falls between them, and the second pass is what lands
+ * the transition day on the right side of it.
+ */
+function instantAtZonedHour(
+	year: number,
+	monthIndex: number,
+	day: number,
+	hour: number,
+	timeZone: string,
+): number {
+	const wallClockAsUtc = Date.UTC(year, monthIndex, day, hour);
+	const firstPass = wallClockAsUtc - zoneOffsetMs(wallClockAsUtc, timeZone);
+	return wallClockAsUtc - zoneOffsetMs(firstPass, timeZone);
+}
+
 /**
  * Resolve the occurrence of `window` that matters at `ts`: the one in progress
  * if the window is active, otherwise the next one to begin.
  *
- * Occurrences are built from UTC day boundaries because the window itself is
- * defined in UTC hours. The viewer's timezone only enters when formatting, so a
- * DST change in the viewer's zone shifts the displayed clock times, which is
- * exactly what should happen.
+ * Occurrences are built from calendar days in the window's own zone, and each
+ * day's boundaries are resolved to absolute instants through that zone's offset
+ * for that date. So a vendor-side DST change moves the occurrence against UTC,
+ * exactly as it moves at the vendor, and the weekend skip lands on the vendor's
+ * Saturday rather than UTC's.
+ *
+ * The viewer's timezone still only enters when formatting, so a DST change in
+ * the viewer's zone shifts the displayed clock times independently.
  */
 export function resolvePeakOccurrence(
 	window: PeakWindow,
 	ts: number,
 ): PeakOccurrence {
-	const d = new Date(ts);
-	const utcMidnight = Date.UTC(
-		d.getUTCFullYear(),
-		d.getUTCMonth(),
-		d.getUTCDate(),
-	);
+	const today = zonedParts(ts, window.timeZone);
+	// A fake-UTC stand-in for the local calendar date. Day arithmetic on it is
+	// pure calendar arithmetic: UTC has no DST, so adding DAY_MS always lands on
+	// the next local date, and getUTCDay() reads the local weekday.
+	const localDate = Date.UTC(today.year, today.month - 1, today.day);
+
+	const boundaries = (dayOffset: number): { start: number; end: number } => {
+		const date = new Date(localDate + dayOffset * DAY_MS);
+		const [year, monthIndex, day] = [
+			date.getUTCFullYear(),
+			date.getUTCMonth(),
+			date.getUTCDate(),
+		];
+		return {
+			start: instantAtZonedHour(
+				year,
+				monthIndex,
+				day,
+				window.startHour,
+				window.timeZone,
+			),
+			end: instantAtZonedHour(
+				year,
+				monthIndex,
+				day,
+				window.endHour,
+				window.timeZone,
+			),
+		};
+	};
 
 	for (let offset = 0; offset <= MAX_LOOKAHEAD_DAYS; offset++) {
-		const dayStart = utcMidnight + offset * DAY_MS;
 		if (window.weekdaysOnly) {
-			const day = new Date(dayStart).getUTCDay();
-			if (day === 0 || day === 6) continue;
+			const weekday = new Date(localDate + offset * DAY_MS).getUTCDay();
+			if (weekday === 0 || weekday === 6) continue;
 		}
-		const start = dayStart + window.startUtcHour * HOUR_MS;
-		const end = dayStart + window.endUtcHour * HOUR_MS;
+		const { start, end } = boundaries(offset);
 		if (ts < end) return { start, end, active: ts >= start };
 	}
 
 	// Unreachable for any window that occurs at least weekly; the loop above
 	// covers a full week plus a day. Returning the lookahead edge keeps the
 	// return type honest without throwing inside a render.
-	const dayStart = utcMidnight + MAX_LOOKAHEAD_DAYS * DAY_MS;
-	return {
-		start: dayStart + window.startUtcHour * HOUR_MS,
-		end: dayStart + window.endUtcHour * HOUR_MS,
-		active: false,
-	};
+	return { ...boundaries(MAX_LOOKAHEAD_DAYS), active: false };
 }
 
 /**

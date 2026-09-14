@@ -7,6 +7,7 @@ import {
 	PROVIDER_NAMES,
 	requiresSessionDurationTracking,
 } from "@better-ccflare/types";
+import { resolvePeakOccurrence } from "./peak-hours";
 
 /**
  * Check if a provider supports auto-fallback and auto-refresh features
@@ -121,51 +122,70 @@ export function getDefaultEndpointForProvider(provider: string): string {
 }
 
 /**
- * A recurring peak-hour window, expressed as a half-open range of UTC hours.
+ * A recurring peak-hour window, expressed as a half-open range of clock hours in
+ * the vendor's own timezone.
  *
  * These constants are the single source of truth for both the "is it peak right
- * now" predicates below and the localized labels rendered by the dashboard. They
- * are deliberately stated in UTC rather than in the vendor's own timezone: the
- * predicates have always been fixed-UTC, and deriving the label from a different
- * definition would let the badge disagree with the colour of the dot beside it.
+ * now" predicates below and the localized labels rendered by the dashboard. The
+ * predicate and the label both go through `resolvePeakOccurrence`, so the badge
+ * text can never disagree with the colour of the dot beside it.
+ *
+ * The window is stated in the vendor's zone rather than in UTC because that is
+ * where the vendor fixes it. A vendor zone that observes DST moves against UTC
+ * twice a year: `America/Los_Angeles` is UTC-7 on PDT and UTC-8 otherwise, so a
+ * hardcoded UTC range is right for only part of the year. Never write an offset
+ * here — name the IANA zone and let `Intl` resolve it for the date in question.
  */
 export interface PeakWindow {
-	/** Inclusive start, as an hour of the UTC day. */
-	startUtcHour: number;
-	/** Exclusive end, as an hour of the UTC day. */
-	endUtcHour: number;
-	/** When true, the window does not occur on Saturday or Sunday (UTC). */
+	/** IANA zone the window is fixed in, e.g. `America/Los_Angeles`. */
+	timeZone: string;
+	/** Inclusive start, as an hour of the day in `timeZone`. */
+	startHour: number;
+	/** Exclusive end, as an hour of the day in `timeZone`. */
+	endHour: number;
+	/**
+	 * When true, the window does not occur on Saturday or Sunday **in
+	 * `timeZone`**. The vendor's weekend is the vendor's own, not UTC's; the two
+	 * disagree in the early hours of UTC Monday and of UTC Saturday.
+	 */
 	weekdaysOnly: boolean;
 }
 
-/** Zai peak hours: 14:00–18:00 Singapore time (UTC+8), every day. */
+/**
+ * Zai peak hours: 14:00–18:00 Singapore time, every day.
+ *
+ * Singapore has not observed DST since 1935, so this is a constant UTC
+ * 06:00–10:00. Stating it as `Asia/Singapore` is behaviour-identical and keeps
+ * one shape for both windows.
+ *
+ * The missing weekday restriction is deliberate and is not the Anthropic bug in
+ * a second place: Zai's window may genuinely run every day. Do not align it with
+ * the window below without evidence from the vendor (SB23-1867).
+ */
 export const ZAI_PEAK_WINDOW: PeakWindow = {
-	startUtcHour: 6,
-	endUtcHour: 10,
+	timeZone: "Asia/Singapore",
+	startHour: 14,
+	endHour: 18,
 	weekdaysOnly: false,
 };
 
-/** Anthropic OAuth peak hours: 5am–11am PT, weekdays. */
+/** Anthropic OAuth peak hours: 5am–11am PT, weekdays in Los Angeles. */
 export const ANTHROPIC_PEAK_WINDOW: PeakWindow = {
-	startUtcHour: 13,
-	endUtcHour: 19,
+	timeZone: "America/Los_Angeles",
+	startHour: 5,
+	endHour: 11,
 	weekdaysOnly: true,
 };
 
 function isWithinPeakWindow(window: PeakWindow, ts: number): boolean {
-	const d = new Date(ts);
-	if (window.weekdaysOnly) {
-		const day = d.getUTCDay();
-		// Weekdays only (Mon=1 through Fri=5)
-		if (day === 0 || day === 6) return false;
-	}
-	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
-	return utcHour >= window.startUtcHour && utcHour < window.endUtcHour;
+	// Deliberately the same resolver the label uses. A second implementation of
+	// the arithmetic here is how the text and the colour drift apart.
+	return resolvePeakOccurrence(window, ts).active;
 }
 
 /**
  * Check if a given timestamp (default: now) falls within Zai peak hours.
- * Zai peak hours are 14:00–18:00 Singapore time (UTC+8).
+ * Zai peak hours are 14:00–18:00 Singapore time, every day.
  */
 export function isZaiPeakHour(ts?: number): boolean {
 	return isWithinPeakWindow(ZAI_PEAK_WINDOW, ts ?? Date.now());
@@ -173,7 +193,8 @@ export function isZaiPeakHour(ts?: number): boolean {
 
 /**
  * Check if a given timestamp (default: now) falls within Anthropic OAuth peak hours.
- * Peak hours are weekdays 5am–11am PT (1pm–7pm UTC), Monday–Friday.
+ * Peak hours are 5am–11am in Los Angeles, Monday–Friday there. That is 13:00–19:00
+ * UTC while PDT is in effect and 14:00–20:00 UTC the rest of the year.
  * During these windows, 5-hour sessions consume a larger share of the weekly budget.
  */
 export function isAnthropicPeakHour(ts?: number): boolean {
