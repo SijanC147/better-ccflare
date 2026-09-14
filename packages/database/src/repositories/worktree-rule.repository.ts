@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
+	toWorktreeRule,
 	type WorktreeRule,
 	type WorktreeRuleKind,
 	type WorktreeRuleRow,
-	toWorktreeRule,
 } from "@better-ccflare/types";
 import { BaseRepository } from "./base.repository";
 

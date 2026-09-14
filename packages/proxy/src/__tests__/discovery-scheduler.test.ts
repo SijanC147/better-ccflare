@@ -5,10 +5,10 @@
  * Uses a temp projects directory and a minimal stub DatabaseOperations.
  */
 
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { ResolverManager } from "@better-ccflare/core";
 import { DiscoveryScheduler } from "../discovery-scheduler";
 

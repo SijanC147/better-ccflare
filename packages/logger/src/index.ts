@@ -236,9 +236,9 @@ export { logFileWriter } from "./file-writer";
 export {
 	configureOpenObserve,
 	flush as flushOpenObserve,
+	type OpenObserveSettings,
 	openObserveBufferSizes,
 	openObserveEnabled,
-	type OpenObserveSettings,
 	openObserveShipsPayloads,
 	shipRequestRecord,
 } from "./openobserve";

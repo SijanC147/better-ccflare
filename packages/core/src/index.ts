@@ -35,12 +35,12 @@ export type ModelMappingData = {
 export type ModelFallback = { [modelFamily: string]: string };
 export * from "./alert-events";
 export * from "./auth-failure-events";
-export * from "./force-account-model";
 export {
 	formatBuildIdentity,
 	normalizeBuildCommit,
 	normalizeBuildVersion,
 } from "./build-identity";
+export * from "./force-account-model";
 export {
 	type IntervalConfig,
 	intervalManager,
@@ -97,6 +97,7 @@ export {
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";
+export * from "./probe-backoff";
 export {
 	type ResolveResult,
 	ResolverManager,
@@ -105,7 +106,6 @@ export {
 	type ResolverRuleInput,
 	ResolverSnapshot,
 } from "./project-resolver";
-export * from "./probe-backoff";
 export * from "./request-events";
 export * from "./strategy";
 export {

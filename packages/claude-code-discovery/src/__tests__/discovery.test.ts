@@ -1,8 +1,8 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ClaudeCodeDiscovery } from "../discovery";
 import { isLikelyWorktreePath } from "../path-encoding";
 

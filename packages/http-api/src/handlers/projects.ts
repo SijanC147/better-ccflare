@@ -1,7 +1,7 @@
+import { basename } from "node:path";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, NotFound } from "@better-ccflare/errors";
 import type { Project, WorktreeRuleKind } from "@better-ccflare/types";
-import { basename } from "node:path";
 import { errorResponse } from "../utils/http-error";
 
 // ── GET /api/projects ──────────────────────────────────────────────────────

@@ -8,9 +8,9 @@
 import { describe, expect, it } from "bun:test";
 import {
   ResolverManager,
-  ResolverSnapshot,
   type ResolverProjectInput,
   type ResolverRuleInput,
+  ResolverSnapshot,
 } from "../project-resolver";
 
 // ---------------------------------------------------------------------------
