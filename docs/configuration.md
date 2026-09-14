@@ -74,7 +74,7 @@ The configuration file is stored at:
 | `retry_attempts` | number | `3` | Total attempts for one upstream request, the first attempt included. `1` disables retry |
 | `retry_delay_ms` | number | `1000` | Base delay in milliseconds before the first retry |
 | `retry_backoff` | number | `2` | Multiplier applied per attempt: the delay for attempt n is `retry_delay_ms * retry_backoff ** n`, with full jitter, capped |
-| `session_duration_ms` | number | `18000000` (5 hours) | Session persistence duration in milliseconds |
+| `session_duration_ms` | number | `18000000` (5 hours) | Session persistence duration in milliseconds. Minimum 0, no maximum. `0` is legal and means every request starts a new session. A negative value is clamped to 0, a fraction is floored, and a value that is not a number applies the default; each of those warns once naming the key, the value received and the value applied |
 | `port` | number | `8080` | HTTP server port |
 
 A change to `retry_attempts`, `retry_delay_ms` or `retry_backoff` requires a restart. The server builds its runtime config once at startup, so editing the config file or the environment has no effect on a running process.

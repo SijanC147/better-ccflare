@@ -37,7 +37,10 @@ import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
-import { validateRuntimeRetry } from "./runtime-validation";
+import {
+	validateRuntimeRetry,
+	validateRuntimeSessionDuration,
+} from "./runtime-validation";
 
 const log = new Logger("Config");
 
@@ -2382,6 +2385,14 @@ export class Config extends EventEmitter {
 		// Clamps rather than throwing, which is argued in the function
 		// (SB23-1980).
 		validateRuntimeRetry(defaults.retry, retryDefaults);
+
+		// Same pass, same reasons, for session_duration_ms (SB23-2040). The
+		// default is read back off the constant rather than repeated, so the
+		// value the warning names is the value a caller with no setting gets.
+		validateRuntimeSessionDuration(
+			defaults,
+			TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
+		);
 
 		// Validate the final database configuration
 		try {
