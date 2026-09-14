@@ -847,7 +847,12 @@ export const useUpdateComboSlot = () => {
 		}: {
 			comboId: string;
 			slotId: string;
-			params: { model?: string; enabled?: boolean };
+			params: {
+				model?: string;
+				enabled?: boolean;
+				max_utilization_percent?: number | null;
+				min_reset_remaining_ms?: number | null;
+			};
 		}) => api.updateComboSlot(comboId, slotId, params),
 		onSuccess: (_data, { comboId }) => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
