@@ -288,6 +288,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			model TEXT NOT NULL,
 			priority INTEGER NOT NULL,
 			enabled INTEGER DEFAULT 1,
+			max_utilization_percent INTEGER,
+			min_reset_remaining_ms BIGINT,
 			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE,
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)
@@ -920,6 +922,22 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			definition:
 				"ALTER TABLE oauth_sessions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
 		},
+		{
+			// Per-slot throttle thresholds (SB23-1269). Both stay NULL on
+			// upgrade, which is the inert state: the rule is a conjunction and
+			// fires only when both are set, so routing is unchanged until an
+			// operator configures a slot.
+			table: "combo_slots",
+			column: "max_utilization_percent",
+			definition:
+				"ALTER TABLE combo_slots ADD COLUMN max_utilization_percent INTEGER",
+		},
+		{
+			table: "combo_slots",
+			column: "min_reset_remaining_ms",
+			definition:
+				"ALTER TABLE combo_slots ADD COLUMN min_reset_remaining_ms BIGINT",
+		},
 	];
 
 	// Track whether api_keys.role was just added so we can backfill existing
@@ -1221,6 +1239,8 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			model TEXT NOT NULL,
 			priority INTEGER NOT NULL,
 			enabled INTEGER DEFAULT 1,
+			max_utilization_percent INTEGER,
+			min_reset_remaining_ms BIGINT,
 			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE,
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)

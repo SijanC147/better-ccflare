@@ -273,11 +273,18 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 	): Promise<Response> => {
 		try {
 			const body = await req.json();
-			const { model, enabled } = body;
+			const {
+				model,
+				enabled,
+				max_utilization_percent,
+				min_reset_remaining_ms,
+			} = body;
 
 			const fields: Partial<{
 				model: string;
 				enabled: boolean;
+				max_utilization_percent: number | null;
+				min_reset_remaining_ms: number | null;
 			}> = {};
 
 			if (model !== undefined) {
@@ -317,6 +324,44 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 					return errorResponse(BadRequest("enabled must be a boolean"));
 				}
 				fields.enabled = enabled;
+			}
+
+			// Per-slot throttle thresholds (SB23-1269). null clears a threshold
+			// and returns the slot to the inert state, so null is accepted and
+			// undefined means "leave it alone".
+			if (max_utilization_percent !== undefined) {
+				if (max_utilization_percent !== null) {
+					if (
+						typeof max_utilization_percent !== "number" ||
+						!Number.isInteger(max_utilization_percent) ||
+						max_utilization_percent < 0 ||
+						max_utilization_percent > 100
+					) {
+						return errorResponse(
+							BadRequest(
+								"max_utilization_percent must be an integer between 0 and 100, or null",
+							),
+						);
+					}
+				}
+				fields.max_utilization_percent = max_utilization_percent;
+			}
+
+			if (min_reset_remaining_ms !== undefined) {
+				if (min_reset_remaining_ms !== null) {
+					if (
+						typeof min_reset_remaining_ms !== "number" ||
+						!Number.isInteger(min_reset_remaining_ms) ||
+						min_reset_remaining_ms < 0
+					) {
+						return errorResponse(
+							BadRequest(
+								"min_reset_remaining_ms must be a non-negative integer, or null",
+							),
+						);
+					}
+				}
+				fields.min_reset_remaining_ms = min_reset_remaining_ms;
 			}
 
 			// Scope the update to the combo declared on the path so stale UI state
