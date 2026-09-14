@@ -7,10 +7,29 @@
  * full network + auth cost before seeing the same 529 again, and the
  * watchdog kept amplifying because nothing was actually shedding load.
  *
- * This module is the **state machine only**. It is NOT wired into the proxy
- * path on purpose — a follow-up task will integrate it with proxy.ts and
- * response-handler.ts. Wiring is deferred so this change stays atomic and
- * reviewable.
+ * Wiring, as of 2026-09-14 (SB23-1903, measured by grep for non-test
+ * callers — do not trust a stale summary here, re-measure before relying
+ * on it):
+ *
+ *   WRITE side, live in the proxy path:
+ *     recordFailure — packages/proxy/src/handlers/rate-limit-cooldown.ts:278
+ *     recordSuccess — packages/proxy/src/handlers/response-processor.ts:460
+ *
+ *   ADMISSION side, no non-test caller:
+ *     shouldAllow and isProviderWideOpen are called only by this file's own
+ *     module-level wrappers and by
+ *     packages/proxy/src/__tests__/circuit-breaker.test.ts and
+ *     packages/proxy/src/__tests__/circuit-recovery-reachability.test.ts.
+ *     No request path consults the breaker, so no request is ever gated on
+ *     it and an open circuit does not take an account out of rotation.
+ *
+ *   READ side, reporting only:
+ *     healthSnapshot — packages/http-api/src/handlers/health.ts, which puts
+ *     the result on GET /api/health under `circuit`. Reporting is
+ *     deliberate: gating would add a fourth exclusion on top of
+ *     rate_limited_until, requires_reauth, paused and usage exhaustion, so a
+ *     breaker that opens wrongly could empty a pool that would otherwise
+ *     route. Report first, gate only once the reported data says it helps.
  *
  * State machine: `closed -> open -> half-open -> (closed | open)`.
  *
@@ -164,6 +183,34 @@ export interface CircuitSnapshotEntry {
 	probeDeadlineAt: number | null;
 }
 
+/**
+ * Per-provider rollup of the tracked keys. `wideOpen` is
+ * `isProviderWideOpen(provider)`: at least two tracked accounts AND every one
+ * of them currently open. Reported, never enforced.
+ */
+export interface CircuitProviderSummary {
+	provider: string;
+	tracked: number;
+	open: number;
+	halfOpen: number;
+	closed: number;
+	wideOpen: boolean;
+}
+
+/**
+ * What `/api/health` reports under `circuit`.
+ *
+ * `enabled: false` means the breaker records nothing, so empty `accounts` is
+ * expected and says nothing about upstream. With the breaker enabled, an
+ * account appears here only once it has produced a recorded outcome, so an
+ * empty list on a healthy install is also normal.
+ */
+export interface CircuitHealthSnapshot {
+	enabled: boolean;
+	accounts: CircuitSnapshotEntry[];
+	providers: CircuitProviderSummary[];
+}
+
 interface CircuitEntry {
 	provider: string;
 	accountId: string;
@@ -214,9 +261,9 @@ interface CircuitEntry {
  * setting upstream. So it counts, on the same grounds as account-wide
  * exhaustion.
  *
- * What counting it does NOT do is change routing. Nothing in the request path
- * calls `shouldAllow` or `isProviderWideOpen` today — see the "Wiring is
- * deferred" note at the top of this file — so what actually takes the account
+ * What counting it does NOT do is change routing. No request path calls
+ * `shouldAllow` or `isProviderWideOpen` — see the wiring note at the top of
+ * this file, which lists every caller — so what actually takes the account
  * out of rotation is the cooldown bench `applyRateLimitCooldown` applies at the
  * call site, not this predicate. Counting here keeps the breaker's failure
  * accounting truthful for whenever admission is wired up; and because the
@@ -582,6 +629,51 @@ export class CircuitBreaker {
 		return out;
 	}
 
+	/**
+	 * Reporting view for `/api/health`: every tracked key plus a per-provider
+	 * rollup. Pure read — it never calls `shouldAllow`, so it cannot promote an
+	 * open circuit to half-open or lease a probe by observing it.
+	 *
+	 * Because state transitions out of `open` happen inside `shouldAllow` and
+	 * nothing calls it, a key whose `cooldownEndsAt` has already passed is still
+	 * reported `open`. That is the honest reading of the stored machine: with no
+	 * admission caller, nothing has promoted it. Compare `cooldownEndsAt`
+	 * against the report's own timestamp to tell "open and cooling" from "open,
+	 * cooldown elapsed, waiting for an admission check that never comes".
+	 */
+	healthSnapshot(): CircuitHealthSnapshot {
+		const accounts = this.snapshot();
+		const byProvider = new Map<string, CircuitProviderSummary>();
+		for (const entry of accounts) {
+			let summary = byProvider.get(entry.provider);
+			if (!summary) {
+				summary = {
+					provider: entry.provider,
+					tracked: 0,
+					open: 0,
+					halfOpen: 0,
+					closed: 0,
+					wideOpen: false,
+				};
+				byProvider.set(entry.provider, summary);
+			}
+			summary.tracked++;
+			if (entry.state === "open") summary.open++;
+			else if (entry.state === "half-open") summary.halfOpen++;
+			else summary.closed++;
+		}
+		for (const summary of byProvider.values()) {
+			summary.wideOpen = this.isProviderWideOpen(summary.provider);
+		}
+		return {
+			enabled: this.enabled,
+			accounts,
+			providers: [...byProvider.values()].sort((a, b) =>
+				a.provider.localeCompare(b.provider),
+			),
+		};
+	}
+
 	/** Test hook: clear all tracked state. */
 	resetAll(): void {
 		this.entries.clear();
@@ -656,4 +748,8 @@ export function isProviderWideOpen(provider: string): boolean {
 
 export function snapshot(): CircuitSnapshotEntry[] {
 	return getDefaultCircuitBreaker().snapshot();
+}
+
+export function healthSnapshot(): CircuitHealthSnapshot {
+	return getDefaultCircuitBreaker().healthSnapshot();
 }

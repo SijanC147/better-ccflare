@@ -14,13 +14,16 @@ export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export { DiscoveryScheduler, type ScanResult } from "./discovery-scheduler";
 export {
 	CircuitBreaker,
+	type CircuitHealthSnapshot,
 	type CircuitKey,
+	type CircuitProviderSummary,
 	type CircuitSnapshotEntry,
 	type CircuitState,
 	circuitKeyFor,
 	type FailureKind,
 	forceClose as forceCloseCircuit,
 	getDefaultCircuitBreaker as getDefaultCircuitBreakerProxy,
+	healthSnapshot as circuitHealthSnapshot,
 	recordSuccess as recordCircuitSuccess,
 	resetDefaultCircuitBreaker as resetDefaultCircuitBreakerProxy,
 	shouldCountAsCircuitFailure,

@@ -2,11 +2,12 @@ import type { Config } from "@better-ccflare/config";
 import { isAccountAvailable, TtlCache } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { jsonResponse } from "@better-ccflare/http-common";
+import { circuitHealthSnapshot } from "@better-ccflare/proxy";
 import {
 	getRepresentativeUtilizationForProvider,
 	usageCache,
 } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+import type { Account, CircuitHealth } from "@better-ccflare/types";
 import type {
 	HealthResponse,
 	IntegrityStatus,
@@ -63,6 +64,13 @@ type UsageWorkerHealthFn = () => {
 };
 type IntegrityStatusFn = () => IntegrityStatus;
 type RetentionStatusFn = () => RetentionStatus;
+/**
+ * Reads circuit-breaker state for the response. Injected so tests can drive
+ * keys open without reaching into the proxy's module-level default breaker.
+ * Reporting only: the value never feeds `computeHealthStatus`, so a wrongly
+ * open circuit cannot flip this endpoint's status code or its `pool` counters.
+ */
+export type CircuitHealthFn = () => CircuitHealth;
 
 export function computePoolStatus(
 	accounts: Account[],
@@ -193,6 +201,7 @@ export function createHealthHandler(
 	getIntegrityStatus?: IntegrityStatusFn,
 	getAccountUsageInfo: AccountUsageInfoFn = usageCacheUsageInfo,
 	getRetentionStatus?: RetentionStatusFn,
+	getCircuitHealth: CircuitHealthFn = circuitHealthSnapshot,
 ) {
 	const normalCache = new TtlCache<HealthResponse>(2000);
 	const detailCache = new TtlCache<HealthResponse>(2000);
@@ -236,6 +245,7 @@ export function createHealthHandler(
 			strategy: config.getStrategy(),
 			...readBuildProvenance(),
 			pool,
+			circuit: getCircuitHealth(),
 		};
 
 		// Build runtime section from stored results
