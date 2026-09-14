@@ -335,12 +335,20 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 		description: "Load balancing algorithm",
 	});
 
+	// getRuntime() (packages/config/src/index.ts:2163-2204) applies env vars
+	// first and then overrides with config file values. Unlike the CLI-arg
+	// fields above, a config file setting here wins over env. The
+	// source checks below follow that actual precedence (file before env),
+	// not the env-before-file order used elsewhere in this function.
 	configItems.push({
 		name: "Session Duration",
 		value: `${runtime.sessionDurationMs}ms`,
-		source: process.env.SESSION_DURATION_MS
-			? "Environment (SESSION_DURATION_MS)"
-			: "Default",
+		source:
+			typeof config.get("session_duration_ms") === "number"
+				? "Config file"
+				: process.env.SESSION_DURATION_MS
+					? "Environment (SESSION_DURATION_MS)"
+					: "Default",
 		description: "Session persistence duration",
 	});
 
@@ -348,27 +356,36 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 	configItems.push({
 		name: "Retry Attempts",
 		value: runtime.retry.attempts,
-		source: process.env.RETRY_ATTEMPTS
-			? "Environment (RETRY_ATTEMPTS)"
-			: "Default",
+		source:
+			typeof config.get("retry_attempts") === "number"
+				? "Config file"
+				: process.env.RETRY_ATTEMPTS
+					? "Environment (RETRY_ATTEMPTS)"
+					: "Default",
 		description: "Number of retry attempts",
 	});
 
 	configItems.push({
 		name: "Retry Delay",
 		value: `${runtime.retry.delayMs}ms`,
-		source: process.env.RETRY_DELAY_MS
-			? "Environment (RETRY_DELAY_MS)"
-			: "Default",
+		source:
+			typeof config.get("retry_delay_ms") === "number"
+				? "Config file"
+				: process.env.RETRY_DELAY_MS
+					? "Environment (RETRY_DELAY_MS)"
+					: "Default",
 		description: "Initial retry delay",
 	});
 
 	configItems.push({
 		name: "Retry Backoff",
 		value: runtime.retry.backoff,
-		source: process.env.RETRY_BACKOFF
-			? "Environment (RETRY_BACKOFF)"
-			: "Default",
+		source:
+			typeof config.get("retry_backoff") === "number"
+				? "Config file"
+				: process.env.RETRY_BACKOFF
+					? "Environment (RETRY_BACKOFF)"
+					: "Default",
 		description: "Retry backoff multiplier",
 	});
 
