@@ -127,6 +127,12 @@ export function createRetryConfigHandlers(config: Config) {
 			} catch {
 				return errorResponse(BadRequest("Invalid JSON body"));
 			}
+			// `null`, a bare number and a bare string all parse, and reading a
+			// field off them throws outside the try, which the router turns into a
+			// 500. A malformed body is the caller's mistake, so it gets a 400.
+			if (typeof body !== "object" || body === null) {
+				return errorResponse(BadRequest("Body must be a JSON object"));
+			}
 
 			const attempts = readNumber(
 				body.attempts,

@@ -191,6 +191,21 @@ describe("POST /api/config/retry", () => {
 		expect(written).toEqual([]);
 	});
 
+	it("rejects a body that parses but is not an object", async () => {
+		// `null` and a bare number parse, and reading a field off them throws
+		// outside the try, which the router would turn into a 500 for what is a
+		// caller mistake.
+		const { config } = configStub();
+		const handlers = createRetryConfigHandlers(config);
+		for (const raw of ["null", "3", '"attempts"']) {
+			const request = new Request("http://localhost/api/config/retry", {
+				method: "POST",
+				body: raw,
+			});
+			expect((await handlers.setRetryConfig(request)).status).toBe(400);
+		}
+	});
+
 	it("rejects a body that is not JSON", async () => {
 		const { config } = configStub();
 		const request = new Request("http://localhost/api/config/retry", {

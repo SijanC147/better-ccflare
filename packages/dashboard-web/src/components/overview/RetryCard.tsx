@@ -11,6 +11,48 @@ import {
 import { Input } from "../ui/input";
 
 /**
+ * Jitter ceiling for one delay, in milliseconds. RETRY_MAX_DELAY_MS_DEFAULT in
+ * packages/core, where it is not exported; CCFLARE_OVERLOAD_RETRY_MAX_MS
+ * overrides it in the proxy and cannot be read from the browser, so the number
+ * shown here is the ceiling for a default install.
+ */
+const JITTER_CEILING_MS = 3000;
+
+/**
+ * The longest a request that keeps failing can spend waiting, in milliseconds.
+ *
+ * Mirrors the loop that actually runs. `forwardWithTransportRetry` calls
+ * `retryDelayMs(cfg, attempt + 1)`, and `retryDelayMs` computes
+ * `Math.min(baseMs * backoff ** attempt, maxMs)` and then draws uniformly from
+ * `[0, cap]`. So the first delay's cap is `delayMs * backoff`, NOT `delayMs`,
+ * and every cap is clipped at the ceiling.
+ *
+ * An earlier version of this function summed `delayMs * backoff ** retry` with
+ * no ceiling. It was wrong in both directions: 5 attempts at 1000ms with
+ * backoff 2 read as 15 seconds when the real ceiling sum is 11, and at a 100ms
+ * base it understated. Exported so a test can pin the arithmetic against
+ * `retryDelayMs` rather than against the number this file happens to print.
+ */
+export function retryWaitCeilingMs(
+	attempts: number,
+	delayMs: number,
+	backoff: number,
+	maxMs = JITTER_CEILING_MS,
+): number | null {
+	if (
+		!Number.isFinite(attempts) ||
+		!Number.isFinite(delayMs) ||
+		!Number.isFinite(backoff)
+	)
+		return null;
+	let total = 0;
+	for (let retry = 1; retry <= Math.max(0, attempts - 1); retry++) {
+		total += Math.min(delayMs * backoff ** retry, maxMs);
+	}
+	return total;
+}
+
+/**
  * Upstream retry settings: `retry_attempts`, `retry_delay_ms` and
  * `retry_backoff`.
  *
@@ -71,23 +113,9 @@ export function RetryCard() {
 		});
 	}
 
-	// What the settings actually cost, computed rather than described, because
-	// a backoff of 2 with 5 attempts and a 1000ms base is 15 seconds of waiting
-	// and nobody works that out from three separate inputs.
-	function compoundWaitMs(): number | null {
-		const a = Number(attempts);
-		const d = Number(delayMs);
-		const b = Number(backoff);
-		if (!Number.isFinite(a) || !Number.isFinite(d) || !Number.isFinite(b))
-			return null;
-		let total = 0;
-		for (let retry = 0; retry < Math.max(0, a - 1); retry++) {
-			total += d * b ** retry;
-		}
-		return total;
-	}
-
-	const wait = hasError ? null : compoundWaitMs();
+	const wait = hasError
+		? null
+		: retryWaitCeilingMs(Number(attempts), Number(delayMs), Number(backoff));
 	const attemptsNumber = Number(attempts);
 	const worstCaseFetches = Number.isFinite(attemptsNumber)
 		? Math.max(1, attemptsNumber) ** 2
@@ -186,9 +214,10 @@ export function RetryCard() {
 
 				{wait !== null && (
 					<p className="text-xs text-muted-foreground">
-						At these settings a request that keeps failing waits about{" "}
-						{(wait / 1000).toFixed(1)} seconds in total before it gives up,
-						before jitter and the per-delay ceiling.
+						At these settings a request that keeps failing waits at most about{" "}
+						{(wait / 1000).toFixed(1)} seconds before it gives up. Each delay is
+						drawn uniformly from zero up to its own ceiling, so the average is
+						around half that.
 					</p>
 				)}
 
