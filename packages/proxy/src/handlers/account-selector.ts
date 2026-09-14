@@ -76,11 +76,12 @@ function usageSnapshot(account: Account): AccountUsageSnapshot | null {
 /**
  * Per-slot throttle rule for combo members (SB23-1269).
  *
- * Sean's wording: "skip codex account slot in combo when usage above <custom
- * value>% and next reset <custom timespan> away". It is one rule with two
- * clauses joined by "and", so BOTH thresholds must be set before anything is
- * skipped, and a slot carrying only one of them is inert. A slot carrying
- * neither behaves exactly as it did before this feature existed.
+ * Only the CONFIGURED conditions are evaluated, and every configured one must
+ * hold. Sean's ruling of 2026-09-14: "One or both of the conditions can be set,
+ * and only those conditions which are configured are considered. If both are
+ * configured, then it's a conjunction, but if one is configured, then it's only
+ * the one." A slot carrying neither threshold behaves exactly as it did before
+ * this feature existed.
  *
  * The reset clause reads "still far from resetting": an account that is heavily
  * used but resets in two minutes needs no routing around, while one that stays
@@ -90,7 +91,10 @@ function usageSnapshot(account: Account): AccountUsageSnapshot | null {
  * milliseconds away, matching the staleness rule `isUsageExhausted` already
  * applies: a `resetMs` behind `now` means the cached snapshot predates the
  * window reset, so the utilization figure beside it is not about the current
- * window either.
+ * window either. That staleness disqualifies the whole snapshot, so it applies
+ * to a utilization-only rule as well. A `resetMs` that is simply absent is not
+ * evidence of staleness, so it blocks only the reset clause: a utilization-only
+ * rule still fires for a provider that reports no reset timestamp.
  *
  * Exported for tests.
  */
@@ -102,19 +106,27 @@ export function isSlotThrottled(
 	const maxUtilization = slot.max_utilization_percent;
 	const minResetRemaining = slot.min_reset_remaining_ms;
 
-	// Conjunction: a half-configured rule does nothing at all.
-	if (maxUtilization === null || minResetRemaining === null) return false;
+	// Nothing configured: the rule does not exist for this slot.
+	if (maxUtilization === null && minResetRemaining === null) return false;
 
 	// No telemetry means no basis for either clause.
 	if (!usage) return false;
 
-	if (usage.utilization < maxUtilization) return false;
+	// A snapshot whose reset has already passed describes the previous window,
+	// so neither clause can be evaluated against it.
+	const resetMs = usage.resetMs ?? null;
+	if (resetMs !== null && resetMs <= now) return false;
 
-	const resetMs = usage.resetMs;
-	if (resetMs === null || resetMs === undefined) return false;
-	if (resetMs <= now) return false;
+	if (maxUtilization !== null && usage.utilization < maxUtilization) {
+		return false;
+	}
 
-	return resetMs - now >= minResetRemaining;
+	if (minResetRemaining !== null) {
+		if (resetMs === null) return false;
+		if (resetMs - now < minResetRemaining) return false;
+	}
+
+	return true;
 }
 
 // Module-level WeakMap to store model-family exhaustion info per RequestMeta,

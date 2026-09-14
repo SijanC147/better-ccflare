@@ -1,10 +1,10 @@
 /**
  * Per-slot throttle thresholds on combo members (SB23-1269).
  *
- * The rule is a conjunction of two clauses, taken from the request as worded:
- * "skip <account> slot in combo when usage above <percent>% and next reset
- * <timespan> away". Both columns must be set before a slot is skipped, and a
- * skip advances to the next slot rather than failing the request.
+ * Only the configured conditions are evaluated, and every configured one must
+ * hold: a utilization-only rule skips on utilization, a reset-only rule skips on
+ * the reset distance, a rule with both set needs both, and a rule with neither
+ * never skips. A skip advances to the next slot rather than failing the request.
  *
  * Distinct from the pace-based, globally-configured throttling in
  * usage-throttling.ts, which runs after selection and answers 529.
@@ -183,18 +183,73 @@ describe("isSlotThrottled — the rule itself", () => {
 		).toBe(false);
 	});
 
-	it("is inert when only one half of the conjunction is configured", () => {
+	it("skips on the utilization threshold alone when it is the only one configured", () => {
+		const slot = makeSlot({ max_utilization_percent: 50 });
+		// The reset is five minutes away, which would defeat the reset clause if
+		// one were configured. It is not, so it is not considered.
 		expect(
 			isSlotThrottled(
-				makeSlot({ max_utilization_percent: 50 }),
-				{ utilization: 99, resetMs: NOW + 4 * HOUR },
+				slot,
+				{ utilization: 99, resetMs: NOW + 5 * 60_000 },
+				NOW,
+			),
+		).toBe(true);
+		expect(
+			isSlotThrottled(slot, { utilization: 49, resetMs: NOW + 4 * HOUR }, NOW),
+		).toBe(false);
+	});
+
+	it("skips on the reset distance alone when it is the only one configured", () => {
+		const slot = makeSlot({ min_reset_remaining_ms: HOUR });
+		// Utilization of 1% would defeat any sane utilization clause. None is
+		// configured, so only the reset distance decides.
+		expect(
+			isSlotThrottled(slot, { utilization: 1, resetMs: NOW + 4 * HOUR }, NOW),
+		).toBe(true);
+		expect(
+			isSlotThrottled(
+				slot,
+				{ utilization: 99, resetMs: NOW + 5 * 60_000 },
+				NOW,
+			),
+		).toBe(false);
+	});
+
+	it("still requires both clauses when both are configured", () => {
+		const slot = makeSlot({
+			max_utilization_percent: 80,
+			min_reset_remaining_ms: HOUR,
+		});
+		// Each clause alone holds in one of these; neither case skips.
+		expect(
+			isSlotThrottled(
+				slot,
+				{ utilization: 99, resetMs: NOW + 5 * 60_000 },
 				NOW,
 			),
 		).toBe(false);
 		expect(
+			isSlotThrottled(slot, { utilization: 10, resetMs: NOW + 4 * HOUR }, NOW),
+		).toBe(false);
+		expect(
+			isSlotThrottled(slot, { utilization: 99, resetMs: NOW + 4 * HOUR }, NOW),
+		).toBe(true);
+	});
+
+	it("fires a utilization-only rule when the provider reports no reset timestamp", () => {
+		// An absent resetMs is not evidence of a stale snapshot, unlike one in the
+		// past, so it blocks only the reset clause.
+		expect(
+			isSlotThrottled(
+				makeSlot({ max_utilization_percent: 50 }),
+				{ utilization: 99, resetMs: null },
+				NOW,
+			),
+		).toBe(true);
+		expect(
 			isSlotThrottled(
 				makeSlot({ min_reset_remaining_ms: HOUR }),
-				{ utilization: 99, resetMs: NOW + 4 * HOUR },
+				{ utilization: 99, resetMs: null },
 				NOW,
 			),
 		).toBe(false);
