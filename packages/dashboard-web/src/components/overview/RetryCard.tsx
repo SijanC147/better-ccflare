@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { RetryConfig } from "../../api";
 import { useRetryConfig, useSetRetryConfig } from "../../hooks/queries";
 import { Button } from "../ui/button";
 import {
@@ -55,6 +56,30 @@ export function retryWaitCeilingMs(
 		total += Math.min(delayMs * backoff ** retry, maxMs);
 	}
 	return total;
+}
+
+/**
+ * The compound wait for the values on screen, using the ceiling the SERVER
+ * resolved rather than this file's default.
+ *
+ * This exists as its own exported function because the ceiling selection is
+ * the part that breaks silently. A mutation replacing `config?.jitterCeilingMs`
+ * with the local default left every test green when the selection lived inline
+ * in the component: `retryWaitCeilingMs` was fully covered, and the argument
+ * passed to it was covered by nothing (SB23-2018).
+ */
+export function retryWaitFromConfig(
+	config: Pick<RetryConfig, "jitterCeilingMs"> | undefined,
+	attempts: number,
+	delayMs: number,
+	backoff: number,
+): number | null {
+	return retryWaitCeilingMs(
+		attempts,
+		delayMs,
+		backoff,
+		config?.jitterCeilingMs ?? JITTER_CEILING_MS,
+	);
 }
 
 /**
@@ -120,11 +145,11 @@ export function RetryCard() {
 
 	const wait = hasError
 		? null
-		: retryWaitCeilingMs(
+		: retryWaitFromConfig(
+				data,
 				Number(attempts),
 				Number(delayMs),
 				Number(backoff),
-				data?.jitterCeilingMs ?? JITTER_CEILING_MS,
 			);
 	const attemptsNumber = Number(attempts);
 	const worstCaseFetches = Number.isFinite(attemptsNumber)
