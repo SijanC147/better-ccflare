@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { RetryConfig } from "../../api";
 import { useRetryConfig, useSetRetryConfig } from "../../hooks/queries";
 import { Button } from "../ui/button";
 import {
@@ -11,10 +12,15 @@ import {
 import { Input } from "../ui/input";
 
 /**
- * Jitter ceiling for one delay, in milliseconds. RETRY_MAX_DELAY_MS_DEFAULT in
- * packages/core, where it is not exported; CCFLARE_OVERLOAD_RETRY_MAX_MS
- * overrides it in the proxy and cannot be read from the browser, so the number
- * shown here is the ceiling for a default install.
+ * Jitter ceiling for one delay, in milliseconds, used only until the server
+ * answers. GET /api/config/retry now returns the RESOLVED ceiling as
+ * `jitterCeilingMs`, because CCFLARE_OVERLOAD_RETRY_MAX_MS can move it away
+ * from this default on a host the browser cannot inspect, and every wait shown
+ * here would then be wrong with nothing on screen saying so (SB23-2018).
+ *
+ * Kept as the parameter default rather than deleted: retryWaitCeilingMs is
+ * exported and tested directly, and a required argument there would make the
+ * tests specify a number that is not the point of what they assert.
  */
 const JITTER_CEILING_MS = 3000;
 
@@ -50,6 +56,30 @@ export function retryWaitCeilingMs(
 		total += Math.min(delayMs * backoff ** retry, maxMs);
 	}
 	return total;
+}
+
+/**
+ * The compound wait for the values on screen, using the ceiling the SERVER
+ * resolved rather than this file's default.
+ *
+ * This exists as its own exported function because the ceiling selection is
+ * the part that breaks silently. A mutation replacing `config?.jitterCeilingMs`
+ * with the local default left every test green when the selection lived inline
+ * in the component: `retryWaitCeilingMs` was fully covered, and the argument
+ * passed to it was covered by nothing (SB23-2018).
+ */
+export function retryWaitFromConfig(
+	config: Pick<RetryConfig, "jitterCeilingMs"> | undefined,
+	attempts: number,
+	delayMs: number,
+	backoff: number,
+): number | null {
+	return retryWaitCeilingMs(
+		attempts,
+		delayMs,
+		backoff,
+		config?.jitterCeilingMs ?? JITTER_CEILING_MS,
+	);
 }
 
 /**
@@ -115,7 +145,12 @@ export function RetryCard() {
 
 	const wait = hasError
 		? null
-		: retryWaitCeilingMs(Number(attempts), Number(delayMs), Number(backoff));
+		: retryWaitFromConfig(
+				data,
+				Number(attempts),
+				Number(delayMs),
+				Number(backoff),
+			);
 	const attemptsNumber = Number(attempts);
 	const worstCaseFetches = Number.isFinite(attemptsNumber)
 		? Math.max(1, attemptsNumber) ** 2
@@ -180,8 +215,9 @@ export function RetryCard() {
 					/>
 					<p className="text-xs text-muted-foreground">
 						Milliseconds before the first retry. Each individual delay is drawn
-						under a jittered ceiling of 3000ms unless
-						CCFLARE_OVERLOAD_RETRY_MAX_MS says otherwise.
+						under a jittered ceiling of{" "}
+						{data ? `${data.jitterCeilingMs}ms` : "3000ms"}, set by
+						CCFLARE_OVERLOAD_RETRY_MAX_MS.
 					</p>
 					{delayError && (
 						<p className="text-xs text-destructive">{delayError}</p>

@@ -2,6 +2,30 @@
 // Load .env file to ensure environment variables are available
 import { config } from "dotenv";
 
+/**
+ * Renders a resolved retry value, naming the raw one when the clamp moved it.
+ *
+ * `--show-config` prints the value in force, which is right, but the config
+ * layer clamps out-of-range retry settings and the CLI sets `silentConsole`,
+ * so the warning explaining the difference never reaches this terminal. An
+ * operator who wrote 9 and sees 5 under "Config file" has no visible reason
+ * for it (SB23-2045).
+ *
+ * The provenance label is NOT affected and must not be changed: `source` reads
+ * the raw config key, so the clamp can never move a value between "Config
+ * file" and "Default". Only the number can differ from what was written.
+ */
+function withClampNote(
+	resolved: number,
+	raw: unknown,
+	suffix = "",
+): string | number {
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw === resolved) {
+		return suffix ? `${resolved}${suffix}` : resolved;
+	}
+	return `${resolved}${suffix} (clamped from ${raw}${suffix})`;
+}
+
 // Load .env with robust path resolution for different deployment scenarios:
 // 1. Current directory (when binary is in project root)
 // 2. Project root (when running from source with bun run)
@@ -355,7 +379,7 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 	// Retry Configuration
 	configItems.push({
 		name: "Retry Attempts",
-		value: runtime.retry.attempts,
+		value: withClampNote(runtime.retry.attempts, config.get("retry_attempts")),
 		source:
 			typeof config.get("retry_attempts") === "number"
 				? "Config file"
@@ -367,7 +391,11 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 
 	configItems.push({
 		name: "Retry Delay",
-		value: `${runtime.retry.delayMs}ms`,
+		value: withClampNote(
+			runtime.retry.delayMs,
+			config.get("retry_delay_ms"),
+			"ms",
+		),
 		source:
 			typeof config.get("retry_delay_ms") === "number"
 				? "Config file"
@@ -379,7 +407,7 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 
 	configItems.push({
 		name: "Retry Backoff",
-		value: runtime.retry.backoff,
+		value: withClampNote(runtime.retry.backoff, config.get("retry_backoff")),
 		source:
 			typeof config.get("retry_backoff") === "number"
 				? "Config file"

@@ -1,5 +1,5 @@
 import type { Config } from "@better-ccflare/config";
-import { RETRY_BOUNDS } from "@better-ccflare/core";
+import { getOverloadRetryConfig, RETRY_BOUNDS } from "@better-ccflare/core";
 import {
 	BadRequest,
 	errorResponse,
@@ -92,6 +92,12 @@ export function createRetryConfigHandlers(config: Config) {
 				// would say "in force" about variables that lose and variables
 				// that win, in one sentence.
 				overloadEnvironmentKeys: config.getOverloadRetryEnvironmentKeys(),
+				// The RESOLVED per-attempt jitter ceiling, not the default.
+				// retryDelayMs clips every cap at this, so the compound wait the
+				// card shows is wrong without it. CCFLARE_OVERLOAD_RETRY_MAX_MS
+				// overrides the 3000ms default and the browser cannot read an
+				// environment variable, so it has to come from here (SB23-2018).
+				jitterCeilingMs: getOverloadRetryConfig(retry).maxMs,
 			});
 		},
 

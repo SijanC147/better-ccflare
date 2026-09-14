@@ -8,7 +8,7 @@
  * further down or, for attempts, actually attempted (SB23-1980).
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { Config } from "@better-ccflare/config";
 import { createRetryConfigHandlers } from "../config-retry";
 
@@ -215,5 +215,46 @@ describe("POST /api/config/retry", () => {
 		const response =
 			await createRetryConfigHandlers(config).setRetryConfig(request);
 		expect(response.status).toBe(400);
+	});
+});
+
+/**
+ * SB23-2018. The card computes the compound wait with `Math.min(cap, maxMs)`,
+ * so it needs the RESOLVED ceiling. RETRY_MAX_DELAY_MS_DEFAULT is not exported
+ * from packages/core and CCFLARE_OVERLOAD_RETRY_MAX_MS can move it, which a
+ * browser cannot read. Without this field every wait shown would be the
+ * default-ceiling answer on a host that raised it, with nothing saying so.
+ */
+describe("GET /api/config/retry jitter ceiling", () => {
+	const original = process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
+
+	afterEach(() => {
+		if (original === undefined) {
+			delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
+		} else {
+			process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = original;
+		}
+	});
+
+	it("reports the default ceiling when the variable is unset", async () => {
+		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
+
+		const { config } = configStub();
+		const body = (await createRetryConfigHandlers(config)
+			.getRetryConfig()
+			.json()) as { jitterCeilingMs: number };
+
+		expect(body.jitterCeilingMs).toBe(3000);
+	});
+
+	it("reports the overridden ceiling, which is the whole point", async () => {
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "60000";
+
+		const { config } = configStub();
+		const body = (await createRetryConfigHandlers(config)
+			.getRetryConfig()
+			.json()) as { jitterCeilingMs: number };
+
+		expect(body.jitterCeilingMs).toBe(60000);
 	});
 });
