@@ -11,10 +11,15 @@ import {
 import { Input } from "../ui/input";
 
 /**
- * Jitter ceiling for one delay, in milliseconds. RETRY_MAX_DELAY_MS_DEFAULT in
- * packages/core, where it is not exported; CCFLARE_OVERLOAD_RETRY_MAX_MS
- * overrides it in the proxy and cannot be read from the browser, so the number
- * shown here is the ceiling for a default install.
+ * Jitter ceiling for one delay, in milliseconds, used only until the server
+ * answers. GET /api/config/retry now returns the RESOLVED ceiling as
+ * `jitterCeilingMs`, because CCFLARE_OVERLOAD_RETRY_MAX_MS can move it away
+ * from this default on a host the browser cannot inspect, and every wait shown
+ * here would then be wrong with nothing on screen saying so (SB23-2018).
+ *
+ * Kept as the parameter default rather than deleted: retryWaitCeilingMs is
+ * exported and tested directly, and a required argument there would make the
+ * tests specify a number that is not the point of what they assert.
  */
 const JITTER_CEILING_MS = 3000;
 
@@ -115,7 +120,12 @@ export function RetryCard() {
 
 	const wait = hasError
 		? null
-		: retryWaitCeilingMs(Number(attempts), Number(delayMs), Number(backoff));
+		: retryWaitCeilingMs(
+				Number(attempts),
+				Number(delayMs),
+				Number(backoff),
+				data?.jitterCeilingMs ?? JITTER_CEILING_MS,
+			);
 	const attemptsNumber = Number(attempts);
 	const worstCaseFetches = Number.isFinite(attemptsNumber)
 		? Math.max(1, attemptsNumber) ** 2
@@ -180,8 +190,9 @@ export function RetryCard() {
 					/>
 					<p className="text-xs text-muted-foreground">
 						Milliseconds before the first retry. Each individual delay is drawn
-						under a jittered ceiling of 3000ms unless
-						CCFLARE_OVERLOAD_RETRY_MAX_MS says otherwise.
+						under a jittered ceiling of{" "}
+						{data ? `${data.jitterCeilingMs}ms` : "3000ms"}, set by
+						CCFLARE_OVERLOAD_RETRY_MAX_MS.
 					</p>
 					{delayError && (
 						<p className="text-xs text-destructive">{delayError}</p>

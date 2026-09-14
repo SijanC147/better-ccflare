@@ -89,3 +89,51 @@ describe("retryWaitCeilingMs", () => {
 		);
 	});
 });
+
+/**
+ * SB23-2018. The ceiling is a parameter because it is not a constant in
+ * practice: CCFLARE_OVERLOAD_RETRY_MAX_MS moves it, and the browser cannot
+ * read an environment variable, so the card takes the resolved value from
+ * GET /api/config/retry.
+ *
+ * Expectations here are computed from retryDelayMs's own formula restated
+ * below, never copied from what the card prints. Copying its output would pin
+ * whatever it currently does, including a bug.
+ */
+describe("retryWaitCeilingMs honours a non-default ceiling", () => {
+	/** `Math.min(baseMs * backoff ** attempt, maxMs)`, summed over the retries. */
+	function expected(
+		attempts: number,
+		delayMs: number,
+		backoff: number,
+		maxMs: number,
+	): number {
+		let total = 0;
+		for (let retry = 1; retry <= Math.max(0, attempts - 1); retry++) {
+			total += Math.min(delayMs * backoff ** retry, maxMs);
+		}
+		return total;
+	}
+
+	it("differs from the default-ceiling answer when the ceiling moves", () => {
+		// The property that matters: a host with a raised ceiling must not be
+		// shown the default-ceiling number.
+		const raised = retryWaitCeilingMs(5, 1000, 2, 60_000);
+		const withDefault = retryWaitCeilingMs(5, 1000, 2);
+
+		expect(raised).toBe(expected(5, 1000, 2, 60_000));
+		expect(raised).not.toBe(withDefault);
+	});
+
+	it("clips at a lowered ceiling", () => {
+		expect(retryWaitCeilingMs(5, 1000, 2, 1500)).toBe(
+			expected(5, 1000, 2, 1500),
+		);
+	});
+
+	it("still uses 3000 when no ceiling is supplied", () => {
+		// Pins the parameter default, so dropping it would fail rather than
+		// silently changing every wait the card shows.
+		expect(retryWaitCeilingMs(5, 1000, 2)).toBe(expected(5, 1000, 2, 3000));
+	});
+});
