@@ -15,7 +15,21 @@ export const TIME_CONSTANTS = {
 
 	// Session durations - specifically for Anthropic usage windows
 	ANTHROPIC_SESSION_DURATION_DEFAULT: 5 * 60 * 60 * 1000, // 5 hours - default for Anthropic provider session tracking
-	ANTHROPIC_SESSION_DURATION_FALLBACK: 1 * 60 * 60 * 1000, // 1 hour - fallback for Anthropic provider
+	/**
+	 * @deprecated Nothing reads this. Do not introduce a new consumer.
+	 *
+	 * It sat one line below a constant of the same name ending `DEFAULT` and
+	 * holding a different value, five hours against one, and its only consumer
+	 * was a defect: `GET /api/config` fell back to it while the session logic
+	 * used `ANTHROPIC_SESSION_DURATION_DEFAULT`, so the endpoint under-reported
+	 * by a factor of five on every install (SB23-2048). That consumer is gone.
+	 *
+	 * The session duration has one resolved value, from `config.getRuntime()`,
+	 * already defaulted and clamped. A second "fallback" for the same setting
+	 * is what let the two disagree silently, so the pair is the hazard rather
+	 * than either number.
+	 */
+	ANTHROPIC_SESSION_DURATION_FALLBACK: 1 * 60 * 60 * 1000, // 1 hour
 	/**
 	 * @deprecated Use ANTHROPIC_SESSION_DURATION_DEFAULT instead.
 	 * This constant is kept for backward compatibility only and should not be used in new code.

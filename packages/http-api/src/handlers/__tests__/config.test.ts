@@ -22,15 +22,26 @@ function makeCatalog(
 
 function makeConfig() {
 	return {
+		// snake_case only, because that is what the real getAllSettings() returns:
+		// it spreads the config data, which is keyed by config-file name. This
+		// mock used to carry a camelCase `sessionDurationMs` here, which exists in
+		// no real response, and that is why SB23-2048 survived. The handler read
+		// `settings.sessionDurationMs`, always `undefined` in production, and the
+		// mock handed it a value so the test agreed with the defect.
 		getAllSettings: () => ({
 			lb_strategy: "session",
 			port: 8080,
-			sessionDurationMs: 18_000_000,
+			session_duration_ms: 18_000_000,
 			default_agent_model: "sonnet",
 			system_prompt_cache_ttl_1h: false,
 			usage_throttling_five_hour_enabled: true,
 			usage_throttling_weekly_enabled: true,
 		}),
+		// The resolved runtime config. Only sessionDurationMs is read by these
+		// handlers; the rest of RuntimeConfig is deliberately absent so a new
+		// dependency on it fails loudly here rather than silently reading
+		// undefined.
+		getRuntime: () => ({ sessionDurationMs: 18_000_000 }),
 		getSystemPromptCacheTtl1h: () => false,
 		getUsageThrottlingFiveHourEnabled: () => true,
 		getUsageThrottlingWeeklyEnabled: () => true,
