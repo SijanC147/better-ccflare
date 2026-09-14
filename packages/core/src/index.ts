@@ -111,6 +111,7 @@ export {
 	ResolverSnapshot,
 } from "./project-resolver";
 export * from "./request-events";
+export { RETRY_BOUNDS } from "./retry-bounds";
 export * from "./strategy";
 export {
 	computeWindowStartMs,

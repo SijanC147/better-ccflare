@@ -25,6 +25,7 @@ import {
 	DEFAULT_STRATEGY,
 	isValidStrategy,
 	NETWORK,
+	RETRY_DEFAULTS,
 	type StrategyName,
 	TIME_CONSTANTS,
 	ValidationError,
@@ -36,6 +37,7 @@ import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
+import { validateRuntimeRetry } from "./runtime-validation";
 
 const log = new Logger("Config");
 
@@ -2239,14 +2241,16 @@ export class Config extends EventEmitter {
 	}
 
 	getRuntime(): RuntimeConfig {
+		// RETRY_DEFAULTS from @better-ccflare/core, the same object
+		// getOverloadRetryConfig falls back to. An earlier version of this wrote
+		// the three numbers out again with a comment saying a second literal
+		// could drift; a second literal already existed one package over, which
+		// is the thing the comment was warning about.
+		const retryDefaults = { ...RETRY_DEFAULTS };
 		// Default values
 		const defaults: RuntimeConfig = {
 			clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-			retry: {
-				attempts: 3,
-				delayMs: TIME_CONSTANTS.RETRY_DELAY_DEFAULT,
-				backoff: 2,
-			},
+			retry: { ...retryDefaults },
 			sessionDurationMs: TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
 			port: NETWORK.DEFAULT_PORT,
 			database: {
@@ -2371,6 +2375,13 @@ export class Config extends EventEmitter {
 		if (typeof this.data.db_retry_max_delay_ms === "number") {
 			defaults.database.retry.maxDelayMs = this.data.db_retry_max_delay_ms;
 		}
+
+		// Clamp the upstream retry family against RETRY_BOUNDS, the same bounds
+		// POST /api/config/retry enforces. Runs after both the environment and
+		// the config file have had their say, so one pass covers both sources.
+		// Clamps rather than throwing, which is argued in the function
+		// (SB23-1980).
+		validateRuntimeRetry(defaults.retry, retryDefaults);
 
 		// Validate the final database configuration
 		try {
