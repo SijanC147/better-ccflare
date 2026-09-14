@@ -103,8 +103,8 @@ The following environment variables can be used during development:
 
 - `LB_STRATEGY` - Override the default load balancing strategy
 - `CLIENT_ID` - Set a custom OAuth client ID
-- `RETRY_ATTEMPTS` - Number of retry attempts for failed requests
-- `RETRY_DELAY_MS` - Delay between retry attempts in milliseconds
+- `RETRY_ATTEMPTS` - Total attempts for one upstream request, the first attempt included
+- `RETRY_DELAY_MS` - Base delay in milliseconds before the first retry
 
 **Note**: Most configuration is handled through the config file and CLI. Environment variables are optional overrides.
 
