@@ -255,11 +255,20 @@ export function buildSnapshot(
 	};
 }
 
+/**
+ * Only the call signature is needed, not the `preconnect` property Bun hangs off
+ * the global `fetch`, so a test double stays a two-line arrow function.
+ */
+export type FetchLike = (
+	input: string,
+	init?: RequestInit,
+) => Promise<Response>;
+
 export interface ServiceStatusServiceOptions {
 	/** How long a successful snapshot is served without re-querying. */
 	refreshIntervalMs?: number;
 	/** Injected for tests; defaults to `globalThis.fetch`. */
-	fetchImpl?: typeof fetch;
+	fetchImpl?: FetchLike;
 	/** Injected for tests; defaults to `Date.now`. */
 	now?: () => number;
 }
@@ -278,7 +287,7 @@ export class ServiceStatusService {
 	private lastFailureAt: number | null = null;
 	private inFlight: Promise<ServiceStatusResult> | null = null;
 	private readonly refreshIntervalMs: number;
-	private readonly fetchImpl: typeof fetch;
+	private readonly fetchImpl: FetchLike;
 	private readonly now: () => number;
 
 	constructor(options: ServiceStatusServiceOptions = {}) {

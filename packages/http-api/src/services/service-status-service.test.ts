@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-	buildSnapshot,
-	ServiceStatusService,
-} from "./service-status-service";
+import type { FetchLike } from "./service-status-service";
+import { buildSnapshot, ServiceStatusService } from "./service-status-service";
 
 /**
  * Fixture JSON only — never the live page. A test that reaches the network
@@ -160,12 +158,12 @@ describe("buildSnapshot component filter", () => {
 	});
 });
 
-function jsonFetch(payload: unknown, status = 200): typeof fetch {
-	return (async () =>
+function jsonFetch(payload: unknown, status = 200): FetchLike {
+	return async () =>
 		new Response(JSON.stringify(payload), {
 			status,
 			headers: { "Content-Type": "application/json" },
-		})) as unknown as typeof fetch;
+		});
 }
 
 describe("ServiceStatusService", () => {
@@ -177,7 +175,7 @@ describe("ServiceStatusService", () => {
 			fetchImpl: (async () => {
 				calls += 1;
 				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
-			}) as unknown as typeof fetch,
+			}),
 		});
 		const first = await service.getStatus();
 		const second = await service.getStatus();
@@ -195,7 +193,7 @@ describe("ServiceStatusService", () => {
 			fetchImpl: (async () => {
 				if (shouldFail) throw new Error("connect ECONNREFUSED");
 				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
-			}) as unknown as typeof fetch,
+			}),
 		});
 
 		const good = await service.getStatus();
@@ -229,7 +227,7 @@ describe("ServiceStatusService", () => {
 			fetchImpl: (async () => {
 				calls += 1;
 				throw new Error("boom");
-			}) as unknown as typeof fetch,
+			}),
 		});
 		await service.getStatus(true);
 		now = 1_000;
@@ -246,7 +244,7 @@ describe("ServiceStatusService", () => {
 				calls += 1;
 				await new Promise((resolve) => setTimeout(resolve, 5));
 				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
-			}) as unknown as typeof fetch,
+			}),
 		});
 		const [a, b] = await Promise.all([
 			service.getStatus(),
