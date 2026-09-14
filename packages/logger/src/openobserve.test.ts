@@ -23,6 +23,7 @@ function settings(
 		logStream: "better_ccflare_logs",
 		requestStream: "better_ccflare_requests",
 		shipPayloads: true,
+		logMinLevel: "INFO",
 		...overrides,
 	};
 }
@@ -242,5 +243,141 @@ describe("openobserve exporter", () => {
 
 		configureOpenObserve(null);
 		expect(openObserveBufferSizes().requests).toBe(0);
+	});
+});
+
+/**
+ * The exporter's buffers drop the oldest under pressure, so a DEBUG burst does
+ * not merely add noise: it evicts the ERROR records that were the reason for
+ * shipping logs at all. These tests pin the filter that stops that, and the
+ * fallback that stops a typo doing something worse.
+ */
+describe("openobserve log minimum level", () => {
+	test("drops an event below the configured level and ships one at it", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings({ logMinLevel: "INFO" }));
+
+		logBus.emit("log", { ts: 1, level: "DEBUG", msg: "chatter" });
+		logBus.emit("log", { ts: 2, level: "INFO", msg: "kept" });
+		await flush();
+
+		const msgs = captures.flatMap((c) =>
+			(c.body as { msg: string }[]).map((r) => r.msg),
+		);
+		expect(msgs).toEqual(["kept"]);
+	});
+
+	test("ships every level above the configured one", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings({ logMinLevel: "WARN" }));
+
+		logBus.emit("log", { ts: 1, level: "DEBUG", msg: "debug" });
+		logBus.emit("log", { ts: 2, level: "INFO", msg: "info" });
+		logBus.emit("log", { ts: 3, level: "WARN", msg: "warn" });
+		logBus.emit("log", { ts: 4, level: "ERROR", msg: "error" });
+		await flush();
+
+		const msgs = captures.flatMap((c) =>
+			(c.body as { msg: string }[]).map((r) => r.msg),
+		);
+		expect(msgs).toEqual(["warn", "error"]);
+	});
+
+	test("DEBUG ships everything, which is how the old behaviour is restored", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings({ logMinLevel: "DEBUG" }));
+
+		logBus.emit("log", { ts: 1, level: "DEBUG", msg: "chatter" });
+		await flush();
+
+		const msgs = captures.flatMap((c) =>
+			(c.body as { msg: string }[]).map((r) => r.msg),
+		);
+		expect(msgs).toEqual(["chatter"]);
+	});
+
+	// The silent-green case: a typo must not turn the log stream off, which
+	// looks exactly like a working exporter with nothing to say.
+	test("an unparseable level falls back to INFO rather than dropping everything", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args.map(String).join(" "));
+		};
+		try {
+			configureOpenObserve(() => settings({ logMinLevel: "INFF" }));
+
+			logBus.emit("log", { ts: 1, level: "DEBUG", msg: "below" });
+			logBus.emit("log", { ts: 2, level: "INFO", msg: "at" });
+			logBus.emit("log", { ts: 3, level: "ERROR", msg: "above" });
+			await flush();
+		} finally {
+			console.warn = originalWarn;
+		}
+
+		const msgs = captures.flatMap((c) =>
+			(c.body as { msg: string }[]).map((r) => r.msg),
+		);
+		expect(msgs).toEqual(["at", "above"]);
+		// Warned once for the bad value, not once per event.
+		expect(warnings.filter((w) => w.includes("INFF"))).toHaveLength(1);
+	});
+
+	test("an empty level means unset, which is the INFO default", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings({ logMinLevel: "" }));
+
+		logBus.emit("log", { ts: 1, level: "DEBUG", msg: "below" });
+		logBus.emit("log", { ts: 2, level: "INFO", msg: "at" });
+		await flush();
+
+		const msgs = captures.flatMap((c) =>
+			(c.body as { msg: string }[]).map((r) => r.msg),
+		);
+		expect(msgs).toEqual(["at"]);
+	});
+
+	// server.ts installs `configureOpenObserve(() => config.getOpenObserveSettings())`
+	// and currentSettings() calls it on every decision, so a level changed in the
+	// dashboard takes effect with no restart. A test holding one settings object
+	// would not exercise that, so this one drives the getter.
+	test("a level change through the getter takes effect with no restart", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		let level = "ERROR";
+		configureOpenObserve(() => settings({ logMinLevel: level }));
+
+		logBus.emit("log", { ts: 1, level: "INFO", msg: "before" });
+		level = "DEBUG";
+		logBus.emit("log", { ts: 2, level: "INFO", msg: "after" });
+		await flush();
+
+		const msgs = captures.flatMap((c) =>
+			(c.body as { msg: string }[]).map((r) => r.msg),
+		);
+		expect(msgs).toEqual(["after"]);
+	});
+
+	// Request records carry no level and are the other half of the feature.
+	// Filtering them would silently stop shipping request data.
+	test("the minimum level does not filter the request stream", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings({ logMinLevel: "ERROR" }));
+
+		shipRequestRecord({ id: "req-1" });
+		await flush();
+
+		const requestPosts = captures.filter((c) =>
+			c.url.includes("better_ccflare_requests"),
+		);
+		expect(requestPosts).toHaveLength(1);
+		expect((requestPosts[0].body as { id: string }[])[0].id).toBe("req-1");
 	});
 });

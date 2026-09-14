@@ -5,6 +5,11 @@ import {
 	jsonResponse,
 } from "@better-ccflare/http-common";
 
+// Mirrors the LogLevel enum in @better-ccflare/logger. Duplicated rather than
+// imported: this package does not otherwise depend on the logger, and the set
+// of level names is fixed by the LogEvent type.
+const LOG_MIN_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"];
+
 /**
  * OpenObserve shipping (`/api/config/openobserve`).
  *
@@ -33,6 +38,7 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				logStream: settings?.logStream ?? "better_ccflare_logs",
 				requestStream: settings?.requestStream ?? "better_ccflare_requests",
 				shipPayloads: settings?.shipPayloads ?? false,
+				logMinLevel: settings?.logMinLevel ?? "INFO",
 				tokenSet: config.hasOpenObserveToken(),
 				// The environment wins over the config file, so the dashboard can
 				// explain why saving here changed nothing.
@@ -52,6 +58,7 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				logStream?: unknown;
 				requestStream?: unknown;
 				shipPayloads?: unknown;
+				logMinLevel?: unknown;
 			};
 			try {
 				body = (await req.json()) as typeof body;
@@ -80,6 +87,29 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				return errorResponse(BadRequest("shipPayloads must be a boolean"));
 			}
 
+			// Absent leaves the stored level alone, the same posture as the token:
+			// a client written before this field existed sends the rest of the
+			// form, and must not silently reset a configured level to the default.
+			let logMinLevel = config.getOpenObserveSettings()?.logMinLevel ?? "INFO";
+			if (body.logMinLevel !== undefined) {
+				if (typeof body.logMinLevel !== "string") {
+					return errorResponse(BadRequest("logMinLevel must be a string"));
+				}
+				const candidate = body.logMinLevel.trim().toUpperCase();
+				// Rejected here rather than accepted and coerced, because this is the
+				// one write path that can tell the operator. A bad value arriving by
+				// config file or environment variable still falls back in the
+				// exporter rather than turning the log stream off.
+				if (!LOG_MIN_LEVELS.includes(candidate)) {
+					return errorResponse(
+						BadRequest(
+							`logMinLevel must be one of ${LOG_MIN_LEVELS.join(", ")}`,
+						),
+					);
+				}
+				logMinLevel = candidate;
+			}
+
 			config.setOpenObserveEndpoint({
 				url: strings.url,
 				// Empty falls back to the same default the config read applies, so a
@@ -89,6 +119,7 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				logStream: strings.logStream || "better_ccflare_logs",
 				requestStream: strings.requestStream || "better_ccflare_requests",
 				shipPayloads: body.shipPayloads,
+				logMinLevel,
 			});
 
 			// Absent leaves the stored token alone; the form does not read it back,

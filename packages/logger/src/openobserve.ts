@@ -38,6 +38,20 @@ export interface OpenObserveSettings {
 	 * box is a different decision from shipping log lines.
 	 */
 	shipPayloads: boolean;
+	/**
+	 * Lowest level that reaches the log stream, by name: DEBUG, INFO, WARN or
+	 * ERROR. Carried as a string rather than a parsed rank so the one place that
+	 * can safely report a bad value is the one that parses it. This module warns
+	 * on `console.warn` and never through `Logger`, which would feed itself.
+	 *
+	 * An unrecognized name falls back to INFO rather than dropping everything.
+	 * The failure to avoid is a typo turning the log stream off, which looks
+	 * exactly like a working exporter with nothing to say.
+	 *
+	 * Applies to the log stream only. Request records carry no level and are
+	 * the other half of the feature.
+	 */
+	logMinLevel: string;
 }
 
 // Bound both buffers by count and by bytes, mirroring MAX_ACTIVE_PAYLOAD_BYTES
@@ -260,8 +274,48 @@ export async function flush(): Promise<void> {
 	}
 }
 
+// Ranks, not the LogLevel enum from ./index, which would be an import cycle:
+// index.ts owns Logger and this module is subscribed from the same package.
+const LEVEL_RANK: Record<string, number> = {
+	DEBUG: 0,
+	INFO: 1,
+	WARN: 2,
+	ERROR: 3,
+};
+const DEFAULT_MIN_LEVEL_RANK = LEVEL_RANK.INFO;
+
+// One warning per distinct bad value, not per event: a misconfigured level is
+// on every log line, and warnThrottled's shared window would then suppress the
+// exporter's real failures for a minute at a time.
+const warnedBadLevels = new Set<string>();
+
+/**
+ * Rank of a configured minimum level. An unrecognized name warns once and
+ * falls back to the default rather than filtering everything out.
+ */
+function minLevelRank(configured: string): number {
+	const key = configured.trim().toUpperCase();
+	if (!key) return DEFAULT_MIN_LEVEL_RANK;
+	const rank = LEVEL_RANK[key];
+	if (rank !== undefined) return rank;
+	if (!warnedBadLevels.has(key)) {
+		warnedBadLevels.add(key);
+		console.warn(
+			`[openobserve] unrecognized log min level ${JSON.stringify(key)}; shipping at INFO and above`,
+		);
+	}
+	return DEFAULT_MIN_LEVEL_RANK;
+}
+
 function onLog(event: LogEvent): void {
-	if (!currentSettings()) return;
+	const settings = currentSettings();
+	if (!settings) return;
+	// Filter before the record is built, so a filtered event costs only the
+	// comparison. Read through currentSettings() so a level changed in the
+	// dashboard takes effect with no restart.
+	const eventRank = LEVEL_RANK[event.level];
+	if (eventRank !== undefined && eventRank < minLevelRank(settings.logMinLevel))
+		return;
 	enqueue(logBuffer, {
 		_timestamp: event.ts,
 		level: event.level,

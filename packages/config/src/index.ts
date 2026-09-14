@@ -214,6 +214,11 @@ export interface ConfigData {
 	openobserve_log_stream?: string;
 	openobserve_request_stream?: string;
 	openobserve_ship_payloads?: boolean;
+	// Lowest level shipped to the log stream, by name. Defaults to INFO: the
+	// exporter's buffers drop the oldest under pressure, so a DEBUG burst
+	// evicts the ERROR records that were the reason for shipping at all.
+	// Affects the log stream only; request records carry no level.
+	openobserve_log_min_level?: string;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -1775,6 +1780,17 @@ export class Config extends EventEmitter {
 				"better_ccflare_requests"
 			).trim(),
 			shipPayloads,
+			// Passed through unvalidated on purpose. The exporter parses it,
+			// because the exporter is the only place that can report a bad value
+			// without calling Logger and feeding itself. An empty value means
+			// unset, which the exporter reads as the INFO default.
+			logMinLevel: (
+				process.env.BETTER_CCFLARE_OPENOBSERVE_LOG_MIN_LEVEL ||
+				(typeof this.data.openobserve_log_min_level === "string"
+					? this.data.openobserve_log_min_level
+					: "") ||
+				"INFO"
+			).trim(),
 		};
 	}
 
@@ -1813,6 +1829,7 @@ export class Config extends EventEmitter {
 		logStream: string;
 		requestStream: string;
 		shipPayloads: boolean;
+		logMinLevel: string;
 	}): void {
 		this.set("openobserve_url", settings.url);
 		this.set("openobserve_org", settings.org);
@@ -1820,6 +1837,7 @@ export class Config extends EventEmitter {
 		this.set("openobserve_log_stream", settings.logStream);
 		this.set("openobserve_request_stream", settings.requestStream);
 		this.set("openobserve_ship_payloads", settings.shipPayloads);
+		this.set("openobserve_log_min_level", settings.logMinLevel);
 	}
 
 	// Deliberately no setter. Unlike pg_password, this value has no write path

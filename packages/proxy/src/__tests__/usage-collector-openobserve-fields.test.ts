@@ -87,6 +87,7 @@ function settings(): OpenObserveSettings {
 		logStream: "better_ccflare_logs",
 		requestStream: REQUEST_STREAM,
 		shipPayloads: false,
+		logMinLevel: "INFO",
 	};
 }
 
