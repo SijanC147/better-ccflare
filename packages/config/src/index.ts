@@ -1056,6 +1056,59 @@ export class Config extends EventEmitter {
 		this.set("request_storage_headers_only", value);
 	}
 
+	/**
+	 * Which of the three retry keys are supplied by the environment.
+	 *
+	 * Reported so the dashboard can say what a saved value does to an
+	 * environment variable. getRuntime() applies the config file AFTER the
+	 * environment, so a value written here outranks RETRY_ATTEMPTS,
+	 * RETRY_DELAY_MS and RETRY_BACKOFF rather than being shadowed by them.
+	 * That is the opposite of the OpenObserve token, where the environment
+	 * wins, and it is worth saying on the card rather than leaving an operator
+	 * to discover which way round it goes.
+	 */
+	getRetryEnvironmentKeys(): string[] {
+		return ["RETRY_ATTEMPTS", "RETRY_DELAY_MS", "RETRY_BACKOFF"].filter(
+			(name) => process.env[name] !== undefined,
+		);
+	}
+
+	/**
+	 * The deprecated CCFLARE_OVERLOAD_RETRY_* variables that are in force.
+	 *
+	 * Reported SEPARATELY from getRetryEnvironmentKeys() because the two groups
+	 * mean opposite things. The RETRY_* group loses to a value saved from the
+	 * dashboard; this group beats it, inside getOverloadRetryConfig() in
+	 * packages/core, for the in-place 529 loop and the ZAI 1305 loop. One
+	 * undifferentiated list of "variables in force" would read as a single fact
+	 * and mislead in both directions at once.
+	 */
+	getOverloadRetryEnvironmentKeys(): string[] {
+		return [
+			"CCFLARE_OVERLOAD_RETRY_ENABLED",
+			"CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS",
+			"CCFLARE_OVERLOAD_RETRY_BASE_MS",
+		].filter((name) => process.env[name] !== undefined);
+	}
+
+	/**
+	 * Writes the three documented retry keys.
+	 *
+	 * No clamping and no fallback here: the one caller is the API handler,
+	 * which rejects an out-of-range value outright so the operator is told.
+	 * The config file and the environment keep their own forgiving path
+	 * through getRuntime(), because a boot-time value must not stop the proxy.
+	 */
+	setRetrySettings(settings: {
+		attempts: number;
+		delayMs: number;
+		backoff: number;
+	}): void {
+		this.set("retry_attempts", settings.attempts);
+		this.set("retry_delay_ms", settings.delayMs);
+		this.set("retry_backoff", settings.backoff);
+	}
+
 	getUsagePollIntervalMs(): number {
 		const fromEnv = process.env.USAGE_POLL_INTERVAL_MS;
 		if (fromEnv) {

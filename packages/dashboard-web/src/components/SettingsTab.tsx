@@ -6,6 +6,7 @@ import { GithubTokenCard } from "./overview/GithubTokenCard";
 import { OpenObserveCard } from "./overview/OpenObserveCard";
 import { PostgresConfigCard } from "./overview/PostgresConfigCard";
 import { RequestStorageCard } from "./overview/RequestStorageCard";
+import { RetryCard } from "./overview/RetryCard";
 import { RoutingCard } from "./overview/RoutingCard";
 import { SystemCacheTtlCard } from "./overview/SystemCacheTtlCard";
 import { UsageThrottlingCard } from "./overview/UsageThrottlingCard";
@@ -21,6 +22,7 @@ export const SettingsTab = React.memo(() => {
 				<UsageThrottlingCard />
 				<DataRetentionCard />
 				<RequestStorageCard />
+				<RetryCard />
 				<PostgresConfigCard />
 				<GithubTokenCard />
 				<OpenObserveCard />

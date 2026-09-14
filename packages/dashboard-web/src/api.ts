@@ -85,6 +85,44 @@ export interface OpenObserveConfig {
 	endpointFromEnvironment: boolean;
 }
 
+/** One numeric field's accepted range, as the server reports it. */
+export interface RetryBound {
+	min: number;
+	max: number;
+}
+
+/**
+ * What `GET /api/config/retry` reports. The bounds travel with the values
+ * because the handler is the only place that enforces them; a copy in the card
+ * would drift from the copy that rejects.
+ */
+export interface RetryConfig {
+	attempts: number;
+	delayMs: number;
+	backoff: number;
+	bounds: {
+		attempts: RetryBound;
+		delayMs: RetryBound;
+		backoff: RetryBound;
+	};
+	/** True while the proxy reads these once at startup. */
+	restartRequired: boolean;
+	/** RETRY_* variables set in the environment. A saved value outranks them. */
+	environmentKeys: string[];
+	/**
+	 * CCFLARE_OVERLOAD_RETRY_* variables set in the environment. These go the
+	 * other way: they override a saved value on the 529 and ZAI 1305 loops.
+	 */
+	overloadEnvironmentKeys: string[];
+}
+
+/** An omitted field leaves that stored key alone. */
+export interface RetryConfigUpdate {
+	attempts?: number;
+	delayMs?: number;
+	backoff?: number;
+}
+
 /** The levels the server accepts, in ascending order of severity. */
 export const OPENOBSERVE_LOG_MIN_LEVELS = [
 	"DEBUG",
@@ -3007,6 +3045,21 @@ class API extends HttpClient {
 	async setOpenObserveConfig(settings: OpenObserveConfigUpdate): Promise<void> {
 		const url = "/api/config/openobserve";
 		this.logger.debug(`→ POST ${url} (token redacted)`);
+		await this.post(url, settings);
+	}
+
+	// Upstream retry settings. The server supplies the bounds with the values,
+	// so the card never carries a second copy of them.
+	async getRetryConfig(): Promise<RetryConfig> {
+		const url = "/api/config/retry";
+		this.logger.debug(`→ GET ${url}`);
+		return await this.get<RetryConfig>(url);
+	}
+
+	/** An omitted field leaves that stored key alone. */
+	async setRetryConfig(settings: RetryConfigUpdate): Promise<void> {
+		const url = "/api/config/retry";
+		this.logger.debug(`→ POST ${url}`);
 		await this.post(url, settings);
 	}
 
