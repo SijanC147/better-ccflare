@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY_BOUNDS } from "@better-ccflare/core";
+import { logBus } from "@better-ccflare/logger";
+import type { LogEvent } from "@better-ccflare/types";
 import { Config } from "./index";
 import {
 	resetRetryWarningsForTest,
@@ -43,6 +45,27 @@ function makeConfig(initial?: Record<string, unknown>): {
 }
 
 const DEFAULTS = { attempts: 3, delayMs: 1000, backoff: 2 };
+
+/**
+ * Runs `fn` and returns the WARN messages it put on the log bus.
+ *
+ * Counting emitted warnings is the only way to pin the dedupe: every other
+ * observable, including the returned adjustments, is identical with and without
+ * it.
+ */
+function captureWarnings(fn: () => void): string[] {
+	const captured: string[] = [];
+	const handler = (event: LogEvent) => {
+		if (event.level === "WARN") captured.push(event.msg);
+	};
+	logBus.on("log", handler);
+	try {
+		fn();
+	} finally {
+		logBus.off("log", handler);
+	}
+	return captured;
+}
 
 beforeEach(() => {
 	saved = {};
@@ -144,6 +167,41 @@ describe("validateRuntimeRetry", () => {
 		expect(retry.attempts).toBe(DEFAULTS.attempts);
 		expect(adjustments).toHaveLength(1);
 		expect(adjustments[0].reason).toBe("not a number");
+	});
+
+	it("warns once for one misconfiguration, however many times it is called", () => {
+		// The assertion the dedupe actually needs. The test below pins that the
+		// RETURN value is not deduplicated, which was never the half at risk:
+		// removing the dedupe entirely leaves that one green. This counts WARN
+		// events on the log bus, so deleting the guard in warnOnce fails here.
+		resetRetryWarningsForTest();
+		const warnings = captureWarnings(() => {
+			for (let i = 0; i < 5; i++) {
+				validateRuntimeRetry(
+					{ attempts: 99, delayMs: 1000, backoff: 2 },
+					{ ...DEFAULTS },
+				);
+			}
+		});
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("retry_attempts");
+	});
+
+	it("warns again when the bad value changes to a different bad value", () => {
+		// The dedupe key carries the values, not just the setting, so a second
+		// distinct misconfiguration is not swallowed by the first.
+		resetRetryWarningsForTest();
+		const warnings = captureWarnings(() => {
+			validateRuntimeRetry(
+				{ attempts: 99, delayMs: 1000, backoff: 2 },
+				{ ...DEFAULTS },
+			);
+			validateRuntimeRetry(
+				{ attempts: -7, delayMs: 1000, backoff: 2 },
+				{ ...DEFAULTS },
+			);
+		});
+		expect(warnings).toHaveLength(2);
 	});
 
 	it("returns the adjustment on every call, not only the first", () => {
