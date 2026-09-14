@@ -346,13 +346,13 @@ function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProp
 
 interface ProjectRowProps {
 	project: Project;
-	children: Project[];
+	childProjects: Project[];
 	allProjects: Project[];
 	onEdit: (p: Project) => void;
 	onDelete: (p: Project) => void;
 }
 
-function ProjectRow({ project, children, allProjects, onEdit, onDelete }: ProjectRowProps) {
+function ProjectRow({ project, childProjects, allProjects, onEdit, onDelete }: ProjectRowProps) {
 	const [expanded, setExpanded] = useState(true);
 	const updateProject = useUpdateProject();
 
@@ -365,7 +365,7 @@ function ProjectRow({ project, children, allProjects, onEdit, onDelete }: Projec
 	return (
 		<div className={cn("border rounded-lg", isWorktree && "ml-6 border-dashed")}>
 			<div className="flex items-center gap-3 p-3">
-				{children.length > 0 && (
+				{childProjects.length > 0 && (
 					<button
 						type="button"
 						className="text-muted-foreground hover:text-foreground"
@@ -374,7 +374,7 @@ function ProjectRow({ project, children, allProjects, onEdit, onDelete }: Projec
 						{expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
 					</button>
 				)}
-				{children.length === 0 && <div className="w-4" />}
+				{childProjects.length === 0 && <div className="w-4" />}
 
 				<FolderOpen className={cn("h-4 w-4 shrink-0", project.enabled ? "text-primary" : "text-muted-foreground")} />
 
@@ -422,13 +422,13 @@ function ProjectRow({ project, children, allProjects, onEdit, onDelete }: Projec
 				</div>
 			</div>
 
-			{expanded && children.length > 0 && (
+			{expanded && childProjects.length > 0 && (
 				<div className="px-3 pb-3 space-y-2">
-					{children.map((child) => (
+					{childProjects.map((child) => (
 						<ProjectRow
 							key={child.id}
 							project={child}
-							children={[]}
+							childProjects={[]}
 							allProjects={allProjects}
 							onEdit={onEdit}
 							onDelete={onDelete}
@@ -621,7 +621,7 @@ export function ProjectsTab() {
 						<ProjectRow
 							key={project.id}
 							project={project}
-							children={childrenMap.get(project.id) ?? []}
+							childProjects={childrenMap.get(project.id) ?? []}
 							allProjects={projects}
 							onEdit={(p) => setProjectDialog({ open: true, project: p })}
 							onDelete={handleDeleteProject}
