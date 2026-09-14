@@ -1200,21 +1200,20 @@ export default async function startServer(options?: {
 		throw new Error("Anthropic provider not available");
 	}
 
-	// Create runtime config
+	// Create runtime config.
+	//
+	// getRuntime() is the only resolver that applies the documented precedence,
+	// which is the config file first, then the environment, then the default.
+	// The hand-rolled version this replaced called config.get(key, default) per
+	// field, and config.get reads the config file alone. So RETRY_ATTEMPTS,
+	// RETRY_DELAY_MS, RETRY_BACKOFF, CLIENT_ID and SESSION_DURATION_MS were
+	// parsed in packages/config and then discarded here. Worse, config.get
+	// PERSISTS its default into the config file on a miss, so the first boot
+	// wrote retry_attempts: 3 to disk and every later boot read that written
+	// value in preference to the environment variable the operator had set.
 	const runtimeConfig: RuntimeConfig = {
-		clientId: config.get(
-			"client_id",
-			"9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-		) as string,
-		retry: {
-			attempts: config.get("retry_attempts", 3) as number,
-			delayMs: config.get("retry_delay_ms", 1000) as number,
-			backoff: config.get("retry_backoff", 2) as number,
-		},
-		sessionDurationMs: config.get(
-			"session_duration_ms",
-			TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
-		) as number,
+		...config.getRuntime(),
+		// The CLI's --port flag outranks both the file and the environment.
 		port,
 	};
 
