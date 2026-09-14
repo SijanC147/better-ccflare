@@ -260,11 +260,17 @@ export function getOverloadRetryConfig(settings?: RetrySettings): {
 } {
 	const resolved = settings ?? RETRY_DEFAULTS;
 
-	// maxAttempts: 0 is not useful (use ENABLED=false to disable), so || is correct.
+	// An out-of-range value is CLAMPED to the nearest legal one, never replaced by
+	// the default. The distinction matters: `retry_attempts: 0` is an operator
+	// asking for no retries, and treating it as unset would hand them 3, the
+	// largest value in play and the opposite of the request. Same for a negative
+	// delay and for a backoff below 1. Nothing upstream catches these; the
+	// config layer accepts the three keys on a bare `typeof === "number"`, unlike
+	// `db_retry_*`, which is range-validated.
 	const maxAttempts =
 		Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS) ||
-		(Number.isFinite(resolved.attempts) && resolved.attempts >= 1
-			? Math.floor(resolved.attempts)
+		(Number.isFinite(resolved.attempts)
+			? Math.max(1, Math.floor(resolved.attempts))
 			: RETRY_DEFAULTS.attempts);
 
 	// baseMs/maxMs: 0 is valid (zero delay for tests), so use explicit finite check.
@@ -273,20 +279,20 @@ export function getOverloadRetryConfig(settings?: RetrySettings): {
 	const baseMs =
 		Number.isFinite(rawBase) && rawBase >= 0
 			? rawBase
-			: Number.isFinite(resolved.delayMs) && resolved.delayMs >= 0
-				? resolved.delayMs
+			: Number.isFinite(resolved.delayMs)
+				? Math.max(0, resolved.delayMs)
 				: RETRY_DEFAULTS.delayMs;
 	const maxMs =
 		Number.isFinite(rawMax) && rawMax >= 0
 			? rawMax
 			: RETRY_MAX_DELAY_MS_DEFAULT;
 
-	// backoff below 1 would shrink the delay on every attempt, which defeats the
-	// point of backing off, so treat it as unset rather than honouring it.
-	const backoff =
-		Number.isFinite(resolved.backoff) && resolved.backoff >= 1
-			? resolved.backoff
-			: RETRY_DEFAULTS.backoff;
+	// A backoff below 1 would shrink the delay on every attempt, which defeats
+	// the point of backing off. Clamped to 1, a constant delay, rather than
+	// silently restored to 2.
+	const backoff = Number.isFinite(resolved.backoff)
+		? Math.max(1, resolved.backoff)
+		: RETRY_DEFAULTS.backoff;
 
 	const enabled =
 		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED !== "false" && maxAttempts > 1;
@@ -320,10 +326,25 @@ export function retryDelayMs(
  * retried: the cost of missing a safe retry is one failed request, and the cost
  * of retrying an unsafe one is a double charge or a duplicated answer.
  *
- * Measured on Bun 1.4.2 on 2026-09-14, `err.code` on the thrown TypeError:
- *   fetch("http://127.0.0.1:1")        ConnectionRefused
- *   fetch("http://<nxdomain>/")        ENOTFOUND
- *   fetch("https://expired.badssl.com") CERT_HAS_EXPIRED
+ * Measured on 2026-09-14 on BOTH Bun versions in play, because they disagree.
+ * 1.4.2 is local; 1.3.14 is the CI and release pin (.github/workflows/ci.yml).
+ * `err.code` is top level in every case; `err.cause` is undefined.
+ *
+ *   case                                 1.4.2              1.3.14
+ *   fetch("http://127.0.0.1:1")          ConnectionRefused  ConnectionRefused
+ *   fetch("http://<nxdomain>/")          ENOTFOUND          ConnectionRefused
+ *   fetch("https://expired.badssl.com")  CERT_HAS_EXPIRED   CERT_HAS_EXPIRED
+ *   fetch("https://self-signed...")      DEPTH_ZERO_SELF_SIGNED_CERT (both)
+ *
+ * Note the DNS row. On the pinned version a name that does not resolve reports
+ * ConnectionRefused, so measuring only on 1.3.14 would make ENOTFOUND look dead
+ * and invite someone to tidy it out of the set. Both spellings are needed. The
+ * error class also differs, TypeError on 1.4.2 and Error on 1.3.14, which is why
+ * the check below is `instanceof Error` rather than `instanceof TypeError`.
+ *
+ * Also measured, the case that decides the exclusions: a socket accepted, the
+ * full request body received, then RST. Both versions report ECONNRESET, which
+ * is not in the set. The non-idempotency argument is empirical, not asserted.
  *
  * Deliberately absent: ECONNRESET, EPIPE and ETIMEDOUT. A reset or a broken
  * pipe can arrive after the body was fully sent, so they do not prove the

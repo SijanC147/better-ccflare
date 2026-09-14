@@ -148,6 +148,155 @@ describe("forwardWithTransportRetry: the configured attempt count is the attempt
 	});
 });
 
+describe("forwardWithTransportRetry: retry_delay_ms and retry_backoff reach the delay", () => {
+	// Without these, `retryDelayMs(cfg, attempt + 1)` could be replaced by a
+	// constant and all the attempt-count tests would still pass. That is the
+	// "asserts the key parses" failure this file's header rejects, applied to
+	// the other two keys rather than to retry_attempts.
+	function collectDelays(settings: {
+		attempts: number;
+		delayMs: number;
+		backoff: number;
+	}) {
+		const delays: number[] = [];
+		const slept: number[] = [];
+		const promise = forwardWithTransportRetry(
+			post(),
+			async () => {
+				throw connectionRefused();
+			},
+			{
+				settings,
+				sleep: async (ms) => {
+					slept.push(ms);
+				},
+				onRetry: ({ delayMs }) => delays.push(delayMs),
+			},
+		);
+		return { promise, delays, slept };
+	}
+
+	test("each delay stays inside its own jittered cap, which grows by retry_backoff", () => {
+		const settings = { attempts: 4, delayMs: 100, backoff: 3 };
+		const { promise, delays, slept } = collectDelays(settings);
+		return promise.catch(() => {
+			// attempts: 4 means 3 retries, so 3 delays.
+			expect(delays.length).toBe(3);
+			// The value passed to sleep is the value reported to onRetry.
+			expect(slept).toEqual(delays);
+			delays.forEach((delay, i) => {
+				const cap = Math.min(
+					settings.delayMs * settings.backoff ** (i + 1),
+					3000,
+				);
+				expect(delay).toBeGreaterThanOrEqual(0);
+				expect(delay).toBeLessThanOrEqual(cap);
+			});
+			// Caps here are 300, 900 and 2700, so the third delay's ceiling is
+			// nine times the first's. A constant delay cannot satisfy this.
+			expect(Math.min(settings.delayMs * settings.backoff ** 3, 3000)).toBe(
+				2700,
+			);
+		});
+	});
+
+	test("retry_delay_ms of 0 produces a delay of 0 on every retry", () => {
+		const { promise, delays } = collectDelays({
+			attempts: 4,
+			delayMs: 0,
+			backoff: 2,
+		});
+		return promise.catch(() => {
+			expect(delays).toEqual([0, 0, 0]);
+		});
+	});
+
+	test("a larger retry_delay_ms raises the ceiling it is drawn under", async () => {
+		// Sampled rather than asserted once: the draw is uniform over [0, cap],
+		// so a single pair could order either way by chance. The maximum over
+		// many draws separates the two caps reliably.
+		const maxOf = async (delayMs: number) => {
+			let seen = 0;
+			for (let i = 0; i < 200; i++) {
+				const { promise, delays } = collectDelays({
+					attempts: 2,
+					delayMs,
+					backoff: 2,
+				});
+				await promise.catch(() => {});
+				seen = Math.max(seen, delays[0] ?? 0);
+			}
+			return seen;
+		};
+		// attempts: 2 means one retry, at cap = delayMs * backoff**1.
+		// So the caps are 20 and 2000. The larger sample must clear the
+		// smaller cap; 200 uniform draws miss the top 1% with probability
+		// 0.99**200, about 13%, so compare against the smaller cap rather
+		// than against the larger one to keep this deterministic.
+		expect(await maxOf(1000)).toBeGreaterThan(20);
+		expect(await maxOf(10)).toBeLessThanOrEqual(20);
+	});
+});
+
+describe("getOverloadRetryConfig: an out-of-range value is clamped, not replaced", () => {
+	// retry_attempts: 0 is an operator asking for no retries. Falling back to
+	// the default would hand them 3, the largest value in play.
+	test("retry_attempts of 0 disables retry rather than becoming 3", () => {
+		const cfg = getOverloadRetryConfig({
+			attempts: 0,
+			delayMs: 100,
+			backoff: 2,
+		});
+		expect(cfg.maxAttempts).toBe(1);
+		expect(cfg.enabled).toBe(false);
+	});
+
+	test("a negative retry_attempts also disables retry", () => {
+		expect(
+			getOverloadRetryConfig({ attempts: -5, delayMs: 100, backoff: 2 })
+				.maxAttempts,
+		).toBe(1);
+	});
+
+	test("retry_attempts of 0 makes exactly one attempt", async () => {
+		let calls = 0;
+		const promise = forwardWithTransportRetry(
+			post(),
+			async () => {
+				calls++;
+				throw connectionRefused();
+			},
+			{ settings: { attempts: 0, delayMs: 0, backoff: 2 }, sleep: noSleep },
+		);
+		await expect(promise).rejects.toThrow("Unable to connect");
+		expect(calls).toBe(1);
+	});
+
+	test("a negative retry_delay_ms clamps to 0, not to the 1000 default", () => {
+		expect(
+			getOverloadRetryConfig({ attempts: 3, delayMs: -1, backoff: 2 }).baseMs,
+		).toBe(0);
+	});
+
+	test("a retry_backoff below 1 clamps to 1, not to the 2 default", () => {
+		expect(
+			getOverloadRetryConfig({ attempts: 3, delayMs: 100, backoff: 0.5 })
+				.backoff,
+		).toBe(1);
+	});
+
+	test("a non-finite value falls back to the default, which is different from clamping", () => {
+		const cfg = getOverloadRetryConfig({
+			attempts: Number.NaN,
+			delayMs: Number.NaN,
+			backoff: Number.NaN,
+		});
+		expect(cfg.maxAttempts).toBe(3);
+		expect(cfg.baseMs).toBe(1000);
+		expect(cfg.backoff).toBe(2);
+	});
+});
+
 describe("forwardWithTransportRetry: what is never retried", () => {
 	test("a response is never retried, whatever its status", async () => {
 		// 429 routes to another account through the selector and 529 has its own

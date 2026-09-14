@@ -63,13 +63,17 @@ export async function forwardWithTransportRetry(
 		// The spare is cancelled on every path that does not use it, because an
 		// abandoned clone retains its backing buffer (issue #382).
 		const spare = !isLast && current.body ? current.clone() : null;
+		// `handedOn` flips only once the spare has become the next attempt's
+		// request. Everything else, including a throw from onRetry or from
+		// sleep, must cancel it: an abandoned clone retains its backing buffer.
+		// The earlier version cancelled at each exit point by hand and missed
+		// those two, which is the issue #382 shape this comment warns about.
+		let handedOn = false;
 		try {
 			const response = await attemptOnce(current);
-			spare?.body?.cancel();
 			return response;
 		} catch (err) {
 			if (isLast || !isRetryableUpstreamError(err, options.signal)) {
-				spare?.body?.cancel();
 				throw err;
 			}
 			const delayMs = retryDelayMs(cfg, attempt + 1);
@@ -81,6 +85,9 @@ export async function forwardWithTransportRetry(
 			});
 			await sleep(delayMs);
 			current = spare ?? current;
+			handedOn = spare !== null;
+		} finally {
+			if (!handedOn) spare?.body?.cancel();
 		}
 	}
 }
