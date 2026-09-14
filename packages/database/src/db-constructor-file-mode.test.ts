@@ -65,11 +65,18 @@ describe("DatabaseOperations constructor file modes", () => {
 			expect(existsSync(dbPath)).toBe(true);
 			expect(mode(dbPath)).toBe(0o600);
 
-			// The WAL is the half that proves the ordering as well as the wiring.
 			// configureSqlite turns WAL on after restrictDbFiles, and SQLite's unix
-			// VFS gives the new -wal the main file's mode, so it is born 0600. Move
-			// the restrictDbFiles call after configureSqlite and this assertion
-			// fails while the one above still passes.
+			// VFS gives the new -wal the main file's mode, so it is born 0600.
+			//
+			// Measured, not assumed: moving restrictDbFiles below configureSqlite
+			// leaves this GREEN. restrictDbFiles sweeps `${path}-wal` and
+			// `${path}-shm` explicitly, so the reversed order chmods the WAL after
+			// the fact instead of letting it inherit. The two guards are redundant
+			// for the mode that ends up on disk, and only the window differs: under
+			// the reversal the WAL exists at 0644 until the chmod lands. Nothing
+			// here can observe that window, so this assertion pins the wiring and
+			// the final mode, not the ordering. The ordering's comment in
+			// file-modes.ts is the record of why it is that way round.
 			expect(existsSync(`${dbPath}-wal`)).toBe(true);
 			expect(mode(`${dbPath}-wal`)).toBe(0o600);
 		} finally {
