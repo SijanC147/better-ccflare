@@ -328,6 +328,8 @@ export function ensureSchema(db: Database): void {
 			model TEXT NOT NULL,
 			priority INTEGER NOT NULL,
 			enabled INTEGER DEFAULT 1,
+			max_utilization_percent INTEGER,
+			min_reset_remaining_ms INTEGER,
 			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE,
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)
@@ -845,6 +847,11 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		(col) => col.name,
 	);
 
+	const comboSlotsInfo = db
+		.prepare("PRAGMA table_info(combo_slots)")
+		.all() as Array<{ name: string }>;
+	const comboSlotsColumnNames = comboSlotsInfo.map((col) => col.name);
+
 	const refreshTokenCol = accountsInfo.find(
 		(col) => col.name === "refresh_token",
 	);
@@ -1303,6 +1310,23 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE oauth_sessions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
 			).run();
 			log.info("Added priority column to oauth_sessions table");
+		}
+
+		// Add the per-slot throttle threshold columns to combo_slots if they
+		// don't exist. Both stay NULL on upgrade, which is the inert state:
+		// routing behaves exactly as it did before the feature landed.
+		if (!comboSlotsColumnNames.includes("max_utilization_percent")) {
+			db.prepare(
+				"ALTER TABLE combo_slots ADD COLUMN max_utilization_percent INTEGER",
+			).run();
+			log.info("Added max_utilization_percent column to combo_slots table");
+		}
+
+		if (!comboSlotsColumnNames.includes("min_reset_remaining_ms")) {
+			db.prepare(
+				"ALTER TABLE combo_slots ADD COLUMN min_reset_remaining_ms INTEGER",
+			).run();
+			log.info("Added min_reset_remaining_ms column to combo_slots table");
 		}
 
 		// Add model column if it doesn't exist

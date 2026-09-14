@@ -107,7 +107,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 			[id, comboId, accountId, model, priority],
 		);
 		const row = await this.get<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled FROM combo_slots WHERE id = ?`,
+			`SELECT id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms FROM combo_slots WHERE id = ?`,
 			[id],
 		);
 		if (!row) throw new Error(`Failed to create combo slot`);
@@ -116,7 +116,13 @@ export class ComboRepository extends BaseRepository<Combo> {
 
 	async updateSlot(
 		slotId: string,
-		fields: Partial<{ model: string; priority: number; enabled: boolean }>,
+		fields: Partial<{
+			model: string;
+			priority: number;
+			enabled: boolean;
+			max_utilization_percent: number | null;
+			min_reset_remaining_ms: number | null;
+		}>,
 	): Promise<ComboSlot> {
 		const setClauses: string[] = [];
 		const params: unknown[] = [];
@@ -133,6 +139,17 @@ export class ComboRepository extends BaseRepository<Combo> {
 			setClauses.push("enabled = ?");
 			params.push(fields.enabled ? 1 : 0);
 		}
+		// Explicit null is a real value here: it clears the threshold and
+		// returns the slot to the inert state, so the `!== undefined` guard is
+		// what distinguishes "clear it" from "leave it alone".
+		if (fields.max_utilization_percent !== undefined) {
+			setClauses.push("max_utilization_percent = ?");
+			params.push(fields.max_utilization_percent);
+		}
+		if (fields.min_reset_remaining_ms !== undefined) {
+			setClauses.push("min_reset_remaining_ms = ?");
+			params.push(fields.min_reset_remaining_ms);
+		}
 
 		if (setClauses.length === 0) {
 			throw new Error("updateSlot called with no fields to update");
@@ -145,7 +162,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 		);
 
 		const row = await this.get<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled FROM combo_slots WHERE id = ?`,
+			`SELECT id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms FROM combo_slots WHERE id = ?`,
 			[slotId],
 		);
 		if (!row) throw new Error(`Combo slot not found: ${slotId}`);
@@ -158,7 +175,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 
 	async getSlots(comboId: string): Promise<ComboSlot[]> {
 		const rows = await this.query<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled
+			`SELECT id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms
        FROM combo_slots WHERE combo_id = ? ORDER BY priority ASC`,
 			[comboId],
 		);

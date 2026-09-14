@@ -15,6 +15,7 @@ import {
 import type {
 	Account,
 	ComboFamily,
+	ComboSlot,
 	ComboSlotInfo,
 	RequestMeta,
 } from "@better-ccflare/types";
@@ -70,6 +71,50 @@ function usageSnapshot(account: Account): AccountUsageSnapshot | null {
 		utilization,
 		resetMs: getRepresentativeUsageResetMs(data, provider),
 	};
+}
+
+/**
+ * Per-slot throttle rule for combo members (SB23-1269).
+ *
+ * Sean's wording: "skip codex account slot in combo when usage above <custom
+ * value>% and next reset <custom timespan> away". It is one rule with two
+ * clauses joined by "and", so BOTH thresholds must be set before anything is
+ * skipped, and a slot carrying only one of them is inert. A slot carrying
+ * neither behaves exactly as it did before this feature existed.
+ *
+ * The reset clause reads "still far from resetting": an account that is heavily
+ * used but resets in two minutes needs no routing around, while one that stays
+ * heavily used for four more hours does.
+ *
+ * `resetMs` in the past is ignored rather than treated as a reset zero
+ * milliseconds away, matching the staleness rule `isUsageExhausted` already
+ * applies: a `resetMs` behind `now` means the cached snapshot predates the
+ * window reset, so the utilization figure beside it is not about the current
+ * window either.
+ *
+ * Exported for tests.
+ */
+export function isSlotThrottled(
+	slot: Pick<ComboSlot, "max_utilization_percent" | "min_reset_remaining_ms">,
+	usage: AccountUsageSnapshot | null,
+	now: number,
+): boolean {
+	const maxUtilization = slot.max_utilization_percent;
+	const minResetRemaining = slot.min_reset_remaining_ms;
+
+	// Conjunction: a half-configured rule does nothing at all.
+	if (maxUtilization === null || minResetRemaining === null) return false;
+
+	// No telemetry means no basis for either clause.
+	if (!usage) return false;
+
+	if (usage.utilization < maxUtilization) return false;
+
+	const resetMs = usage.resetMs;
+	if (resetMs === null || resetMs === undefined) return false;
+	if (resetMs <= now) return false;
+
+	return resetMs - now >= minResetRemaining;
 }
 
 // Module-level WeakMap to store model-family exhaustion info per RequestMeta,
@@ -720,13 +765,23 @@ export async function selectAccountsForRequest(
 							continue;
 						}
 
+						const slotUsage = usageSnapshot(account);
+
 						if (
-							!isAccountAvailable(
-								account,
-								Date.now(),
-								usageSnapshot(account) ?? undefined,
-							)
+							!isAccountAvailable(account, Date.now(), slotUsage ?? undefined)
 						) {
+							continue;
+						}
+
+						// Per-slot throttle rule (SB23-1269). Distinct from
+						// getUsageThrottleStatus in usage-throttling.ts: that one is
+						// global, pace-based, runs after selection and 529s the whole
+						// request. This one is per-slot, threshold-based, and advances
+						// to the next slot.
+						if (isSlotThrottled(slot, slotUsage, capacityNow)) {
+							log.info(
+								`Combo slot ${slot.id} skipped by its throttle rule (account ${account.name})`,
+							);
 							continue;
 						}
 
