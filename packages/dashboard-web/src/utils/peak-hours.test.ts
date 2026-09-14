@@ -19,7 +19,12 @@ import { ANTHROPIC_PEAK_WINDOW, ZAI_PEAK_WINDOW } from "./provider-utils";
 const MALTA = { timeZone: "Europe/Malta", locale: "en-GB", hour12: false };
 const NEW_YORK = { timeZone: "America/New_York", locale: "en-US" };
 
-/** Wednesday 2026-09-09, inside the Anthropic window (13:00–19:00 UTC). */
+/**
+ * September is PDT (UTC-7), so the Anthropic window's 5–11am Los Angeles is
+ * 12:00–18:00 UTC on these dates. It is 13:00–19:00 UTC on PST dates instead;
+ * see the vendor-zone suite at the bottom of this file.
+ */
+/** Wednesday 2026-09-09, inside the Anthropic window (12:00–18:00 UTC). */
 const WED_INSIDE = Date.parse("2026-09-09T14:30:00Z");
 /** Wednesday 2026-09-09, before the window opens. */
 const WED_BEFORE = Date.parse("2026-09-09T09:00:00Z");
@@ -34,27 +39,27 @@ describe("resolvePeakOccurrence", () => {
 	it("reports the window in progress as active", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, WED_INSIDE);
 		expect(occurrence.active).toBe(true);
-		expect(occurrence.start).toBe(Date.parse("2026-09-09T13:00:00Z"));
-		expect(occurrence.end).toBe(Date.parse("2026-09-09T19:00:00Z"));
+		expect(occurrence.start).toBe(Date.parse("2026-09-09T12:00:00Z"));
+		expect(occurrence.end).toBe(Date.parse("2026-09-09T18:00:00Z"));
 	});
 
 	it("returns today's window before it opens", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, WED_BEFORE);
 		expect(occurrence.active).toBe(false);
-		expect(occurrence.start).toBe(Date.parse("2026-09-09T13:00:00Z"));
+		expect(occurrence.start).toBe(Date.parse("2026-09-09T12:00:00Z"));
 	});
 
 	it("rolls to the next day once today's window has closed", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, WED_AFTER);
 		expect(occurrence.active).toBe(false);
-		expect(occurrence.start).toBe(Date.parse("2026-09-10T13:00:00Z"));
+		expect(occurrence.start).toBe(Date.parse("2026-09-10T12:00:00Z"));
 	});
 
 	it("skips the weekend for a weekdays-only window", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, SATURDAY);
 		expect(occurrence.active).toBe(false);
 		// Monday 2026-09-14, not Sunday.
-		expect(occurrence.start).toBe(Date.parse("2026-09-14T13:00:00Z"));
+		expect(occurrence.start).toBe(Date.parse("2026-09-14T12:00:00Z"));
 	});
 
 	it("does not skip the weekend for a window without a weekday rule", () => {
@@ -75,14 +80,14 @@ describe("resolvePeakOccurrence", () => {
 describe("formatPeakRange", () => {
 	it("renders the Anthropic window in Malta's local clock", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, WED_INSIDE);
-		// 13:00–19:00 UTC is 15:00–21:00 in Malta during CEST.
-		expect(formatPeakRange(occurrence, MALTA)).toBe("15:00–21:00");
+		// 12:00–18:00 UTC is 14:00–20:00 in Malta during CEST.
+		expect(formatPeakRange(occurrence, MALTA)).toBe("14:00–20:00");
 	});
 
 	it("renders the same window differently in New York", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, WED_INSIDE);
-		// 13:00–19:00 UTC is 9:00 AM–3:00 PM in New York during EDT.
-		expect(formatPeakRange(occurrence, NEW_YORK)).toBe("9:00 AM–3:00 PM");
+		// 12:00–18:00 UTC is 8:00 AM–2:00 PM in New York during EDT.
+		expect(formatPeakRange(occurrence, NEW_YORK)).toBe("8:00 AM–2:00 PM");
 	});
 
 	it("renders the Zai window in Malta's local clock", () => {
@@ -92,9 +97,11 @@ describe("formatPeakRange", () => {
 	});
 
 	it("follows the viewer's own DST change, not a fixed offset", () => {
-		// Same UTC window in January, when Malta is on CET rather than CEST.
+		// January: Los Angeles is on PST, so the window is 13:00–19:00 UTC, and
+		// Malta is on CET rather than CEST. Both shifts land on 14:00–20:00 local.
 		const winter = Date.parse("2027-01-13T14:30:00Z");
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, winter);
+		expect(occurrence.start).toBe(Date.parse("2027-01-13T13:00:00Z"));
 		expect(formatPeakRange(occurrence, MALTA)).toBe("14:00–20:00");
 	});
 });
@@ -147,23 +154,23 @@ describe("peakHoursLabel", () => {
 	it("counts down to the end while the window is active", () => {
 		const label = peakHoursLabel(ANTHROPIC_PEAK_WINDOW, WED_INSIDE, MALTA);
 		expect(label.active).toBe(true);
-		expect(label.text).toBe("Peak hours 15:00–21:00");
-		expect(label.countdown).toBe("ends in 4h 30m");
-		expect(label.title).toBe("Peak hours 15:00–21:00 · ends in 4h 30m");
+		expect(label.text).toBe("Peak hours 14:00–20:00");
+		expect(label.countdown).toBe("ends in 3h 30m");
+		expect(label.title).toBe("Peak hours 14:00–20:00 · ends in 3h 30m");
 	});
 
 	it("counts down to the start when off-peak later the same day", () => {
 		const label = peakHoursLabel(ANTHROPIC_PEAK_WINDOW, WED_BEFORE, MALTA);
 		expect(label.active).toBe(false);
-		expect(label.text).toBe("Off-peak · next peak 15:00–21:00");
-		expect(label.countdown).toBe("in 4h");
+		expect(label.text).toBe("Off-peak · next peak 14:00–20:00");
+		expect(label.countdown).toBe("in 3h");
 	});
 
 	it("names the next weekday when the wait crosses the weekend", () => {
 		const label = peakHoursLabel(ANTHROPIC_PEAK_WINDOW, SATURDAY, MALTA);
 		expect(label.active).toBe(false);
-		expect(label.text).toBe("Off-peak · next peak Mon 15:00–21:00");
-		expect(label.countdown).toBe("in 2d 3h");
+		expect(label.text).toBe("Off-peak · next peak Mon 14:00–20:00");
+		expect(label.countdown).toBe("in 2d 2h");
 	});
 
 	it("localizes the Zai window too, with no weekend gap", () => {
@@ -171,5 +178,106 @@ describe("peakHoursLabel", () => {
 		expect(label.active).toBe(true);
 		expect(label.text).toBe("Peak hours 8:00–12:00");
 		expect(label.countdown).toBe("ends in 2h");
+	});
+});
+
+/**
+ * The window is fixed at the vendor, not in UTC, so its UTC hours move when the
+ * vendor's zone changes offset. Los Angeles is UTC-7 on PDT and UTC-8 otherwise.
+ *
+ * Note which half of the year was wrong. SB23-1867 states the inversion: the old
+ * fixed 13:00–19:00 UTC constant is 5–11am PST, so it was correct in winter and
+ * an hour late through PDT, roughly March to November — not the other way round.
+ */
+describe("vendor-zone resolution of the Anthropic window", () => {
+	it("is 13:00–19:00 UTC in January, when Los Angeles is on PST", () => {
+		const occurrence = resolvePeakOccurrence(
+			ANTHROPIC_PEAK_WINDOW,
+			Date.parse("2027-01-13T09:00:00Z"),
+		);
+		expect(occurrence.start).toBe(Date.parse("2027-01-13T13:00:00Z"));
+		expect(occurrence.end).toBe(Date.parse("2027-01-13T19:00:00Z"));
+	});
+
+	it("is 12:00–18:00 UTC in July, when Los Angeles is on PDT", () => {
+		const occurrence = resolvePeakOccurrence(
+			ANTHROPIC_PEAK_WINDOW,
+			Date.parse("2026-07-15T09:00:00Z"),
+		);
+		expect(occurrence.start).toBe(Date.parse("2026-07-15T12:00:00Z"));
+		expect(occurrence.end).toBe(Date.parse("2026-07-15T18:00:00Z"));
+	});
+
+	it("renders 5–11am in Los Angeles on both of those dates", () => {
+		const LA = { timeZone: "America/Los_Angeles", locale: "en-GB", hour12: false };
+		const winter = resolvePeakOccurrence(
+			ANTHROPIC_PEAK_WINDOW,
+			Date.parse("2027-01-13T09:00:00Z"),
+		);
+		const summer = resolvePeakOccurrence(
+			ANTHROPIC_PEAK_WINDOW,
+			Date.parse("2026-07-15T09:00:00Z"),
+		);
+		expect(formatPeakRange(winter, LA)).toBe("5:00–11:00");
+		expect(formatPeakRange(summer, LA)).toBe("5:00–11:00");
+	});
+
+	it("carries the shift across a spring-forward weekend", () => {
+		// US DST always changes on a Sunday, so a weekdays-only window never
+		// contains a transition. It straddles one: the Friday before the 2027
+		// spring-forward is PST and the Monday after is PDT, so the gap between
+		// consecutive occurrences is 65 hours, not a round 3 * 24.
+		const afterFriday = resolvePeakOccurrence(
+			ANTHROPIC_PEAK_WINDOW,
+			Date.parse("2027-03-12T20:00:00Z"),
+		);
+		expect(afterFriday.start).toBe(Date.parse("2027-03-15T12:00:00Z"));
+		expect(afterFriday.start - Date.parse("2027-03-12T19:00:00Z")).toBe(
+			65 * 60 * 60 * 1000,
+		);
+	});
+
+	it("skips the vendor's weekend, not a fixed UTC weekend", () => {
+		// 06:00 UTC Saturday is 23:00 Friday in Los Angeles. Friday's window has
+		// already closed, so the next one is Monday's — never Saturday's.
+		const occurrence = resolvePeakOccurrence(
+			ANTHROPIC_PEAK_WINDOW,
+			Date.parse("2026-09-12T06:00:00Z"),
+		);
+		expect(occurrence.active).toBe(false);
+		expect(occurrence.start).toBe(Date.parse("2026-09-14T12:00:00Z"));
+	});
+
+	it("takes the weekday from the vendor's calendar when UTC disagrees", () => {
+		// Los Angeles is behind UTC, so its 5–11am window never lands on a
+		// different UTC date and the two calendars happen to agree. A zone AHEAD
+		// of UTC separates them: 05:00 Monday in Singapore is 21:00 SUNDAY in
+		// UTC. A resolver still reading getUTCDay() would skip it as a weekend.
+		const singaporeMornings = {
+			timeZone: "Asia/Singapore",
+			startHour: 5,
+			endHour: 11,
+			weekdaysOnly: true,
+		};
+		const occurrence = resolvePeakOccurrence(
+			singaporeMornings,
+			// Sunday 2026-09-13, 12:00 UTC — Sunday evening in Singapore.
+			Date.parse("2026-09-13T12:00:00Z"),
+		);
+		expect(occurrence.active).toBe(false);
+		// Monday 2026-09-14 local, which begins on Sunday in UTC.
+		expect(occurrence.start).toBe(Date.parse("2026-09-13T21:00:00Z"));
+		expect(occurrence.end).toBe(Date.parse("2026-09-14T03:00:00Z"));
+	});
+
+	it("leaves the Zai window on its year-round UTC hours", () => {
+		// Singapore has no DST, so stating the window in Asia/Singapore rather
+		// than UTC must not move it in either season.
+		for (const iso of ["2027-01-13T04:00:00Z", "2026-07-15T04:00:00Z"]) {
+			const occurrence = resolvePeakOccurrence(ZAI_PEAK_WINDOW, Date.parse(iso));
+			const day = iso.slice(0, 10);
+			expect(occurrence.start).toBe(Date.parse(`${day}T06:00:00Z`));
+			expect(occurrence.end).toBe(Date.parse(`${day}T10:00:00Z`));
+		}
 	});
 });
