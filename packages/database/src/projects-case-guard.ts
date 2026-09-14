@@ -29,6 +29,14 @@ export interface ProjectsCaseModeInput {
 	/**
 	 * Whether any stored `canonical_path` carries an uppercase character.
 	 *
+	 * The exact predicate the caller supplies is `p !== p.toLowerCase()`, not
+	 * a character-class test, and that is deliberate: the question is whether
+	 * a case-insensitive scan would have stored something different, which is
+	 * that comparison and nothing else. It therefore stays correct for paths
+	 * the word "uppercase" does not obviously cover. Measured: the Kelvin sign
+	 * `K` and Turkish `İ` both answer true and both genuinely fold, while
+	 * Greek final sigma `ς` and dotless `ı` answer false and genuinely do not.
+	 *
 	 * This is the one thing the database can prove about which key space its
 	 * rows live in, and the asymmetry is the whole subtlety of this guard, so
 	 * do not "simplify" it away:
@@ -66,6 +74,27 @@ function refusal(recorded: boolean, current: boolean, count: number): string {
 		"",
 		`To go ahead anyway and accept that detachment, set projects_case_sensitive_stored to ${current} in the config file. To keep the existing history, restore PROJECTS_CASE_SENSITIVE to ${recorded}.`,
 	].join("\n");
+}
+
+/**
+ * Compute `rowsHaveUppercase` from the projects table.
+ *
+ * DISCOVERED rows only. A manual project is stored exactly as
+ * `POST /api/projects` was given it, with no lowercasing whatever the setting
+ * says (`http-api/src/handlers/projects.ts:92`), so an uppercase manual path
+ * is normal on a case-insensitive install and says nothing about which mode
+ * wrote the discovered rows. Counting it would refuse a boot that is fine.
+ * Manual rows are also not at risk from a flip in the first place: the scan
+ * never rewrites their paths, so their ids do not move.
+ */
+export function hasUppercaseDiscoveredPath(
+	rows: ReadonlyArray<{ source: string; canonical_path: string }>,
+): boolean {
+	return rows.some(
+		(r) =>
+			r.source === "discovered" &&
+			r.canonical_path !== r.canonical_path.toLowerCase(),
+	);
 }
 
 /**

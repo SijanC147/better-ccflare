@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { decideProjectsCaseMode } from "./projects-case-guard";
+import {
+	decideProjectsCaseMode,
+	hasUppercaseDiscoveredPath,
+} from "./projects-case-guard";
 
 // SB23-1988. A project's primary key is sha1(canonical_path).slice(0, 16), and
 // PROJECTS_CASE_SENSITIVE decides whether that path is stored lowercased. So
@@ -111,5 +114,58 @@ describe("decideProjectsCaseMode", () => {
 				rowsHaveUppercase: false,
 			}).action,
 		).toBe("ok");
+	});
+});
+
+describe("hasUppercaseDiscoveredPath", () => {
+	test("ignores an uppercase path on a manual project", () => {
+		// POST /api/projects stores the path exactly as it was given, with no
+		// lowercasing whatever the setting says, so an uppercase manual row is
+		// normal on a case-insensitive install. Counting it would refuse a boot
+		// that is fine, and the scan never rewrites a manual path anyway, so
+		// its id is not at risk from a flip.
+		expect(
+			hasUppercaseDiscoveredPath([
+				{ source: "discovered", canonical_path: "/users/sean/code/a" },
+				{ source: "manual", canonical_path: "/Users/sean/Code/B" },
+			]),
+		).toBe(false);
+	});
+
+	test("reports an uppercase path on a discovered project", () => {
+		expect(
+			hasUppercaseDiscoveredPath([
+				{ source: "discovered", canonical_path: "/users/sean/code/a" },
+				{ source: "discovered", canonical_path: "/Users/sean/Code/B" },
+			]),
+		).toBe(true);
+	});
+
+	test("is false for an empty table and for all-lowercase discovered rows", () => {
+		expect(hasUppercaseDiscoveredPath([])).toBe(false);
+		expect(
+			hasUppercaseDiscoveredPath([
+				{ source: "discovered", canonical_path: "/users/sean/code/a" },
+			]),
+		).toBe(false);
+	});
+
+	// The predicate is `p !== p.toLowerCase()`, not a character-class test,
+	// because the question is whether a case-insensitive scan would have
+	// stored something different. That keeps it correct for paths the word
+	// "uppercase" does not obviously cover.
+	test("follows the case fold rather than an ASCII notion of uppercase", () => {
+		const folds = ["/tr/İstanbul", "/k/K"];
+		const doesNot = ["/gr/ς", "/tr/ı"];
+		for (const canonical_path of folds) {
+			expect(
+				hasUppercaseDiscoveredPath([{ source: "discovered", canonical_path }]),
+			).toBe(true);
+		}
+		for (const canonical_path of doesNot) {
+			expect(
+				hasUppercaseDiscoveredPath([{ source: "discovered", canonical_path }]),
+			).toBe(false);
+		}
 	});
 });

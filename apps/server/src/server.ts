@@ -27,6 +27,7 @@ import {
 	AsyncDbWriter,
 	DatabaseFactory,
 	decideProjectsCaseMode,
+	hasUppercaseDiscoveredPath,
 	initPayloadEncryption,
 } from "@better-ccflare/database";
 import {
@@ -424,9 +425,7 @@ async function guardProjectsCaseMode(
 	try {
 		const projects = await dbOps.listProjects();
 		projectCount = projects.length;
-		rowsHaveUppercase = projects.some(
-			(p) => p.canonical_path !== p.canonical_path.toLowerCase(),
-		);
+		rowsHaveUppercase = hasUppercaseDiscoveredPath(projects);
 	} catch (err) {
 		log.warn(
 			`Could not check the projects path case mode: ${err instanceof Error ? err.message : String(err)}`,
