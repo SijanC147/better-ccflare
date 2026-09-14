@@ -121,15 +121,54 @@ export function getDefaultEndpointForProvider(provider: string): string {
 }
 
 /**
+ * A recurring peak-hour window, expressed as a half-open range of UTC hours.
+ *
+ * These constants are the single source of truth for both the "is it peak right
+ * now" predicates below and the localized labels rendered by the dashboard. They
+ * are deliberately stated in UTC rather than in the vendor's own timezone: the
+ * predicates have always been fixed-UTC, and deriving the label from a different
+ * definition would let the badge disagree with the colour of the dot beside it.
+ */
+export interface PeakWindow {
+	/** Inclusive start, as an hour of the UTC day. */
+	startUtcHour: number;
+	/** Exclusive end, as an hour of the UTC day. */
+	endUtcHour: number;
+	/** When true, the window does not occur on Saturday or Sunday (UTC). */
+	weekdaysOnly: boolean;
+}
+
+/** Zai peak hours: 14:00–18:00 Singapore time (UTC+8), every day. */
+export const ZAI_PEAK_WINDOW: PeakWindow = {
+	startUtcHour: 6,
+	endUtcHour: 10,
+	weekdaysOnly: false,
+};
+
+/** Anthropic OAuth peak hours: 5am–11am PT, weekdays. */
+export const ANTHROPIC_PEAK_WINDOW: PeakWindow = {
+	startUtcHour: 13,
+	endUtcHour: 19,
+	weekdaysOnly: true,
+};
+
+function isWithinPeakWindow(window: PeakWindow, ts: number): boolean {
+	const d = new Date(ts);
+	if (window.weekdaysOnly) {
+		const day = d.getUTCDay();
+		// Weekdays only (Mon=1 through Fri=5)
+		if (day === 0 || day === 6) return false;
+	}
+	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
+	return utcHour >= window.startUtcHour && utcHour < window.endUtcHour;
+}
+
+/**
  * Check if a given timestamp (default: now) falls within Zai peak hours.
  * Zai peak hours are 14:00–18:00 Singapore time (UTC+8).
  */
 export function isZaiPeakHour(ts?: number): boolean {
-	const d = new Date(ts ?? Date.now());
-	// Convert to UTC+8 hour
-	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
-	const sgtHour = (utcHour + 8) % 24;
-	return sgtHour >= 14 && sgtHour < 18;
+	return isWithinPeakWindow(ZAI_PEAK_WINDOW, ts ?? Date.now());
 }
 
 /**
@@ -138,10 +177,5 @@ export function isZaiPeakHour(ts?: number): boolean {
  * During these windows, 5-hour sessions consume a larger share of the weekly budget.
  */
 export function isAnthropicPeakHour(ts?: number): boolean {
-	const d = new Date(ts ?? Date.now());
-	const day = d.getUTCDay();
-	// Weekdays only (Mon=1 through Fri=5)
-	if (day === 0 || day === 6) return false;
-	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
-	return utcHour >= 13 && utcHour < 19;
+	return isWithinPeakWindow(ANTHROPIC_PEAK_WINDOW, ts ?? Date.now());
 }

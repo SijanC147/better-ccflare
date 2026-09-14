@@ -4,10 +4,15 @@ import { useEffect, useState } from "react";
 import { formatRelativeReset } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import {
-	isAnthropicPeakHour,
-	isZaiPeakHour,
+	type PeakLabel,
+	peakHoursLabel,
+	prefersTwentyFourHourClock,
+} from "../../utils/peak-hours";
+import {
+	ANTHROPIC_PEAK_WINDOW,
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
+	ZAI_PEAK_WINDOW,
 } from "../../utils/provider-utils";
 import { Progress } from "../ui/progress";
 import {
@@ -17,6 +22,32 @@ import {
 	severityColor,
 	type UsageDisplay,
 } from "./rate-limit-helpers";
+
+/**
+ * Peak-hour pill. Orange while the window is in progress, green otherwise, and
+ * always carrying the window's local clock range plus a countdown to the next
+ * boundary — so it says something useful off-peak as well as during.
+ */
+function PeakHoursBadge({ label }: { label: PeakLabel }) {
+	return (
+		<div className="flex items-center gap-2">
+			<span
+				title={label.title}
+				className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+					label.active
+						? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+						: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+				}`}
+			>
+				<span
+					className={`h-1.5 w-1.5 rounded-full ${label.active ? "bg-orange-500" : "bg-green-500"}`}
+				/>
+				{label.text}
+			</span>
+			<span className="text-xs text-muted-foreground">{label.countdown}</span>
+		</div>
+	);
+}
 
 interface RateLimitProgressProps {
 	resetIso: string | null;
@@ -488,8 +519,19 @@ export function RateLimitProgress({
 		});
 	}
 
-	const isZaiPeak = provider === "zai" && isZaiPeakHour(now);
-	const isAnthropicPeak = provider === "anthropic" && isAnthropicPeakHour(now);
+	// One preference read per render, shared by both badges. The label helpers
+	// stay pure so they can be tested against a pinned zone and instant.
+	const clockOptions = {
+		hour12: prefersTwentyFourHourClock() ? false : undefined,
+	};
+	const zaiPeak =
+		provider === "zai"
+			? peakHoursLabel(ZAI_PEAK_WINDOW, now, clockOptions)
+			: null;
+	const anthropicPeak =
+		provider === "anthropic"
+			? peakHoursLabel(ANTHROPIC_PEAK_WINDOW, now, clockOptions)
+			: null;
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	// The throttle notice normally rides along inside the throttled window's row.
@@ -511,40 +553,8 @@ export function RateLimitProgress({
 
 	return (
 		<div className={cn("space-y-3", className)}>
-			{provider === "zai" && (
-				<div className="flex items-center gap-2">
-					<span
-						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
-							isZaiPeak
-								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-						}`}
-					>
-						<span
-							className={`h-1.5 w-1.5 rounded-full ${isZaiPeak ? "bg-orange-500" : "bg-green-500"}`}
-						/>
-						{isZaiPeak ? "Peak hours (14:00–18:00 SGT)" : "Off-peak hours"}
-					</span>
-				</div>
-			)}
-			{provider === "anthropic" && (
-				<div className="flex items-center gap-2">
-					<span
-						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
-							isAnthropicPeak
-								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-						}`}
-					>
-						<span
-							className={`h-1.5 w-1.5 rounded-full ${isAnthropicPeak ? "bg-orange-500" : "bg-green-500"}`}
-						/>
-						{isAnthropicPeak
-							? "Peak hours (5–11am PT, weekdays)"
-							: "Off-peak hours"}
-					</span>
-				</div>
-			)}
+			{zaiPeak && <PeakHoursBadge label={zaiPeak} />}
+			{anthropicPeak && <PeakHoursBadge label={anthropicPeak} />}
 			{hasOrphanThrottledWindow && usageThrottledUntil != null && (
 				<div className="flex items-center justify-between">
 					<span className="text-xs text-amber-600 dark:text-amber-400">
