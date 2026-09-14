@@ -66,6 +66,42 @@ describe("config directory permissions", () => {
 		});
 	});
 
+	it("creates the intermediate directory 0700, where mkdirSync's mode is the only guard", () => {
+		// SB23-1812. The test above passes with `mode: 0o700` deleted, because
+		// restrictConfigDir() chmods the same directory a line later and repairs
+		// the damage. This one does not: with recursive: true the mode also lands
+		// on every intermediate directory the call creates, and restrictConfigDir()
+		// only ever touches dirname(configPath). Nothing repairs the parent, so the
+		// mkdirSync mode argument is the sole thing holding it at 0700.
+		//
+		// The window this closes is real: without the mode the whole chain is
+		// created 0755 and the database can be created under it by another process
+		// before the chmod lands.
+		const base = mkdtempSync(join(tmpdir(), "better-ccflare-xdg-"));
+		const saved = process.env.XDG_CONFIG_HOME;
+		// A path that does not exist yet, so mkdirSync creates BOTH "nested" and
+		// the better-ccflare directory under it in one recursive call. mkdtempSync
+		// itself yields 0700, which is why the fixture cannot be the temp root.
+		const nested = join(base, "nested");
+		process.env.XDG_CONFIG_HOME = nested;
+		try {
+			const platformDir = join(nested, "better-ccflare");
+			new Config(join(platformDir, "better-ccflare.json"));
+
+			// The directory restrictConfigDir() chmods. Guarded twice.
+			expect(mode(platformDir)).toBe(0o700);
+			// Its parent, created by the same call and chmodded by nothing.
+			expect(mode(nested)).toBe(0o700);
+		} finally {
+			if (saved === undefined) {
+				delete process.env.XDG_CONFIG_HOME;
+			} else {
+				process.env.XDG_CONFIG_HOME = saved;
+			}
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
 	it("tightens a pre-existing 0755 directory to 0700 on load", () => {
 		withXdgHome((platformDir) => {
 			// chmod rather than mkdirSync's mode option: that option is masked by
