@@ -921,8 +921,15 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	async updateAccountUsage(accountId: string): Promise<void> {
+		// `??`, not `||`. `session_duration_ms: 0` is a legitimate setting meaning
+		// "no session grouping" (see SESSION_DURATION_BOUNDS), and `||` discarded
+		// it in favour of five hours, so the operator asking for the smallest
+		// window got a large one (SB23-2040). `getRuntime()` now clamps and warns,
+		// so a value that arrives here is already in range; the fallback covers
+		// only a caller that passed no runtime at all.
 		const sessionDuration =
-			this.runtime?.sessionDurationMs || 5 * 60 * 60 * 1000;
+			this.runtime?.sessionDurationMs ??
+			TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT;
 		await withDatabaseRetry(
 			() => this.accounts.incrementUsage(accountId, sessionDuration),
 			this.retryConfig,

@@ -112,6 +112,7 @@ export {
 } from "./project-resolver";
 export * from "./request-events";
 export { RETRY_BOUNDS } from "./retry-bounds";
+export { SESSION_DURATION_BOUNDS } from "./session-bounds";
 export * from "./strategy";
 export {
 	computeWindowStartMs,
