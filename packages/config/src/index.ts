@@ -25,6 +25,7 @@ import {
 	DEFAULT_STRATEGY,
 	isValidStrategy,
 	NETWORK,
+	RETRY_DEFAULTS,
 	type StrategyName,
 	TIME_CONSTANTS,
 	ValidationError,
@@ -2240,13 +2241,12 @@ export class Config extends EventEmitter {
 	}
 
 	getRuntime(): RuntimeConfig {
-		// Named because validateRuntimeRetry needs the same three numbers to fall
-		// back to, and a second literal of them could drift from this one.
-		const retryDefaults = {
-			attempts: 3,
-			delayMs: TIME_CONSTANTS.RETRY_DELAY_DEFAULT,
-			backoff: 2,
-		};
+		// RETRY_DEFAULTS from @better-ccflare/core, the same object
+		// getOverloadRetryConfig falls back to. An earlier version of this wrote
+		// the three numbers out again with a comment saying a second literal
+		// could drift; a second literal already existed one package over, which
+		// is the thing the comment was warning about.
+		const retryDefaults = { ...RETRY_DEFAULTS };
 		// Default values
 		const defaults: RuntimeConfig = {
 			clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",

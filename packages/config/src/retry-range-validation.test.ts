@@ -116,10 +116,23 @@ describe("validateRuntimeRetry", () => {
 		expect(retry.backoff).toBe(1.5);
 	});
 
-	it("rounds a fractional attempts count to a whole number", () => {
+	it("truncates a fractional attempts count DOWN, never up", () => {
 		const retry = { attempts: 2.6, delayMs: 1000, backoff: 2 };
 		validateRuntimeRetry(retry, { ...DEFAULTS });
-		expect(retry.attempts).toBe(3);
+		// 2, not 3. Rounding up would grant more attempts than were asked for.
+		expect(retry.attempts).toBe(2);
+	});
+
+	it("does not flip transport retry on by rounding 1.6 up to 2", () => {
+		// The case that makes the direction load-bearing. The consumer resolves
+		// attempts with `Math.max(1, Math.floor(...))` and sets
+		// `enabled = maxAttempts > 1` (packages/core/src/constants.ts:273), so
+		// 1.6 floors to 1 and retry stays OFF. Rounding to 2 would turn it ON,
+		// which is the inversion this issue exists to prevent.
+		const retry = { attempts: 1.6, delayMs: 1000, backoff: 2 };
+		validateRuntimeRetry(retry, { ...DEFAULTS });
+		expect(retry.attempts).toBe(1);
+		expect(retry.attempts).not.toBe(2);
 	});
 
 	it("falls back to the default for NaN and says so in the adjustment", () => {
@@ -197,9 +210,17 @@ describe("getRuntime applies the bounds to both sources", () => {
 	it("falls back to the default for an unparseable environment value", () => {
 		// parseInt("abc", 10) is NaN, which the old bare check admitted.
 		process.env.RETRY_ATTEMPTS = "abc";
+		// A second, VALID env var in the same call. Without it this test passes
+		// for the wrong reason: expecting 3 for attempts is indistinguishable
+		// from the no-env default, so deleting the whole RETRY_ATTEMPTS parse
+		// from getRuntime leaves it green. Asserting that delayMs still picks up
+		// 250 proves the environment path actually ran.
+		process.env.RETRY_DELAY_MS = "250";
 		const { config, cleanup } = makeConfig();
 		try {
-			expect(config.getRuntime().retry.attempts).toBe(3);
+			const runtime = config.getRuntime();
+			expect(runtime.retry.attempts).toBe(3);
+			expect(runtime.retry.delayMs).toBe(250);
 		} finally {
 			cleanup();
 		}

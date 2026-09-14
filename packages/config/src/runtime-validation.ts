@@ -162,9 +162,19 @@ export function validateRuntimeRetry(
 		// Integer first, then range: rounding cannot push a value out of a range
 		// whose ends are whole numbers, while clamping first and rounding after
 		// could, if a bound were ever fractional.
+		// FLOOR, not round. Rounding 1.6 up to 2 would be more aggressive than
+		// both the operator's value and the old behaviour: the consumer floors
+		// with `Math.max(1, Math.floor(resolved.attempts))`
+		// (`packages/core/src/constants.ts:273`), so `retry_attempts: 1.6` used to
+		// mean one attempt with `enabled = false`, and rounding would flip
+		// transport retry from off to on. That is the inversion this issue exists
+		// to prevent, so the direction is load-bearing rather than cosmetic.
+		//
+		// Both integer fields floor. `delayMs` has no competing argument: a
+		// sub-millisecond fraction is below `setTimeout` granularity either way.
 		if (integer && !Number.isInteger(applied)) {
-			applied = Math.round(applied);
-			reasons.push("rounded to a whole number");
+			applied = Math.floor(applied);
+			reasons.push("truncated to a whole number");
 		}
 
 		if (applied < bounds.min) {

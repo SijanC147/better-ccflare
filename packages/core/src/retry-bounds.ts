@@ -56,9 +56,3 @@ export const RETRY_BOUNDS = {
 	delayMs: { min: DELAY_MIN_MS, max: DELAY_MAX_MS },
 	backoff: { min: BACKOFF_MIN, max: BACKOFF_MAX },
 } as const;
-
-/**
- * The keys in the family that must be whole numbers. `backoff` is absent
- * because it is a multiplier and 1.5 is a legitimate value.
- */
-export const RETRY_INTEGER_FIELDS = ["attempts", "delayMs"] as const;
