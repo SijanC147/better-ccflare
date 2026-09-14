@@ -83,11 +83,43 @@ function describe(fileKey: string, envKey: string): string {
 	return `${fileKey} (${envKey})`;
 }
 
+function warnOnce(dedupeKey: string, message: string): void {
+	if (warned.has(dedupeKey)) return;
+	warned.add(dedupeKey);
+	log.warn(message);
+}
+
 /**
- * Clamps `retry` in place and returns the adjustments made, newest last. The
- * return value exists so a test can assert what happened without reading the
- * log, and so a caller that wants to report the adjustments somewhere other
- * than the log can.
+ * Warnings already emitted, keyed by the setting, the value that arrived and
+ * the value applied.
+ *
+ * `getRuntime()` is NOT called once at startup. `apps/server/src/server.ts`
+ * builds its RuntimeConfig from it once, but `packages/http-api` calls it per
+ * request in the OAuth handlers and on every read of the retry config card. A
+ * warning emitted unconditionally would therefore repeat for the life of the
+ * process on a misconfigured install, which buries the one line the operator
+ * needs under thousands of copies of itself.
+ *
+ * The key includes the values, not just the setting, so correcting a bad value
+ * to a different bad value warns again rather than being swallowed by the
+ * first. Process-wide by design: the point is one warning per distinct
+ * misconfiguration, and a second Config instance reading the same bad file has
+ * nothing new to tell anyone.
+ */
+const warned = new Set<string>();
+
+/** Test seam: forget what has been warned about, so a case can assert the log. */
+export function resetRetryWarningsForTest(): void {
+	warned.clear();
+}
+
+/**
+ * Clamps `retry` in place and returns the adjustments made, newest last.
+ *
+ * The return value is the contract, not the log. It exists so a test can assert
+ * what happened without reading the log, and so a caller that wants to report
+ * the adjustments somewhere else can. Every adjustment is returned on every
+ * call; only the warning is deduplicated.
  */
 export function validateRuntimeRetry(
 	retry: RetryRuntime,
@@ -116,7 +148,8 @@ export function validateRuntimeRetry(
 				applied: defaults[field],
 				reason: "not a number",
 			});
-			log.warn(
+			warnOnce(
+				`${key}:nan:${defaults[field]}`,
 				`${key} is not a number; applying the default ${defaults[field]}. ` +
 					`Set a number between ${bounds.min} and ${bounds.max}.`,
 			);
@@ -151,7 +184,8 @@ export function validateRuntimeRetry(
 			applied,
 			reason: reasons.join(", "),
 		});
-		log.warn(
+		warnOnce(
+			`${key}:${received}:${applied}`,
 			`${key} was ${received}, ${reasons.join(", ")}: applying ${applied}. ` +
 				`The accepted range is ${bounds.min} to ${bounds.max}.`,
 		);

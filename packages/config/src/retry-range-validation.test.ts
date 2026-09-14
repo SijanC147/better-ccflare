@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY_BOUNDS } from "@better-ccflare/core";
 import { Config } from "./index";
-import { validateRuntimeRetry } from "./runtime-validation";
+import {
+	resetRetryWarningsForTest,
+	validateRuntimeRetry,
+} from "./runtime-validation";
 
 /**
  * SB23-1980. The three `retry_*` keys reached `RuntimeConfig` through a bare
@@ -128,6 +131,24 @@ describe("validateRuntimeRetry", () => {
 		expect(retry.attempts).toBe(DEFAULTS.attempts);
 		expect(adjustments).toHaveLength(1);
 		expect(adjustments[0].reason).toBe("not a number");
+	});
+
+	it("returns the adjustment on every call, not only the first", () => {
+		// getRuntime() is called per request in the OAuth handlers and on every
+		// read of the retry config card, so this function runs repeatedly. The
+		// warning is deduplicated; the return value must not be, or a caller that
+		// reports adjustments would see them vanish after the first request.
+		resetRetryWarningsForTest();
+		const first = validateRuntimeRetry(
+			{ attempts: 99, delayMs: 1000, backoff: 2 },
+			{ ...DEFAULTS },
+		);
+		const second = validateRuntimeRetry(
+			{ attempts: 99, delayMs: 1000, backoff: 2 },
+			{ ...DEFAULTS },
+		);
+		expect(first).toHaveLength(1);
+		expect(second).toEqual(first);
 	});
 
 	it("clamps Infinity to the ceiling rather than treating it as unset", () => {
