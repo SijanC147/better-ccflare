@@ -44,6 +44,14 @@ export {
 	isEncryptionEnabled,
 } from "./payload-encryption";
 export { analyzeIndexUsage } from "./performance-indexes";
+export type {
+	ProjectsCaseModeDecision,
+	ProjectsCaseModeInput,
+} from "./projects-case-guard";
+export {
+	decideProjectsCaseMode,
+	hasUppercaseDiscoveredPath,
+} from "./projects-case-guard";
 export type { MarkAccountRateLimitedResult } from "./repositories/account.repository";
 export type {
 	ModelTranslation,
