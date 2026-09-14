@@ -1,4 +1,4 @@
-import { RETRY_BOUNDS } from "@better-ccflare/core";
+import { RETRY_BOUNDS, SESSION_DURATION_BOUNDS } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 
 const log = new Logger("Config");
@@ -108,7 +108,13 @@ function warnOnce(dedupeKey: string, message: string): void {
  */
 const warned = new Set<string>();
 
-/** Test seam: forget what has been warned about, so a case can assert the log. */
+/**
+ * Test seam: forget what has been warned about, so a case can assert the log.
+ *
+ * One set, one reset, shared by every validator in this file. The name predates
+ * `session_duration_ms` joining it and is kept rather than churned through the
+ * existing call sites.
+ */
 export function resetRetryWarningsForTest(): void {
 	warned.clear();
 }
@@ -207,4 +213,96 @@ export function validateRuntimeRetry(
 	}
 
 	return adjustments;
+}
+
+const SESSION_KEY = describe("session_duration_ms", "SESSION_DURATION_MS");
+
+/**
+ * Clamps `sessionDurationMs` and returns the adjustment, or null if the value
+ * was already usable (SB23-2040).
+ *
+ * Applied in `getRuntime()` after both the environment and the config file for
+ * the same reason the retry pass is: there are two ways in, `parseInt` on
+ * `SESSION_DURATION_MS` and a `typeof` check on `session_duration_ms`, and both
+ * admit `NaN` because `typeof NaN === "number"`. One pass over the resolved
+ * value covers both and cannot be half-applied.
+ *
+ * It clamps rather than throwing, for the reason stated at the top of this
+ * file: refusing to boot turns a bad tuning number into an outage of the proxy
+ * the number was tuning.
+ *
+ * # Why the default is the wrong answer for everything except NaN
+ *
+ * The default is five hours, which is the aggressive end for this setting: an
+ * operator writing 0 or a negative number is asking for the shortest possible
+ * window and would silently get the longest. That is the inversion SB23-2040
+ * was filed for, and the `||` at the consumer produced exactly it. Clamping
+ * cannot reproduce it, because a negative becomes 0, which is behaviourally
+ * what a negative already meant.
+ *
+ * `NaN` is the one arrival with no direction to clamp toward, so it keeps the
+ * default, and that case warns loudest: the message names the key, that the
+ * value was not a number, and the value applied.
+ *
+ * FLOOR, not round, for a fractional value, matching the retry family: flooring
+ * moves toward the shorter window, which is the less surprising direction when
+ * the operator's intent is ambiguous, and rounding 0.6 up to 1 would be a
+ * longer window than either the value written or the old behaviour.
+ */
+export function validateRuntimeSessionDuration(
+	runtime: { sessionDurationMs: number },
+	defaultMs: number,
+): { key: string; received: number; applied: number; reason: string } | null {
+	const received = runtime.sessionDurationMs;
+	const { min } = SESSION_DURATION_BOUNDS;
+
+	if (typeof received !== "number" || Number.isNaN(received)) {
+		runtime.sessionDurationMs = defaultMs;
+		warnOnce(
+			`${SESSION_KEY}:nan:${defaultMs}`,
+			`${SESSION_KEY} is not a number; applying the default ${defaultMs}. ` +
+				`Set a whole number of milliseconds, ${min} or more. ` +
+				`${min} means every request starts a new session.`,
+		);
+		return {
+			key: SESSION_KEY,
+			received: Number.NaN,
+			applied: defaultMs,
+			reason: "not a number",
+		};
+	}
+
+	let applied = received;
+	const reasons: string[] = [];
+
+	if (!Number.isInteger(applied)) {
+		// Infinity is an integer to nobody and to `Number.isInteger`, so it lands
+		// here. `Math.floor(Infinity)` is `Infinity`, which then fails the range
+		// check below only if it were negative, so a positive Infinity survives
+		// on purpose: it is the limit of "sessions that never reset", which this
+		// setting has no ceiling against.
+		applied = Math.floor(applied);
+		reasons.push("truncated to a whole number of milliseconds");
+	}
+
+	if (applied < min) {
+		applied = min;
+		reasons.push(`raised to the minimum ${min}`);
+	}
+
+	if (applied === received) return null;
+
+	runtime.sessionDurationMs = applied;
+	warnOnce(
+		`${SESSION_KEY}:${received}:${applied}`,
+		`${SESSION_KEY} was ${received}, ${reasons.join(", ")}: applying ${applied}. ` +
+			`The minimum is ${min}, which means every request starts a new session. ` +
+			`There is no maximum.`,
+	);
+	return {
+		key: SESSION_KEY,
+		received,
+		applied,
+		reason: reasons.join(", "),
+	};
 }

@@ -367,7 +367,9 @@ The configuration file is automatically created at `~/.better-ccflare/config.jso
 
 The following time constants are used throughout the system:
 - `SESSION_DURATION_DEFAULT`: 18000000ms (5 hours)
-- `SESSION_DURATION_FALLBACK`: 3600000ms (1 hour) - used if configuration is invalid
+- `ANTHROPIC_SESSION_DURATION_FALLBACK`: 3600000ms (1 hour) - read only by the
+  `GET /api/config` response, never by the session logic. An invalid
+  `session_duration_ms` does NOT produce one hour: see the clamp below.
 
 ### Dynamic Configuration
 
