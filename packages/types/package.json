@@ -5,6 +5,7 @@
 	"main": "./src/index.ts",
 	"exports": {
 		".": "./src/index.ts",
+		"./api-catalog": "./src/api-catalog.ts",
 		"./request": "./src/request.ts"
 	},
 	"scripts": {
