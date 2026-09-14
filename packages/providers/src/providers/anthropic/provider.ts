@@ -771,9 +771,7 @@ export class AnthropicProvider extends BaseProvider {
 		requestHeaders?: Headers,
 	): Promise<Response> {
 		if (!response.ok) return response;
-		if (
-			!response.headers.get("content-type")?.toLowerCase().includes("json")
-		) {
+		if (!response.headers.get("content-type")?.toLowerCase().includes("json")) {
 			return response;
 		}
 
@@ -806,9 +804,7 @@ export class AnthropicProvider extends BaseProvider {
 					return {
 						id: model.id as string,
 						object: "model",
-						created: Number.isNaN(createdMs)
-							? 0
-							: Math.floor(createdMs / 1000),
+						created: Number.isNaN(createdMs) ? 0 : Math.floor(createdMs / 1000),
 						owned_by: "anthropic",
 						// Kept for the model-catalog ingester, which reads these
 						// names off the proxied body.

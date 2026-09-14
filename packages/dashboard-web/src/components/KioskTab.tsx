@@ -21,7 +21,9 @@ export interface KioskPool {
  * a kiosk is that the state reads at a glance from across a room, so there are
  * three states and no gradient between them.
  */
-export function kioskUsageTone(pct: number | null): "idle" | "ok" | "warn" | "hot" {
+export function kioskUsageTone(
+	pct: number | null,
+): "idle" | "ok" | "warn" | "hot" {
 	if (pct === null) return "idle";
 	if (pct >= 90) return "hot";
 	if (pct >= 70) return "warn";
@@ -112,7 +114,9 @@ function KioskPoolRow({ pool, now }: { pool: KioskPool; now: number }) {
  * permanent red state here.
  */
 export function KioskTab() {
-	const { data: accounts, isLoading } = useAccounts({ backgroundRefresh: true });
+	const { data: accounts, isLoading } = useAccounts({
+		backgroundRefresh: true,
+	});
 
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {

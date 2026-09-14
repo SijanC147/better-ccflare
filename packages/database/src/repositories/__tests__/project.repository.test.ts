@@ -132,7 +132,11 @@ describe("ProjectRepository", () => {
 			await repo.create({ canonicalPath: "/p/mango", displayName: "Mango" });
 
 			const all = await repo.findAll();
-			expect(all.map((p) => p.display_name)).toEqual(["apple", "Mango", "Zebra"]);
+			expect(all.map((p) => p.display_name)).toEqual([
+				"apple",
+				"Mango",
+				"Zebra",
+			]);
 		});
 	});
 
@@ -218,7 +222,9 @@ describe("ProjectRepository", () => {
 				canonicalPath: "/p/rename-me",
 				displayName: "Old Name",
 			});
-			const updated = await repo.update(created.id, { displayName: "New Name" });
+			const updated = await repo.update(created.id, {
+				displayName: "New Name",
+			});
 			expect(updated.display_name).toBe("New Name");
 			expect(updated.id).toBe(created.id);
 		});

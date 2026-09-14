@@ -11,7 +11,6 @@ export {
 } from "@better-ccflare/providers";
 export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
-export { DiscoveryScheduler, type ScanResult } from "./discovery-scheduler";
 export {
 	CircuitBreaker,
 	type CircuitHealthSnapshot,
@@ -41,6 +40,7 @@ export {
 	recordCodexUsageSnapshot,
 	resetCodexUsageHistoryThrottle,
 } from "./codex-usage-history";
+export { DiscoveryScheduler, type ScanResult } from "./discovery-scheduler";
 export {
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,

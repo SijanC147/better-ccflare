@@ -31,7 +31,12 @@ function inSubprocess(
 	dir: string,
 	configPath: string,
 	body: string,
-): { killed: boolean; exitCode: number | null; stdout: string; stderr: string } {
+): {
+	killed: boolean;
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+} {
 	const script = join(dir, "construct.ts");
 	writeFileSync(
 		script,

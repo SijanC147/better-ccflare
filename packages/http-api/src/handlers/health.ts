@@ -2,11 +2,11 @@ import type { Config } from "@better-ccflare/config";
 import { isAccountAvailable, TtlCache } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { jsonResponse } from "@better-ccflare/http-common";
-import { circuitHealthSnapshot } from "@better-ccflare/proxy";
 import {
 	getRepresentativeUtilizationForProvider,
 	usageCache,
 } from "@better-ccflare/providers";
+import { circuitHealthSnapshot } from "@better-ccflare/proxy";
 import type { Account, CircuitHealth } from "@better-ccflare/types";
 import type {
 	HealthResponse,

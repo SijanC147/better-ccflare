@@ -34,7 +34,14 @@
  * No network and no credentials: the base URL is an unroutable `.invalid`
  * host and `fetch` is replaced for the duration of the file.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	test,
+} from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
 
 import {
@@ -92,7 +99,10 @@ let shipped: Record<string, unknown>[] = [];
  * the bundled table instead of reaching out.
  */
 function installFetchStub(): void {
-	globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+	globalThis.fetch = (async (
+		url: string | URL | Request,
+		init?: RequestInit,
+	) => {
 		const href = String(url instanceof Request ? url.url : url);
 		if (href.startsWith(BASE_URL) && href.includes(REQUEST_STREAM)) {
 			const body = JSON.parse(String(init?.body)) as Record<string, unknown>[];
@@ -123,9 +133,14 @@ describe("UsageCollector - token fields on the record shipped to OpenObserve", (
 		DatabaseFactory.initialize(TEST_DB_PATH);
 		dbOps = DatabaseFactory.getInstance();
 		asyncWriter = new AsyncDbWriter();
-		collector = new UsageCollector(dbOps, asyncWriter, () => false, (summary) => {
-			summaries.set(summary.id, summary);
-		});
+		collector = new UsageCollector(
+			dbOps,
+			asyncWriter,
+			() => false,
+			(summary) => {
+				summaries.set(summary.id, summary);
+			},
+		);
 	});
 
 	afterAll(async () => {

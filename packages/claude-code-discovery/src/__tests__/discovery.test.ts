@@ -1,8 +1,8 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ClaudeCodeDiscovery } from "../discovery";
 import { isLikelyWorktreePath } from "../path-encoding";
 
@@ -75,7 +75,9 @@ describe("ClaudeCodeDiscovery.scan()", () => {
 	it("resolves canonicalPath from JSONL cwd field", async () => {
 		const encoded = "-Users-alice-Code-myproject";
 		const dir = mkProject(encoded);
-		writeJsonl(dir, "session-abc.jsonl", [{ cwd: "/Users/alice/Code/myproject", type: "session" }]);
+		writeJsonl(dir, "session-abc.jsonl", [
+			{ cwd: "/Users/alice/Code/myproject", type: "session" },
+		]);
 
 		const result = await makeDiscovery().scan();
 		expect(result).toHaveLength(1);
@@ -160,7 +162,9 @@ describe("ClaudeCodeDiscovery.resolveCwd()", () => {
 	it("returns the cwd from the first (oldest) JSONL file", async () => {
 		const encoded = "-Users-alice-Code-resolve";
 		const dir = mkProject(encoded);
-		writeJsonl(dir, "session-old.jsonl", [{ cwd: "/Users/alice/Code/resolve" }]);
+		writeJsonl(dir, "session-old.jsonl", [
+			{ cwd: "/Users/alice/Code/resolve" },
+		]);
 		writeJsonl(dir, "session-new.jsonl", [{ cwd: "/other/path" }]);
 
 		// The oldest-mtime file should be picked.  Since both are written in the

@@ -47,9 +47,7 @@ export function createWorktreeRuleCreateHandler(dbOps: DatabaseOperations) {
 
 			if (!kind || !VALID_KINDS.includes(kind)) {
 				return errorResponse(
-					BadRequest(
-						`kind must be one of: ${VALID_KINDS.join(", ")}`,
-					),
+					BadRequest(`kind must be one of: ${VALID_KINDS.join(", ")}`),
 				);
 			}
 
@@ -199,7 +197,10 @@ export function createWorktreeRuleDeleteHandler(dbOps: DatabaseOperations) {
 			await dbOps.rebuildResolver();
 
 			return new Response(
-				JSON.stringify({ success: true, message: "Worktree rule deleted successfully" }),
+				JSON.stringify({
+					success: true,
+					message: "Worktree rule deleted successfully",
+				}),
 				{
 					status: 200,
 					headers: { "Content-Type": "application/json" },
@@ -247,7 +248,9 @@ export function createWorktreeRuleTestHandler() {
 			}
 
 			if (!Array.isArray(samplePaths)) {
-				return errorResponse(BadRequest("samplePaths must be an array of strings"));
+				return errorResponse(
+					BadRequest("samplePaths must be an array of strings"),
+				);
 			}
 
 			const trimmedPattern = pattern.trim();

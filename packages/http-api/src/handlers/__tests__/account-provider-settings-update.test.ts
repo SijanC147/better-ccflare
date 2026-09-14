@@ -145,9 +145,9 @@ describe("createAccountProviderSettingsUpdateHandler", () => {
 			const id = await insertApiKeyAccount(dbOps, "zai");
 
 			for (const empty of [null, "", "   "]) {
-				expect(
-					(await handler(requestWith({ apiKey: empty }), id)).status,
-				).toBe(400);
+				expect((await handler(requestWith({ apiKey: empty }), id)).status).toBe(
+					400,
+				);
 			}
 
 			const row = await stored(dbOps, id);
@@ -185,18 +185,13 @@ describe("createAccountProviderSettingsUpdateHandler", () => {
 
 		it("reports apiKeySet false for an account with no stored key", async () => {
 			const id = crypto.randomUUID();
-			await dbOps
-				.getAdapter()
-				.run(
-					`INSERT INTO accounts (id, name, provider, refresh_token, created_at, priority)
+			await dbOps.getAdapter().run(
+				`INSERT INTO accounts (id, name, provider, refresh_token, created_at, priority)
 					 VALUES (?, ?, ?, ?, ?, ?)`,
-					[id, id, "vertex-ai", "", Date.now(), 0],
-				);
-
-			const res = await handler(
-				requestWith({ customEndpoint: null }),
-				id,
+				[id, id, "vertex-ai", "", Date.now(), 0],
 			);
+
+			const res = await handler(requestWith({ customEndpoint: null }), id);
 			// vertex-ai keeps {projectId, region} in custom_endpoint, so the field is
 			// refused for it and apiKeySet is exercised through the zai path below.
 			expect(res.status).toBe(400);
@@ -286,9 +281,9 @@ describe("createAccountProviderSettingsUpdateHandler", () => {
 			const id = await insertApiKeyAccount(dbOps, "zai");
 
 			expect((await handler(requestWith({}), id)).status).toBe(400);
-			expect(
-				(await handler(requestWith({ priority: 3 }), id)).status,
-			).toBe(400);
+			expect((await handler(requestWith({ priority: 3 }), id)).status).toBe(
+				400,
+			);
 			expect((await stored(dbOps, id)).priority).toBe(7);
 		});
 

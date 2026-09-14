@@ -1,5 +1,11 @@
 import { AlertTriangle, Play, Radio, Search, Square } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { api, type RawResponse } from "../api";
 import {
 	API_CATEGORIES,
@@ -32,9 +38,11 @@ function routeKey(route: ApiRoute): string {
 }
 
 function statusTone(status: number): string {
-	if (status >= 200 && status < 300) return "text-emerald-600 dark:text-emerald-400";
+	if (status >= 200 && status < 300)
+		return "text-emerald-600 dark:text-emerald-400";
 	if (status >= 300 && status < 400) return "text-blue-600 dark:text-blue-400";
-	if (status >= 400 && status < 500) return "text-amber-600 dark:text-amber-400";
+	if (status >= 400 && status < 500)
+		return "text-amber-600 dark:text-amber-400";
 	return "text-red-600 dark:text-red-400";
 }
 
@@ -66,7 +74,9 @@ export const ApiPlaygroundTab = React.memo(() => {
 	const [filter, setFilter] = useState("");
 
 	const selected = useMemo(
-		() => API_ROUTES.find((route) => routeKey(route) === selectedKey) ?? API_ROUTES[0],
+		() =>
+			API_ROUTES.find((route) => routeKey(route) === selectedKey) ??
+			API_ROUTES[0],
 		[selectedKey],
 	);
 

@@ -320,5 +320,8 @@ export function openObserveBufferSizes(): {
 	logs: number;
 	requests: number;
 } {
-	return { logs: logBuffer.records.length, requests: requestBuffer.records.length };
+	return {
+		logs: logBuffer.records.length,
+		requests: requestBuffer.records.length,
+	};
 }

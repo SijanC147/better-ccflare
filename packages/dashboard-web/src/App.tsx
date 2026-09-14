@@ -12,6 +12,7 @@ import { AccountsTab } from "./components/AccountsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeyAuthDialog } from "./components/ApiKeyAuthDialog";
 import { ApiKeysTab } from "./components/ApiKeysTab";
+import { ApiPlaygroundTab } from "./components/ApiPlaygroundTab";
 import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { KioskTab } from "./components/KioskTab";
@@ -20,7 +21,6 @@ import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
 import { ProjectsTab } from "./components/ProjectsTab";
 import { RequestsTab } from "./components/RequestsTab";
-import { ApiPlaygroundTab } from "./components/ApiPlaygroundTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { ThemeProvider } from "./contexts/theme-context";
@@ -152,7 +152,8 @@ export function App() {
 				path: "/api-playground",
 				element: <ApiPlaygroundTab />,
 				title: "API Playground",
-				subtitle: "Call any endpoint this server serves and inspect the response",
+				subtitle:
+					"Call any endpoint this server serves and inspect the response",
 			},
 			{
 				path: "/settings",

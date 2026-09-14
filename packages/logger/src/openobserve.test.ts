@@ -3,9 +3,9 @@ import { logBus } from "./log-bus";
 import {
 	configureOpenObserve,
 	flush,
+	type OpenObserveSettings,
 	openObserveBufferSizes,
 	openObserveEnabled,
-	type OpenObserveSettings,
 	openObserveShipsPayloads,
 	shipRequestRecord,
 } from "./openobserve";

@@ -1,7 +1,7 @@
+import { basename } from "node:path";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, NotFound } from "@better-ccflare/errors";
 import type { Project, WorktreeRuleKind } from "@better-ccflare/types";
-import { basename } from "node:path";
 import { errorResponse } from "../utils/http-error";
 
 // ── GET /api/projects ──────────────────────────────────────────────────────
@@ -30,7 +30,11 @@ export function createProjectsListHandler(dbOps: DatabaseOperations) {
 			}
 
 			return new Response(
-				JSON.stringify({ success: true, data: projects, count: projects.length }),
+				JSON.stringify({
+					success: true,
+					data: projects,
+					count: projects.length,
+				}),
 				{
 					status: 200,
 					headers: { "Content-Type": "application/json" },
@@ -70,13 +74,17 @@ export function createProjectCreateHandler(dbOps: DatabaseOperations) {
 				canonical_path.trim().length === 0
 			) {
 				return errorResponse(
-					BadRequest("canonical_path is required and must be a non-empty string"),
+					BadRequest(
+						"canonical_path is required and must be a non-empty string",
+					),
 				);
 			}
 
 			const trimmedPath = canonical_path.trim();
 			const resolvedName =
-				display_name && typeof display_name === "string" && display_name.trim().length > 0
+				display_name &&
+				typeof display_name === "string" &&
+				display_name.trim().length > 0
 					? display_name.trim()
 					: basename(trimmedPath) || trimmedPath;
 
@@ -223,7 +231,10 @@ export function createProjectDeleteHandler(dbOps: DatabaseOperations) {
 			await dbOps.rebuildResolver();
 
 			return new Response(
-				JSON.stringify({ success: true, message: "Project deleted successfully" }),
+				JSON.stringify({
+					success: true,
+					message: "Project deleted successfully",
+				}),
 				{
 					status: 200,
 					headers: { "Content-Type": "application/json" },

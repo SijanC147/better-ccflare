@@ -89,7 +89,11 @@ export function Navigation({
 			{ label: "Agents", icon: Bot, path: "/agents" },
 			{ label: "API Keys", icon: Key, path: "/api-keys" },
 			{ label: "Logs", icon: FileText, path: "/logs" },
-			{ label: "API Playground", icon: TerminalSquare, path: "/api-playground" },
+			{
+				label: "API Playground",
+				icon: TerminalSquare,
+				path: "/api-playground",
+			},
 			{ label: "Settings", icon: Settings, path: "/settings" },
 		);
 

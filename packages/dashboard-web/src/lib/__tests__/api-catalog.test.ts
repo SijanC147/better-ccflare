@@ -15,17 +15,12 @@ import { API_ROUTES, fillPath, pathParams } from "../api-catalog";
  * so they are listed in the catalog by hand and are not covered here.
  */
 
-const ROUTER_PATH = join(
-	import.meta.dir,
-	"../../../../http-api/src/router.ts",
-);
+const ROUTER_PATH = join(import.meta.dir, "../../../../http-api/src/router.ts");
 
 function staticRoutesFromRouter(): Set<string> {
 	const source = readFileSync(ROUTER_PATH, "utf8");
 	const matches = source.matchAll(/handlers\.set\(\s*"([A-Z]+):([^"]+)"/g);
-	return new Set(
-		Array.from(matches, (match) => `${match[1]}:${match[2]}`),
-	);
+	return new Set(Array.from(matches, (match) => `${match[1]}:${match[2]}`));
 }
 
 const catalogKeys = new Set(
@@ -110,9 +105,9 @@ describe("path parameters", () => {
 	});
 
 	test("fillPath substitutes and encodes values", () => {
-		expect(
-			fillPath("/api/projects/:projectId", { projectId: "a b/c" }),
-		).toBe("/api/projects/a%20b%2Fc");
+		expect(fillPath("/api/projects/:projectId", { projectId: "a b/c" })).toBe(
+			"/api/projects/a%20b%2Fc",
+		);
 	});
 
 	test("fillPath leaves an unsupplied parameter empty rather than literal", () => {

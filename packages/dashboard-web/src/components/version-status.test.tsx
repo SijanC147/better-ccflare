@@ -80,7 +80,11 @@ describe("ForkCard recheck control", () => {
 		// The original branch, and the only one where the control used to live.
 		const html = render(
 			withRemote(
-				{ available: false, stale: false, error: "GitHub could not be reached." },
+				{
+					available: false,
+					stale: false,
+					error: "GitHub could not be reached.",
+				},
 				null as unknown as VersionStatusResponse["fork"],
 			),
 		);

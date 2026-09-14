@@ -26,7 +26,11 @@ function component(id: string, name: string, status: string) {
  * `minor` solely because of `Claude Cowork` on Windows.
  */
 const MEASURED_SUMMARY = {
-	page: { id: "tymt9n04zgry", name: "Claude", url: "https://status.claude.com" },
+	page: {
+		id: "tymt9n04zgry",
+		name: "Claude",
+		url: "https://status.claude.com",
+	},
 	status: { indicator: "minor", description: "Partially Degraded Service" },
 	components: [
 		component("rwppv331jlwc", "claude.ai", "operational"),
@@ -47,7 +51,9 @@ const MEASURED_SUMMARY = {
 			status: "identified",
 			impact: "major",
 			shortlink: "https://stspg.io/cowork",
-			components: [component("bpp5gb3hpjcl", "Claude Cowork", "degraded_performance")],
+			components: [
+				component("bpp5gb3hpjcl", "Claude Cowork", "degraded_performance"),
+			],
 		},
 	],
 };
@@ -84,7 +90,11 @@ describe("buildSnapshot component filter", () => {
 					impact: "critical",
 					shortlink: "https://stspg.io/api",
 					components: [
-						component(CLAUDE_API_ID, "Claude API (api.anthropic.com)", "major_outage"),
+						component(
+							CLAUDE_API_ID,
+							"Claude API (api.anthropic.com)",
+							"major_outage",
+						),
 					],
 				},
 			],
@@ -99,9 +109,7 @@ describe("buildSnapshot component filter", () => {
 		const payload = {
 			...MEASURED_SUMMARY,
 			components: MEASURED_SUMMARY.components.map((c) =>
-				c.id === CLAUDE_CODE_ID
-					? { ...c, status: "degraded_performance" }
-					: c,
+				c.id === CLAUDE_CODE_ID ? { ...c, status: "degraded_performance" } : c,
 			),
 		};
 		const snapshot = buildSnapshot(payload, 3_000);
@@ -179,10 +187,10 @@ describe("ServiceStatusService", () => {
 		const service = new ServiceStatusService({
 			refreshIntervalMs: 60_000,
 			now: () => 10_000,
-			fetchImpl: (async () => {
+			fetchImpl: async () => {
 				calls += 1;
 				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
-			}),
+			},
 		});
 		const first = await service.getStatus();
 		const second = await service.getStatus();
@@ -197,10 +205,10 @@ describe("ServiceStatusService", () => {
 		const service = new ServiceStatusService({
 			refreshIntervalMs: 1_000,
 			now: () => now,
-			fetchImpl: (async () => {
+			fetchImpl: async () => {
 				if (shouldFail) throw new Error("connect ECONNREFUSED");
 				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
-			}),
+			},
 		});
 
 		const good = await service.getStatus();
@@ -231,10 +239,10 @@ describe("ServiceStatusService", () => {
 		let now = 0;
 		const service = new ServiceStatusService({
 			now: () => now,
-			fetchImpl: (async () => {
+			fetchImpl: async () => {
 				calls += 1;
 				throw new Error("boom");
-			}),
+			},
 		});
 		await service.getStatus(true);
 		now = 1_000;
@@ -247,11 +255,11 @@ describe("ServiceStatusService", () => {
 		let calls = 0;
 		const service = new ServiceStatusService({
 			now: () => 0,
-			fetchImpl: (async () => {
+			fetchImpl: async () => {
 				calls += 1;
 				await new Promise((resolve) => setTimeout(resolve, 5));
 				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
-			}),
+			},
 		});
 		const [a, b] = await Promise.all([
 			service.getStatus(),
@@ -290,9 +298,7 @@ describe("incident filtering", () => {
 					status: "postmortem",
 					impact: "major",
 					shortlink: "https://stspg.io/pm",
-					components: [
-						component(CLAUDE_CODE_ID, "Claude Code", "operational"),
-					],
+					components: [component(CLAUDE_CODE_ID, "Claude Code", "operational")],
 				},
 				{
 					id: "incident-live",
@@ -300,9 +306,7 @@ describe("incident filtering", () => {
 					status: "investigating",
 					impact: "minor",
 					shortlink: "https://stspg.io/live",
-					components: [
-						component(CLAUDE_CODE_ID, "Claude Code", "operational"),
-					],
+					components: [component(CLAUDE_CODE_ID, "Claude Code", "operational")],
 				},
 			],
 		};

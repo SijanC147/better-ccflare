@@ -322,7 +322,10 @@ describe("config file permissions", () => {
 			const configPath = join(dir, "config.json");
 			new Config(configPath);
 
-			const decoy = join(dir, "configXjson.tmp-cccccccc-0000-0000-0000-000000000000");
+			const decoy = join(
+				dir,
+				"configXjson.tmp-cccccccc-0000-0000-0000-000000000000",
+			);
 			const real = `${configPath}.tmp-dddddddd-0000-0000-0000-000000000000`;
 			const twoMinutesAgo = new Date(Date.now() - 120_000);
 			for (const path of [decoy, real]) {

@@ -235,7 +235,8 @@ export class DiscoveryScheduler {
 
 		// Candidate worktrees: path looks like worktree, no parent yet.
 		const unparented = projects.filter(
-			(p) => isLikelyWorktreePath(p.canonical_path) && p.parent_project_id === null,
+			(p) =>
+				isLikelyWorktreePath(p.canonical_path) && p.parent_project_id === null,
 		);
 
 		if (unparented.length === 0) return;
@@ -247,10 +248,7 @@ export class DiscoveryScheduler {
 			const wtNorm = normalise(wt.canonical_path);
 			const parent = nonWorktree.find((nw) => {
 				const nwNorm = normalise(nw.canonical_path);
-				return (
-					wtNorm === nwNorm ||
-					wtNorm.startsWith(nwNorm + "/")
-				);
+				return wtNorm === nwNorm || wtNorm.startsWith(nwNorm + "/");
 			});
 
 			if (parent) {
@@ -262,10 +260,7 @@ export class DiscoveryScheduler {
 						`Assigned worktree parent: ${wt.canonical_path} → ${parent.canonical_path}`,
 					);
 				} catch (err) {
-					log.error(
-						`Failed to assign parent for worktree ${wt.id}`,
-						err,
-					);
+					log.error(`Failed to assign parent for worktree ${wt.id}`, err);
 				}
 			}
 		}

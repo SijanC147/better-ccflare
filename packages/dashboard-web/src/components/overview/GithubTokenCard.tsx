@@ -1,8 +1,5 @@
 import { useState } from "react";
-import {
-	useGithubTokenConfig,
-	useSetGithubToken,
-} from "../../hooks/queries";
+import { useGithubTokenConfig, useSetGithubToken } from "../../hooks/queries";
 import { Button } from "../ui/button";
 import {
 	Card,
