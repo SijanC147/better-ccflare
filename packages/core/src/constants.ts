@@ -299,14 +299,58 @@ export function retryDelayMs(
 }
 
 /**
- * Whether a thrown upstream fetch failure may be retried.
+ * Error codes that prove the upstream connection never carried the request
+ * body, so the model cannot have seen it.
  *
- * Every request through this proxy is a non-idempotent POST and /v1/messages
- * carries no idempotency key, so a retry that reaches a model twice can bill
- * twice and, on a stream, deliver two answers. Only a throw is retried here: a
- * fetch that throws produced no response, so no byte reached the client and the
- * request provably never got a reply from the model. That covers connection
- * refused, DNS failure and TLS failure.
+ * This is an allowlist, not a denylist, and that is the whole point. Every
+ * request through this proxy is a non-idempotent POST and /v1/messages carries
+ * no idempotency key, so a retry that reaches a model twice can bill twice and,
+ * on a stream, deliver two answers. An unrecognised failure is therefore not
+ * retried: the cost of missing a safe retry is one failed request, and the cost
+ * of retrying an unsafe one is a double charge or a duplicated answer.
+ *
+ * Measured on Bun 1.4.2 on 2026-09-14, `err.code` on the thrown TypeError:
+ *   fetch("http://127.0.0.1:1")        ConnectionRefused
+ *   fetch("http://<nxdomain>/")        ENOTFOUND
+ *   fetch("https://expired.badssl.com") CERT_HAS_EXPIRED
+ *
+ * Deliberately absent: ECONNRESET, EPIPE and ETIMEDOUT. A reset or a broken
+ * pipe can arrive after the body was fully sent, so they do not prove the
+ * model never saw the request.
+ */
+const RETRYABLE_UPSTREAM_ERROR_CODES = new Set([
+	// Connect phase refused outright.
+	"ConnectionRefused",
+	"ECONNREFUSED",
+	// Name resolution never produced an address.
+	"ENOTFOUND",
+	"EAI_AGAIN",
+	"DNSException",
+	// Route to the host does not exist.
+	"EHOSTUNREACH",
+	"ENETUNREACH",
+]);
+
+/** TLS handshake failures. The handshake precedes the request body. */
+const RETRYABLE_TLS_ERROR_CODE_PREFIXES = [
+	"CERT_",
+	"ERR_TLS_",
+	"UNABLE_TO_",
+	"SELF_SIGNED_",
+	"DEPTH_ZERO_",
+];
+
+/**
+ * Whether a thrown upstream failure may be retried.
+ *
+ * Only a throw ever reaches this function, and only a throw is retried, so a
+ * response of any status is out of scope by construction: 429 stays with the
+ * account selector and 529 keeps its own in-place retry.
+ *
+ * A throw alone is not enough, though. The call this guards wraps observation
+ * and header handling as well as the fetch, so a ProviderError or an ordinary
+ * bug can surface here on a request that did reach the model. Only a recognised
+ * connect-phase or handshake-phase error code is retried.
  *
  * An abort is never retried. The caller aborts when the client disconnects, and
  * the header-phase timeout aborts on a request that may already be generating,
@@ -317,9 +361,15 @@ export function isRetryableUpstreamError(
 	signal?: AbortSignal,
 ): boolean {
 	if (signal?.aborted) return false;
-	if (err instanceof Error && err.name === "AbortError") return false;
-	if (err instanceof DOMException && err.name === "TimeoutError") return false;
-	return err instanceof Error;
+	if (!(err instanceof Error)) return false;
+	if (err.name === "AbortError" || err.name === "TimeoutError") return false;
+
+	const code = (err as { code?: unknown }).code;
+	if (typeof code !== "string") return false;
+	if (RETRYABLE_UPSTREAM_ERROR_CODES.has(code)) return true;
+	return RETRYABLE_TLS_ERROR_CODE_PREFIXES.some((prefix) =>
+		code.startsWith(prefix),
+	);
 }
 
 // Buffer sizes (in bytes unless specified)

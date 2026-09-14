@@ -44,12 +44,37 @@ function post(body = '{"model":"claude-sonnet-5"}') {
 	});
 }
 
-/** A transport failure: fetch threw, so no Response object ever existed. */
+/**
+ * A connect-phase transport failure, in the shape Bun actually throws.
+ *
+ * Measured on Bun 1.4.2 on 2026-09-14: `fetch("http://127.0.0.1:1")` rejects
+ * with a TypeError carrying `code: "ConnectionRefused"`. An earlier version of
+ * this file threw a bare `new TypeError("fetch failed")`, which no longer
+ * resembles anything the runtime produces and let an over-broad predicate pass.
+ */
 function connectionRefused() {
-	return new TypeError("fetch failed");
+	const err = new TypeError(
+		"Unable to connect. Is the computer able to access the url?",
+	);
+	(err as { code?: string }).code = "ConnectionRefused";
+	return err;
 }
 
-describe("forwardWithTransportRetry — the configured attempt count is the attempt count", () => {
+/** DNS resolution never produced an address. */
+function dnsFailure() {
+	const err = new TypeError("getaddrinfo ENOTFOUND upstream.invalid");
+	(err as { code?: string }).code = "ENOTFOUND";
+	return err;
+}
+
+/** TLS handshake failed, so the body was never sent. */
+function tlsFailure() {
+	const err = new TypeError("certificate has expired");
+	(err as { code?: string }).code = "CERT_HAS_EXPIRED";
+	return err;
+}
+
+describe("forwardWithTransportRetry: the configured attempt count is the attempt count", () => {
 	for (const attempts of [1, 2, 3, 5]) {
 		test(`retry_attempts: ${attempts} makes exactly ${attempts} attempts`, async () => {
 			let calls = 0;
@@ -65,7 +90,7 @@ describe("forwardWithTransportRetry — the configured attempt count is the atte
 				},
 			);
 
-			await expect(promise).rejects.toThrow("fetch failed");
+			await expect(promise).rejects.toThrow("Unable to connect");
 			expect(calls).toBe(attempts);
 		});
 	}
@@ -123,7 +148,7 @@ describe("forwardWithTransportRetry — the configured attempt count is the atte
 	});
 });
 
-describe("forwardWithTransportRetry — what is never retried", () => {
+describe("forwardWithTransportRetry: what is never retried", () => {
 	test("a response is never retried, whatever its status", async () => {
 		// 429 routes to another account through the selector and 529 has its own
 		// in-place retry. A second layer over either is a retry storm.
@@ -140,6 +165,79 @@ describe("forwardWithTransportRetry — what is never retried", () => {
 
 			expect(response.status).toBe(status);
 			expect(calls).toBe(1);
+		}
+	});
+
+	test("every measured connect-phase failure is retried", async () => {
+		for (const make of [connectionRefused, dnsFailure, tlsFailure]) {
+			let calls = 0;
+			const promise = forwardWithTransportRetry(
+				post(),
+				async () => {
+					calls++;
+					throw make();
+				},
+				{ settings: { attempts: 3, delayMs: 0, backoff: 2 }, sleep: noSleep },
+			);
+			await expect(promise).rejects.toThrow();
+			expect(calls).toBe(3);
+		}
+	});
+
+	test("a throw that does not prove the request failed to arrive is not retried", async () => {
+		// The guarded call wraps observation and header handling as well as the
+		// fetch, so a provider error or an ordinary bug can surface as a throw on
+		// a request that DID reach the model. Retrying those double-bills. So does
+		// retrying a reset or a broken pipe, either of which can arrive after the
+		// body was fully sent.
+		const unsafe: Array<[string, () => Error]> = [
+			["a plain bug", () => new Error("boom")],
+			[
+				"a provider error",
+				() => {
+					const err = new Error("provider rejected the response");
+					err.name = "ProviderError";
+					return err;
+				},
+			],
+			[
+				"ECONNRESET, which can follow a fully sent body",
+				() => {
+					const err = new TypeError("socket hang up");
+					(err as { code?: string }).code = "ECONNRESET";
+					return err;
+				},
+			],
+			[
+				"EPIPE, same reason",
+				() => {
+					const err = new TypeError("write EPIPE");
+					(err as { code?: string }).code = "EPIPE";
+					return err;
+				},
+			],
+			[
+				"ETIMEDOUT, which can fire while the model is generating",
+				() => {
+					const err = new TypeError("upstream timed out");
+					(err as { code?: string }).code = "ETIMEDOUT";
+					return err;
+				},
+			],
+		];
+
+		for (const [label, make] of unsafe) {
+			let calls = 0;
+			const promise = forwardWithTransportRetry(
+				post(),
+				async () => {
+					calls++;
+					throw make();
+				},
+				{ settings: { attempts: 5, delayMs: 0, backoff: 2 }, sleep: noSleep },
+			);
+			await expect(promise).rejects.toThrow();
+			expect(calls, `${label} must not be retried`).toBe(1);
 		}
 	});
 
@@ -196,7 +294,7 @@ describe("forwardWithTransportRetry — what is never retried", () => {
 	});
 });
 
-describe("getOverloadRetryConfig — the documented keys drive it", () => {
+describe("getOverloadRetryConfig: the documented keys drive it", () => {
 	test("the documented keys are what it reports", () => {
 		const cfg = getOverloadRetryConfig({
 			attempts: 4,
@@ -242,7 +340,7 @@ describe("getOverloadRetryConfig — the documented keys drive it", () => {
 			{ settings: { attempts: 5, delayMs: 0, backoff: 2 }, sleep: noSleep },
 		);
 
-		await expect(promise).rejects.toThrow("fetch failed");
+		await expect(promise).rejects.toThrow("Unable to connect");
 		expect(calls).toBe(1);
 	});
 });
