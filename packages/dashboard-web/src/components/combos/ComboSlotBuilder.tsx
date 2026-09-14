@@ -22,6 +22,7 @@ import {
 	useRemoveComboSlot,
 	useReorderComboSlots,
 } from "../../hooks/queries";
+import { cn } from "../../lib/utils";
 import { providerAllowsClientModelPassthrough } from "../../utils/provider-utils";
 import { ModelCombobox } from "../models/ModelCombobox";
 import { Badge } from "../ui/badge";
@@ -35,6 +36,8 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { SlotSettingsPopover } from "./SlotSettingsPopover";
+import { describeSlotThrottle } from "./slot-throttle-helpers";
 
 interface SortableSlotRowProps {
 	slot: ComboSlot;
@@ -48,6 +51,7 @@ interface SortableSlotRowProps {
 
 function SortableSlotRow({
 	slot,
+	comboId,
 	index,
 	accountName,
 	provider,
@@ -69,11 +73,17 @@ function SortableSlotRow({
 		opacity: isDragging ? 0.5 : 1,
 	};
 
+	const throttleSummary = describeSlotThrottle(slot);
+
 	return (
 		<div
 			ref={setNodeRef}
 			style={style}
-			className="flex items-center gap-2 rounded-md border bg-card px-3 py-2"
+			className={cn(
+				"flex items-center gap-2 rounded-md border bg-card px-3 py-2",
+				// A disabled slot is legible as disabled without opening the popover.
+				!slot.enabled && "opacity-60",
+			)}
 		>
 			<span className="w-4 shrink-0 text-center text-xs font-medium text-muted-foreground">
 				{index}
@@ -87,11 +97,23 @@ function SortableSlotRow({
 				<GripVertical className="h-4 w-4" />
 			</button>
 
-			<div className="flex min-w-0 flex-1 items-center gap-2">
-				<Badge variant="secondary" className="shrink-0 text-xs">
-					{provider}
-				</Badge>
-				<span className="truncate text-sm font-medium">{accountName}</span>
+			<div className="flex min-w-0 flex-1 flex-col">
+				<div className="flex min-w-0 items-center gap-2">
+					<Badge variant="secondary" className="shrink-0 text-xs">
+						{provider}
+					</Badge>
+					<span className="truncate text-sm font-medium">{accountName}</span>
+					{!slot.enabled && (
+						<Badge variant="outline" className="shrink-0 text-xs">
+							disabled
+						</Badge>
+					)}
+				</div>
+				{throttleSummary && (
+					<span className="truncate text-[11px] text-muted-foreground">
+						{throttleSummary}
+					</span>
+				)}
 			</div>
 
 			<span className="shrink-0 font-mono text-xs text-muted-foreground">
@@ -101,6 +123,12 @@ function SortableSlotRow({
 					<span className="italic">client model</span>
 				)}
 			</span>
+
+			<SlotSettingsPopover
+				slot={slot}
+				comboId={comboId}
+				accountName={accountName}
+			/>
 
 			<Button
 				variant="ghost"

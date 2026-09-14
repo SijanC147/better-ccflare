@@ -2619,7 +2619,15 @@ class API extends HttpClient {
 	async updateComboSlot(
 		comboId: string,
 		slotId: string,
-		params: { model?: string; enabled?: boolean },
+		// A threshold is tri-state on the wire: absent leaves the stored value
+		// alone, null clears it, and a number sets it. `max_utilization_percent:
+		// 0` is a real setting (skip at any usage), not a cleared field.
+		params: {
+			model?: string;
+			enabled?: boolean;
+			max_utilization_percent?: number | null;
+			min_reset_remaining_ms?: number | null;
+		},
 	): Promise<{ slot: ComboSlot }> {
 		const res = await this.put<{ success: boolean; data: ComboSlot }>(
 			`/api/combos/${comboId}/slots/${slotId}`,
