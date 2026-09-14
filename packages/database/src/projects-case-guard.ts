@@ -53,6 +53,10 @@ export interface ProjectsCaseModeInput {
 	 *    filesystem, so this module takes no position on them.
 	 */
 	rowsHaveUppercase: boolean;
+	/** Where the config file is, so the refusal can name it. */
+	configPath: string;
+	/** Which of the three sources decided `current`. */
+	currentSource: "env" | "file" | "default";
 }
 
 export type ProjectsCaseModeDecision =
@@ -64,7 +68,19 @@ export type ProjectsCaseModeDecision =
 	/** Abort the boot with `message`. */
 	| { action: "refuse"; message: string };
 
-function refusal(recorded: boolean, current: boolean, count: number): string {
+function sourceLabel(source: "env" | "file" | "default"): string {
+	if (source === "env") return "PROJECTS_CASE_SENSITIVE environment variable";
+	if (source === "file") return "config file";
+	return "platform default";
+}
+
+function refusal(
+	recorded: boolean,
+	current: boolean,
+	count: number,
+	configPath: string,
+	currentSource: "env" | "file" | "default",
+): string {
 	const from = recorded ? "case-sensitive" : "case-insensitive";
 	const to = current ? "case-sensitive" : "case-insensitive";
 	return [
@@ -72,9 +88,9 @@ function refusal(recorded: boolean, current: boolean, count: number): string {
 		"",
 		"A project's id is sha1(canonical_path) truncated to 16 characters, and this setting decides whether that path is stored lowercased. Starting with the new setting would re-key every one of those rows on the next discovery scan. Because requests.project_id has no foreign key to projects.id, nothing would reject the result: every request already attributed would keep pointing at an id no project has any more, and the attribution history would detach with no error and no log line.",
 		"",
-		`The setting is resolved from the PROJECTS_CASE_SENSITIVE environment variable, then projects_case_sensitive in the config file, then the platform default, so check all three rather than only the environment.`,
+		`The setting is resolved from the PROJECTS_CASE_SENSITIVE environment variable, then projects_case_sensitive in the config file, then the platform default. This boot resolved ${current} from the ${sourceLabel(currentSource)}, so change that one rather than guessing which is in force. A service started by launchd or brew services does not necessarily see the same environment as your shell.`,
 		"",
-		`To go ahead anyway and accept that detachment, set projects_case_sensitive_stored to ${current} in the config file. To keep the existing history, make that resolution produce ${recorded} again.`,
+		`The config file is ${configPath}. To go ahead anyway and accept that detachment, set projects_case_sensitive_stored to ${current} there. To keep the existing history, make the resolution above produce ${recorded} again.`,
 	].join("\n");
 }
 
@@ -114,7 +130,14 @@ export function hasUppercaseDiscoveredPath(
 export function decideProjectsCaseMode(
 	input: ProjectsCaseModeInput,
 ): ProjectsCaseModeDecision {
-	const { recorded, current, projectCount, rowsHaveUppercase } = input;
+	const {
+		recorded,
+		current,
+		projectCount,
+		rowsHaveUppercase,
+		configPath,
+		currentSource,
+	} = input;
 
 	if (projectCount === 0) {
 		return recorded === current
@@ -134,7 +157,13 @@ export function decideProjectsCaseMode(
 		if (derived !== current) {
 			return {
 				action: "refuse",
-				message: refusal(derived, current, projectCount),
+				message: refusal(
+					derived,
+					current,
+					projectCount,
+					configPath,
+					currentSource,
+				),
 			};
 		}
 		return {
@@ -148,6 +177,12 @@ export function decideProjectsCaseMode(
 
 	return {
 		action: "refuse",
-		message: refusal(recorded, current, projectCount),
+		message: refusal(
+			recorded,
+			current,
+			projectCount,
+			configPath,
+			currentSource,
+		),
 	};
 }

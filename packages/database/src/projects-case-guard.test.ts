@@ -17,6 +17,8 @@ describe("decideProjectsCaseMode", () => {
 			current: true,
 			projectCount: 3,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("refuse");
 		// The message must name the consequence, not just the condition: an
@@ -34,6 +36,8 @@ describe("decideProjectsCaseMode", () => {
 			current: false,
 			projectCount: 3,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("refuse");
 		expect(decision.message).toContain("requests.project_id");
@@ -47,6 +51,8 @@ describe("decideProjectsCaseMode", () => {
 			current: true,
 			projectCount: 0,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("record");
 		expect(decision.record).toBe(true);
@@ -58,6 +64,8 @@ describe("decideProjectsCaseMode", () => {
 			current: false,
 			projectCount: 0,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("record");
 		expect(decision.record).toBe(false);
@@ -75,6 +83,8 @@ describe("decideProjectsCaseMode", () => {
 			current: false,
 			projectCount: 12,
 			rowsHaveUppercase: true,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("refuse");
 		expect(decision.message).toContain("requests.project_id");
@@ -91,6 +101,8 @@ describe("decideProjectsCaseMode", () => {
 			current: true,
 			projectCount: 12,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("adopt");
 		expect(decision.record).toBe(true);
@@ -104,6 +116,8 @@ describe("decideProjectsCaseMode", () => {
 				current: true,
 				projectCount: 12,
 				rowsHaveUppercase: false,
+				configPath: "/tmp/fixture/better-ccflare.json",
+				currentSource: "env",
 			}).action,
 		).toBe("ok");
 		expect(
@@ -112,6 +126,8 @@ describe("decideProjectsCaseMode", () => {
 				current: false,
 				projectCount: 12,
 				rowsHaveUppercase: false,
+				configPath: "/tmp/fixture/better-ccflare.json",
+				currentSource: "env",
 			}).action,
 		).toBe("ok");
 	});
@@ -181,6 +197,8 @@ describe("decideProjectsCaseMode boundaries", () => {
 			current: true,
 			projectCount: 1,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("refuse");
 		// Singular, because a message reading "1 projects" is the kind of
@@ -200,6 +218,8 @@ describe("decideProjectsCaseMode boundaries", () => {
 			current: false,
 			projectCount: 12,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("adopt");
 		expect(decision.record).toBe(false);
@@ -211,8 +231,56 @@ describe("decideProjectsCaseMode boundaries", () => {
 			current: false,
 			projectCount: 0,
 			rowsHaveUppercase: false,
+			configPath: "/tmp/fixture/better-ccflare.json",
+			currentSource: "env",
 		});
 		expect(decision.action).toBe("record");
 		expect(decision.record).toBe(false);
+	});
+});
+
+describe("the refusal tells a locked-out operator where to go", () => {
+	// The operator reads this message at the moment the server refuses to
+	// start, so they cannot look the path up in a running dashboard, and it
+	// moves with BETTER_CCFLARE_CONFIG_PATH.
+	test("names the config file path", () => {
+		const decision = decideProjectsCaseMode({
+			recorded: false,
+			current: true,
+			projectCount: 3,
+			rowsHaveUppercase: false,
+			configPath: "/etc/better-ccflare/config.json",
+			currentSource: "file",
+		});
+		expect(decision.action).toBe("refuse");
+		expect(decision.message).toContain("/etc/better-ccflare/config.json");
+	});
+
+	// `current` is read from the environment first, so an operator whose
+	// service environment differs from their interactive shell would compute
+	// one value reading the message and get another when the service boots,
+	// and hand-edit the marker to a value that refuses again.
+	test("names which of the three sources decided the current value", () => {
+		const env = decideProjectsCaseMode({
+			recorded: false,
+			current: true,
+			projectCount: 3,
+			rowsHaveUppercase: false,
+			configPath: "/c.json",
+			currentSource: "env",
+		});
+		expect(env.message).toContain(
+			"PROJECTS_CASE_SENSITIVE environment variable",
+		);
+
+		const dflt = decideProjectsCaseMode({
+			recorded: false,
+			current: true,
+			projectCount: 3,
+			rowsHaveUppercase: false,
+			configPath: "/c.json",
+			currentSource: "default",
+		});
+		expect(dflt.message).toContain("platform default");
 	});
 });

@@ -438,6 +438,8 @@ async function guardProjectsCaseMode(
 		current: config.isProjectsCaseSensitive(),
 		projectCount,
 		rowsHaveUppercase,
+		configPath: config.getConfigPath(),
+		currentSource: config.getProjectsCaseSensitiveSource(),
 	});
 
 	switch (decision.action) {
