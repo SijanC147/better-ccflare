@@ -123,6 +123,14 @@ export const API_ROUTES: ApiRoute[] = [
 		summary: "Database and WAL size, plus the last integrity check.",
 	},
 	{
+		method: "GET",
+		path: "/api/service-status",
+		category: "System",
+		summary:
+			"Claude service status, filtered to the components this proxy forwards to. Always 200.",
+		query: ["refresh"],
+	},
+	{
 		method: "POST",
 		path: "/api/storage/integrity/check",
 		category: "System",
