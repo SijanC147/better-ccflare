@@ -3,7 +3,12 @@ import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 import { Logger } from "@better-ccflare/logger";
-import { isLikelyWorktreePath, naiveDecode } from "./path-encoding";
+import {
+	isLikelyWorktreePath,
+	naiveDecode,
+	type ReadDirFn,
+	resolveEncodedName,
+} from "./path-encoding";
 
 const logger = new Logger("discovery");
 
@@ -47,7 +52,39 @@ export interface DiscoveryOptions {
 	 * Defaults to false; callers decide based on the host filesystem.
 	 */
 	caseInsensitiveCanonicalize?: boolean;
+	/** Directory lister used by the forward-slug resolver. Injectable for tests. */
+	readDir?: ReadDirFn;
 }
+
+/**
+ * Thrown by `scan()` when the forward-slug rule resolves nothing at all across
+ * a realistically sized set of entries that needed it.
+ *
+ * A drifted slug rule fails silently: every lookup returns an empty result, and
+ * empty reads exactly like "this host has no projects". The guard is the point,
+ * not the threshold. One or two misses are normal (a deleted directory, a
+ * renamed repository); ten with zero successes is a broken rule.
+ */
+export class SlugRuleDriftError extends Error {
+	constructor(
+		readonly attempted: number,
+		readonly projectsDir: string,
+	) {
+		super(
+			`Forward-slug resolution failed for all ${attempted} entries under ${projectsDir} ` +
+				`that carried no JSONL cwd. The slug rule in path-encoding.encodePath has ` +
+				`probably drifted from Claude Code's, or ${projectsDir} belongs to another host. ` +
+				`Refusing to report paths that were guessed by inverting the slug (SB23-1975).`,
+		);
+		this.name = "SlugRuleDriftError";
+	}
+}
+
+/**
+ * Entries needing the fallback below this count never trip the guard: a small
+ * set can legitimately resolve to nothing when the directories were deleted.
+ */
+const SLUG_DRIFT_MIN_SAMPLE = 10;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -168,6 +205,11 @@ async function gatherSessionStats(
 export class ClaudeCodeDiscovery {
 	private readonly projectsDir: string;
 	private readonly _caseInsensitive: boolean;
+	private readonly _readDir: ReadDirFn | undefined;
+	/** Entries in the current scan that fell through to forward-slug resolution. */
+	private _slugAttempts = 0;
+	/** How many of those the forward-slug resolver placed on a real directory. */
+	private _slugResolved = 0;
 
 	constructor(opts?: DiscoveryOptions) {
 		// Priority: constructor option > env var > default
@@ -177,6 +219,7 @@ export class ClaudeCodeDiscovery {
 			nodePath.join(os.homedir(), ".claude", "projects");
 
 		this._caseInsensitive = opts?.caseInsensitiveCanonicalize ?? false;
+		this._readDir = opts?.readDir;
 	}
 
 	/**
@@ -195,6 +238,8 @@ export class ClaudeCodeDiscovery {
 		}
 
 		const results: DiscoveredProject[] = [];
+		this._slugAttempts = 0;
+		this._slugResolved = 0;
 
 		for (const entry of topEntries) {
 			// Skip non-directories.
@@ -214,6 +259,13 @@ export class ClaudeCodeDiscovery {
 			} catch (err) {
 				logger.warn(`Error processing project entry: ${name}`, err);
 			}
+		}
+
+		if (
+			this._slugAttempts >= SLUG_DRIFT_MIN_SAMPLE &&
+			this._slugResolved === 0
+		) {
+			throw new SlugRuleDriftError(this._slugAttempts, this.projectsDir);
 		}
 
 		return results;
@@ -289,9 +341,22 @@ export class ClaudeCodeDiscovery {
 				: cwdFromJsonl;
 			ambiguous = false;
 		} else {
-			// Fall back to naive decode.
-			canonicalPath = naiveDecode(encodedName);
-			ambiguous = true;
+			// No JSONL cwd. Place the entry by encoding real directories forward
+			// and comparing, which is the only direction the slug is defined in.
+			this._slugAttempts++;
+			const resolved = resolveEncodedName(encodedName, this._readDir);
+			if (resolved !== null) {
+				this._slugResolved++;
+				canonicalPath = this._caseInsensitive
+					? resolved.toLowerCase()
+					: resolved;
+				ambiguous = false;
+			} else {
+				// Nothing on disk encodes to this name. The decoded path is a guess
+				// and almost certainly names a directory that does not exist.
+				canonicalPath = naiveDecode(encodedName);
+				ambiguous = true;
+			}
 		}
 
 		const { sessionCount, lastSessionAt } = await gatherSessionStats(dir);
