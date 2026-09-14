@@ -357,8 +357,13 @@ describe("CLI Integration Tests", () => {
 			const configFilePath = join(tempDir, "better-ccflare.json");
 			writeFileSync(
 				configFilePath,
+				// 5 rather than 7 for the attempts: SB23-1980 clamps the retry
+				// family to RETRY_BOUNDS, whose ceiling is 5, so 7 would be
+				// displayed as 5 and this test would read the clamp as a
+				// provenance failure. 5 is still non-default (the default is 3),
+				// so the case still discriminates. The other three are in range.
 				JSON.stringify({
-					retry_attempts: 7,
+					retry_attempts: 5,
 					retry_delay_ms: 4321,
 					retry_backoff: 3,
 					session_duration_ms: 123456,
@@ -381,13 +386,13 @@ describe("CLI Integration Tests", () => {
 			});
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toMatch(/Retry Attempts\s+7\s+\[Config file\]/);
+			expect(result.stdout).toMatch(/Retry Attempts\s+5\s+\[Config file\]/);
 			expect(result.stdout).toMatch(/Retry Delay\s+4321ms\s+\[Config file\]/);
 			expect(result.stdout).toMatch(/Retry Backoff\s+3\s+\[Config file\]/);
 			expect(result.stdout).toMatch(
 				/Session Duration\s+123456ms\s+\[Config file\]/,
 			);
-			expect(result.stdout).not.toMatch(/Retry Attempts\s+7\s+\[Default\]/);
+			expect(result.stdout).not.toMatch(/Retry Attempts\s+5\s+\[Default\]/);
 		});
 
 		it("still reports an unset retry value as Default (regression guard)", async () => {
