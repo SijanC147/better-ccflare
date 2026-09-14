@@ -148,6 +148,11 @@ export function validateRuntimeRetry(
 				applied: defaults[field],
 				reason: "not a number",
 			});
+			// The literal `nan` rather than the received value, so every
+			// non-numeric arrival collapses to one warning. Not because NaN
+			// would defeat the Set: Set uses SameValueZero, under which NaN
+			// does match itself, and the key is a template string where NaN
+			// stringifies to "NaN" anyway.
 			warnOnce(
 				`${key}:nan:${defaults[field]}`,
 				`${key} is not a number; applying the default ${defaults[field]}. ` +
