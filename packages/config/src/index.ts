@@ -233,6 +233,11 @@ export interface ConfigData {
 	// Discovery configuration
 	claude_projects_dir?: string;
 	projects_case_sensitive?: boolean;
+	// The mode the projects table was actually populated under, as opposed to
+	// projects_case_sensitive above, which is the mode the operator is asking
+	// for. They diverge exactly when someone changes the setting on a database
+	// that already holds projects, which re-keys every row (SB23-1988).
+	projects_case_sensitive_stored?: boolean;
 	[key: string]:
 		| string
 		| number
@@ -2132,6 +2137,27 @@ export class Config extends EventEmitter {
 		if (typeof fromFile === "boolean") return fromFile;
 		// Default: darwin is case-insensitive; everything else is case-sensitive.
 		return process.platform !== "darwin";
+	}
+
+	/**
+	 * The projects path case mode this database's rows were populated under,
+	 * or undefined on an install that predates the guard. Deliberately file
+	 * only, with no env override: it records what happened, not what is
+	 * wanted, and an env var would let the very flip it guards set its own
+	 * marker. See decideProjectsCaseMode (SB23-1988).
+	 */
+	getStoredProjectsCaseSensitive(): boolean | undefined {
+		const fromFile = this.data.projects_case_sensitive_stored;
+		return typeof fromFile === "boolean" ? fromFile : undefined;
+	}
+
+	setStoredProjectsCaseSensitive(value: boolean): void {
+		this.data.projects_case_sensitive_stored = value;
+		this.saveConfig();
+		this.emit("change", {
+			key: "projects_case_sensitive_stored",
+			newValue: value,
+		});
 	}
 
 	getRuntime(): RuntimeConfig {

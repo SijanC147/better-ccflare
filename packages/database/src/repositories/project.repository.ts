@@ -8,6 +8,24 @@ import {
 } from "@better-ccflare/types";
 import { BaseRepository } from "./base.repository";
 
+/**
+ * A project's primary key is derived from the exact path string it is stored
+ * with, so the CASE of that string is part of the key:
+ *
+ *   /Users/seanbugeja/Code/runpod_workspace -> ddb001cb08dd347f
+ *   /users/seanbugeja/code/runpod_workspace -> 084f767d0b7bbb27
+ *
+ * Whether a path arrives here lowercased is decided two packages away, by
+ * PROJECTS_CASE_SENSITIVE, read at discovery-scheduler.ts:125 and applied in
+ * claude-code-discovery's discovery.ts. Changing that setting therefore
+ * changes the id every existing row hashes to, and because
+ * `requests.project_id` has no foreign key to `projects.id`, nothing rejects
+ * the orphans that leaves behind.
+ *
+ * That coupling is invisible from this function, which is why it is written
+ * down here. The guard against it is decideProjectsCaseMode in
+ * ../projects-case-guard.ts, called once at server bootstrap (SB23-1988).
+ */
 function projectIdFromPath(canonicalPath: string): string {
 	return createHash("sha1").update(canonicalPath).digest("hex").slice(0, 16);
 }

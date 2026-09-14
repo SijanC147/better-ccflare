@@ -26,6 +26,7 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import {
 	AsyncDbWriter,
 	DatabaseFactory,
+	decideProjectsCaseMode,
 	initPayloadEncryption,
 } from "@better-ccflare/database";
 import {
@@ -399,6 +400,53 @@ async function adoptLegacyRoutingSettings(
 		log.warn(
 			`Could not adopt the legacy combo settings: ${err instanceof Error ? err.message : String(err)}`,
 		);
+	}
+}
+
+/**
+ * Refuse to start when PROJECTS_CASE_SENSITIVE has changed since the projects
+ * table was populated, because the change re-keys every row in it. See
+ * decideProjectsCaseMode for the four states and project.repository.ts for why
+ * the id depends on the setting at all (SB23-1988).
+ *
+ * Unlike adoptLegacyRoutingSettings, a failure here is not downgraded to a
+ * warning. Only a failure to READ the projects table is, since refusing to
+ * boot over a transient database error would be worse than the thing guarded
+ * against.
+ */
+async function guardProjectsCaseMode(
+	config: Config,
+	dbOps: DatabaseOperations,
+) {
+	const log = new Logger("Startup");
+	let projectCount: number;
+	try {
+		projectCount = (await dbOps.listProjects()).length;
+	} catch (err) {
+		log.warn(
+			`Could not check the projects path case mode: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return;
+	}
+
+	const decision = decideProjectsCaseMode({
+		recorded: config.getStoredProjectsCaseSensitive(),
+		current: config.isProjectsCaseSensitive(),
+		projectCount,
+	});
+
+	switch (decision.action) {
+		case "ok":
+			return;
+		case "record":
+			config.setStoredProjectsCaseSensitive(decision.record);
+			return;
+		case "adopt":
+			config.setStoredProjectsCaseSensitive(decision.record);
+			log.info(decision.message);
+			return;
+		case "refuse":
+			throw new Error(decision.message);
 	}
 }
 
@@ -891,6 +939,15 @@ export default async function startServer(options?: {
 
 	// Propagate filesystem case-sensitivity into the resolver manager before
 	// the first scan so projects are matched correctly.
+	//
+	// Guarded first, and deliberately NOT inside a try/catch: this setting is
+	// part of every project's primary key, so changing it on a populated
+	// database silently detaches the attribution history. Refusing to boot is
+	// the correct response, and a warning that boots anyway is not
+	// (SB23-1988). Both consumers, discovery-scheduler.ts:125 and :244 and the
+	// ResolverSnapshot, read the setting through the call below, so guarding
+	// this one line covers them all.
+	await guardProjectsCaseMode(config, dbOps);
 	dbOps.setProjectsCaseSensitive(config.isProjectsCaseSensitive());
 
 	// Start the discovery scheduler — scans ~/.claude/projects/ every 60 s and
