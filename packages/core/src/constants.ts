@@ -228,8 +228,19 @@ const RETRY_MAX_DELAY_MS_DEFAULT = 3000;
  * `attempts: 1` disables retry; the loops below run `attempts - 1` retries.
  *
  * The `CCFLARE_OVERLOAD_RETRY_*` variables predate the documented keys and stay
- * honoured so an existing deployment does not change behaviour on upgrade. They
- * are deprecated: each one overrides the documented key it shadows.
+ * honoured. They are deprecated: each one overrides the documented key it
+ * shadows.
+ *
+ * Setting them pins the old behaviour across an upgrade. Leaving them unset
+ * does NOT, and that is a deliberate widening rather than an oversight. This
+ * function previously hardcoded `maxAttempts: 2` and `baseMs: 750`, so the
+ * reset-less 529 in-place loop on a default install moves to 3 attempts at a
+ * 1000ms base, which are the documented defaults. The jitter formula and the
+ * 3000ms ceiling are unchanged, so the effect is one extra 529 attempt and a
+ * slightly larger cap before the ceiling bites. Preserving the old numbers
+ * would need a distinction between "key absent" and "key at its default",
+ * which packages/config does not expose. One documented widening beats a
+ * fourth knob.
  *
  *   CCFLARE_OVERLOAD_RETRY_ENABLED      set to "false" to disable retry entirely
  *   CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS overrides retry_attempts
