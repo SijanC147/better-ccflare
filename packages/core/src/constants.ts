@@ -198,31 +198,128 @@ export function isOverloadReason(reason: RateLimitReason): boolean {
 }
 
 /**
- * Configuration for in-place retry of reset-less 529 (overloaded_error) responses.
- * Used by proxyWithAccount before applying account cooldown.
- *
- * Env knobs:
- *   CCFLARE_OVERLOAD_RETRY_ENABLED      — set to "false" to disable (default: true)
- *   CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS — max in-place attempts (default: 2)
- *   CCFLARE_OVERLOAD_RETRY_BASE_MS      — jitter backoff base delay ms (default: 750)
- *   CCFLARE_OVERLOAD_RETRY_MAX_MS       — jitter backoff ceiling ms (default: 3000)
+ * The retry settings as the rest of the system states them: the three keys
+ * `retry_attempts`, `retry_delay_ms` and `retry_backoff`, resolved by
+ * packages/config from the config file, then the environment, then defaults.
  */
-export function getOverloadRetryConfig(): {
+export interface RetrySettings {
+	/** Total attempts for one upstream request, the first attempt included. */
+	attempts: number;
+	/** Base delay in milliseconds before the first retry. */
+	delayMs: number;
+	/** Multiplier applied per attempt. */
+	backoff: number;
+}
+
+/** Fallbacks used when no resolved RetrySettings is supplied. */
+export const RETRY_DEFAULTS: RetrySettings = {
+	attempts: 3,
+	delayMs: 1000,
+	backoff: 2,
+};
+
+/** Jitter ceiling, in milliseconds, when CCFLARE_OVERLOAD_RETRY_MAX_MS is unset. */
+const RETRY_MAX_DELAY_MS_DEFAULT = 3000;
+
+/**
+ * Resolves the retry policy actually applied on the proxy path.
+ *
+ * The documented keys drive it. `retry_attempts` counts the first attempt, so
+ * `attempts: 1` disables retry; the loops below run `attempts - 1` retries.
+ *
+ * The `CCFLARE_OVERLOAD_RETRY_*` variables predate the documented keys and stay
+ * honoured so an existing deployment does not change behaviour on upgrade. They
+ * are deprecated: each one overrides the documented key it shadows.
+ *
+ *   CCFLARE_OVERLOAD_RETRY_ENABLED      set to "false" to disable retry entirely
+ *   CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS overrides retry_attempts
+ *   CCFLARE_OVERLOAD_RETRY_BASE_MS      overrides retry_delay_ms
+ *   CCFLARE_OVERLOAD_RETRY_MAX_MS       jitter backoff ceiling ms (default: 3000)
+ *
+ * @param settings resolved retry settings, normally `ctx.runtime.retry`. Omitted
+ *   only by callers with no access to the runtime config, which then get
+ *   RETRY_DEFAULTS.
+ */
+export function getOverloadRetryConfig(settings?: RetrySettings): {
 	enabled: boolean;
 	maxAttempts: number;
 	baseMs: number;
+	backoff: number;
 	maxMs: number;
 } {
-	const enabled = process.env.CCFLARE_OVERLOAD_RETRY_ENABLED !== "false";
+	const resolved = settings ?? RETRY_DEFAULTS;
+
 	// maxAttempts: 0 is not useful (use ENABLED=false to disable), so || is correct.
 	const maxAttempts =
-		Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS) || 2;
+		Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS) ||
+		(Number.isFinite(resolved.attempts) && resolved.attempts >= 1
+			? Math.floor(resolved.attempts)
+			: RETRY_DEFAULTS.attempts);
+
 	// baseMs/maxMs: 0 is valid (zero delay for tests), so use explicit finite check.
 	const rawBase = Number(process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS);
 	const rawMax = Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS);
-	const baseMs = Number.isFinite(rawBase) && rawBase >= 0 ? rawBase : 750;
-	const maxMs = Number.isFinite(rawMax) && rawMax >= 0 ? rawMax : 3000;
-	return { enabled, maxAttempts, baseMs, maxMs };
+	const baseMs =
+		Number.isFinite(rawBase) && rawBase >= 0
+			? rawBase
+			: Number.isFinite(resolved.delayMs) && resolved.delayMs >= 0
+				? resolved.delayMs
+				: RETRY_DEFAULTS.delayMs;
+	const maxMs =
+		Number.isFinite(rawMax) && rawMax >= 0
+			? rawMax
+			: RETRY_MAX_DELAY_MS_DEFAULT;
+
+	// backoff below 1 would shrink the delay on every attempt, which defeats the
+	// point of backing off, so treat it as unset rather than honouring it.
+	const backoff =
+		Number.isFinite(resolved.backoff) && resolved.backoff >= 1
+			? resolved.backoff
+			: RETRY_DEFAULTS.backoff;
+
+	const enabled =
+		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED !== "false" && maxAttempts > 1;
+
+	return { enabled, maxAttempts, baseMs, backoff, maxMs };
+}
+
+/**
+ * The delay before retry attempt `attempt` (1-based), with full jitter.
+ *
+ * Full jitter, meaning a uniform draw from [0, cap], rather than the cap
+ * itself: several accounts failing at the same instant must not all wake at the
+ * same instant and rebuild the spike they are backing off from.
+ */
+export function retryDelayMs(
+	cfg: { baseMs: number; backoff: number; maxMs: number },
+	attempt: number,
+): number {
+	const cap = Math.min(cfg.baseMs * cfg.backoff ** attempt, cfg.maxMs);
+	return Math.random() * cap;
+}
+
+/**
+ * Whether a thrown upstream fetch failure may be retried.
+ *
+ * Every request through this proxy is a non-idempotent POST and /v1/messages
+ * carries no idempotency key, so a retry that reaches a model twice can bill
+ * twice and, on a stream, deliver two answers. Only a throw is retried here: a
+ * fetch that throws produced no response, so no byte reached the client and the
+ * request provably never got a reply from the model. That covers connection
+ * refused, DNS failure and TLS failure.
+ *
+ * An abort is never retried. The caller aborts when the client disconnects, and
+ * the header-phase timeout aborts on a request that may already be generating,
+ * so neither proves that no tokens were produced.
+ */
+export function isRetryableUpstreamError(
+	err: unknown,
+	signal?: AbortSignal,
+): boolean {
+	if (signal?.aborted) return false;
+	if (err instanceof Error && err.name === "AbortError") return false;
+	if (err instanceof DOMException && err.name === "TimeoutError") return false;
+	return err instanceof Error;
 }
 
 // Buffer sizes (in bytes unless specified)
