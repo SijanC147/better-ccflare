@@ -738,6 +738,20 @@ export const API_ROUTES: ApiRoute[] = [
 		bodyHint:
 			"Carries openobserve_token. The playground never logs a request body — see the PR body.",
 	},
+	{
+		method: "GET",
+		path: "/api/config/retry",
+		category: "Config",
+		summary:
+			"Upstream retry settings, the bounds the write enforces, and whether a restart is needed.",
+	},
+	{
+		method: "POST",
+		path: "/api/config/retry",
+		category: "Config",
+		summary:
+			"Set retry_attempts, retry_delay_ms and retry_backoff. Out-of-range values are rejected.",
+	},
 
 	// ----------------------------------------------------------- Maintenance
 	{

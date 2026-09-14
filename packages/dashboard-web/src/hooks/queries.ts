@@ -11,6 +11,7 @@ import {
 	type OpenObserveConfigUpdate,
 	type RequestPayload,
 	type RequestSummary,
+	type RetryConfigUpdate,
 } from "../api";
 import { queryKeys } from "../lib/query-keys";
 
@@ -574,6 +575,23 @@ export const useSetOpenObserveConfig = () => {
 			api.setOpenObserveConfig(settings),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["openobserve-config"] });
+		},
+	});
+};
+
+export const useRetryConfig = () => {
+	return useQuery({
+		queryKey: ["retry-config"],
+		queryFn: () => api.getRetryConfig(),
+	});
+};
+
+export const useSetRetryConfig = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (settings: RetryConfigUpdate) => api.setRetryConfig(settings),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["retry-config"] });
 		},
 	});
 };

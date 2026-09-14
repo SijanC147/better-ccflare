@@ -87,6 +87,7 @@ import { createGithubTokenConfigHandlers } from "./handlers/config-github-token"
 import { createOpenObserveConfigHandlers } from "./handlers/config-openobserve";
 import { createPostgresConfigHandlers } from "./handlers/config-postgres";
 import { createRequestStorageHandlers } from "./handlers/config-request-storage";
+import { createRetryConfigHandlers } from "./handlers/config-retry";
 import { createUpstreamMaintainerConfigHandlers } from "./handlers/config-upstream-maintainer";
 import {
 	createHeapSnapshotHandler,
@@ -332,6 +333,7 @@ export class APIRouter {
 			createUpstreamMaintainerConfigHandlers(config);
 		const githubTokenConfigHandlers = createGithubTokenConfigHandlers(config);
 		const openObserveConfigHandlers = createOpenObserveConfigHandlers(config);
+		const retryConfigHandlers = createRetryConfigHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -583,6 +585,14 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/openobserve", (req) =>
 			openObserveConfigHandlers.updateOpenObserveConfig(req),
+		);
+		// The three documented upstream retry keys. The read reports the bounds
+		// the write enforces, so the dashboard has one source for them.
+		this.handlers.set("GET:/api/config/retry", () =>
+			retryConfigHandlers.getRetryConfig(),
+		);
+		this.handlers.set("POST:/api/config/retry", (req) =>
+			retryConfigHandlers.setRetryConfig(req),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
