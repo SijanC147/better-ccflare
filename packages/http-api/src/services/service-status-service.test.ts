@@ -1,6 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { FetchLike } from "./service-status-service";
-import { buildSnapshot, ServiceStatusService } from "./service-status-service";
+import {
+	buildSnapshot,
+	getRefreshSeconds,
+	getServiceStatusService,
+	initServiceStatusRefresh,
+	resetServiceStatusServiceForTest,
+	ServiceStatusService,
+} from "./service-status-service";
 
 /**
  * Fixture JSON only — never the live page. A test that reaches the network
@@ -253,5 +260,193 @@ describe("ServiceStatusService", () => {
 		expect(calls).toBe(1);
 		expect(a.snapshot?.level).toBe("operational");
 		expect(b.snapshot?.level).toBe("operational");
+	});
+});
+
+describe("incident filtering", () => {
+	test("a resolved incident on a component that matters is not reported", () => {
+		// Pins the `resolved`/`postmortem` skip. Without it this line survives
+		// deletion: every other fixture incident is `investigating`.
+		const payload = {
+			...MEASURED_SUMMARY,
+			incidents: [
+				{
+					id: "incident-resolved",
+					name: "Elevated errors on api.anthropic.com",
+					status: "resolved",
+					impact: "critical",
+					shortlink: "https://stspg.io/resolved",
+					components: [
+						component(
+							CLAUDE_API_ID,
+							"Claude API (api.anthropic.com)",
+							"operational",
+						),
+					],
+				},
+				{
+					id: "incident-postmortem",
+					name: "Postmortem for the above",
+					status: "postmortem",
+					impact: "major",
+					shortlink: "https://stspg.io/pm",
+					components: [
+						component(CLAUDE_CODE_ID, "Claude Code", "operational"),
+					],
+				},
+				{
+					id: "incident-live",
+					name: "Investigating elevated latency",
+					status: "investigating",
+					impact: "minor",
+					shortlink: "https://stspg.io/live",
+					components: [
+						component(CLAUDE_CODE_ID, "Claude Code", "operational"),
+					],
+				},
+			],
+		};
+		const snapshot = buildSnapshot(payload, 7_000);
+		expect(snapshot?.incidents.map((i) => i.id)).toEqual(["incident-live"]);
+	});
+});
+
+describe("force bypasses the freshness TTL", () => {
+	test("a forced refresh re-fetches inside a TTL that has not expired", async () => {
+		// Pins the `!force &&` guard on the TTL branch. The backoff test forces
+		// on an empty cache, so it never exercises this.
+		let calls = 0;
+		const service = new ServiceStatusService({
+			refreshIntervalMs: 60_000,
+			now: () => 10_000,
+			fetchImpl: async () => {
+				calls += 1;
+				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
+			},
+		});
+		await service.getStatus();
+		expect(calls).toBe(1);
+		await service.getStatus();
+		expect(calls).toBe(1);
+		await service.getStatus(true);
+		expect(calls).toBe(2);
+	});
+});
+
+describe("getRefreshSeconds and the shared instance", () => {
+	const ENV = "BETTER_CCFLARE_SERVICE_STATUS_REFRESH_SECONDS";
+	const original = process.env[ENV];
+
+	afterEach(() => {
+		if (original === undefined) delete process.env[ENV];
+		else process.env[ENV] = original;
+		resetServiceStatusServiceForTest();
+	});
+
+	test("an unset variable yields the 300s default", () => {
+		delete process.env[ENV];
+		expect(getRefreshSeconds()).toBe(300);
+	});
+
+	test("a configured value is used verbatim", () => {
+		process.env[ENV] = "900";
+		expect(getRefreshSeconds()).toBe(900);
+	});
+
+	test("zero disables, and is distinct from an invalid value", () => {
+		process.env[ENV] = "0";
+		expect(getRefreshSeconds()).toBe(0);
+		process.env[ENV] = "not-a-number";
+		expect(getRefreshSeconds()).toBe(300);
+		process.env[ENV] = "-5";
+		expect(getRefreshSeconds()).toBe(300);
+	});
+
+	test("the configured cadence reaches the shared service's TTL", () => {
+		// The regression this pins: the environment variable used to feed only
+		// the disable check and a log string, so `=900` changed no behaviour
+		// while the log claimed a 900s cadence was in effect.
+		process.env[ENV] = "900";
+		resetServiceStatusServiceForTest();
+		expect(getServiceStatusService().refreshIntervalMsForTest).toBe(900_000);
+	});
+
+	test("a disabled poller still leaves the endpoint a sane TTL", () => {
+		process.env[ENV] = "0";
+		resetServiceStatusServiceForTest();
+		// Nothing is polling, so a zero TTL would make every request an
+		// outbound fetch.
+		expect(getServiceStatusService().refreshIntervalMsForTest).toBe(300_000);
+	});
+});
+
+describe("initServiceStatusRefresh", () => {
+	const ENV = "BETTER_CCFLARE_SERVICE_STATUS_REFRESH_SECONDS";
+	const original = process.env[ENV];
+
+	afterEach(() => {
+		if (original === undefined) delete process.env[ENV];
+		else process.env[ENV] = original;
+	});
+
+	test("zero disables the poller: nothing is fetched and the unregister is a no-op", async () => {
+		process.env[ENV] = "0";
+		let calls = 0;
+		const service = new ServiceStatusService({
+			now: () => 0,
+			fetchImpl: async () => {
+				calls += 1;
+				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
+			},
+		});
+		const stop = initServiceStatusRefresh(service, {
+			initialDelayMs: 1,
+			tickSeconds: 1,
+		});
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(calls).toBe(0);
+		expect(() => stop()).not.toThrow();
+	});
+
+	test("an enabled poller fires the first tick and stops after unregistering", async () => {
+		process.env[ENV] = "300";
+		let calls = 0;
+		const service = new ServiceStatusService({
+			refreshIntervalMs: 60_000,
+			now: () => 0,
+			fetchImpl: async () => {
+				calls += 1;
+				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
+			},
+		});
+		const stop = initServiceStatusRefresh(service, {
+			initialDelayMs: 1,
+			tickSeconds: 3600,
+		});
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(calls).toBe(1);
+		stop();
+		const after = calls;
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		expect(calls).toBe(after);
+	});
+
+	test("unregistering before the initial delay elapses cancels the first tick", async () => {
+		process.env[ENV] = "300";
+		let calls = 0;
+		const service = new ServiceStatusService({
+			now: () => 0,
+			fetchImpl: async () => {
+				calls += 1;
+				return new Response(JSON.stringify(MEASURED_SUMMARY), { status: 200 });
+			},
+		});
+		const stop = initServiceStatusRefresh(service, {
+			initialDelayMs: 50,
+			tickSeconds: 3600,
+		});
+		stop();
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(calls).toBe(0);
 	});
 });

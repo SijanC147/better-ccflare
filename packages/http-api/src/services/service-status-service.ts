@@ -297,6 +297,11 @@ export class ServiceStatusService {
 		this.now = options.now ?? (() => Date.now());
 	}
 
+	/** The effective TTL in milliseconds. Lets a test prove the env value landed. */
+	get refreshIntervalMsForTest(): number {
+		return this.refreshIntervalMs;
+	}
+
 	getStatus(force = false): Promise<ServiceStatusResult> {
 		const now = this.now();
 		if (
@@ -372,20 +377,11 @@ export class ServiceStatusService {
 let sharedService: ServiceStatusService | null = null;
 
 /**
- * The one instance the router's handler and the server's poller share, so the
- * poller's fetches are what keep the handler's snapshot warm.
+ * Resolve the configured cadence in seconds. `0` disables the poller; an
+ * unparseable or negative value falls back to the default rather than
+ * disabling anything by accident.
  */
-export function getServiceStatusService(): ServiceStatusService {
-	if (sharedService === null) sharedService = new ServiceStatusService();
-	return sharedService;
-}
-
-/** Test cleanup only. */
-export function resetServiceStatusServiceForTest(): void {
-	sharedService = null;
-}
-
-function getRefreshSeconds(): number {
+export function getRefreshSeconds(): number {
 	const raw = process.env[REFRESH_SECONDS_ENV];
 	if (raw === undefined || raw.trim() === "") return DEFAULT_REFRESH_SECONDS;
 	const parsed = Number(raw);
@@ -394,6 +390,31 @@ function getRefreshSeconds(): number {
 		return DEFAULT_REFRESH_SECONDS;
 	}
 	return parsed;
+}
+
+/**
+ * The one instance the router's handler and the server's poller share, so the
+ * poller's fetches are what keep the handler's snapshot warm.
+ *
+ * The configured cadence drives the service's TTL as well as the poller, so a
+ * cadence of 900 really is 900. `0` disables the poller but leaves the
+ * on-demand endpoint on the default TTL: nothing is polling, so a TTL of zero
+ * would make every request an outbound fetch.
+ */
+export function getServiceStatusService(): ServiceStatusService {
+	if (sharedService === null) {
+		const seconds = getRefreshSeconds();
+		sharedService = new ServiceStatusService({
+			refreshIntervalMs:
+				(seconds > 0 ? seconds : DEFAULT_REFRESH_SECONDS) * 1000,
+		});
+	}
+	return sharedService;
+}
+
+/** Test cleanup only. */
+export function resetServiceStatusServiceForTest(): void {
+	sharedService = null;
 }
 
 export interface ServiceStatusRefreshTestOverrides {
