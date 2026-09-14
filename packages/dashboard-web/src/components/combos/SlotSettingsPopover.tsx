@@ -11,6 +11,7 @@ import {
 	buildSlotUpdate,
 	draftFromSlot,
 	isDirty,
+	MAX_RESET_HOURS,
 	type SlotThrottleDraft,
 	validateDraft,
 } from "./slot-throttle-helpers";
@@ -35,6 +36,11 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 	const { percent, resetMs } = validateDraft(draft);
 	const update = buildSlotUpdate(slot, draft);
 	const dirty = isDirty(update);
+	// Stable ids so each field's message can be announced with the field it
+	// belongs to, rather than leaving a screen reader with "invalid" and no
+	// reason.
+	const percentHintId = `slot-max-util-hint-${slot.id}`;
+	const resetHintId = `slot-min-reset-hint-${slot.id}`;
 
 	const handleSave = () => {
 		if (!update || !dirty) return;
@@ -62,7 +68,9 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 
 			<div className="space-y-3 border-t pt-3">
 				<div className="space-y-1">
-					<Label>Skip this slot when</Label>
+					{/* A heading, not a label: it names the group rather than any one
+					 * control, so an orphan <label> here would point at nothing. */}
+					<p className="text-sm font-medium">Skip this slot when</p>
 					{/*
 					 * Settled 2026-09-14: only the configured conditions are
 					 * evaluated, and every configured one must hold. Each field is
@@ -95,19 +103,20 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 							}
 							className="w-24"
 							aria-invalid={percent === "invalid"}
+							aria-describedby={percentHintId}
 						/>
 						<span className="text-xs text-muted-foreground">
 							percent (0-100)
 						</span>
 					</div>
 					{percent === "invalid" && (
-						<p className="text-[11px] text-destructive">
+						<p id={percentHintId} className="text-[11px] text-destructive">
 							Enter a whole number from 0 to 100, or clear the field to ignore
 							this condition.
 						</p>
 					)}
 					{percent === 0 && (
-						<p className="text-[11px] text-muted-foreground">
+						<p id={percentHintId} className="text-[11px] text-muted-foreground">
 							0 percent matches any usage, so this slot is always skipped while
 							that is the only condition set.
 						</p>
@@ -132,15 +141,27 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 							}
 							className="w-24"
 							aria-invalid={resetMs === "invalid"}
+							aria-describedby={resetHintId}
 						/>
 						<span className="text-xs text-muted-foreground">
 							hours from resetting
 						</span>
 					</div>
 					{resetMs === "invalid" && (
-						<p className="text-[11px] text-destructive">
-							Enter a number of hours that is zero or greater, or clear the
-							field to ignore this condition.
+						<p id={resetHintId} className="text-[11px] text-destructive">
+							Enter a number of hours between 0 and{" "}
+							{MAX_RESET_HOURS.toLocaleString()}, or clear the field to ignore
+							this condition.
+						</p>
+					)}
+					{/* 0 hours is as slot-disabling here as 0 percent is above: the
+					 * clause becomes "resetMs - now >= 0", which holds for any reset in
+					 * the future, so the slot is skipped on every request. The percent
+					 * field warns about its zero, so this one must too. */}
+					{resetMs === 0 && (
+						<p id={resetHintId} className="text-[11px] text-muted-foreground">
+							0 hours matches any reset that is still ahead, so this slot is
+							always skipped while that is the only condition set.
 						</p>
 					)}
 					<p className="text-[11px] text-muted-foreground">
@@ -149,14 +170,22 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 					</p>
 				</div>
 
+				{/* The cadence is usage-fetcher.ts:925, a 90s default with plus or
+				 * minus 20 percent jitter (:806). On a failed fetch it backs off
+				 * exponentially to 30 minutes (:813), so quoting 90 seconds alone
+				 * would understate the worst case by a factor of twenty. */}
 				<p className="text-[11px] text-muted-foreground">
-					Usage figures are polled in the background roughly every 90 seconds,
-					so a threshold acts on a number that can be more than a minute old.
+					Usage figures come from a background poll, about every 90 seconds
+					while a provider is answering and as little as every 30 minutes while
+					it is failing. A threshold acts on the last cached figure, not a live
+					one.
 				</p>
 			</div>
 
+			{/* A failed save is otherwise silent to a screen reader: the button
+			 * returns from "Saving..." to "Save" and nothing announces why. */}
 			{updateSlot.isError && (
-				<p className="text-[11px] text-destructive">
+				<p role="alert" className="text-[11px] text-destructive">
 					{updateSlot.error instanceof Error
 						? updateSlot.error.message
 						: "Could not save the slot."}

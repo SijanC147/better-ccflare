@@ -4,7 +4,9 @@ import {
 	buildSlotUpdate,
 	describeSlotThrottle,
 	draftFromSlot,
+	formatHoursForSummary,
 	isDirty,
+	MAX_RESET_HOURS,
 	msToHoursInput,
 	parseHoursField,
 	parseIntegerField,
@@ -95,6 +97,35 @@ describe("parseHoursField", () => {
 	test("rejects a negative value", () => {
 		expect(parseHoursField("-1")).toBe("invalid");
 	});
+
+	// Without a ceiling, 1e20 hours is 3.6e26, Number.isInteger(3.6e26) is true,
+	// and the handler only checks Number.isInteger and >= 0, so the value would
+	// pass validation and reach the database far above int64.
+	test("rejects a value beyond the safe integer range", () => {
+		expect(parseHoursField("1e20")).toBe("invalid");
+		expect(parseHoursField(String(MAX_RESET_HOURS + 1))).toBe("invalid");
+	});
+
+	test("accepts the largest value it advertises", () => {
+		const result = parseHoursField(String(MAX_RESET_HOURS));
+		expect(result).not.toBe("invalid");
+		expect(Number.isSafeInteger(result as number)).toBe(true);
+	});
+});
+
+// Whatever msToHoursInput renders into the field, parseHoursField must read
+// back as the same stored value, or reopening the popover and saving would
+// write a different number than the one already stored.
+describe("the hours field round trip", () => {
+	const values = [
+		0, 1, 999, 1000, 3_599_999, 3_600_000, 3_600_001, 7_200_000, 18_000_000,
+		86_400_000, 604_800_000, 123_456_789, 2_147_483_647,
+	];
+	for (const ms of values) {
+		test(`${ms}ms renders and parses back unchanged`, () => {
+			expect(parseHoursField(msToHoursInput(ms))).toBe(ms);
+		});
+	}
 });
 
 describe("msToHoursInput", () => {
@@ -289,5 +320,46 @@ describe("describeSlotThrottle", () => {
 		expect(describeSlotThrottle(slot({ max_utilization_percent: 0 }))).toBe(
 			"skip when usage >= 0%",
 		);
+	});
+
+	// The summary is one line on a collapsed row. msToHoursInput is exact so the
+	// input field round-trips, which puts 0.016666666666666666 and
+	// 2.7777777777777776e-7 on screen; the summary must not show those.
+	test("rounds an awkward duration rather than showing its exact form", () => {
+		expect(describeSlotThrottle(slot({ min_reset_remaining_ms: 60_000 }))).toBe(
+			"skip when reset >= <0.1h away",
+		);
+		expect(describeSlotThrottle(slot({ min_reset_remaining_ms: 1 }))).toBe(
+			"skip when reset >= <0.1h away",
+		);
+		expect(
+			describeSlotThrottle(slot({ min_reset_remaining_ms: 5_400_000 })),
+		).toBe("skip when reset >= 1.5h away");
+	});
+
+	test("a zero reset threshold reads as 0, not as less than 0.1", () => {
+		expect(describeSlotThrottle(slot({ min_reset_remaining_ms: 0 }))).toBe(
+			"skip when reset >= 0h away",
+		);
+	});
+});
+
+describe("formatHoursForSummary", () => {
+	test("a whole number of hours has no decimal", () => {
+		expect(formatHoursForSummary(3_600_000)).toBe("1");
+		expect(formatHoursForSummary(18_000_000)).toBe("5");
+	});
+
+	test("zero is exact, not a floor marker", () => {
+		expect(formatHoursForSummary(0)).toBe("0");
+	});
+
+	test("anything under a tenth of an hour collapses to a floor marker", () => {
+		expect(formatHoursForSummary(1)).toBe("<0.1");
+		expect(formatHoursForSummary(60_000)).toBe("<0.1");
+	});
+
+	test("never renders exponent notation", () => {
+		expect(formatHoursForSummary(1)).not.toContain("e");
 	});
 });

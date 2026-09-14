@@ -3,6 +3,15 @@ import type { ComboSlot } from "@better-ccflare/types";
 const MS_PER_HOUR = 3_600_000;
 
 /**
+ * The largest number of hours the reset field accepts. Above this the
+ * millisecond value stops being exactly representable, and the handler would
+ * wave it through because it only checks `Number.isInteger` and `>= 0`.
+ */
+export const MAX_RESET_HOURS = Math.floor(
+	Number.MAX_SAFE_INTEGER / MS_PER_HOUR,
+);
+
+/**
  * A field the operator left blank is `null` (clear the threshold), a field
  * holding a number is that number, and anything else is `"invalid"`.
  *
@@ -38,7 +47,15 @@ export function parseHoursField(raw: string): ParsedField {
 	if (raw.trim().length === 0) return null;
 	const hours = Number(raw);
 	if (!Number.isFinite(hours) || hours < 0) return "invalid";
-	return Math.round(hours * MS_PER_HOUR);
+	const ms = Math.round(hours * MS_PER_HOUR);
+	// Without a ceiling, "1e20" hours produces 3.6e26, which passes
+	// Number.isInteger and therefore passes the handler's validation too
+	// (combos.ts only checks Number.isInteger and >= 0). It then reaches the
+	// database as a value far above int64, turning what should be a 400 into a
+	// 500 or a corrupt row. Reject it here, where the operator can still see
+	// which field is wrong.
+	if (ms > Number.MAX_SAFE_INTEGER) return "invalid";
+	return ms;
 }
 
 /**
@@ -129,6 +146,21 @@ export function isDirty(update: SlotThrottleUpdate | null): boolean {
 }
 
 /**
+ * Hours for the collapsed row summary, rounded for reading. Deliberately NOT
+ * `msToHoursInput`, which is exact so the input field round-trips: a stored
+ * 60000ms renders there as `0.016666666666666666` and a stored 1ms as
+ * `2.7777777777777776e-7`, which are correct in a field the operator edits and
+ * unreadable in a one-line summary.
+ */
+export function formatHoursForSummary(ms: number): string {
+	const hours = ms / MS_PER_HOUR;
+	if (hours === 0) return "0";
+	if (hours < 0.1) return "<0.1";
+	if (Number.isInteger(hours)) return String(hours);
+	return hours.toFixed(1);
+}
+
+/**
  * The one-line summary shown on the collapsed row, so an operator can see that
  * a slot carries a rule without opening the popover. Mirrors the settled
  * semantics: only the configured conditions are evaluated, and every
@@ -141,7 +173,7 @@ export function describeSlotThrottle(slot: ComboSlot): string | null {
 	}
 	if (slot.min_reset_remaining_ms !== null) {
 		clauses.push(
-			`reset >= ${msToHoursInput(slot.min_reset_remaining_ms)}h away`,
+			`reset >= ${formatHoursForSummary(slot.min_reset_remaining_ms)}h away`,
 		);
 	}
 	if (clauses.length === 0) return null;
