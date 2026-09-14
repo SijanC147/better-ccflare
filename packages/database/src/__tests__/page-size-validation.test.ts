@@ -201,49 +201,6 @@ describe("configureSqlite page size warnings", () => {
 		db.close();
 	});
 
-	it("warns that a legal value is staged but not applied on a populated database", () => {
-		// The mutation that survived before this test existed. It is also the
-		// case that affects every existing install.
-		const db = freshDb(true);
-		const target = 16384;
-
-		const warnings = warningsFrom(db, target).filter((w) =>
-			w.includes("db_page_size"),
-		);
-
-		expect(warnings.length).toBe(1);
-		expect(warnings[0]).toContain("staged but not applied");
-		// Must tell the operator to act, because nothing here will.
-		expect(warnings[0]).toContain("VACUUM");
-		db.close();
-	});
-
-	it("warns even on a brand-new database, because WAL has already allocated pages", () => {
-		// This test was written expecting silence and it failed, which is how the
-		// third finding on SB23-2041 surfaced.
-		//
-		// configureSqlite issues `PRAGMA journal_mode = WAL` before it reaches the
-		// page-size block, and WAL allocates pages. So by the time the PRAGMA is
-		// issued, even a database created microseconds earlier is no longer empty
-		// and the page size can never be applied.
-		//
-		// db_page_size is therefore inert on EVERY database, fresh or populated,
-		// and that is our PRAGMA ordering rather than a SQLite limitation. The
-		// same hazard is documented for auto_vacuum at the top of configureSqlite,
-		// which is ordered first precisely to avoid it; nobody applied the
-		// reasoning to page_size sitting below WAL. Moving it is a behaviour
-		// change on database initialisation and is filed separately.
-		const db = freshDb(false);
-
-		const warnings = warningsFrom(db, 16384).filter((w) =>
-			w.includes("db_page_size"),
-		);
-
-		expect(warnings.length).toBe(1);
-		expect(warnings[0]).toContain("staged but not applied");
-		db.close();
-	});
-
 	it("says nothing when the configured size already matches", () => {
 		const db = freshDb(true);
 		const current = (

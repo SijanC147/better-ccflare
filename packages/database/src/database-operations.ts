@@ -123,7 +123,8 @@ export function isValidSqlitePageSize(pageSize: number): boolean {
 	);
 }
 
-function configureSqlite(db: Database, config: DatabaseConfig): void {
+/** Exported for tests: the page-size warning is otherwise unreachable. */
+export function configureSqlite(db: Database, config: DatabaseConfig): void {
 	try {
 		// MUST be the first write-affecting PRAGMA. SQLite's auto_vacuum
 		// mode is locked in the DB header at first-write time. Anything that
@@ -230,23 +231,20 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 						`such a value without error, so the page size stays ${currentPageSize}.`,
 				);
 			} else if (currentPageSize !== config.pageSize) {
+				// Issued, but deliberately NOT warned about when it fails to apply.
+				//
+				// packages/config/src/index.ts defaults pageSize to 2048 whether or
+				// not an operator set db_page_size, and SQLite's own default is
+				// 4096. So on every install the requested and current sizes differ,
+				// and a warning here would fire on every boot for a setting nobody
+				// chose. That is noise, not signal.
+				//
+				// Distinguishing a configured value from the default needs a change
+				// in the config layer, and making the PRAGMA work at all needs it
+				// issued before `journal_mode = WAL` allocates pages. Both are
+				// behaviour changes on database initialisation and are filed
+				// separately (SB23-2041).
 				db.run(`PRAGMA page_size = ${config.pageSize}`);
-
-				// Re-read rather than assume. On an empty database this now
-				// reports the requested value and there is nothing to warn about.
-				const appliedPageSize = (
-					db.query("PRAGMA page_size").get() as { page_size: number }
-				).page_size;
-
-				if (appliedPageSize !== config.pageSize) {
-					console.warn(
-						`db_page_size ${config.pageSize} is staged but not applied: this ` +
-							`database already holds data, so the page size remains ` +
-							`${appliedPageSize}. SQLite only rewrites it during a full VACUUM. ` +
-							`Nothing in better-ccflare performs one on an existing database, ` +
-							`so run VACUUM manually if you want this setting to take effect.`,
-					);
-				}
 			}
 		}
 
