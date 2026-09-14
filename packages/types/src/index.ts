@@ -5,6 +5,7 @@ export * from "./agent-constants";
 export * from "./alerts";
 // Keep existing exports for backward compatibility
 export * from "./api";
+export * from "./api-catalog";
 export * from "./api-key";
 export * from "./combo";
 export * from "./constants";

@@ -1,15 +1,22 @@
 /**
- * The inventory of every HTTP route this fork serves, used by the API
- * playground.
+ * The inventory of every HTTP route this fork serves. Two consumers: the
+ * dashboard's API playground, and `GET /api/meta/routes`, which serves this
+ * array verbatim.
+ *
+ * It lives in `@better-ccflare/types` rather than in the dashboard because
+ * the server has to import it and does not depend on `dashboard-web`. It is
+ * hand-authored on purpose: generating it from the router would lose the
+ * `description`, `category` and parameter metadata the playground needs.
  *
  * The authority is `packages/http-api/src/router.ts`, not this file and not
  * any document. Static routes are registered there as
  * `this.handlers.set("<METHOD>:<path>", ...)`; dynamic routes are matched by
  * prefix in `handleRequest` and appear here with `:param` placeholders.
  *
- * `__tests__/api-catalog.test.ts` re-reads router.ts and fails if a static
- * route exists there but not here, so this list cannot quietly fall behind
- * the router.
+ * `packages/dashboard-web/src/lib/__tests__/api-catalog.test.ts` re-reads
+ * router.ts and fails if a static route exists there but not here, so this
+ * list cannot quietly fall behind the router. The dynamic half is guarded
+ * more weakly; see that file.
  */
 
 export type ApiCategory =
@@ -22,6 +29,7 @@ export type ApiCategory =
 	| "Insights"
 	| "Logs"
 	| "Maintenance"
+	| "Meta"
 	| "Models"
 	| "OAuth"
 	| "Projects"
@@ -1063,6 +1071,15 @@ export const API_ROUTES: ApiRoute[] = [
 		summary: "Preview how a model string resolves, without routing.",
 	},
 
+	// ------------------------------------------------------------------ Meta
+	{
+		method: "GET",
+		path: "/api/meta/routes",
+		category: "Meta",
+		summary: "This catalog, served by the server itself.",
+		note: "Dynamic routes are returned with their `:param` placeholders intact, exactly as they appear here.",
+	},
+
 	// ----------------------------------------------------------------- Debug
 	{
 		method: "GET",
@@ -1100,5 +1117,6 @@ export const API_CATEGORIES: ApiCategory[] = [
 	"Projects",
 	"Combos",
 	"Models",
+	"Meta",
 	"Debug",
 ];

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { API_ROUTES, fillPath, pathParams } from "../api-catalog";
+import {
+	API_ROUTES,
+	fillPath,
+	pathParams,
+} from "@better-ccflare/types/api-catalog";
 
 /**
  * The router is the authority on what this fork serves. These tests re-read it
@@ -9,10 +13,26 @@ import { API_ROUTES, fillPath, pathParams } from "../api-catalog";
  * reachable from the playground" stays a checked property rather than a claim
  * that rots on the next router edit.
  *
- * Static routes only: they are registered declaratively as
- * `this.handlers.set("<METHOD>:<path>", ...)` and can be extracted exactly.
- * Dynamic routes are matched by prefix inside `handleRequest` and cannot be,
- * so they are listed in the catalog by hand and are not covered here.
+ * Two guards of unequal strength, and the difference matters.
+ *
+ * The static guard is exact. Routes are registered declaratively as
+ * `this.handlers.set("<METHOD>:<path>", ...)`, so both directions are checked:
+ * no router route is missing from the catalog, and no catalog route is absent
+ * from the router.
+ *
+ * The dynamic guard is weaker. Dynamic routes are matched by
+ * `path.startsWith("<prefix>")` inside `handleRequest`, and the method and the
+ * remaining path segments are decided by control flow below that line, not by
+ * any literal. So the prefix is all that can be extracted. The dynamic guard
+ * therefore checks only that every `:param` catalog entry falls under some
+ * prefix branch and that every prefix branch has at least one catalog entry.
+ *
+ * What that does NOT catch: a new dynamic route added under a prefix branch
+ * that already has a catalog entry, a catalog entry whose method the branch
+ * never handles, and a catalog entry whose tail segments the branch never
+ * matches. Adding `GET /api/accounts/:accountId/invented` to the catalog
+ * passes, because `/api/accounts/` is a live prefix. Treat the dynamic half
+ * as a coarse containment check, not as parity with the static half.
  */
 
 const ROUTER_PATH = join(import.meta.dir, "../../../../http-api/src/router.ts");
@@ -23,8 +43,23 @@ function staticRoutesFromRouter(): Set<string> {
 	return new Set(Array.from(matches, (match) => `${match[1]}:${match[2]}`));
 }
 
+/**
+ * The prefix literals of every `path.startsWith("...")` branch in
+ * `handleRequest`. That literal is the only part of a dynamic route the source
+ * states declaratively; everything after it is control flow.
+ */
+function dynamicPrefixesFromRouter(): Set<string> {
+	const source = readFileSync(ROUTER_PATH, "utf8");
+	const matches = source.matchAll(/path\.startsWith\(\s*"([^"]+)"/g);
+	return new Set(Array.from(matches, (match) => match[1]));
+}
+
 const catalogKeys = new Set(
 	API_ROUTES.map((route) => `${route.method}:${route.path}`),
+);
+
+const dynamicRoutes = API_ROUTES.filter((route) =>
+	route.path.split("/").some((segment) => segment.startsWith(":")),
 );
 
 describe("api catalog", () => {
@@ -62,6 +97,12 @@ describe("api catalog", () => {
 		expect(unknown).toEqual([]);
 	});
 
+	test("serves itself: /api/meta/routes is in the catalog", () => {
+		// A route that describes every route, absent from the list of routes,
+		// is the one failure this catalog cannot afford.
+		expect(catalogKeys.has("GET:/api/meta/routes")).toBe(true);
+	});
+
 	test("every route has a category and a summary", () => {
 		for (const route of API_ROUTES) {
 			expect(route.category).toBeTruthy();
@@ -92,6 +133,37 @@ describe("api catalog", () => {
 			expect(route).toBeDefined();
 			expect(route?.dangerous).toBe(true);
 		}
+	});
+});
+
+describe("api catalog, dynamic half", () => {
+	// Weaker than the static guard by construction. See the header: containment
+	// under a prefix, in both directions, and nothing about method or tail.
+
+	test("every dynamic catalog route falls under a router prefix branch", () => {
+		const prefixes = Array.from(dynamicPrefixesFromRouter());
+
+		// Guard the extraction: a regex that silently stopped matching would
+		// make this test pass while checking nothing.
+		expect(prefixes.length).toBeGreaterThan(10);
+		expect(dynamicRoutes.length).toBeGreaterThan(30);
+
+		const unmatched = dynamicRoutes
+			.filter((route) => !prefixes.some((p) => route.path.startsWith(p)))
+			.map((route) => `${route.method}:${route.path}`)
+			.sort();
+
+		expect(unmatched).toEqual([]);
+	});
+
+	test("every router prefix branch has at least one catalog route", () => {
+		const prefixes = Array.from(dynamicPrefixesFromRouter());
+
+		const unlisted = prefixes
+			.filter((prefix) => !dynamicRoutes.some((r) => r.path.startsWith(prefix)))
+			.sort();
+
+		expect(unlisted).toEqual([]);
 	});
 });
 

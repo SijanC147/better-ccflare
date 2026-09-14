@@ -1,3 +1,11 @@
+import {
+	API_CATEGORIES,
+	API_ROUTES,
+	type ApiRoute,
+	fillPath,
+	isMutating,
+	pathParams,
+} from "@better-ccflare/types/api-catalog";
 import { AlertTriangle, Play, Radio, Search, Square } from "lucide-react";
 import React, {
 	useCallback,
@@ -7,14 +15,6 @@ import React, {
 	useState,
 } from "react";
 import { api, type RawResponse } from "../api";
-import {
-	API_CATEGORIES,
-	API_ROUTES,
-	type ApiRoute,
-	fillPath,
-	isMutating,
-	pathParams,
-} from "../lib/api-catalog";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";

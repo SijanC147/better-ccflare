@@ -4,6 +4,7 @@ import {
 	validateNumber,
 } from "@better-ccflare/core";
 import { BadRequest, Unauthorized } from "@better-ccflare/errors";
+import { API_ROUTES } from "@better-ccflare/types/api-catalog";
 import {
 	createAccountAddHandler,
 	createAccountAutoFallbackHandler,
@@ -625,6 +626,16 @@ export class APIRouter {
 			return bulkHandler(req);
 		});
 		this.handlers.set("GET:/api/workspaces", () => workspacesHandler());
+
+		// Meta routes: the server describing its own API surface.
+		this.handlers.set(
+			"GET:/api/meta/routes",
+			() =>
+				new Response(
+					JSON.stringify({ count: API_ROUTES.length, routes: API_ROUTES }),
+					{ headers: { "Content-Type": "application/json" } },
+				),
+		);
 
 		// Debug/profiling routes
 		this.handlers.set("GET:/api/debug/heap", () => heapStatsHandler());
