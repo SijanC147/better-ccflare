@@ -245,15 +245,52 @@ describe("buildSlotUpdate", () => {
 		expect(update).toEqual({ enabled: false });
 	});
 
-	test("an invalid field produces no payload at all", () => {
+	test("an invalid field produces no threshold payload", () => {
 		const s = slot();
 		const update = buildSlotUpdate(s, {
-			enabled: false,
+			...draftFromSlot(s),
 			maxUtilizationPercent: "abc",
 			minResetRemainingHours: "1",
 		});
 		expect(update).toBe(null);
 		expect(isDirty(update)).toBe(false);
+	});
+
+	// An invalid threshold must not hold the enabled toggle hostage. The case is
+	// reachable because the handler has no upper bound on
+	// min_reset_remaining_ms: a value stored through the API above
+	// Number.MAX_SAFE_INTEGER renders back into the hours field as invalid text
+	// nobody typed, and without this the slot could not be disabled at all.
+	test("the enabled toggle still saves while a threshold is invalid", () => {
+		const s = slot({ enabled: true, min_reset_remaining_ms: 1e300 });
+		const draft = draftFromSlot(s);
+		expect(validateDraft(draft).hasInvalidField).toBe(true);
+
+		const update = buildSlotUpdate(s, { ...draft, enabled: false });
+		expect(update).toEqual({ enabled: false });
+		expect(isDirty(update)).toBe(true);
+	});
+
+	test("an invalid threshold alone still sends nothing", () => {
+		const s = slot({ enabled: true });
+		const update = buildSlotUpdate(s, {
+			...draftFromSlot(s),
+			maxUtilizationPercent: "abc",
+		});
+		expect(update).toBe(null);
+	});
+
+	// The enabled-only escape must not smuggle a threshold out with it.
+	test("the escape carries no threshold key", () => {
+		const s = slot({ enabled: true, max_utilization_percent: 50 });
+		const update = buildSlotUpdate(s, {
+			enabled: false,
+			maxUtilizationPercent: "abc",
+			minResetRemainingHours: "9",
+		});
+		expect(update).toEqual({ enabled: false });
+		expect(update).not.toHaveProperty("max_utilization_percent");
+		expect(update).not.toHaveProperty("min_reset_remaining_ms");
 	});
 });
 

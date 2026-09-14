@@ -125,7 +125,17 @@ export function buildSlotUpdate(
 	draft: SlotThrottleDraft,
 ): SlotThrottleUpdate | null {
 	const { percent, resetMs, hasInvalidField } = validateDraft(draft);
-	if (hasInvalidField) return null;
+	if (hasInvalidField) {
+		// An invalid threshold must not produce a partial threshold payload, but
+		// it must not hold the enabled toggle hostage either. The toggle is a
+		// boolean that cannot itself be invalid, and the case is reachable: the
+		// handler has no upper bound on min_reset_remaining_ms, so a value stored
+		// through the API above Number.MAX_SAFE_INTEGER renders back into the
+		// hours field as invalid text the operator never typed. Without this, a
+		// slot in that state could not be disabled from the UI at all.
+		if (draft.enabled !== slot.enabled) return { enabled: draft.enabled };
+		return null;
+	}
 
 	const update: SlotThrottleUpdate = {};
 	if (draft.enabled !== slot.enabled) {
