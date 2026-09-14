@@ -793,6 +793,40 @@ describe("startServer() wiring guards", () => {
 	// helper exported would not have failed the unit tests in this file
 	// before this guard landed. With this guard, deleting that block while
 	// leaving the helper intact goes RED.
+	// SB23-1988. Same shape, same reason. The projects case guard is pure and
+	// well tested on its own, but the thing that actually protects an operator
+	// is the CALL to it in startServer(), before setProjectsCaseSensitive().
+	// A reviewer confirmed that deleting that call failed no test at all.
+	// Order matters as much as presence: guarding after the setter would let
+	// the resolver be built with the new mode before anything refused.
+	it("invokes guardProjectsCaseMode before setProjectsCaseSensitive in startServer()", () => {
+		const body = readStartServerBody();
+		const guardIdx = body.search(/guardProjectsCaseMode\s*\(/);
+		const setterIdx = body.search(/dbOps\.setProjectsCaseSensitive\s*\(/);
+		expect(guardIdx).toBeGreaterThanOrEqual(0);
+		expect(setterIdx).toBeGreaterThanOrEqual(0);
+		expect(guardIdx).toBeLessThan(setterIdx);
+	});
+
+	// The refusal only refuses if it throws. Downgrading it to a log line,
+	// or wrapping the call in a try/catch the way the neighbouring
+	// adoptLegacyRoutingSettings is wrapped, would boot anyway and defeat
+	// the whole guard, so pin that the call site is not inside a catch.
+	it("does not swallow guardProjectsCaseMode in a try/catch", () => {
+		const body = readStartServerBody();
+		const idx = body.search(/await\s+guardProjectsCaseMode\s*\(/);
+		expect(idx).toBeGreaterThanOrEqual(0);
+		// Look back over the preceding lines for an unclosed `try {`. The
+		// call sits at the top level of startServer(), so any `try` opened
+		// before it must already have been closed by a `}` at the same
+		// indentation.
+		const before = body.slice(0, idx);
+		const lastTry = before.lastIndexOf("try {");
+		if (lastTry >= 0) {
+			expect(before.slice(lastTry)).toContain("}");
+		}
+	});
+
 	it("invokes bootstrapMinimaxUsagePolling inside startServer()", () => {
 		const body = readStartServerBody();
 		// Match an actual call: `<identifier> (`. Just matching the bare

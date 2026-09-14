@@ -72,7 +72,9 @@ function refusal(recorded: boolean, current: boolean, count: number): string {
 		"",
 		"A project's id is sha1(canonical_path) truncated to 16 characters, and this setting decides whether that path is stored lowercased. Starting with the new setting would re-key every one of those rows on the next discovery scan. Because requests.project_id has no foreign key to projects.id, nothing would reject the result: every request already attributed would keep pointing at an id no project has any more, and the attribution history would detach with no error and no log line.",
 		"",
-		`To go ahead anyway and accept that detachment, set projects_case_sensitive_stored to ${current} in the config file. To keep the existing history, restore PROJECTS_CASE_SENSITIVE to ${recorded}.`,
+		`The setting is resolved from the PROJECTS_CASE_SENSITIVE environment variable, then projects_case_sensitive in the config file, then the platform default, so check all three rather than only the environment.`,
+		"",
+		`To go ahead anyway and accept that detachment, set projects_case_sensitive_stored to ${current} in the config file. To keep the existing history, make that resolution produce ${recorded} again.`,
 	].join("\n");
 }
 

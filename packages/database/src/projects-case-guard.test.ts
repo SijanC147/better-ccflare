@@ -169,3 +169,50 @@ describe("hasUppercaseDiscoveredPath", () => {
 		}
 	});
 });
+
+describe("decideProjectsCaseMode boundaries", () => {
+	// Found by a reviewer's surviving mutation: changing `projectCount === 0`
+	// to `projectCount <= 1` passed the whole suite, because the other cases
+	// use 0, 3 and 12 and none of them sits on the boundary. A database
+	// holding exactly one project has exactly one project's history to lose.
+	test("refuses on a table holding exactly one project", () => {
+		const decision = decideProjectsCaseMode({
+			recorded: false,
+			current: true,
+			projectCount: 1,
+			rowsHaveUppercase: false,
+		});
+		expect(decision.action).toBe("refuse");
+		// Singular, because a message reading "1 projects" is the kind of
+		// detail an operator reads as carelessness in a message asking them
+		// to trust a refusal.
+		expect(decision.message).toContain("1 project.");
+	});
+
+	// Found by a reviewer's second surviving mutation: changing the adopted
+	// value to `derived || projectCount > 5` passed, because adopt was only
+	// ever exercised with `current: true`, so nothing pinned what it records
+	// when the answer is false. Recording the wrong value here would refuse
+	// the NEXT boot, on an install whose setting never moved.
+	test("adopts case-insensitive, and records false, when that is the answer", () => {
+		const decision = decideProjectsCaseMode({
+			recorded: undefined,
+			current: false,
+			projectCount: 12,
+			rowsHaveUppercase: false,
+		});
+		expect(decision.action).toBe("adopt");
+		expect(decision.record).toBe(false);
+	});
+
+	test("records false on an empty table when that is the current mode", () => {
+		const decision = decideProjectsCaseMode({
+			recorded: true,
+			current: false,
+			projectCount: 0,
+			rowsHaveUppercase: false,
+		});
+		expect(decision.action).toBe("record");
+		expect(decision.record).toBe(false);
+	});
+});
