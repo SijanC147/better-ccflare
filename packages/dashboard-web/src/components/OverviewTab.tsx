@@ -37,6 +37,7 @@ import {
 	type PoolCapacitySectionPool,
 } from "./overview/PoolCapacitySection";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
+import { ServiceStatusBanner } from "./overview/ServiceStatusBanner";
 import {
 	StorageIntegrityBanner,
 	StorageIntegrityCard,
@@ -255,6 +256,10 @@ export const OverviewTab = React.memo(() => {
 		<div className="space-y-6">
 			{/* Sticky corruption banner — only renders when /api/storage reports corrupt */}
 			<StorageIntegrityBanner />
+
+			{/* Claude service status — only renders when a component this proxy
+			    forwards to is degraded or down */}
+			<ServiceStatusBanner />
 
 			{/* Header with Time Range Selector */}
 			<div className="flex justify-between items-center">

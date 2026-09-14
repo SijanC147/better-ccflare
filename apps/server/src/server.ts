@@ -28,7 +28,13 @@ import {
 	DatabaseFactory,
 	initPayloadEncryption,
 } from "@better-ccflare/database";
-import { AlertService, APIRouter, AuthService } from "@better-ccflare/http-api";
+import {
+	AlertService,
+	APIRouter,
+	AuthService,
+	getServiceStatusService,
+	initServiceStatusRefresh,
+} from "@better-ccflare/http-api";
 import {
 	LeastUsedStrategy,
 	SessionAffinityStrategy,
@@ -353,6 +359,7 @@ let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let stopModelCatalogRefreshJob: (() => void) | null = null;
+let stopServiceStatusRefreshJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let discoveryScheduler: DiscoveryScheduler | null = null;
@@ -2036,6 +2043,13 @@ Available endpoints:
 	// rather than a single long-lived interval timer).
 	stopModelCatalogRefreshJob = initModelCatalogRefresh(proxyContext);
 
+	// Keep the filtered status.claude.com snapshot warm from the server, so the
+	// dashboard never waits on an outbound fetch. Same tick-and-check shape;
+	// BETTER_CCFLARE_SERVICE_STATUS_REFRESH_SECONDS=0 disables it.
+	stopServiceStatusRefreshJob = initServiceStatusRefresh(
+		getServiceStatusService(),
+	);
+
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {
 		throw new Error("Server instance has no valid port");
@@ -2250,6 +2264,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (stopModelCatalogRefreshJob) {
 			stopModelCatalogRefreshJob();
 			stopModelCatalogRefreshJob = null;
+		}
+		if (stopServiceStatusRefreshJob) {
+			stopServiceStatusRefreshJob();
+			stopServiceStatusRefreshJob = null;
 		}
 		if (autoRefreshScheduler) {
 			autoRefreshScheduler.stop();
