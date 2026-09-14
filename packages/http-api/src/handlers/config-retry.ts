@@ -1,4 +1,5 @@
 import type { Config } from "@better-ccflare/config";
+import { RETRY_BOUNDS } from "@better-ccflare/core";
 import {
 	BadRequest,
 	errorResponse,
@@ -20,46 +21,24 @@ import {
  * the read below says so. That is the opposite of the OpenObserve settings,
  * which are read through a getter on every decision.
  *
- * The bounds are enforced HERE and nowhere else. `packages/config` accepts the
- * three keys on a bare `typeof value === "number"`, unlike the adjacent
- * `db_retry_*`, which is range-validated (SB23-1980). So this handler is the
- * only thing between an interactive caller and a value the retry loop will
- * clamp silently or, worse, attempt.
+ * The bounds are `RETRY_BOUNDS` from `@better-ccflare/core`, which is also what
+ * `packages/config` clamps the config-file and environment values against
+ * (SB23-1980). The two layers share one definition on purpose: a second set of
+ * numbers here would let the dashboard reject a value the config file accepts.
+ *
+ * What the two layers do NOT share is the response to an out-of-range value.
+ * This endpoint rejects with a 400, because an interactive caller can be told
+ * it is wrong and can try again. The config layer clamps and warns, because a
+ * boot-time value must not take the proxy down. That asymmetry is deliberate
+ * and is argued in `validateRuntimeRetry` in `packages/config`.
  */
 
-/**
- * Total attempts for one upstream request, the first attempt included, so 1
- * means no retry and 0 also resolves to a single attempt. The ceiling is 5
- * because two retry layers read these keys and can stack on one request: the
- * transport retry in `forwardWithTransportRetry` and the in-place 529 loop.
- * The worst case is attempts squared, so 5 allows 25 upstream fetches for one
- * client request. 10 would allow 100, which is a spike turned into a storm.
- */
-const ATTEMPTS_MIN = 0;
-const ATTEMPTS_MAX = 5;
+const { attempts: ATTEMPTS, delayMs: DELAY, backoff: BACKOFF } = RETRY_BOUNDS;
+const { min: ATTEMPTS_MIN, max: ATTEMPTS_MAX } = ATTEMPTS;
+const { min: DELAY_MIN_MS, max: DELAY_MAX_MS } = DELAY;
+const { min: BACKOFF_MIN, max: BACKOFF_MAX } = BACKOFF;
 
-/**
- * Base delay in milliseconds before the first retry. The ceiling is 30000
- * because a larger value holds a client request open with nothing to show for
- * it; the jittered per-attempt delay is separately capped by
- * CCFLARE_OVERLOAD_RETRY_MAX_MS, 3000 by default.
- */
-const DELAY_MIN_MS = 0;
-const DELAY_MAX_MS = 30_000;
-
-/**
- * Multiplier applied per attempt, NOT a duration. Below 1 would shrink the
- * delay on each retry, which is the opposite of backing off, so 1 is the floor
- * and means a constant delay.
- */
-const BACKOFF_MIN = 1;
-const BACKOFF_MAX = 5;
-
-export const RETRY_BOUNDS = {
-	attempts: { min: ATTEMPTS_MIN, max: ATTEMPTS_MAX },
-	delayMs: { min: DELAY_MIN_MS, max: DELAY_MAX_MS },
-	backoff: { min: BACKOFF_MIN, max: BACKOFF_MAX },
-} as const;
+export { RETRY_BOUNDS };
 
 /**
  * Reads one numeric field. Absent leaves the stored value alone, the same

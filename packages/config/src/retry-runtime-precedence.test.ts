@@ -71,13 +71,13 @@ describe("retry settings precedence", () => {
 	});
 
 	it("honours RETRY_ATTEMPTS, RETRY_DELAY_MS and RETRY_BACKOFF", () => {
-		process.env.RETRY_ATTEMPTS = "7";
+		process.env.RETRY_ATTEMPTS = "5";
 		process.env.RETRY_DELAY_MS = "250";
 		process.env.RETRY_BACKOFF = "1.5";
 		const { config, cleanup } = makeConfig();
 		try {
 			const runtime = config.getRuntime();
-			expect(runtime.retry.attempts).toBe(7);
+			expect(runtime.retry.attempts).toBe(5);
 			expect(runtime.retry.delayMs).toBe(250);
 			expect(runtime.retry.backoff).toBe(1.5);
 		} finally {
@@ -86,7 +86,7 @@ describe("retry settings precedence", () => {
 	});
 
 	it("lets the config file outrank the environment", () => {
-		process.env.RETRY_ATTEMPTS = "7";
+		process.env.RETRY_ATTEMPTS = "5";
 		const { config, cleanup } = makeConfig({ retry_attempts: 4 });
 		try {
 			expect(config.getRuntime().retry.attempts).toBe(4);
@@ -98,12 +98,12 @@ describe("retry settings precedence", () => {
 	it("config.get discards the environment, which is why the server must not use it", () => {
 		// This is the defect, asserted rather than described. If someone
 		// rebuilds RuntimeConfig out of config.get calls again, this fails.
-		process.env.RETRY_ATTEMPTS = "7";
+		process.env.RETRY_ATTEMPTS = "5";
 		const { config, cleanup } = makeConfig();
 		try {
 			// getRuntime first, so this reads a config file that config.get has
 			// not yet written to. See the next test for why the order matters.
-			expect(config.getRuntime().retry.attempts).toBe(7);
+			expect(config.getRuntime().retry.attempts).toBe(5);
 			expect(config.get("retry_attempts", 3)).toBe(3);
 		} finally {
 			cleanup();
@@ -116,10 +116,10 @@ describe("retry settings precedence", () => {
 		// through `get` writes 3 into the config file. The file outranks the
 		// environment, so from that moment the operator's RETRY_ATTEMPTS loses,
 		// in this process and in every later one, to a value nobody chose.
-		process.env.RETRY_ATTEMPTS = "7";
+		process.env.RETRY_ATTEMPTS = "5";
 		const { config, path, cleanup } = makeConfig();
 		try {
-			expect(config.getRuntime().retry.attempts).toBe(7);
+			expect(config.getRuntime().retry.attempts).toBe(5);
 
 			config.get("retry_attempts", 3);
 

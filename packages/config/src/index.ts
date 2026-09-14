@@ -36,6 +36,7 @@ import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
+import { validateRuntimeRetry } from "./runtime-validation";
 
 const log = new Logger("Config");
 
@@ -2239,14 +2240,17 @@ export class Config extends EventEmitter {
 	}
 
 	getRuntime(): RuntimeConfig {
+		// Named because validateRuntimeRetry needs the same three numbers to fall
+		// back to, and a second literal of them could drift from this one.
+		const retryDefaults = {
+			attempts: 3,
+			delayMs: TIME_CONSTANTS.RETRY_DELAY_DEFAULT,
+			backoff: 2,
+		};
 		// Default values
 		const defaults: RuntimeConfig = {
 			clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-			retry: {
-				attempts: 3,
-				delayMs: TIME_CONSTANTS.RETRY_DELAY_DEFAULT,
-				backoff: 2,
-			},
+			retry: { ...retryDefaults },
 			sessionDurationMs: TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
 			port: NETWORK.DEFAULT_PORT,
 			database: {
@@ -2371,6 +2375,13 @@ export class Config extends EventEmitter {
 		if (typeof this.data.db_retry_max_delay_ms === "number") {
 			defaults.database.retry.maxDelayMs = this.data.db_retry_max_delay_ms;
 		}
+
+		// Clamp the upstream retry family against RETRY_BOUNDS, the same bounds
+		// POST /api/config/retry enforces. Runs after both the environment and
+		// the config file have had their say, so one pass covers both sources.
+		// Clamps rather than throwing, which is argued in the function
+		// (SB23-1980).
+		validateRuntimeRetry(defaults.retry, retryDefaults);
 
 		// Validate the final database configuration
 		try {
