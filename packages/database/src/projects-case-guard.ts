@@ -71,13 +71,12 @@ function refusal(recorded: boolean, current: boolean, count: number): string {
 /**
  * Decide what a boot should do about the projects case mode.
  *
- * Four states:
+ * States:
  *  - empty table: nothing to detach, so record the current mode and proceed.
  *  - no marker, populated table: every install upgrading into this guard lands
- *    here. The rows were populated under whatever the setting resolved to
- *    then, which is what it resolves to now unless it has already been
- *    changed, so adopt it and say so. Refusing here would break every existing
- *    install's first boot after the upgrade.
+ *    here, so the mode is derived from the rows rather than from the setting,
+ *    which would otherwise agree with itself. Uppercase rows under a
+ *    case-insensitive setting refuse; anything else adopts and logs.
  *  - marker matches: proceed.
  *  - marker differs, populated table: refuse.
  */
