@@ -71,11 +71,13 @@ The configuration file is stored at:
 |-------|------|---------|-------------|
 | `lb_strategy` | string | `"session"` | Load balancing strategy. Use session-class strategies only: `"session"` (default), `"session-drain-soonest"` (same session semantics, prefers the soonest-resetting weekly window), or `"session-drain-soonest-strict"` (drain ranking applies to every selection; an active 5h session only breaks ties). Per-request spreading strategies risk account bans — see warning below |
 | `client_id` | string | `"9d1c250a-e61b-44d9-88ed-5944d1962f5e"` | OAuth client ID for authentication |
-| `retry_attempts` | number | `3` | Maximum number of retry attempts for failed requests |
-| `retry_delay_ms` | number | `1000` | Initial delay in milliseconds between retry attempts |
-| `retry_backoff` | number | `2` | Exponential backoff multiplier for retry delays |
+| `retry_attempts` | number | `3` | Total attempts for one upstream request, the first attempt included. `1` disables retry |
+| `retry_delay_ms` | number | `1000` | Base delay in milliseconds before the first retry |
+| `retry_backoff` | number | `2` | Multiplier applied per attempt: the delay for attempt n is `retry_delay_ms * retry_backoff ** n`, with full jitter, capped |
 | `session_duration_ms` | number | `18000000` (5 hours) | Session persistence duration in milliseconds |
 | `port` | number | `8080` | HTTP server port |
+
+A change to `retry_attempts`, `retry_delay_ms` or `retry_backoff` requires a restart. The server builds its runtime config once at startup, so editing the config file or the environment has no effect on a running process.
 
 ### Load Balancing Strategy
 
@@ -103,9 +105,9 @@ The configuration file is stored at:
 |---------------------|--------------|------|---------|
 | `LB_STRATEGY` | `lb_strategy` | string | `LB_STRATEGY=session` |
 | `CLIENT_ID` | `client_id` | string | `CLIENT_ID=your-client-id` |
-| `RETRY_ATTEMPTS` | `retry_attempts` | number | `RETRY_ATTEMPTS=5` |
-| `RETRY_DELAY_MS` | `retry_delay_ms` | number | `RETRY_DELAY_MS=2000` |
-| `RETRY_BACKOFF` | `retry_backoff` | number | `RETRY_BACKOFF=1.5` |
+| `RETRY_ATTEMPTS` | `retry_attempts` | number | `RETRY_ATTEMPTS=5` (config file value wins if both are set) |
+| `RETRY_DELAY_MS` | `retry_delay_ms` | number | `RETRY_DELAY_MS=2000` (config file value wins if both are set) |
+| `RETRY_BACKOFF` | `retry_backoff` | number | `RETRY_BACKOFF=1.5` (config file value wins if both are set) |
 | `SESSION_DURATION_MS` | `session_duration_ms` | number | `SESSION_DURATION_MS=3600000` |
 | `PORT` | `port` | number | `PORT=3000` |
 | `DATA_RETENTION_DAYS` | `data_retention_days` | number | `DATA_RETENTION_DAYS=3` (payloads) |
@@ -132,10 +134,10 @@ These environment variables are not stored in the configuration file and must be
 | `BETTER_CCFLARE_MODELS_OAUTH_REFRESH` | Allow OAuth accounts as a fallback source for *scheduled* model catalog refreshes when no console/API-key account is eligible. Manual refreshes always allow the OAuth fallback regardless of this setting | - (console-only) | `BETTER_CCFLARE_MODELS_OAUTH_REFRESH=1` |
 | `BETTER_CCFLARE_HOST` | Server binding host | `0.0.0.0` | `BETTER_CCFLARE_HOST=127.0.0.1` (localhost-only) |
 | `SSL_KEY_PATH` / `SSL_CERT_PATH` | SSL private key / certificate paths for HTTPS | - | `SSL_KEY_PATH=/path/to/key.pem` |
-| `CCFLARE_OVERLOAD_RETRY_ENABLED` | In-place retry of Anthropic 529 "no reset" overloads before falling back to account cooldown | `true` | `CCFLARE_OVERLOAD_RETRY_ENABLED=false` |
-| `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS` | Total attempts including the original request | `2` | `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS=3` |
-| `CCFLARE_OVERLOAD_RETRY_BASE_MS` | Overload retry backoff base in ms; `0` = no sleep | `750` | `CCFLARE_OVERLOAD_RETRY_BASE_MS=500` |
-| `CCFLARE_OVERLOAD_RETRY_MAX_MS` | Overload retry backoff ceiling in ms | `3000` | `CCFLARE_OVERLOAD_RETRY_MAX_MS=5000` |
+| `CCFLARE_OVERLOAD_RETRY_ENABLED` | **Deprecated.** Predates `retry_attempts`, `retry_delay_ms` and `retry_backoff` and still overrides them when set. Set to `false` to disable retry entirely. Setting the three variables in this group pins the old behavior across an upgrade; leaving them unset does not, see the two rows below | `true` | `CCFLARE_OVERLOAD_RETRY_ENABLED=false` |
+| `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS` | **Deprecated.** Overrides `retry_attempts` when set, total attempts including the first. When unset, the 529 in-place retry now falls back to `retry_attempts` instead of its own old default of `2`, changing behavior on upgrade for a deployment that never set this variable | `retry_attempts` (3) | `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS=3` |
+| `CCFLARE_OVERLOAD_RETRY_BASE_MS` | **Deprecated.** Overrides `retry_delay_ms` when set; `0` = no delay. When unset, the 529 in-place retry now falls back to `retry_delay_ms` instead of its own old default of `750`, changing behavior on upgrade for a deployment that never set this variable | `retry_delay_ms` (1000) | `CCFLARE_OVERLOAD_RETRY_BASE_MS=500` |
+| `CCFLARE_OVERLOAD_RETRY_MAX_MS` | **Deprecated.** Jitter delay ceiling in ms. No equivalent among `retry_attempts`, `retry_delay_ms` and `retry_backoff` | `3000` | `CCFLARE_OVERLOAD_RETRY_MAX_MS=5000` |
 | `CCFLARE_OVERLOAD_COOLDOWN_MS` | Fixed per-account cooldown after a 529 (overloaded) response with no Retry-After header. Unlike 429 cooldowns it never ramps with a streak; pairs with a single-flight recovery probe that admits exactly one request once the cooldown expires, as long as another account is available to defer to — if every account in the pool is currently suppressed, the request runs ungated instead | `10000` (10s) | `CCFLARE_OVERLOAD_COOLDOWN_MS=15000` |
 | `CCFLARE_OVERLOAD_WITH_RESET_MAX_MS` | Cap on a 529-with-reset cooldown duration (`min(resetTime, now + cap)`). Guards against a multi-hour quota-window reset header (`anthropic-ratelimit-unified-reset`) being mistaken for a short, real retry-after | `60000` (60s) | `CCFLARE_OVERLOAD_WITH_RESET_MAX_MS=120000` |
 | `CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS` | Base delay for adaptive per-account 429 cooldown backoff | `30000` (30s) | `CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS=15000` |

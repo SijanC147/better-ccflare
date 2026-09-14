@@ -9,8 +9,12 @@ export {
 	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
 	isOverloadReason,
+	isRetryableUpstreamError,
 	LIMITS,
 	NETWORK,
+	RETRY_DEFAULTS,
+	type RetrySettings,
+	retryDelayMs,
 	TIME_CONSTANTS,
 } from "./constants";
 

@@ -344,6 +344,75 @@ describe("CLI Integration Tests", () => {
 		});
 	});
 
+	describe("--show-config provenance", () => {
+		// SB23-1959: Session Duration and the three retry keys (Retry Attempts,
+		// Retry Delay, Retry Backoff) were unconditionally labelled "Default"
+		// unless the matching env var was set — a value set only in the config
+		// file was mislabelled "Default", which is exactly what let three
+		// inert retry keys look live for months. This is the only case that
+		// discriminates: no env var set, config file value set, non-default.
+		it("reports a config-file-only retry value as Config file, not Default", async () => {
+			const xdgConfigHome = join(tempDir, "xdg-empty");
+			mkdirSync(xdgConfigHome, { recursive: true });
+			const configFilePath = join(tempDir, "better-ccflare.json");
+			writeFileSync(
+				configFilePath,
+				JSON.stringify({
+					retry_attempts: 7,
+					retry_delay_ms: 4321,
+					retry_backoff: 3,
+					session_duration_ms: 123456,
+				}),
+			);
+
+			const result = await runCLI(["--show-config"], {
+				cwd: tempDir,
+				env: {
+					// Isolate from the real machine's env/.env — a host that
+					// happens to export these would make this test pass for
+					// the wrong reason (it would already say "Environment").
+					XDG_CONFIG_HOME: xdgConfigHome,
+					BETTER_CCFLARE_CONFIG_PATH: configFilePath,
+					RETRY_ATTEMPTS: "",
+					RETRY_DELAY_MS: "",
+					RETRY_BACKOFF: "",
+					SESSION_DURATION_MS: "",
+				},
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toMatch(/Retry Attempts\s+7\s+\[Config file\]/);
+			expect(result.stdout).toMatch(/Retry Delay\s+4321ms\s+\[Config file\]/);
+			expect(result.stdout).toMatch(/Retry Backoff\s+3\s+\[Config file\]/);
+			expect(result.stdout).toMatch(
+				/Session Duration\s+123456ms\s+\[Config file\]/,
+			);
+			expect(result.stdout).not.toMatch(/Retry Attempts\s+7\s+\[Default\]/);
+		});
+
+		it("still reports an unset retry value as Default (regression guard)", async () => {
+			const xdgConfigHome = join(tempDir, "xdg-empty");
+			mkdirSync(xdgConfigHome, { recursive: true });
+			const configFilePath = join(tempDir, "better-ccflare-empty.json");
+			writeFileSync(configFilePath, JSON.stringify({}));
+
+			const result = await runCLI(["--show-config"], {
+				cwd: tempDir,
+				env: {
+					XDG_CONFIG_HOME: xdgConfigHome,
+					BETTER_CCFLARE_CONFIG_PATH: configFilePath,
+					RETRY_ATTEMPTS: "",
+					RETRY_DELAY_MS: "",
+					RETRY_BACKOFF: "",
+					SESSION_DURATION_MS: "",
+				},
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toMatch(/Retry Attempts\s+3\s+\[Default\]/);
+		});
+	});
+
 	describe("Error Handling", () => {
 		it("should handle invalid port gracefully", async () => {
 			const result = await runCLI(["--serve", "--port", "not-a-number"]);

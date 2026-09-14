@@ -198,31 +198,210 @@ export function isOverloadReason(reason: RateLimitReason): boolean {
 }
 
 /**
- * Configuration for in-place retry of reset-less 529 (overloaded_error) responses.
- * Used by proxyWithAccount before applying account cooldown.
- *
- * Env knobs:
- *   CCFLARE_OVERLOAD_RETRY_ENABLED      — set to "false" to disable (default: true)
- *   CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS — max in-place attempts (default: 2)
- *   CCFLARE_OVERLOAD_RETRY_BASE_MS      — jitter backoff base delay ms (default: 750)
- *   CCFLARE_OVERLOAD_RETRY_MAX_MS       — jitter backoff ceiling ms (default: 3000)
+ * The retry settings as the rest of the system states them: the three keys
+ * `retry_attempts`, `retry_delay_ms` and `retry_backoff`, resolved by
+ * packages/config from the config file, then the environment, then defaults.
  */
-export function getOverloadRetryConfig(): {
+export interface RetrySettings {
+	/** Total attempts for one upstream request, the first attempt included. */
+	attempts: number;
+	/** Base delay in milliseconds before the first retry. */
+	delayMs: number;
+	/** Multiplier applied per attempt. */
+	backoff: number;
+}
+
+/** Fallbacks used when no resolved RetrySettings is supplied. */
+export const RETRY_DEFAULTS: RetrySettings = {
+	attempts: 3,
+	delayMs: 1000,
+	backoff: 2,
+};
+
+/** Jitter ceiling, in milliseconds, when CCFLARE_OVERLOAD_RETRY_MAX_MS is unset. */
+const RETRY_MAX_DELAY_MS_DEFAULT = 3000;
+
+/**
+ * Resolves the retry policy actually applied on the proxy path.
+ *
+ * The documented keys drive it. `retry_attempts` counts the first attempt, so
+ * `attempts: 1` disables retry; the loops below run `attempts - 1` retries.
+ *
+ * The `CCFLARE_OVERLOAD_RETRY_*` variables predate the documented keys and stay
+ * honoured. They are deprecated: each one overrides the documented key it
+ * shadows.
+ *
+ * Setting them pins the old behaviour across an upgrade. Leaving them unset
+ * does NOT, and that is a deliberate widening rather than an oversight. This
+ * function previously hardcoded `maxAttempts: 2` and `baseMs: 750`, so the
+ * reset-less 529 in-place loop on a default install moves to 3 attempts at a
+ * 1000ms base, which are the documented defaults. The jitter formula and the
+ * 3000ms ceiling are unchanged, so the effect is one extra 529 attempt and a
+ * slightly larger cap before the ceiling bites. Preserving the old numbers
+ * would need a distinction between "key absent" and "key at its default",
+ * which packages/config does not expose. One documented widening beats a
+ * fourth knob.
+ *
+ *   CCFLARE_OVERLOAD_RETRY_ENABLED      set to "false" to disable retry entirely
+ *   CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS overrides retry_attempts
+ *   CCFLARE_OVERLOAD_RETRY_BASE_MS      overrides retry_delay_ms
+ *   CCFLARE_OVERLOAD_RETRY_MAX_MS       jitter backoff ceiling ms (default: 3000)
+ *
+ * @param settings resolved retry settings, normally `ctx.runtime.retry`. Omitted
+ *   only by callers with no access to the runtime config, which then get
+ *   RETRY_DEFAULTS.
+ */
+export function getOverloadRetryConfig(settings?: RetrySettings): {
 	enabled: boolean;
 	maxAttempts: number;
 	baseMs: number;
+	backoff: number;
 	maxMs: number;
 } {
-	const enabled = process.env.CCFLARE_OVERLOAD_RETRY_ENABLED !== "false";
-	// maxAttempts: 0 is not useful (use ENABLED=false to disable), so || is correct.
+	const resolved = settings ?? RETRY_DEFAULTS;
+
+	// An out-of-range value is CLAMPED to the nearest legal one, never replaced by
+	// the default. The distinction matters: `retry_attempts: 0` is an operator
+	// asking for no retries, and treating it as unset would hand them 3, the
+	// largest value in play and the opposite of the request. Same for a negative
+	// delay and for a backoff below 1. Nothing upstream catches these; the
+	// config layer accepts the three keys on a bare `typeof === "number"`, unlike
+	// `db_retry_*`, which is range-validated.
 	const maxAttempts =
-		Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS) || 2;
+		Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS) ||
+		(Number.isFinite(resolved.attempts)
+			? Math.max(1, Math.floor(resolved.attempts))
+			: RETRY_DEFAULTS.attempts);
+
 	// baseMs/maxMs: 0 is valid (zero delay for tests), so use explicit finite check.
 	const rawBase = Number(process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS);
 	const rawMax = Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS);
-	const baseMs = Number.isFinite(rawBase) && rawBase >= 0 ? rawBase : 750;
-	const maxMs = Number.isFinite(rawMax) && rawMax >= 0 ? rawMax : 3000;
-	return { enabled, maxAttempts, baseMs, maxMs };
+	const baseMs =
+		Number.isFinite(rawBase) && rawBase >= 0
+			? rawBase
+			: Number.isFinite(resolved.delayMs)
+				? Math.max(0, resolved.delayMs)
+				: RETRY_DEFAULTS.delayMs;
+	const maxMs =
+		Number.isFinite(rawMax) && rawMax >= 0
+			? rawMax
+			: RETRY_MAX_DELAY_MS_DEFAULT;
+
+	// A backoff below 1 would shrink the delay on every attempt, which defeats
+	// the point of backing off. Clamped to 1, a constant delay, rather than
+	// silently restored to 2.
+	const backoff = Number.isFinite(resolved.backoff)
+		? Math.max(1, resolved.backoff)
+		: RETRY_DEFAULTS.backoff;
+
+	const enabled =
+		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED !== "false" && maxAttempts > 1;
+
+	return { enabled, maxAttempts, baseMs, backoff, maxMs };
+}
+
+/**
+ * The delay before retry attempt `attempt` (1-based), with full jitter.
+ *
+ * Full jitter, meaning a uniform draw from [0, cap], rather than the cap
+ * itself: several accounts failing at the same instant must not all wake at the
+ * same instant and rebuild the spike they are backing off from.
+ */
+export function retryDelayMs(
+	cfg: { baseMs: number; backoff: number; maxMs: number },
+	attempt: number,
+): number {
+	const cap = Math.min(cfg.baseMs * cfg.backoff ** attempt, cfg.maxMs);
+	return Math.random() * cap;
+}
+
+/**
+ * Error codes that prove the upstream connection never carried the request
+ * body, so the model cannot have seen it.
+ *
+ * This is an allowlist, not a denylist, and that is the whole point. Every
+ * request through this proxy is a non-idempotent POST and /v1/messages carries
+ * no idempotency key, so a retry that reaches a model twice can bill twice and,
+ * on a stream, deliver two answers. An unrecognised failure is therefore not
+ * retried: the cost of missing a safe retry is one failed request, and the cost
+ * of retrying an unsafe one is a double charge or a duplicated answer.
+ *
+ * Measured on 2026-09-14 on BOTH Bun versions in play, because they disagree.
+ * 1.4.2 is local; 1.3.14 is the CI and release pin (.github/workflows/ci.yml).
+ * `err.code` is top level in every case; `err.cause` is undefined.
+ *
+ *   case                                 1.4.2              1.3.14
+ *   fetch("http://127.0.0.1:1")          ConnectionRefused  ConnectionRefused
+ *   fetch("http://<nxdomain>/")          ENOTFOUND          ConnectionRefused
+ *   fetch("https://expired.badssl.com")  CERT_HAS_EXPIRED   CERT_HAS_EXPIRED
+ *   fetch("https://self-signed...")      DEPTH_ZERO_SELF_SIGNED_CERT (both)
+ *
+ * Note the DNS row. On the pinned version a name that does not resolve reports
+ * ConnectionRefused, so measuring only on 1.3.14 would make ENOTFOUND look dead
+ * and invite someone to tidy it out of the set. Both spellings are needed. The
+ * error class also differs, TypeError on 1.4.2 and Error on 1.3.14, which is why
+ * the check below is `instanceof Error` rather than `instanceof TypeError`.
+ *
+ * Also measured, the case that decides the exclusions: a socket accepted, the
+ * full request body received, then RST. Both versions report ECONNRESET, which
+ * is not in the set. The non-idempotency argument is empirical, not asserted.
+ *
+ * Deliberately absent: ECONNRESET, EPIPE and ETIMEDOUT. A reset or a broken
+ * pipe can arrive after the body was fully sent, so they do not prove the
+ * model never saw the request.
+ */
+const RETRYABLE_UPSTREAM_ERROR_CODES = new Set([
+	// Connect phase refused outright.
+	"ConnectionRefused",
+	"ECONNREFUSED",
+	// Name resolution never produced an address.
+	"ENOTFOUND",
+	"EAI_AGAIN",
+	"DNSException",
+	// Route to the host does not exist.
+	"EHOSTUNREACH",
+	"ENETUNREACH",
+]);
+
+/** TLS handshake failures. The handshake precedes the request body. */
+const RETRYABLE_TLS_ERROR_CODE_PREFIXES = [
+	"CERT_",
+	"ERR_TLS_",
+	"UNABLE_TO_",
+	"SELF_SIGNED_",
+	"DEPTH_ZERO_",
+];
+
+/**
+ * Whether a thrown upstream failure may be retried.
+ *
+ * Only a throw ever reaches this function, and only a throw is retried, so a
+ * response of any status is out of scope by construction: 429 stays with the
+ * account selector and 529 keeps its own in-place retry.
+ *
+ * A throw alone is not enough, though. The call this guards wraps observation
+ * and header handling as well as the fetch, so a ProviderError or an ordinary
+ * bug can surface here on a request that did reach the model. Only a recognised
+ * connect-phase or handshake-phase error code is retried.
+ *
+ * An abort is never retried. The caller aborts when the client disconnects, and
+ * the header-phase timeout aborts on a request that may already be generating,
+ * so neither proves that no tokens were produced.
+ */
+export function isRetryableUpstreamError(
+	err: unknown,
+	signal?: AbortSignal,
+): boolean {
+	if (signal?.aborted) return false;
+	if (!(err instanceof Error)) return false;
+	if (err.name === "AbortError" || err.name === "TimeoutError") return false;
+
+	const code = (err as { code?: unknown }).code;
+	if (typeof code !== "string") return false;
+	if (RETRYABLE_UPSTREAM_ERROR_CODES.has(code)) return true;
+	return RETRYABLE_TLS_ERROR_CODE_PREFIXES.some((prefix) =>
+		code.startsWith(prefix),
+	);
 }
 
 // Buffer sizes (in bytes unless specified)

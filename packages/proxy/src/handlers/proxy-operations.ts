@@ -7,6 +7,8 @@ import {
 	isUsageExhausted,
 	logError,
 	ProviderError,
+	type RetrySettings,
+	retryDelayMs,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import { withSanitizedProxyHeaders } from "@better-ccflare/http-common";
@@ -47,6 +49,7 @@ import { makeProxyRequest, validateProviderPath } from "./request-handler";
 import { handleProxyError, processProxyResponse } from "./response-processor";
 import { isRetryable429 } from "./retryable-429";
 import { getValidAccessToken } from "./token-manager";
+import { forwardWithTransportRetry } from "./upstream-retry";
 import { collectWindows } from "./usage-throttling";
 import { peekSseForZai1305 } from "./zai-1305";
 
@@ -497,6 +500,7 @@ async function checkZai1305(
 	account: Account,
 	requestClone: Request,
 	log: Logger,
+	retrySettings: RetrySettings,
 ): Promise<Response> {
 	if (
 		response.status !== 200 ||
@@ -522,11 +526,10 @@ async function checkZai1305(
 	cancelDiscardedResponseBody(response);
 
 	// Retry with backoff (same config as 529 retry)
-	const retryCfg = getOverloadRetryConfig();
+	const retryCfg = getOverloadRetryConfig(retrySettings);
 	if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
 		for (let attempt = 1; attempt < retryCfg.maxAttempts; attempt++) {
-			const cap = Math.min(retryCfg.baseMs * 2 ** attempt, retryCfg.maxMs);
-			const delayMs = Math.random() * cap;
+			const delayMs = retryDelayMs(retryCfg, attempt);
 			await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 
 			log.info(
@@ -729,29 +732,43 @@ export async function proxyWithAccount(
 		// invariant that every provider has to remember. Merged with
 		// drainAbortController so the terminal-recovery drain deadline can also
 		// abort this same fetch later.
-		const forwardUpstream = (target: Request) => {
+		const forwardUpstream = async (target: Request) => {
 			const signal = AbortSignal.any([req.signal, drainAbortController.signal]);
-			return forwardObservedUpstream(
-				provider,
-				target,
-				{
-					requestId: requestMeta.id,
-					account,
-					sourceBody: effectiveBodyBuffer,
-					sourceHeaders: req.headers,
-					nativeResponses: isTrustedNativeResponses(requestMeta),
-					signal,
-				},
-				(wire) =>
-					makeProxyRequest(
-						wire,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
+			const attemptOnce = (attemptTarget: Request) =>
+				forwardObservedUpstream(
+					provider,
+					attemptTarget,
+					{
+						requestId: requestMeta.id,
+						account,
+						sourceBody: effectiveBodyBuffer,
+						sourceHeaders: req.headers,
+						nativeResponses: isTrustedNativeResponses(requestMeta),
 						signal,
-					),
-			);
+					},
+					(wire) =>
+						makeProxyRequest(
+							wire,
+							undefined,
+							undefined,
+							undefined,
+							undefined,
+							signal,
+						),
+				);
+
+			// Transport-failure retry, bounded by retry_attempts. See
+			// forwardWithTransportRetry for why a throw is the only signal that
+			// makes a retry safe on a non-idempotent POST.
+			return forwardWithTransportRetry(target, attemptOnce, {
+				settings: ctx.runtime.retry,
+				signal,
+				onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
+					log.warn(
+						`Account ${account.name}: upstream transport failure on attempt ${attempt}/${maxAttempts}, retrying after ${Math.round(delayMs)}ms: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				},
+			});
 		};
 		if (
 			process.env.DEBUG?.includes("proxy") ||
@@ -1135,6 +1152,7 @@ export async function proxyWithAccount(
 			account,
 			transformedRequest,
 			log,
+			ctx.runtime.retry,
 		);
 
 		// ── org_permission_denied: the ORGANIZATION forbids this account ──
@@ -1575,6 +1593,7 @@ export async function proxyWithAccount(
 						account,
 						retryTransformedRequest,
 						log,
+						ctx.runtime.retry,
 					);
 					zai1305AlreadyChecked = true;
 					if (!(await isModelUnavailableError(rawResponse.clone()))) {
@@ -1596,6 +1615,7 @@ export async function proxyWithAccount(
 					account,
 					transformedRequest,
 					log,
+					ctx.runtime.retry,
 				);
 			}
 			if (await isModelUnavailableError(rawResponse)) {
@@ -1746,15 +1766,12 @@ export async function proxyWithAccount(
 			// overload case it exists for. We are already inside `status === 529`;
 			// resetTime alone decides in-place retry vs. cooldown.
 			if (!rlInfo.resetTime) {
-				const retryCfg = getOverloadRetryConfig();
+				const retryCfg = getOverloadRetryConfig(ctx.runtime.retry);
 				if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
 					for (let attempt = 1; attempt < retryCfg.maxAttempts; attempt++) {
-						// Full-jitter backoff: sleep in [0, min(base * 2^attempt, max)]
-						const cap = Math.min(
-							retryCfg.baseMs * 2 ** attempt,
-							retryCfg.maxMs,
-						);
-						const delayMs = Math.random() * cap;
+						// Full-jitter backoff: sleep in
+						// [0, min(base * backoff^attempt, max)]
+						const delayMs = retryDelayMs(retryCfg, attempt);
 						await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 
 						log.info(

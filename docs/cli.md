@@ -577,9 +577,9 @@ The SQLite database follows the same directory structure:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `RETRY_ATTEMPTS` | Number of retry attempts | 3 |
-| `RETRY_DELAY_MS` | Initial retry delay (ms) | 1000 |
-| `RETRY_BACKOFF` | Exponential backoff multiplier | 2 |
+| `RETRY_ATTEMPTS` | Total attempts for one upstream request, the first attempt included. `1` disables retry | 3 |
+| `RETRY_DELAY_MS` | Base delay before the first retry (ms) | 1000 |
+| `RETRY_BACKOFF` | Multiplier applied per attempt, with full jitter, capped | 2 |
 
 ### Session Management
 

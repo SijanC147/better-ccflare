@@ -771,9 +771,9 @@ BETTER_CCFLARE_HOST=0.0.0.0   # Server binding host (use 127.0.0.1 for localhost
 LB_STRATEGY=session           # Load balancing strategy
 
 # Retry Configuration
-RETRY_ATTEMPTS=3              # Number of retry attempts
-RETRY_DELAY_MS=1000          # Initial retry delay
-RETRY_BACKOFF=2              # Backoff multiplier
+RETRY_ATTEMPTS=3              # Total attempts, the first included
+RETRY_DELAY_MS=1000          # Base delay before the first retry
+RETRY_BACKOFF=2              # Multiplier applied per attempt
 SESSION_DURATION_MS=18000000 # Session duration (5 hours)
 ```
 
