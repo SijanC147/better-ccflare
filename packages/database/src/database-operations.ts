@@ -99,6 +99,30 @@ export interface DatabaseRetryConfig {
  * full `integrity_check` daily, surfacing corruption through `/api/storage`
  * and the dashboard "Storage Integrity" card.
  */
+/** SQLite's own limits for `PRAGMA page_size`. */
+export const MIN_SQLITE_PAGE_SIZE = 512;
+export const MAX_SQLITE_PAGE_SIZE = 65536;
+
+/**
+ * Whether SQLite will accept a value for `PRAGMA page_size`.
+ *
+ * A power of two from 512 to 65536. Anything else is discarded silently,
+ * with no error and no change, which is why this is checked before the
+ * PRAGMA rather than after it (SB23-2041).
+ *
+ * Exported so the check is testable without a database. `(n & (n - 1)) === 0`
+ * is the power-of-two test and needs the `n > 0` guard beside it, because 0
+ * satisfies it too.
+ */
+export function isValidSqlitePageSize(pageSize: number): boolean {
+	return (
+		Number.isInteger(pageSize) &&
+		pageSize >= MIN_SQLITE_PAGE_SIZE &&
+		pageSize <= MAX_SQLITE_PAGE_SIZE &&
+		(pageSize & (pageSize - 1)) === 0
+	);
+}
+
 function configureSqlite(db: Database, config: DatabaseConfig): void {
 	try {
 		// MUST be the first write-affecting PRAGMA. SQLite's auto_vacuum
@@ -171,13 +195,58 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 			}
 		}
 
-		// Set page size (only effective before any data is written, or after VACUUM)
+		// Page size. Both failure modes here are silent, which is why they are
+		// warned about rather than left to the PRAGMA (SB23-2041).
+		//
+		// Measured against bun:sqlite, not assumed:
+		//
+		//   requested  before  after  threw
+		//   8192       4096    8192   no     <- empty database, applies
+		//   5000       4096    4096   no     <- not a power of two, ignored
+		//   99999      4096    4096   no     <- above the ceiling, ignored
+		//   8192       4096    4096   no     <- POPULATED database, ignored
+		//
+		// SQLite accepts only a power of two from 512 to 65536 and discards
+		// anything else without error, so a typo is indistinguishable from a
+		// working setting. And on a database that already holds data the PRAGMA
+		// sets a PENDING value that reads back unchanged and materialises only
+		// on a full VACUUM.
+		//
+		// The warning deliberately does not say "on the next VACUUM". The full
+		// VACUUM in this codebase runs once, to migrate auto_vacuum from mode 0
+		// to mode 2, and only on databases still at mode 0. The hourly worker
+		// runs incremental_vacuum, which reclaims free pages and does NOT
+		// rewrite the page size. So on a settled install the pending value is
+		// pending forever unless an operator runs VACUUM by hand.
 		if (config.pageSize !== undefined) {
 			const currentPageSize = (
 				db.query("PRAGMA page_size").get() as { page_size: number }
 			).page_size;
-			if (currentPageSize !== config.pageSize) {
+
+			if (!isValidSqlitePageSize(config.pageSize)) {
+				console.warn(
+					`db_page_size ${config.pageSize} is not a power of two between ` +
+						`${MIN_SQLITE_PAGE_SIZE} and ${MAX_SQLITE_PAGE_SIZE}. SQLite discards ` +
+						`such a value without error, so the page size stays ${currentPageSize}.`,
+				);
+			} else if (currentPageSize !== config.pageSize) {
 				db.run(`PRAGMA page_size = ${config.pageSize}`);
+
+				// Re-read rather than assume. On an empty database this now
+				// reports the requested value and there is nothing to warn about.
+				const appliedPageSize = (
+					db.query("PRAGMA page_size").get() as { page_size: number }
+				).page_size;
+
+				if (appliedPageSize !== config.pageSize) {
+					console.warn(
+						`db_page_size ${config.pageSize} is staged but not applied: this ` +
+							`database already holds data, so the page size remains ` +
+							`${appliedPageSize}. SQLite only rewrites it during a full VACUUM. ` +
+							`Nothing in better-ccflare performs one on an existing database, ` +
+							`so run VACUUM manually if you want this setting to take effect.`,
+					);
+				}
 			}
 		}
 
