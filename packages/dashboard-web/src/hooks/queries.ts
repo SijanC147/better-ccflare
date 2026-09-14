@@ -49,6 +49,21 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
 	};
 }
 
+/**
+ * Filtered Claude service status. The server-side poller keeps the snapshot
+ * warm, so this only has to read it; per the convention in this file it does
+ * not poll in a hidden tab.
+ */
+export const useServiceStatus = () => {
+	return useQuery({
+		queryKey: queryKeys.serviceStatus(),
+		queryFn: () => api.getServiceStatus(),
+		staleTime: 60_000,
+		refetchInterval: 120_000,
+		refetchIntervalInBackground: false,
+	});
+};
+
 export const useStorageInfo = (refetchInterval?: number) => {
 	return useQuery({
 		queryKey: queryKeys.storage(),

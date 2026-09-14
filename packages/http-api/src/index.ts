@@ -7,6 +7,10 @@ export { APIRouter } from "./router";
 export { AlertService } from "./services/alerts";
 // Export services
 export { AuthService } from "./services/auth-service";
+export {
+	getServiceStatusService,
+	initServiceStatusRefresh,
+} from "./services/service-status-service";
 // Export types
 export * from "./types";
 // Export utilities

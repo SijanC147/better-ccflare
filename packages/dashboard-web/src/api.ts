@@ -98,6 +98,44 @@ export interface AgentsResponse {
 	workspaces: AgentWorkspace[];
 }
 
+export type ServiceStatusLevel =
+	| "operational"
+	| "degraded"
+	| "outage"
+	| "unknown";
+
+export interface ServiceStatusComponent {
+	id: string;
+	name: string;
+	status: string;
+}
+
+export interface ServiceStatusIncident {
+	id: string;
+	name: string;
+	status: string;
+	impact: string;
+	url: string | null;
+}
+
+export interface ServiceStatusSnapshot {
+	level: ServiceStatusLevel;
+	components: ServiceStatusComponent[];
+	affected: ServiceStatusComponent[];
+	incidents: ServiceStatusIncident[];
+	missingComponentIds: string[];
+	pageIndicator: string;
+	pageUrl: string;
+	checkedAt: number;
+}
+
+/** Response of `GET /api/service-status`. Always 200. */
+export interface ServiceStatusResponse {
+	snapshot: ServiceStatusSnapshot | null;
+	stale: boolean;
+	error: string | null;
+}
+
 export interface StorageInfoResponse {
 	db_bytes: number;
 	wal_bytes: number;
@@ -2720,6 +2758,24 @@ class API extends HttpClient {
 			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
 				error: error instanceof Error ? error.message : String(error),
 				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	async getServiceStatus(): Promise<ServiceStatusResponse> {
+		const startTime = Date.now();
+		const url = "/api/service-status";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<ServiceStatusResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
 			});
 			throw error;
 		}

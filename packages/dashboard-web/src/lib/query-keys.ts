@@ -37,6 +37,7 @@ export const queryKeys = {
 	families: () => [...queryKeys.all, "families"] as const,
 	apiKeys: () => [...queryKeys.all, "api-keys"] as const,
 	storage: () => [...queryKeys.all, "storage"] as const,
+	serviceStatus: () => [...queryKeys.all, "service-status"] as const,
 	routingObservations: () =>
 		[...queryKeys.all, "routing", "observations"] as const,
 	usageHistory: (account?: string, range?: string) =>

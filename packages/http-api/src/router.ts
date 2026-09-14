@@ -134,6 +134,7 @@ import {
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
 import { createRoutingObservationsHandler } from "./handlers/routing-observations";
+import { createServiceStatusHandler } from "./handlers/service-status";
 import { createSessionAccountHandler } from "./handlers/sessions";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import {
@@ -162,6 +163,7 @@ import {
 } from "./handlers/worktree-rules";
 import { AuthService } from "./services/auth-service";
 import { MERGED_UPSTREAM_SHA } from "./services/fork-identity";
+import { getServiceStatusService } from "./services/service-status-service";
 import { VersionStatusService } from "./services/version-status-service";
 import type { APIContext } from "./types";
 import { errorResponse, jsonResponse } from "./utils/http-error";
@@ -303,6 +305,11 @@ export class APIRouter {
 			// refresh must use it without waiting for a restart.
 			token: () => config.getGithubReadToken() || undefined,
 		});
+		// Claude service status, filtered to the components this proxy forwards
+		// to. Shares its instance with the server-side poller.
+		const serviceStatusHandler = createServiceStatusHandler(
+			getServiceStatusService(),
+		);
 		const versionCheckHandler = createVersionCheckHandler(versionStatusService);
 		const versionStatusHandler = createVersionStatusHandler(
 			versionStatusService,
@@ -340,6 +347,9 @@ export class APIRouter {
 		this.handlers.set("GET:/api/stats", (_req, url) => statsHandler(url));
 		this.handlers.set("POST:/api/stats/reset", () => statsResetHandler());
 		this.handlers.set("GET:/api/storage", (_req, _url) => storageHandler());
+		this.handlers.set("GET:/api/service-status", (_req, url) =>
+			serviceStatusHandler(url),
+		);
 		this.handlers.set("POST:/api/storage/integrity/check", (req) =>
 			integrityCheckHandler(req),
 		);
