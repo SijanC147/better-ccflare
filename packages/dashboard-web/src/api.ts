@@ -114,6 +114,13 @@ export interface RetryConfig {
 	 * other way: they override a saved value on the 529 and ZAI 1305 loops.
 	 */
 	overloadEnvironmentKeys: string[];
+	/**
+	 * The RESOLVED per-attempt jitter ceiling in milliseconds, not the
+	 * default. retryDelayMs clips every cap at this, so the compound wait is
+	 * wrong without it, and CCFLARE_OVERLOAD_RETRY_MAX_MS can move it away
+	 * from 3000 on a host the browser cannot inspect (SB23-2018).
+	 */
+	jitterCeilingMs: number;
 }
 
 /** An omitted field leaves that stored key alone. */

@@ -395,6 +395,78 @@ describe("CLI Integration Tests", () => {
 			expect(result.stdout).not.toMatch(/Retry Attempts\s+5\s+\[Default\]/);
 		});
 
+		// SB23-2045: --show-config prints the value in force, and the config layer
+		// clamps an out-of-range retry setting. The CLI sets silentConsole, so the
+		// warning explaining the difference never reaches this terminal, leaving an
+		// operator who wrote 9 looking at 5 under [Config file] with no reason for
+		// it. The provenance label is correct and must stay correct: source reads
+		// the raw key, so the clamp can never relabel anything.
+		it("names the raw value when the clamp moved it, without changing the label", async () => {
+			const xdgConfigHome = join(tempDir, "xdg-clamped");
+			mkdirSync(xdgConfigHome, { recursive: true });
+			const configFilePath = join(tempDir, "better-ccflare-clamped.json");
+			writeFileSync(
+				configFilePath,
+				// Each one out of range in a different direction: above the
+				// ceiling, far above it, and below the floor.
+				JSON.stringify({
+					retry_attempts: 9,
+					retry_delay_ms: 99999,
+					retry_backoff: 0.5,
+				}),
+			);
+
+			const result = await runCLI(["--show-config"], {
+				cwd: tempDir,
+				env: {
+					XDG_CONFIG_HOME: xdgConfigHome,
+					BETTER_CCFLARE_CONFIG_PATH: configFilePath,
+					RETRY_ATTEMPTS: "",
+					RETRY_DELAY_MS: "",
+					RETRY_BACKOFF: "",
+				},
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toMatch(
+				/Retry Attempts\s+5 \(clamped from 9\)\s+\[Config file\]/,
+			);
+			expect(result.stdout).toMatch(
+				/Retry Delay\s+30000ms \(clamped from 99999ms\)\s+\[Config file\]/,
+			);
+			expect(result.stdout).toMatch(
+				/Retry Backoff\s+1 \(clamped from 0.5\)\s+\[Config file\]/,
+			);
+			// The clamp must not relabel. This is the half that was already
+			// correct and could regress silently.
+			expect(result.stdout).not.toMatch(/Retry Attempts.*\[Default\]/);
+		});
+
+		// An in-range value must NOT carry the note, or every row grows noise.
+		it("says nothing about clamping when the value is in range", async () => {
+			const xdgConfigHome = join(tempDir, "xdg-inrange");
+			mkdirSync(xdgConfigHome, { recursive: true });
+			const configFilePath = join(tempDir, "better-ccflare-inrange.json");
+			writeFileSync(
+				configFilePath,
+				JSON.stringify({ retry_attempts: 4, retry_delay_ms: 2000 }),
+			);
+
+			const result = await runCLI(["--show-config"], {
+				cwd: tempDir,
+				env: {
+					XDG_CONFIG_HOME: xdgConfigHome,
+					BETTER_CCFLARE_CONFIG_PATH: configFilePath,
+					RETRY_ATTEMPTS: "",
+					RETRY_DELAY_MS: "",
+				},
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toMatch(/Retry Attempts\s+4\s+\[Config file\]/);
+			expect(result.stdout).not.toMatch(/clamped from/);
+		});
+
 		it("still reports an unset retry value as Default (regression guard)", async () => {
 			const xdgConfigHome = join(tempDir, "xdg-empty");
 			mkdirSync(xdgConfigHome, { recursive: true });
