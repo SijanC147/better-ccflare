@@ -95,6 +95,54 @@ Three worth stating plainly, because each has cost time before.
   enough that the playground reports its size and content type rather than
   rendering it.
 
+## What the OpenObserve request stream holds
+
+The exporter ships one record per request to the configured request stream, and
+that record is the `summary` object `UsageCollector._handleEndInternal` builds
+(`packages/proxy/src/usage-collector.ts:1020-1074`), spread wholesale into
+`shipRequestRecord`. `shipRequestRecord` takes a loose `Record<string, unknown>`
+(`packages/logger/src/openobserve.ts:313-316`), adds `_timestamp`, and enqueues,
+so it is field-agnostic: a field added to the summary reaches the stream with no
+exporter change, and one deleted from it disappears just as silently.
+
+Ten of those fields carry token usage and cost: `model`, `promptTokens`,
+`completionTokens`, `totalTokens`, `inputTokens`, `cacheReadInputTokens`,
+`cacheCreationInputTokens`, `outputTokens`, `costUsd`, `tokensPerSecond`.
+`packages/logger/src/openobserve.test.ts` pins all ten.
+
+Four things about this stream mislead people writing queries against it. Each
+has a real failure mode, not a caveat.
+
+**The shipped names are camelCase; the database columns are snake_case.** The
+stream receives `inputTokens` and `costUsd`; the `requests` table has
+`input_tokens` and `cost_usd` (`packages/database/src/migrations.ts:147-155`). A
+query written from the schema matches nothing and reads as a broken exporter.
+OpenObserve also lowercases field names on ingest, so confirm what the stream
+stores rather than trusting what the code sends.
+
+**An absent token field is omitted, not zeroed.** Every token field is optional
+on `RequestResponse` (`packages/types/src/request.ts:200-210`) and
+`JSON.stringify` drops `undefined` (`openobserve.ts:120`), so a request with no
+parsed usage, an error or a non-message endpoint, ships with no token keys at
+all. This is deliberate. A zero reads as "no tokens were used"; a missing key
+reads as "this was not measured". Aggregates must treat missing as missing, and
+an `avg()` over a stream half of whose records lack the field is not the average
+anyone intends.
+
+**There are two timestamps and they mean different things.** `_timestamp`
+(`openobserve.ts:315`) is `Date.now()` at ship time, so approximately request
+*end*. The `timestamp` field (`usage-collector.ts:1022`) is request *start*, as
+an ISO string. OpenObserve indexes `_timestamp`, so a dashboard should use
+`_timestamp` unless it specifically wants arrival time; the two differ by the
+request duration, which for a long stream is not small.
+
+**There is no retry, so the stream is lossy and is never a billing record.** A
+batch that fails to post is dropped rather than requeued
+(`openobserve.ts:206-210`, `:239-246`), and the buffers are bounded at 1000
+records and 16 MB with evictions counted and warned about. Under pressure or an
+outage, records are gone. Use the `requests` table for anything that must
+reconcile. Retry is tracked as SB23-1760.
+
 ## Gaps worth filling
 
 Filed as Linear issues rather than implemented here, since SB23-1220 was

@@ -113,6 +113,91 @@ describe("openobserve exporter", () => {
 		expect(typeof record._timestamp).toBe("number");
 	});
 
+	test("ships every token and cost field the usage collector sets", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings());
+
+		// The ten fields `UsageCollector._handleEndInternal` puts on its summary
+		// (packages/proxy/src/usage-collector.ts:1031-1041). The exporter takes a
+		// loose Record and never names them, so nothing else pins them: deleting
+		// one from the summary literal would otherwise ship green.
+		shipRequestRecord({
+			id: "req-1",
+			model: "claude-opus-5",
+			promptTokens: 11,
+			completionTokens: 22,
+			totalTokens: 33,
+			inputTokens: 11,
+			cacheReadInputTokens: 44,
+			cacheCreationInputTokens: 55,
+			outputTokens: 22,
+			costUsd: 0.0123,
+			tokensPerSecond: 17.5,
+		});
+		await flush();
+
+		expect(captures).toHaveLength(1);
+		const [record] = captures[0].body as Array<Record<string, unknown>>;
+		expect(record.model).toBe("claude-opus-5");
+		expect(record.promptTokens).toBe(11);
+		expect(record.completionTokens).toBe(22);
+		expect(record.totalTokens).toBe(33);
+		expect(record.inputTokens).toBe(11);
+		expect(record.cacheReadInputTokens).toBe(44);
+		expect(record.cacheCreationInputTokens).toBe(55);
+		expect(record.outputTokens).toBe(22);
+		expect(record.costUsd).toBe(0.0123);
+		expect(record.tokensPerSecond).toBe(17.5);
+	});
+
+	test("omits token fields that were never measured rather than zeroing them", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings());
+
+		// Every token field is optional on RequestResponse
+		// (packages/types/src/request.ts:200-210) and JSON.stringify drops
+		// undefined, so a request with no parsed usage — an error, a
+		// non-message endpoint — ships with no token keys at all.
+		//
+		// Do not "fix" this into zeros. A zero reads as "no tokens were used";
+		// a missing key reads as "this was not measured". avg() over a stream
+		// padded with spurious zeros is not the average anyone intends.
+		shipRequestRecord({
+			id: "req-1",
+			model: undefined,
+			promptTokens: undefined,
+			completionTokens: undefined,
+			totalTokens: undefined,
+			inputTokens: undefined,
+			cacheReadInputTokens: undefined,
+			cacheCreationInputTokens: undefined,
+			outputTokens: undefined,
+			costUsd: undefined,
+			tokensPerSecond: undefined,
+		});
+		await flush();
+
+		expect(captures).toHaveLength(1);
+		const [record] = captures[0].body as Array<Record<string, unknown>>;
+		for (const field of [
+			"model",
+			"promptTokens",
+			"completionTokens",
+			"totalTokens",
+			"inputTokens",
+			"cacheReadInputTokens",
+			"cacheCreationInputTokens",
+			"outputTokens",
+			"costUsd",
+			"tokensPerSecond",
+		]) {
+			expect(Object.hasOwn(record, field)).toBe(false);
+		}
+		expect(record.id).toBe("req-1");
+	});
+
 	test("bounds the buffer and drops the oldest records under pressure", async () => {
 		configureOpenObserve(() => settings());
 
