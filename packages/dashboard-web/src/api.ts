@@ -78,16 +78,37 @@ export interface OpenObserveConfig {
 	logStream: string;
 	requestStream: string;
 	shipPayloads: boolean;
+	/** The lowest log level shipped. The server supplies it on every read. */
+	logMinLevel: OpenObserveLogMinLevel;
 	tokenSet: boolean;
 	tokenFromEnvironment: boolean;
 	endpointFromEnvironment: boolean;
 }
 
-/** An omitted `token` leaves the stored one alone; an empty string clears it. */
+/** The levels the server accepts, in ascending order of severity. */
+export const OPENOBSERVE_LOG_MIN_LEVELS = [
+	"DEBUG",
+	"INFO",
+	"WARN",
+	"ERROR",
+] as const;
+
+export type OpenObserveLogMinLevel =
+	(typeof OPENOBSERVE_LOG_MIN_LEVELS)[number];
+
+/**
+ * An omitted `token` leaves the stored one alone; an empty string clears it.
+ * An omitted `logMinLevel` likewise leaves the stored level alone, so a client
+ * that has not read the current value yet cannot wipe it.
+ */
 export type OpenObserveConfigUpdate = Omit<
 	OpenObserveConfig,
-	"enabled" | "tokenSet" | "tokenFromEnvironment" | "endpointFromEnvironment"
-> & { token?: string };
+	| "enabled"
+	| "tokenSet"
+	| "tokenFromEnvironment"
+	| "endpointFromEnvironment"
+	| "logMinLevel"
+> & { token?: string; logMinLevel?: OpenObserveLogMinLevel };
 
 // Agent response interface
 export interface AgentsResponse {

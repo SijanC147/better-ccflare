@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
 import {
+	OPENOBSERVE_LOG_MIN_LEVELS,
+	type OpenObserveLogMinLevel,
+} from "../../api";
+import {
 	useOpenObserveConfig,
 	useSetOpenObserveConfig,
 } from "../../hooks/queries";
@@ -12,6 +16,13 @@ import {
 	CardTitle,
 } from "../ui/card";
 import { Input } from "../ui/input";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "../ui/select";
 import { Switch } from "../ui/switch";
 
 /**
@@ -32,6 +43,13 @@ export function OpenObserveCard() {
 	const [logStream, setLogStream] = useState("better_ccflare_logs");
 	const [requestStream, setRequestStream] = useState("better_ccflare_requests");
 	const [shipPayloads, setShipPayloads] = useState(false);
+	// Empty means "not read from the server yet", not a level. The default level
+	// lives in the config layer; repeating it here would be a second source of
+	// truth. An empty value is omitted from the save, which leaves the stored
+	// level alone.
+	const [logMinLevel, setLogMinLevel] = useState<OpenObserveLogMinLevel | "">(
+		"",
+	);
 
 	useEffect(() => {
 		if (!data) return;
@@ -41,6 +59,7 @@ export function OpenObserveCard() {
 		setLogStream(data.logStream);
 		setRequestStream(data.requestStream);
 		setShipPayloads(data.shipPayloads);
+		setLogMinLevel(data.logMinLevel);
 		// The token is never pre-filled — the server never returns it.
 	}, [data]);
 
@@ -50,7 +69,9 @@ export function OpenObserveCard() {
 	const tokenOverridden = data?.tokenFromEnvironment ?? false;
 	const endpointOverridden = data?.endpointFromEnvironment ?? false;
 
-	function handleSave() {
+	// Every save posts the whole card, so the level has to travel with it: an
+	// absent logMinLevel leaves the stored one alone rather than resetting it.
+	function currentState(): Parameters<typeof setConfig.mutate>[0] {
 		const body: Parameters<typeof setConfig.mutate>[0] = {
 			url,
 			org,
@@ -59,6 +80,12 @@ export function OpenObserveCard() {
 			requestStream,
 			shipPayloads,
 		};
+		if (logMinLevel !== "") body.logMinLevel = logMinLevel;
+		return body;
+	}
+
+	function handleSave() {
+		const body = currentState();
 		// Absent leaves the stored token alone. Sending an empty string here would
 		// clear it on every unrelated save.
 		if (token.length > 0) body.token = token;
@@ -175,6 +202,33 @@ export function OpenObserveCard() {
 					</p>
 				</div>
 
+				<div className="space-y-1">
+					<label className="text-sm font-medium" htmlFor="oo-log-min-level">
+						Minimum log level
+					</label>
+					<Select
+						value={logMinLevel}
+						disabled={busy}
+						onValueChange={(v) => setLogMinLevel(v as OpenObserveLogMinLevel)}
+					>
+						<SelectTrigger id="oo-log-min-level">
+							<SelectValue placeholder="Loading" />
+						</SelectTrigger>
+						<SelectContent>
+							{OPENOBSERVE_LOG_MIN_LEVELS.map((level) => (
+								<SelectItem key={level} value={level}>
+									{level}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+					<p className="text-xs text-muted-foreground">
+						Log lines below this level are not shipped. The exporter's buffers
+						are bounded and drop the oldest first, so a burst of DEBUG can evict
+						the ERROR records worth keeping.
+					</p>
+				</div>
+
 				{/* A separate decision from shipping log lines: request bodies leaving
 				    the box is not the same as log lines leaving it. */}
 				<div className="flex items-center justify-between">
@@ -201,17 +255,7 @@ export function OpenObserveCard() {
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onClick={() =>
-								setConfig.mutate({
-									url,
-									org,
-									user,
-									logStream,
-									requestStream,
-									shipPayloads,
-									token: "",
-								})
-							}
+							onClick={() => setConfig.mutate({ ...currentState(), token: "" })}
 						>
 							Clear stored token
 						</Button>
