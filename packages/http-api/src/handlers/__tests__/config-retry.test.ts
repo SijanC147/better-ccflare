@@ -100,11 +100,33 @@ describe("POST /api/config/retry", () => {
 
 	it("leaves an omitted key at its current value", async () => {
 		// An older client posting two fields must not reset the third.
-		const { config, written } = configStub();
+		//
+		// Every current value here is deliberately away from the defaults (3,
+		// 1000, 2). With the stub at its defaults, a handler that substituted a
+		// hardcoded default for the current value would pass this test: mutation
+		// M2 replaced `current.attempts` with a literal 3 and survived until the
+		// stub moved off it.
+		const { config, written } = configStub({
+			attempts: 4,
+			delayMs: 250,
+			backoff: 1.5,
+		});
 		await createRetryConfigHandlers(config).setRetryConfig(
 			post({ attempts: 1 }),
 		);
-		expect(written).toEqual([{ attempts: 1, delayMs: 1000, backoff: 2 }]);
+		expect(written).toEqual([{ attempts: 1, delayMs: 250, backoff: 1.5 }]);
+	});
+
+	it("keeps the other two keys when only the delay is posted", async () => {
+		const { config, written } = configStub({
+			attempts: 4,
+			delayMs: 250,
+			backoff: 1.5,
+		});
+		await createRetryConfigHandlers(config).setRetryConfig(
+			post({ delayMs: 900 }),
+		);
+		expect(written).toEqual([{ attempts: 4, delayMs: 900, backoff: 1.5 }]);
 	});
 
 	it("accepts 0 attempts rather than treating it as unset", async () => {
