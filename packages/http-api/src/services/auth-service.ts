@@ -90,7 +90,10 @@ function isSessionAccountPath(path: string): boolean {
  * rather than the durable API key (issue #379 — a key in a URL leaks via
  * browser history, Referer, and reverse-proxy access logs).
  */
-const STREAM_TOKEN_PATHS = new Set(["/api/logs/stream", "/api/requests/stream"]);
+const STREAM_TOKEN_PATHS = new Set([
+	"/api/logs/stream",
+	"/api/requests/stream",
+]);
 
 interface StreamTokenRecord {
 	expiresAt: number;

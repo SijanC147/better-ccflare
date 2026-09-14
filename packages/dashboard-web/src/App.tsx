@@ -152,7 +152,8 @@ export function App() {
 				path: "/api-playground",
 				element: <ApiPlaygroundTab />,
 				title: "API Playground",
-				subtitle: "Call any endpoint this server serves and inspect the response",
+				subtitle:
+					"Call any endpoint this server serves and inspect the response",
 			},
 			{
 				path: "/settings",

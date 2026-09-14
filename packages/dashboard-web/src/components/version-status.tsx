@@ -163,7 +163,9 @@ export function ForkCard({ status }: { status: VersionStatusResponse }) {
 			disabled={rechecking}
 			className="mt-2 flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-primary disabled:opacity-50"
 		>
-			<RefreshCw className={cn("h-3 w-3 shrink-0", rechecking && "animate-spin")} />
+			<RefreshCw
+				className={cn("h-3 w-3 shrink-0", rechecking && "animate-spin")}
+			/>
 			{rechecking ? "Checking…" : "Check again"}
 		</button>
 	);

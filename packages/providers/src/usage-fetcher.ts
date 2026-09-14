@@ -443,9 +443,7 @@ export function getRepresentativeWindow(
  * account isn't actually available again until every exhausted window
  * clears, so picking the earlier one would report recovery too soon.
  */
-function getWinningZaiTokenWindow(
-	usage: ZaiUsageData,
-): ZaiUsageWindow | null {
+function getWinningZaiTokenWindow(usage: ZaiUsageData): ZaiUsageWindow | null {
 	const candidates = [usage.tokens_limit, usage.tokens_limit_weekly].filter(
 		(window): window is ZaiUsageWindow => window !== null,
 	);
@@ -726,9 +724,7 @@ export function getRepresentativeUsageSnapshotForProvider(
 			zai.time_limit,
 			zai.tokens_limit,
 			zai.tokens_limit_weekly,
-		].filter(
-			(window): window is NonNullable<typeof window> => window !== null,
-		);
+		].filter((window): window is NonNullable<typeof window> => window !== null);
 		if (candidates.length === 0) return null;
 		// On a tie (both windows equally exhausted), prefer the LATER reset —
 		// the account isn't actually available again until every exhausted

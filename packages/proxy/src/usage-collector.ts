@@ -93,7 +93,9 @@ function decodePayloadForShipping(
 			request?: { headers?: unknown; body?: string | null };
 			response?: { status?: number; headers?: unknown; body?: string | null };
 		};
-		const decodeBody = (body: string | null | undefined): string | undefined => {
+		const decodeBody = (
+			body: string | null | undefined,
+		): string | undefined => {
 			if (!body) return undefined;
 			return Buffer.from(body, "base64").toString("utf-8");
 		};

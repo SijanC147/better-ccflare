@@ -20,15 +20,19 @@ function makeFakeDb(overrides: Partial<ReturnType<typeof makeStubDb>> = {}) {
 	return makeStubDb(overrides);
 }
 
-function makeStubDb(overrides: Partial<{
-	listProjects: () => Promise<unknown[]>;
-	upsertProjectsFromDiscovery: (rows: unknown[]) => Promise<{ added: number; updated: number; unchanged: number }>;
-	updateProject: (id: string, fields: unknown) => Promise<unknown>;
-	rebuildResolver: () => Promise<void>;
-	setDiscoveryRunner: (fn: (() => Promise<unknown>) | null) => void;
-	getProjectsCaseSensitive: () => boolean;
-	resolverManager: ResolverManager;
-}> = {}) {
+function makeStubDb(
+	overrides: Partial<{
+		listProjects: () => Promise<unknown[]>;
+		upsertProjectsFromDiscovery: (
+			rows: unknown[],
+		) => Promise<{ added: number; updated: number; unchanged: number }>;
+		updateProject: (id: string, fields: unknown) => Promise<unknown>;
+		rebuildResolver: () => Promise<void>;
+		setDiscoveryRunner: (fn: (() => Promise<unknown>) | null) => void;
+		getProjectsCaseSensitive: () => boolean;
+		resolverManager: ResolverManager;
+	}> = {},
+) {
 	const manager = new ResolverManager();
 	return {
 		listProjects: overrides.listProjects ?? (() => Promise.resolve([])),
@@ -59,7 +63,10 @@ function createProjectDir(
 	const dir = path.join(projectsDir, encodedName);
 	mkdirSync(dir, { recursive: true });
 	const session = { cwd, timestamp: new Date().toISOString() };
-	writeFileSync(path.join(dir, "session1.jsonl"), JSON.stringify(session) + "\n");
+	writeFileSync(
+		path.join(dir, "session1.jsonl"),
+		JSON.stringify(session) + "\n",
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +130,11 @@ describe("DiscoveryScheduler.runOnce()", () => {
 		const db = makeFakeDb({
 			upsertProjectsFromDiscovery: (rows) => {
 				captured.push(...rows);
-				return Promise.resolve({ added: 0, updated: 0, unchanged: rows.length });
+				return Promise.resolve({
+					added: 0,
+					updated: 0,
+					unchanged: rows.length,
+				});
 			},
 		});
 
@@ -131,7 +142,9 @@ describe("DiscoveryScheduler.runOnce()", () => {
 		await scheduler.runOnce();
 
 		// The sentinel path must not appear in the upsert call.
-		const paths = captured.map((r) => (r as { canonicalPath: string }).canonicalPath);
+		const paths = captured.map(
+			(r) => (r as { canonicalPath: string }).canonicalPath,
+		);
 		expect(paths).not.toContain(sentinelCwd);
 	});
 

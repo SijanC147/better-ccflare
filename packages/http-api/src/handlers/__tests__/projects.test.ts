@@ -31,7 +31,9 @@ function makeDiscoveredProject(overrides: Partial<Project> = {}): Project {
 }
 
 /** Build a partial DatabaseOperations stub — only methods used by projects.ts */
-function makeDbOps(overrides: Partial<DatabaseOperations> = {}): DatabaseOperations {
+function makeDbOps(
+	overrides: Partial<DatabaseOperations> = {},
+): DatabaseOperations {
 	return {
 		listProjects: async () => [],
 		getProject: async (_id: string) => null,
@@ -49,11 +51,7 @@ function makeDbOps(overrides: Partial<DatabaseOperations> = {}): DatabaseOperati
 	} as unknown as DatabaseOperations;
 }
 
-function makeRequest(
-	method: string,
-	url: string,
-	body?: unknown,
-): Request {
+function makeRequest(method: string, url: string, body?: unknown): Request {
 	return new Request(url, {
 		method,
 		headers: body ? { "Content-Type": "application/json" } : {},
@@ -65,12 +63,17 @@ function makeRequest(
 
 describe("GET /api/projects", () => {
 	it("returns { success, data, count } shape by default", async () => {
-		const projects = [makeProject(), makeProject({ id: "xyz", display_name: "other-app" })];
+		const projects = [
+			makeProject(),
+			makeProject({ id: "xyz", display_name: "other-app" }),
+		];
 		const handler = createProjectsListHandler(
 			makeDbOps({ listProjects: async () => projects }),
 		);
 
-		const res = await handler(makeRequest("GET", "http://localhost/api/projects"));
+		const res = await handler(
+			makeRequest("GET", "http://localhost/api/projects"),
+		);
 		expect(res.status).toBe(200);
 
 		const body = await res.json();
@@ -81,7 +84,10 @@ describe("GET /api/projects", () => {
 	});
 
 	it("returns string[] when ?legacy=1", async () => {
-		const projects = [makeProject(), makeProject({ id: "xyz", display_name: "other-app" })];
+		const projects = [
+			makeProject(),
+			makeProject({ id: "xyz", display_name: "other-app" }),
+		];
 		const handler = createProjectsListHandler(
 			makeDbOps({ listProjects: async () => projects }),
 		);
@@ -118,7 +124,9 @@ describe("POST /api/projects", () => {
 		const handler = createProjectCreateHandler(makeDbOps());
 
 		const res = await handler(
-			makeRequest("POST", "http://localhost/api/projects", { display_name: "oops" }),
+			makeRequest("POST", "http://localhost/api/projects", {
+				display_name: "oops",
+			}),
 		);
 
 		expect(res.status).toBe(400);
@@ -129,7 +137,9 @@ describe("POST /api/projects", () => {
 
 describe("GET /api/projects/:id", () => {
 	it("returns 404 when project does not exist", async () => {
-		const handler = createProjectGetHandler(makeDbOps({ getProject: async () => null }));
+		const handler = createProjectGetHandler(
+			makeDbOps({ getProject: async () => null }),
+		);
 
 		const res = await handler("nonexistent-id");
 		expect(res.status).toBe(404);

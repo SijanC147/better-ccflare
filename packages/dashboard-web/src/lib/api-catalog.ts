@@ -69,10 +69,7 @@ export function pathParams(path: string): string[] {
 }
 
 /** Substitute `:param` placeholders with caller-supplied values. */
-export function fillPath(
-	path: string,
-	values: Record<string, string>,
-): string {
+export function fillPath(path: string, values: Record<string, string>): string {
 	return path
 		.split("/")
 		.map((segment) =>

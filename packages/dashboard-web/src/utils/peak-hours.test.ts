@@ -209,7 +209,11 @@ describe("vendor-zone resolution of the Anthropic window", () => {
 	});
 
 	it("renders 5–11am in Los Angeles on both of those dates", () => {
-		const LA = { timeZone: "America/Los_Angeles", locale: "en-GB", hour12: false };
+		const LA = {
+			timeZone: "America/Los_Angeles",
+			locale: "en-GB",
+			hour12: false,
+		};
 		const winter = resolvePeakOccurrence(
 			ANTHROPIC_PEAK_WINDOW,
 			Date.parse("2027-01-13T09:00:00Z"),
@@ -274,7 +278,10 @@ describe("vendor-zone resolution of the Anthropic window", () => {
 		// Singapore has no DST, so stating the window in Asia/Singapore rather
 		// than UTC must not move it in either season.
 		for (const iso of ["2027-01-13T04:00:00Z", "2026-07-15T04:00:00Z"]) {
-			const occurrence = resolvePeakOccurrence(ZAI_PEAK_WINDOW, Date.parse(iso));
+			const occurrence = resolvePeakOccurrence(
+				ZAI_PEAK_WINDOW,
+				Date.parse(iso),
+			);
 			const day = iso.slice(0, 10);
 			expect(occurrence.start).toBe(Date.parse(`${day}T06:00:00Z`));
 			expect(occurrence.end).toBe(Date.parse(`${day}T10:00:00Z`));

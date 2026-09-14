@@ -25,7 +25,9 @@ export class ProjectRepository extends BaseRepository<Project> {
 		const now = Date.now();
 		const source: ProjectSource = fields.source ?? "discovered";
 		const enabled = fields.enabled !== undefined ? fields.enabled : true;
-		const metadataJson = fields.metadata ? JSON.stringify(fields.metadata) : null;
+		const metadataJson = fields.metadata
+			? JSON.stringify(fields.metadata)
+			: null;
 
 		await this.run(
 			`INSERT INTO projects (id, canonical_path, display_name, enabled, source, parent_project_id, last_session_at, session_count, discovered_at, metadata)
@@ -48,7 +50,8 @@ export class ProjectRepository extends BaseRepository<Project> {
        FROM projects WHERE canonical_path = ?`,
 			[fields.canonicalPath],
 		);
-		if (!row) throw new Error(`Failed to create/find project: ${fields.canonicalPath}`);
+		if (!row)
+			throw new Error(`Failed to create/find project: ${fields.canonicalPath}`);
 		return toProject(row);
 	}
 
@@ -148,9 +151,7 @@ export class ProjectRepository extends BaseRepository<Project> {
 		);
 		if (!row) return; // already gone — idempotent
 		if (row.source !== "manual") {
-			throw BadRequest(
-				"Cannot delete discovered project; disable instead",
-			);
+			throw BadRequest("Cannot delete discovered project; disable instead");
 		}
 		await this.run(`DELETE FROM projects WHERE id = ?`, [id]);
 	}

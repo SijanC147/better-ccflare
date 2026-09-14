@@ -123,7 +123,8 @@ export class WorktreeRuleRepository extends BaseRepository<WorktreeRule> {
 		}>,
 	): Promise<WorktreeRule> {
 		// Re-run compile check if kind or pattern is changing
-		const needsRecompile = fields.kind !== undefined || fields.pattern !== undefined;
+		const needsRecompile =
+			fields.kind !== undefined || fields.pattern !== undefined;
 
 		let compileResult: { ok: boolean; error: string | null } | null = null;
 		if (needsRecompile) {

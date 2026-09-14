@@ -2,9 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createRequestByIdHandler } from "../requests";
 
 type Summary = Awaited<
-	ReturnType<
-		Parameters<typeof createRequestByIdHandler>[0]["getRequestById"]
-	>
+	ReturnType<Parameters<typeof createRequestByIdHandler>[0]["getRequestById"]>
 >;
 
 const row = {

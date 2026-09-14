@@ -1,4 +1,8 @@
-import type { Project, WorktreeRule, WorktreeRuleKind } from "@better-ccflare/types";
+import type {
+	Project,
+	WorktreeRule,
+	WorktreeRuleKind,
+} from "@better-ccflare/types";
 import {
 	AlertCircle,
 	ChevronDown,
@@ -36,7 +40,13 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "./ui/select";
 import { Switch } from "./ui/switch";
 
 // ---------------------------------------------------------------------------
@@ -66,14 +76,23 @@ interface ProjectDialogProps {
 	allProjects: Project[];
 }
 
-function ProjectDialog({ open, onClose, project, allProjects }: ProjectDialogProps) {
+function ProjectDialog({
+	open,
+	onClose,
+	project,
+	allProjects,
+}: ProjectDialogProps) {
 	const isEdit = !!project;
 	const createProject = useCreateProject();
 	const updateProject = useUpdateProject();
 
-	const [canonicalPath, setCanonicalPath] = useState(project?.canonical_path ?? "");
+	const [canonicalPath, setCanonicalPath] = useState(
+		project?.canonical_path ?? "",
+	);
 	const [displayName, setDisplayName] = useState(project?.display_name ?? "");
-	const [parentId, setParentId] = useState<string>(project?.parent_project_id ?? "__none__");
+	const [parentId, setParentId] = useState<string>(
+		project?.parent_project_id ?? "__none__",
+	);
 	const [error, setError] = useState<string | null>(null);
 
 	const busy = createProject.isPending || updateProject.isPending;
@@ -114,7 +133,9 @@ function ProjectDialog({ open, onClose, project, allProjects }: ProjectDialogPro
 		<Dialog open={open} onOpenChange={(v) => !v && onClose()}>
 			<DialogContent className="sm:max-w-md">
 				<DialogHeader>
-					<DialogTitle>{isEdit ? "Edit Project" : "Add Manual Project"}</DialogTitle>
+					<DialogTitle>
+						{isEdit ? "Edit Project" : "Add Manual Project"}
+					</DialogTitle>
 				</DialogHeader>
 				<div className="space-y-4 py-2">
 					{!isEdit && (
@@ -153,9 +174,7 @@ function ProjectDialog({ open, onClose, project, allProjects }: ProjectDialogPro
 							</SelectContent>
 						</Select>
 					</div>
-					{error && (
-						<p className="text-sm text-destructive">{error}</p>
-					)}
+					{error && <p className="text-sm text-destructive">{error}</p>}
 				</div>
 				<DialogFooter>
 					<Button variant="ghost" onClick={onClose} disabled={busy}>
@@ -181,17 +200,28 @@ interface RuleDialogProps {
 	allProjects: Project[];
 }
 
-function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProps) {
+function WorktreeRuleDialog({
+	open,
+	onClose,
+	rule,
+	allProjects,
+}: RuleDialogProps) {
 	const isEdit = !!rule;
 	const createRule = useCreateWorktreeRule();
 	const updateRule = useUpdateWorktreeRule();
 
 	const [kind, setKind] = useState<WorktreeRuleKind>(rule?.kind ?? "glob");
 	const [pattern, setPattern] = useState(rule?.pattern ?? "");
-	const [parentId, setParentId] = useState<string>(rule?.parent_project_id ?? "__none__");
+	const [parentId, setParentId] = useState<string>(
+		rule?.parent_project_id ?? "__none__",
+	);
 	const [priority, setPriority] = useState(String(rule?.priority ?? 0));
 	const [samplePaths, setSamplePaths] = useState("");
-	const [testResults, setTestResults] = useState<Array<{ path: string; matched: boolean; error?: string }> | null>(null);
+	const [testResults, setTestResults] = useState<Array<{
+		path: string;
+		matched: boolean;
+		error?: string;
+	}> | null>(null);
 	const [error, setError] = useState<string | null>(null);
 
 	const busy = createRule.isPending || updateRule.isPending;
@@ -199,7 +229,10 @@ function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProp
 	const handleTest = async () => {
 		setError(null);
 		setTestResults(null);
-		const paths = samplePaths.split("\n").map((s) => s.trim()).filter(Boolean);
+		const paths = samplePaths
+			.split("\n")
+			.map((s) => s.trim())
+			.filter(Boolean);
 		if (paths.length === 0) {
 			setError("Enter at least one sample path.");
 			return;
@@ -249,13 +282,18 @@ function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProp
 		<Dialog open={open} onOpenChange={(v) => !v && onClose()}>
 			<DialogContent className="sm:max-w-lg">
 				<DialogHeader>
-					<DialogTitle>{isEdit ? "Edit Worktree Rule" : "Add Worktree Rule"}</DialogTitle>
+					<DialogTitle>
+						{isEdit ? "Edit Worktree Rule" : "Add Worktree Rule"}
+					</DialogTitle>
 				</DialogHeader>
 				<div className="space-y-4 py-2">
 					<div className="grid grid-cols-2 gap-4">
 						<div className="space-y-1">
 							<Label>Kind</Label>
-							<Select value={kind} onValueChange={(v) => setKind(v as WorktreeRuleKind)}>
+							<Select
+								value={kind}
+								onValueChange={(v) => setKind(v as WorktreeRuleKind)}
+							>
 								<SelectTrigger>
 									<SelectValue />
 								</SelectTrigger>
@@ -280,7 +318,13 @@ function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProp
 						<Label htmlFor="pattern">Pattern</Label>
 						<Input
 							id="pattern"
-							placeholder={kind === "glob" ? "**/.worktrees/**" : kind === "regex" ? "\\.worktrees/" : "/path/to/worktrees"}
+							placeholder={
+								kind === "glob"
+									? "**/.worktrees/**"
+									: kind === "regex"
+										? "\\.worktrees/"
+										: "/path/to/worktrees"
+							}
 							value={pattern}
 							onChange={(e) => setPattern(e.target.value)}
 						/>
@@ -292,7 +336,9 @@ function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProp
 								<SelectValue placeholder="Inferred from longest-prefix match" />
 							</SelectTrigger>
 							<SelectContent>
-								<SelectItem value="__none__">Infer from project path</SelectItem>
+								<SelectItem value="__none__">
+									Infer from project path
+								</SelectItem>
 								{allProjects.map((p) => (
 									<SelectItem key={p.id} value={p.id}>
 										{p.display_name}
@@ -310,17 +356,30 @@ function WorktreeRuleDialog({ open, onClose, rule, allProjects }: RuleDialogProp
 							value={samplePaths}
 							onChange={(e) => setSamplePaths(e.target.value)}
 						/>
-						<Button variant="outline" size="sm" onClick={handleTest} type="button">
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={handleTest}
+							type="button"
+						>
 							Test Rule
 						</Button>
 					</div>
 					{testResults && (
 						<div className="rounded-md border bg-muted/50 p-3 space-y-1 text-xs font-mono">
 							{testResults.map((r) => (
-								<div key={r.path} className={cn("flex gap-2", r.matched ? "text-green-600" : "text-muted-foreground")}>
+								<div
+									key={r.path}
+									className={cn(
+										"flex gap-2",
+										r.matched ? "text-green-600" : "text-muted-foreground",
+									)}
+								>
 									<span>{r.matched ? "✓" : "✗"}</span>
 									<span className="truncate">{r.path}</span>
-									{r.error && <span className="text-destructive">{r.error}</span>}
+									{r.error && (
+										<span className="text-destructive">{r.error}</span>
+									)}
 								</div>
 							))}
 						</div>
@@ -352,18 +411,29 @@ interface ProjectRowProps {
 	onDelete: (p: Project) => void;
 }
 
-function ProjectRow({ project, childProjects, allProjects, onEdit, onDelete }: ProjectRowProps) {
+function ProjectRow({
+	project,
+	childProjects,
+	allProjects,
+	onEdit,
+	onDelete,
+}: ProjectRowProps) {
 	const [expanded, setExpanded] = useState(true);
 	const updateProject = useUpdateProject();
 
 	const handleToggleEnabled = () => {
-		updateProject.mutate({ id: project.id, body: { enabled: !project.enabled } });
+		updateProject.mutate({
+			id: project.id,
+			body: { enabled: !project.enabled },
+		});
 	};
 
 	const isWorktree = project.parent_project_id !== null;
 
 	return (
-		<div className={cn("border rounded-lg", isWorktree && "ml-6 border-dashed")}>
+		<div
+			className={cn("border rounded-lg", isWorktree && "ml-6 border-dashed")}
+		>
 			<div className="flex items-center gap-3 p-3">
 				{childProjects.length > 0 && (
 					<button
@@ -371,20 +441,36 @@ function ProjectRow({ project, childProjects, allProjects, onEdit, onDelete }: P
 						className="text-muted-foreground hover:text-foreground"
 						onClick={() => setExpanded((e) => !e)}
 					>
-						{expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+						{expanded ? (
+							<ChevronDown className="h-4 w-4" />
+						) : (
+							<ChevronRight className="h-4 w-4" />
+						)}
 					</button>
 				)}
 				{childProjects.length === 0 && <div className="w-4" />}
 
-				<FolderOpen className={cn("h-4 w-4 shrink-0", project.enabled ? "text-primary" : "text-muted-foreground")} />
+				<FolderOpen
+					className={cn(
+						"h-4 w-4 shrink-0",
+						project.enabled ? "text-primary" : "text-muted-foreground",
+					)}
+				/>
 
 				<div className="flex-1 min-w-0">
 					<div className="flex items-center gap-2 flex-wrap">
-						<span className={cn("font-medium text-sm truncate", !project.enabled && "text-muted-foreground line-through")}>
+						<span
+							className={cn(
+								"font-medium text-sm truncate",
+								!project.enabled && "text-muted-foreground line-through",
+							)}
+						>
 							{project.display_name}
 						</span>
 						{project.source === "manual" && (
-							<Badge variant="outline" className="text-xs">manual</Badge>
+							<Badge variant="outline" className="text-xs">
+								manual
+							</Badge>
 						)}
 						{isWorktree && (
 							<Badge variant="secondary" className="text-xs gap-1">
@@ -393,9 +479,13 @@ function ProjectRow({ project, childProjects, allProjects, onEdit, onDelete }: P
 							</Badge>
 						)}
 					</div>
-					<p className="text-xs text-muted-foreground truncate font-mono">{project.canonical_path}</p>
+					<p className="text-xs text-muted-foreground truncate font-mono">
+						{project.canonical_path}
+					</p>
 					<p className="text-xs text-muted-foreground">
-						{project.session_count} session{project.session_count !== 1 ? "s" : ""} · last active {relativeTime(project.last_session_at)}
+						{project.session_count} session
+						{project.session_count !== 1 ? "s" : ""} · last active{" "}
+						{relativeTime(project.last_session_at)}
 					</p>
 				</div>
 
@@ -405,7 +495,13 @@ function ProjectRow({ project, childProjects, allProjects, onEdit, onDelete }: P
 						onCheckedChange={handleToggleEnabled}
 						title={project.enabled ? "Disable project" : "Enable project"}
 					/>
-					<Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onEdit(project)} title="Edit">
+					<Button
+						variant="ghost"
+						size="icon"
+						className="h-7 w-7"
+						onClick={() => onEdit(project)}
+						title="Edit"
+					>
 						<Pencil className="h-3.5 w-3.5" />
 					</Button>
 					{project.source === "manual" && (
@@ -451,16 +547,27 @@ interface RuleRowProps {
 	onDelete: (r: WorktreeRule) => void;
 }
 
-function WorktreeRuleRow({ rule, allProjects, onEdit, onDelete }: RuleRowProps) {
+function WorktreeRuleRow({
+	rule,
+	allProjects,
+	onEdit,
+	onDelete,
+}: RuleRowProps) {
 	const updateRule = useUpdateWorktreeRule();
-	const parentProject = allProjects.find((p) => p.id === rule.parent_project_id);
+	const parentProject = allProjects.find(
+		(p) => p.id === rule.parent_project_id,
+	);
 
 	return (
 		<div className="flex items-center gap-3 p-3 border rounded-lg">
 			<div className="flex-1 min-w-0">
 				<div className="flex items-center gap-2 flex-wrap">
-					<Badge variant="outline" className="text-xs font-mono">{rule.kind}</Badge>
-					<code className="text-xs bg-muted px-1 py-0.5 rounded truncate max-w-[300px]">{rule.pattern}</code>
+					<Badge variant="outline" className="text-xs font-mono">
+						{rule.kind}
+					</Badge>
+					<code className="text-xs bg-muted px-1 py-0.5 rounded truncate max-w-[300px]">
+						{rule.pattern}
+					</code>
 					{rule.compile_error && (
 						<Badge variant="destructive" className="text-xs gap-1">
 							<AlertCircle className="h-3 w-3" />
@@ -470,15 +577,25 @@ function WorktreeRuleRow({ rule, allProjects, onEdit, onDelete }: RuleRowProps) 
 				</div>
 				<p className="text-xs text-muted-foreground mt-0.5">
 					Priority {rule.priority}
-					{parentProject ? ` · parent: ${parentProject.display_name}` : " · parent: inferred"}
+					{parentProject
+						? ` · parent: ${parentProject.display_name}`
+						: " · parent: inferred"}
 				</p>
 			</div>
 			<div className="flex items-center gap-2 shrink-0">
 				<Switch
 					checked={rule.enabled}
-					onCheckedChange={() => updateRule.mutate({ id: rule.id, body: { enabled: !rule.enabled } })}
+					onCheckedChange={() =>
+						updateRule.mutate({ id: rule.id, body: { enabled: !rule.enabled } })
+					}
 				/>
-				<Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onEdit(rule)} title="Edit">
+				<Button
+					variant="ghost"
+					size="icon"
+					className="h-7 w-7"
+					onClick={() => onEdit(rule)}
+					title="Edit"
+				>
 					<Pencil className="h-3.5 w-3.5" />
 				</Button>
 				<Button
@@ -500,15 +617,25 @@ function WorktreeRuleRow({ rule, allProjects, onEdit, onDelete }: RuleRowProps) 
 // ---------------------------------------------------------------------------
 
 export function ProjectsTab() {
-	const { data: projects = [], isLoading: projectsLoading, error: projectsError } = useProjectsAll();
+	const {
+		data: projects = [],
+		isLoading: projectsLoading,
+		error: projectsError,
+	} = useProjectsAll();
 	const { data: rules = [], isLoading: rulesLoading } = useWorktreeRules();
 	const discoverProjects = useDiscoverProjects();
 	const deleteProject = useDeleteProject();
 	const deleteWorktreeRule = useDeleteWorktreeRule();
 
 	const [search, setSearch] = useState("");
-	const [projectDialog, setProjectDialog] = useState<{ open: boolean; project?: Project | null }>({ open: false });
-	const [ruleDialog, setRuleDialog] = useState<{ open: boolean; rule?: WorktreeRule | null }>({ open: false });
+	const [projectDialog, setProjectDialog] = useState<{
+		open: boolean;
+		project?: Project | null;
+	}>({ open: false });
+	const [ruleDialog, setRuleDialog] = useState<{
+		open: boolean;
+		rule?: WorktreeRule | null;
+	}>({ open: false });
 	const [discoverResult, setDiscoverResult] = useState<string | null>(null);
 
 	const handleDiscover = async () => {
@@ -516,7 +643,9 @@ export function ProjectsTab() {
 		try {
 			const result = await discoverProjects.mutateAsync();
 			if (result) {
-				setDiscoverResult(`Scan complete — added: ${result.added}, updated: ${result.updated}, unchanged: ${result.unchanged}`);
+				setDiscoverResult(
+					`Scan complete — added: ${result.added}, updated: ${result.updated}, unchanged: ${result.unchanged}`,
+				);
 			}
 		} catch {
 			setDiscoverResult("Scan failed — check server logs.");
@@ -524,7 +653,11 @@ export function ProjectsTab() {
 	};
 
 	const handleDeleteProject = (project: Project) => {
-		if (confirm(`Delete project "${project.display_name}"? This cannot be undone.`)) {
+		if (
+			confirm(
+				`Delete project "${project.display_name}"? This cannot be undone.`,
+			)
+		) {
 			deleteProject.mutate(project.id);
 		}
 	};
@@ -539,7 +672,10 @@ export function ProjectsTab() {
 	const filteredProjects = projects.filter((p) => {
 		if (!search) return true;
 		const q = search.toLowerCase();
-		return p.display_name.toLowerCase().includes(q) || p.canonical_path.toLowerCase().includes(q);
+		return (
+			p.display_name.toLowerCase().includes(q) ||
+			p.canonical_path.toLowerCase().includes(q)
+		);
 	});
 
 	// Map parent_id → children
@@ -572,7 +708,12 @@ export function ProjectsTab() {
 						onClick={handleDiscover}
 						disabled={discoverProjects.isPending}
 					>
-						<RefreshCw className={cn("h-4 w-4 mr-2", discoverProjects.isPending && "animate-spin")} />
+						<RefreshCw
+							className={cn(
+								"h-4 w-4 mr-2",
+								discoverProjects.isPending && "animate-spin",
+							)}
+						/>
 						{discoverProjects.isPending ? "Scanning…" : "Discover"}
 					</Button>
 					<Button
@@ -588,7 +729,11 @@ export function ProjectsTab() {
 			{discoverResult && (
 				<div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
 					<span>{discoverResult}</span>
-					<button type="button" onClick={() => setDiscoverResult(null)} className="ml-auto">
+					<button
+						type="button"
+						onClick={() => setDiscoverResult(null)}
+						className="ml-auto"
+					>
 						<X className="h-4 w-4" />
 					</button>
 				</div>
@@ -601,7 +746,9 @@ export function ProjectsTab() {
 						<FolderOpen className="h-4 w-4" />
 						Projects
 						{!projectsLoading && (
-							<Badge variant="secondary" className="text-xs">{projects.length}</Badge>
+							<Badge variant="secondary" className="text-xs">
+								{projects.length}
+							</Badge>
 						)}
 					</CardTitle>
 				</CardHeader>
@@ -614,7 +761,9 @@ export function ProjectsTab() {
 					)}
 					{!projectsLoading && topLevel.length === 0 && (
 						<p className="text-sm text-muted-foreground">
-							{search ? "No projects match your search." : "No projects found. Click Discover to scan ~/.claude/projects/."}
+							{search
+								? "No projects match your search."
+								: "No projects found. Click Discover to scan ~/.claude/projects/."}
 						</p>
 					)}
 					{topLevel.map((project) => (
@@ -638,7 +787,9 @@ export function ProjectsTab() {
 							<GitBranch className="h-4 w-4" />
 							Worktree Rules
 							{!rulesLoading && (
-								<Badge variant="secondary" className="text-xs">{rules.length}</Badge>
+								<Badge variant="secondary" className="text-xs">
+									{rules.length}
+								</Badge>
 							)}
 						</CardTitle>
 						<Button
@@ -657,7 +808,8 @@ export function ProjectsTab() {
 					)}
 					{!rulesLoading && rules.length === 0 && (
 						<p className="text-sm text-muted-foreground">
-							No worktree rules yet. Add a glob, regex, or directory rule to mark paths as worktrees.
+							No worktree rules yet. Add a glob, regex, or directory rule to
+							mark paths as worktrees.
 						</p>
 					)}
 					{rules.map((rule) => (

@@ -59,7 +59,13 @@ describe("ResolverSnapshot — project attribution", () => {
 		const projectId = "proj-parent";
 		const ruleId = "rule-dir-1";
 		const snapshot = ResolverSnapshot.build(
-			[{ id: projectId, canonicalPath: "/home/user/projects/main", enabled: true }],
+			[
+				{
+					id: projectId,
+					canonicalPath: "/home/user/projects/main",
+					enabled: true,
+				},
+			],
 			[
 				{
 					id: ruleId,

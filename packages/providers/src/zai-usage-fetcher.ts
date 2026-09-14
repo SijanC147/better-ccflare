@@ -139,7 +139,10 @@ function tokenWindows(
 ): Array<{ name: string; percentage: number }> {
 	const windows: Array<{ name: string; percentage: number }> = [];
 	if (usage.tokens_limit && usage.tokens_limit.percentage !== undefined) {
-		windows.push({ name: "five_hour", percentage: usage.tokens_limit.percentage });
+		windows.push({
+			name: "five_hour",
+			percentage: usage.tokens_limit.percentage,
+		});
 	}
 	if (
 		usage.tokens_limit_weekly &&

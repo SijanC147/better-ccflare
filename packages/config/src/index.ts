@@ -724,8 +724,7 @@ export class Config extends EventEmitter {
 		try {
 			const info = statSync(dir);
 			const uid = process.getuid?.();
-			const ownedByUs =
-				uid === undefined || info.uid === uid || info.uid === 0;
+			const ownedByUs = uid === undefined || info.uid === uid || info.uid === 0;
 			return ownedByUs && (info.mode & 0o022) === 0;
 		} catch {
 			// Silent: the walk reports one message naming the hop that failed.
@@ -1740,7 +1739,8 @@ export class Config extends EventEmitter {
 		).trim();
 		if (!org) return null;
 
-		const shipPayloadsEnv = process.env.BETTER_CCFLARE_OPENOBSERVE_SHIP_PAYLOADS;
+		const shipPayloadsEnv =
+			process.env.BETTER_CCFLARE_OPENOBSERVE_SHIP_PAYLOADS;
 		const shipPayloads =
 			shipPayloadsEnv !== undefined
 				? shipPayloadsEnv === "true" || shipPayloadsEnv === "1"

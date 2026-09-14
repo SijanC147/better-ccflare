@@ -70,7 +70,14 @@ function zonedParts(ts: number, timeZone: string): ZonedParts {
  */
 function zoneOffsetMs(ts: number, timeZone: string): number {
 	const p = zonedParts(ts, timeZone);
-	const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+	const asUtc = Date.UTC(
+		p.year,
+		p.month - 1,
+		p.day,
+		p.hour,
+		p.minute,
+		p.second,
+	);
 	// The formatted parts carry no milliseconds, so compare against whole seconds.
 	return asUtc - Math.floor(ts / 1000) * 1000;
 }
