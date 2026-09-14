@@ -272,6 +272,45 @@ export interface HealthResponse {
 			};
 		};
 	};
+	/**
+	 * Circuit-breaker state, reported and never enforced. No request path
+	 * consults the breaker, so nothing here removes an account from rotation.
+	 *
+	 * It sits beside `pool` because the pair answers a question neither
+	 * answers alone: `pool.usage_exhausted` says our accounts are capped,
+	 * while an open circuit says upstream kept failing for that account.
+	 */
+	circuit?: CircuitHealth;
+}
+
+/**
+ * The `circuit` block of `HealthResponse`. Structurally mirrors
+ * `CircuitHealthSnapshot` in `packages/proxy/src/circuit-breaker.ts`; declared
+ * here because `@better-ccflare/types` must not depend on the proxy package.
+ */
+export interface CircuitHealth {
+	/** False when the breaker records nothing, which makes empty lists expected. */
+	enabled: boolean;
+	accounts: Array<{
+		key: string;
+		provider: string;
+		accountId: string;
+		state: "closed" | "open" | "half-open";
+		failureCount: number;
+		openedAt: number | null;
+		cooldownEndsAt: number | null;
+		halfOpenProbeInFlight: boolean;
+		probeDeadlineAt: number | null;
+	}>;
+	providers: Array<{
+		provider: string;
+		tracked: number;
+		open: number;
+		halfOpen: number;
+		closed: number;
+		/** Every tracked account for this provider is open, at least two of them. */
+		wideOpen: boolean;
+	}>;
 }
 
 // Config types
