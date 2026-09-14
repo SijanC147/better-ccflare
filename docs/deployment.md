@@ -1192,9 +1192,9 @@ find /backup/better-ccflare -name "*.tar.gz" -mtime +30 -delete
 |----------|---------|-------------|
 | `CLIENT_ID` | 9d1c250a-e61b-44d9-88ed-5944d1962f5e | OAuth client ID for authentication |
 | `SESSION_DURATION_MS` | 18000000 | Session duration in milliseconds (5 hours) |
-| `RETRY_ATTEMPTS` | 3 | Number of retry attempts for failed requests |
-| `RETRY_DELAY_MS` | 1000 | Initial delay between retries in milliseconds |
-| `RETRY_BACKOFF` | 2 | Backoff multiplier for exponential retry delays |
+| `RETRY_ATTEMPTS` | 3 | Total attempts for one upstream request, the first attempt included. `1` disables retry |
+| `RETRY_DELAY_MS` | 1000 | Base delay before the first retry, in milliseconds |
+| `RETRY_BACKOFF` | 2 | Multiplier applied per attempt, with full jitter, capped |
 | `better-ccflare_CONFIG_PATH` | Platform-specific | Path to configuration file |
 | `better-ccflare_DB_PATH` | Platform-specific | Path to SQLite database file (ignored when `DATABASE_URL` is set) |
 | `DATABASE_URL` | - | PostgreSQL connection string. When set, PostgreSQL is used instead of SQLite. Recommended for single-pod Kubernetes deployments (durable state across restarts). Each better-ccflare instance requires its own database — see [Multi-Instance Deployment](#multi-instance-deployment-single-instance-per-database). Example: `postgresql://user:pass@host:5432/db` |

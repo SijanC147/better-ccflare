@@ -1260,9 +1260,9 @@ better-ccflare can be configured using the following environment variables:
 - `SESSION_DURATION_MS` - Session duration in milliseconds (default: 18000000 / 5 hours)
 - `CLIENT_ID` - OAuth client ID for Anthropic authentication (default: 9d1c250a-e61b-44d9-88ed-5944d1962f5e)
 - `CF_STREAM_BODY_MAX_BYTES` - Maximum bytes to capture from streaming responses (default: 262144 / 256KB)
-- `RETRY_ATTEMPTS` - Number of retry attempts for failed requests (default: 3)
-- `RETRY_DELAY_MS` - Initial delay between retries in milliseconds (default: 1000)
-- `RETRY_BACKOFF` - Exponential backoff multiplier for retries (default: 2)
+- `RETRY_ATTEMPTS` - Total attempts for one upstream request, the first attempt included. `1` disables retry (default: 3)
+- `RETRY_DELAY_MS` - Base delay before the first retry, in milliseconds (default: 1000)
+- `RETRY_BACKOFF` - Multiplier applied per attempt, with full jitter, capped (default: 2)
 - `BETTER_CCFLARE_MODELS_REFRESH_HOURS` - Hours between scheduled model catalog refreshes, 0 disables scheduled refresh (default: 168 / 7 days). See [Model Catalog](configuration.md#model-catalog).
 - `BETTER_CCFLARE_MODELS_OFFLINE` - Disable scheduled/manual model catalog refresh and passive `/v1/models` capture (default: unset)
 - `BETTER_CCFLARE_MODELS_CACHE_DIR` - Directory for the persisted model catalog cache file (default: platform config dir)

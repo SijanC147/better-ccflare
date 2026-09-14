@@ -517,17 +517,19 @@ flowchart TD
 
 ### Retry Configuration
 
-- **Initial delay**: `runtime.retry.delayMs` (default: 1000ms, configurable)
-- **Backoff multiplier**: `runtime.retry.backoff` (default: 2, configurable)
-- **Max attempts**: `runtime.retry.attempts` (default: 3, configurable)
-- **Delay calculation**: `delayMs * (backoff ^ attemptNumber)`
+Retry covers three connect-phase failures where the upstream fetch throws and no Response object was produced: connection refused, DNS failure, and TLS handshake failure, and nothing else. It also covers the reset-less 529 overload path. Not retried: a response of any status (429 stays with the account selector, 529 keeps its own in-place retry); an abort, whether from client disconnect or a header-phase timeout that can fire while the model is already generating; and a connection reset or broken pipe, either of which can arrive after the request body was already sent. It does not cover 500/502/503/504 by default. `runtime.retry` is unrelated to `runtime.database.retry` (`db_retry_*`), which governs database operations.
+
+- **Attempts**: `runtime.retry.attempts` (default: 3). Total attempts for one upstream request, the first attempt included. `1` disables retry.
+- **Base delay**: `runtime.retry.delayMs` (default: 1000ms)
+- **Backoff multiplier**: `runtime.retry.backoff` (default: 2)
+- **Delay calculation**: `retry_delay_ms * retry_backoff ** n`, with full jitter, capped
 - **Stream body max bytes**: Controlled by CF_STREAM_USAGE_BUFFER_KB env var (default: defined in BUFFER_SIZES constant)
 - **Worker processing interval**: AsyncDbWriter processes queue every 100ms
 - **Worker shutdown delay**: TIMING.WORKER_SHUTDOWN_DELAY for graceful shutdown
 
-Configuration can be set via:
-1. Environment variables: `RETRY_ATTEMPTS`, `RETRY_DELAY_MS`, `RETRY_BACKOFF`
-2. Config file: `retry_attempts`, `retry_delay_ms`, `retry_backoff`
+Configuration precedence, highest first:
+1. Config file: `retry_attempts`, `retry_delay_ms`, `retry_backoff`
+2. Environment variables: `RETRY_ATTEMPTS`, `RETRY_DELAY_MS`, `RETRY_BACKOFF`
 3. Default values in code
 
 ## Database Update Patterns
