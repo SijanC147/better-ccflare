@@ -420,8 +420,13 @@ async function guardProjectsCaseMode(
 ) {
 	const log = new Logger("Startup");
 	let projectCount: number;
+	let rowsHaveUppercase: boolean;
 	try {
-		projectCount = (await dbOps.listProjects()).length;
+		const projects = await dbOps.listProjects();
+		projectCount = projects.length;
+		rowsHaveUppercase = projects.some(
+			(p) => p.canonical_path !== p.canonical_path.toLowerCase(),
+		);
 	} catch (err) {
 		log.warn(
 			`Could not check the projects path case mode: ${err instanceof Error ? err.message : String(err)}`,
@@ -433,6 +438,7 @@ async function guardProjectsCaseMode(
 		recorded: config.getStoredProjectsCaseSensitive(),
 		current: config.isProjectsCaseSensitive(),
 		projectCount,
+		rowsHaveUppercase,
 	});
 
 	switch (decision.action) {

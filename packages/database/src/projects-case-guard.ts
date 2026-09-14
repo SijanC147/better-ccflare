@@ -26,6 +26,25 @@ export interface ProjectsCaseModeInput {
 	current: boolean;
 	/** How many rows the projects table holds right now. */
 	projectCount: number;
+	/**
+	 * Whether any stored `canonical_path` carries an uppercase character.
+	 *
+	 * This is the one thing the database can prove about which key space its
+	 * rows live in, and the asymmetry is the whole subtlety of this guard, so
+	 * do not "simplify" it away:
+	 *
+	 *  - Uppercase present is PROOF the ids are real-case hashes, because a
+	 *    case-insensitive scan could not have written them. It also proves a
+	 *    case-insensitive scan would re-key them.
+	 *  - All lowercase proves nothing. It does NOT mean both modes agree: the
+	 *    comparison that decides a re-key is the rows against the NEXT scan's
+	 *    output, and a case-sensitive scan reads real case off the filesystem
+	 *    rather than echoing the rows back. All-lowercase rows are equally
+	 *    consistent with a case-insensitive install whose directories carry
+	 *    uppercase, where a flip does re-key. Separating those needs the
+	 *    filesystem, so this module takes no position on them.
+	 */
+	rowsHaveUppercase: boolean;
 }
 
 export type ProjectsCaseModeDecision =
@@ -65,7 +84,7 @@ function refusal(recorded: boolean, current: boolean, count: number): string {
 export function decideProjectsCaseMode(
 	input: ProjectsCaseModeInput,
 ): ProjectsCaseModeDecision {
-	const { recorded, current, projectCount } = input;
+	const { recorded, current, projectCount, rowsHaveUppercase } = input;
 
 	if (projectCount === 0) {
 		return recorded === current
@@ -74,10 +93,24 @@ export function decideProjectsCaseMode(
 	}
 
 	if (recorded === undefined) {
+		// Derived from the rows, not from `current`. Adopting the setting's
+		// current value would agree with itself, so an operator who flips
+		// PROJECTS_CASE_SENSITIVE and only THEN upgrades into this guard would
+		// get a marker matching the new setting, a silent guard, and the
+		// re-key anyway. An uppercase path settles it; all lowercase does not,
+		// and falls back to `current`, which leaves that quadrant exactly as
+		// unguarded as it was before this existed and no worse.
+		const derived = rowsHaveUppercase ? true : current;
+		if (derived !== current) {
+			return {
+				action: "refuse",
+				message: refusal(derived, current, projectCount),
+			};
+		}
 		return {
 			action: "adopt",
-			record: current,
-			message: `Adopted the projects path case mode this install was already running (${current ? "case-sensitive" : "case-insensitive"}) across its ${projectCount} existing projects. Changing PROJECTS_CASE_SENSITIVE from now on re-keys those rows, so it is refused while any project exists.`,
+			record: derived,
+			message: `Adopted the projects path case mode this install's ${projectCount} existing projects were stored under (${derived ? "case-sensitive" : "case-insensitive"}). Changing PROJECTS_CASE_SENSITIVE from now on re-keys those rows, so it is refused while any project exists.`,
 		};
 	}
 

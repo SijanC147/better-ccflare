@@ -13,6 +13,7 @@ describe("decideProjectsCaseMode", () => {
 			recorded: false,
 			current: true,
 			projectCount: 3,
+			rowsHaveUppercase: false,
 		});
 		expect(decision.action).toBe("refuse");
 		// The message must name the consequence, not just the condition: an
@@ -29,6 +30,7 @@ describe("decideProjectsCaseMode", () => {
 			recorded: true,
 			current: false,
 			projectCount: 3,
+			rowsHaveUppercase: false,
 		});
 		expect(decision.action).toBe("refuse");
 		expect(decision.message).toContain("requests.project_id");
@@ -41,6 +43,7 @@ describe("decideProjectsCaseMode", () => {
 			recorded: false,
 			current: true,
 			projectCount: 0,
+			rowsHaveUppercase: false,
 		});
 		expect(decision.action).toBe("record");
 		expect(decision.record).toBe(true);
@@ -51,21 +54,40 @@ describe("decideProjectsCaseMode", () => {
 			recorded: undefined,
 			current: false,
 			projectCount: 0,
+			rowsHaveUppercase: false,
 		});
 		expect(decision.action).toBe("record");
 		expect(decision.record).toBe(false);
 	});
 
+	test("adopts case-sensitive when the stored rows carry uppercase, whatever the setting says", () => {
+		// The flip-then-upgrade hole. An operator flips the setting to
+		// case-insensitive and only then upgrades into this guard. Adopting the
+		// setting's current value would agree with itself, the guard would stay
+		// silent, and the re-key would happen anyway. An uppercase character in
+		// a stored path is proof those ids are real-case hashes, so the rows
+		// decide, not the setting.
+		const decision = decideProjectsCaseMode({
+			recorded: undefined,
+			current: false,
+			projectCount: 12,
+			rowsHaveUppercase: true,
+		});
+		expect(decision.action).toBe("refuse");
+		expect(decision.message).toContain("requests.project_id");
+	});
+
 	test("adopts the current mode when no marker exists and projects already exist", () => {
-		// Every install that upgrades into this guard lands here. The rows were
-		// populated under whatever the setting resolved to then, which is the
-		// same value it resolves to now unless the operator has already changed
-		// it, so adopting is the only non-destructive answer. Refusing here
-		// would break every existing install's first boot.
+		// All-lowercase rows prove nothing about which mode wrote them, so the
+		// setting is the only evidence available and adopting it is the only
+		// non-destructive answer. This is the quadrant the guard deliberately
+		// leaves open, and every install that upgrades into the guard with
+		// lowercase paths lands here: refusing would break their first boot.
 		const decision = decideProjectsCaseMode({
 			recorded: undefined,
 			current: true,
 			projectCount: 12,
+			rowsHaveUppercase: false,
 		});
 		expect(decision.action).toBe("adopt");
 		expect(decision.record).toBe(true);
@@ -78,6 +100,7 @@ describe("decideProjectsCaseMode", () => {
 				recorded: true,
 				current: true,
 				projectCount: 12,
+				rowsHaveUppercase: false,
 			}).action,
 		).toBe("ok");
 		expect(
@@ -85,6 +108,7 @@ describe("decideProjectsCaseMode", () => {
 				recorded: false,
 				current: false,
 				projectCount: 12,
+				rowsHaveUppercase: false,
 			}).action,
 		).toBe("ok");
 	});
