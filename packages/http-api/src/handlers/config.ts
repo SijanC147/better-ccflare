@@ -10,7 +10,6 @@ import {
 	STRATEGIES,
 	type StrategyName,
 	setForceAccountModel as setForceAccountModelFlag,
-	TIME_CONSTANTS,
 	validateNumber,
 	validateString,
 } from "@better-ccflare/core";
@@ -50,11 +49,22 @@ export function createConfigHandlers(
 				// Use actual running port from runtime, fall back to config
 				port:
 					runtime?.port || (settings.port as number) || NETWORK.DEFAULT_PORT,
-				// Use Anthropic fallback as default since it's the only provider that uses session duration tracking
-				// Non-Anthropic providers don't use fixed-duration sessions but still need a default value
-				sessionDurationMs:
-					(settings.sessionDurationMs as number) ||
-					TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_FALLBACK,
+				// The resolved value, which is what the session logic uses. Read from
+				// getRuntime() rather than from getAllSettings(), for two reasons.
+				//
+				// getAllSettings() returns the snake_case config data, so the key is
+				// `session_duration_ms` and `settings.sessionDurationMs` was always
+				// `undefined`. This endpoint therefore reported the fallback on EVERY
+				// install, a stock one included, and the fallback is the one-hour
+				// ANTHROPIC_SESSION_DURATION_FALLBACK while the session logic uses the
+				// five-hour ANTHROPIC_SESSION_DURATION_DEFAULT. It was wrong by a
+				// factor of five and nothing surfaced the disagreement (SB23-2048).
+				//
+				// getRuntime() also applies the environment, the config file and the
+				// clamp from SB23-2040, so this reports the number actually in force
+				// rather than the number on disk. A 0 configured by an operator now
+				// reaches the response as 0 instead of being read as absent.
+				sessionDurationMs: config.getRuntime().sessionDurationMs,
 				default_agent_model:
 					(settings.default_agent_model as string) || DEFAULT_AGENT_MODEL,
 				// Include actual TLS status
