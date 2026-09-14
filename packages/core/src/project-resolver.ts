@@ -10,6 +10,7 @@
  * Designed for the hot path: every proxied request hits resolve() once.
  */
 
+import { homedir } from "node:os";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,13 @@ export interface ResolveResult {
 export interface ResolverOptions {
 	/** Default: `process.platform !== "darwin"` (darwin FS is case-insensitive). */
 	caseSensitive?: boolean;
+	/**
+	 * The user's home directory. A project row whose canonicalPath is the home
+	 * directory itself, or any ancestor of it, is excluded from the prefix index:
+	 * it would prefix-match every request and attribute the whole machine to one
+	 * project. See `isCatchAllPath`. Pass null to disable the exclusion.
+	 */
+	homeDir?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +105,27 @@ function normalizePath(
 		p = p.slice(0, -1);
 	}
 	return caseSensitive ? p : p.toLowerCase();
+}
+
+/**
+ * True when `canonicalPath` is the home directory itself or an ancestor of it
+ * (`/`, `/Users`, `/Users/seanbugeja`, `/home`, …).
+ *
+ * Such a row matches every path a developer ever works in, so once attribution
+ * resolves at all it wins by default for anything no longer row covers. That is
+ * strictly worse than the null it replaces: a null announces that attribution
+ * did not happen, while a uniform home-directory id looks like a real answer and
+ * silently makes every per-project figure a whole-machine figure (SB23-1975).
+ *
+ * The row is left in the database and stays visible and selectable in the UI.
+ * Only its ability to win a *prefix* match is removed; an explicit worktree rule
+ * naming it as a parent still resolves to it.
+ *
+ * Both arguments must already be normalized by `normalizePath`.
+ */
+export function isCatchAllPath(canonicalPath: string, homeDir: string): boolean {
+	if (canonicalPath === homeDir) return true;
+	return homeDir.startsWith(`${canonicalPath}/`) || canonicalPath === "/";
 }
 
 /**
@@ -208,9 +237,22 @@ export class ResolverSnapshot {
 	): ResolverSnapshot {
 		const caseSensitive = opts?.caseSensitive ?? process.platform !== "darwin";
 
-		// Build prefix index: only enabled projects, sorted longest path first
+		// Normalize the home directory the same way paths are normalized, so the
+		// comparison in isCatchAllPath is like-for-like.
+		const rawHome =
+			opts?.homeDir === undefined ? homedir() : (opts?.homeDir ?? null);
+		const homeDir =
+			rawHome === null ? null : normalizePath(rawHome, caseSensitive);
+
+		// Build prefix index: only enabled projects, excluding catch-all rows at or
+		// above the home directory, sorted longest path first
 		const prefixIndex: CompiledProject[] = projects
 			.filter((p) => p.enabled)
+			.filter((p) => {
+				if (homeDir === null) return true;
+				const normalized = normalizePath(p.canonicalPath, caseSensitive);
+				return normalized === null || !isCatchAllPath(normalized, homeDir);
+			})
 			.map((p) => ({
 				id: p.id,
 				canonicalPath: caseSensitive
