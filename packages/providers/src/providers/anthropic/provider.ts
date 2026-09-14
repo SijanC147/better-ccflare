@@ -15,6 +15,32 @@ import { drainReader } from "../../utils/stream-drain";
 // model-catalog.ts and auto-refresh-scheduler.ts pin for their own fetches.
 const ANTHROPIC_VERSION = "2023-06-01";
 
+/**
+ * How many pages beyond the first `GET /v1/models` will be followed when
+ * stitching the listing for a client that cannot page itself. Eleven models
+ * come back in one page today, so ten further pages is far more headroom than
+ * the catalogue needs; the number exists to bound an upstream that answers
+ * `has_more: true` forever, not to be tuned.
+ */
+const MODELS_MAX_EXTRA_PAGES = 10;
+
+/** Per-page abort for the same loop. */
+const MODELS_PAGE_TIMEOUT_MS = 10_000;
+
+/** One page of Anthropic's `GET /v1/models`. */
+type AnthropicModelSummary = {
+	id?: string;
+	display_name?: string;
+	created_at?: string;
+};
+
+type AnthropicModelsPage = {
+	data?: AnthropicModelSummary[];
+	has_more?: boolean;
+	first_id?: string | null;
+	last_id?: string | null;
+};
+
 // Hard rate limit statuses that should block account usage
 const HARD_LIMIT_STATUSES = new Set([
 	"rate_limited",
@@ -700,7 +726,11 @@ export class AnthropicProvider extends BaseProvider {
 			response.headers.get("x-better-ccflare-request-path") === "/v1/models" &&
 			!requestHeaders?.has("anthropic-version")
 		) {
-			return this.transformModelsListResponse(sanitizedResponse);
+			return this.transformModelsListResponse(
+				sanitizedResponse,
+				_account,
+				requestHeaders,
+			);
 		}
 
 		// Add OpenAI-compatible finish_reason alongside Anthropic's stop_reason
@@ -728,9 +758,17 @@ export class AnthropicProvider extends BaseProvider {
 	 *
 	 * Anything that is not a 200 JSON body is passed through untouched — an
 	 * error still has to reach the client as the error it was.
+	 *
+	 * The OpenAI listing has no pagination contract, so an OpenAI SDK handed a
+	 * first page will never ask for the second. The remaining pages are
+	 * therefore followed here, server-side, and the client gets one body. See
+	 * `fetchRemainingModelPages` for the bound on that loop and for what a
+	 * failure part-way through returns.
 	 */
 	private async transformModelsListResponse(
 		response: Response,
+		account?: Account | null,
+		requestHeaders?: Headers,
 	): Promise<Response> {
 		if (!response.ok) return response;
 		if (
@@ -739,16 +777,7 @@ export class AnthropicProvider extends BaseProvider {
 			return response;
 		}
 
-		let body: {
-			data?: Array<{
-				id?: string;
-				display_name?: string;
-				created_at?: string;
-			}>;
-			has_more?: boolean;
-			first_id?: string | null;
-			last_id?: string | null;
-		};
+		let body: AnthropicModelsPage;
 		try {
 			body = await response.clone().json();
 		} catch (error) {
@@ -758,9 +787,17 @@ export class AnthropicProvider extends BaseProvider {
 
 		if (!Array.isArray(body.data)) return response;
 
+		const models = [...body.data];
+		const stitched = await this.fetchRemainingModelPages(
+			body,
+			account,
+			requestHeaders,
+		);
+		models.push(...stitched.models);
+
 		const translated = {
 			object: "list",
-			data: body.data
+			data: models
 				.filter((model) => typeof model.id === "string" && model.id.length > 0)
 				.map((model) => {
 					const createdMs = model.created_at
@@ -779,9 +816,11 @@ export class AnthropicProvider extends BaseProvider {
 						created_at: model.created_at ?? null,
 					};
 				}),
-			has_more: body.has_more ?? false,
+			// `has_more` is the honest state of the stitched body, not of the
+			// first page: false only when the last page we read said so.
+			has_more: stitched.hasMore,
 			first_id: body.first_id ?? null,
-			last_id: body.last_id ?? null,
+			last_id: stitched.lastId,
 		};
 
 		const headers = new Headers(response.headers);
@@ -796,6 +835,108 @@ export class AnthropicProvider extends BaseProvider {
 			statusText: response.statusText,
 			headers,
 		});
+	}
+
+	/**
+	 * Follow `last_id` through Anthropic's remaining `/v1/models` pages.
+	 *
+	 * Bounds, because an upstream that always answers `has_more: true` must not
+	 * hang the request: at most `MODELS_MAX_EXTRA_PAGES` further pages, each
+	 * with its own `MODELS_PAGE_TIMEOUT_MS` abort.
+	 *
+	 * Every exit that is not "the upstream said `has_more: false`" returns the
+	 * models gathered so far with `hasMore: true`. A page that fails, times out,
+	 * comes back as an error status, or is unparseable does not discard the
+	 * pages already read, and does not fail a request that has a usable partial
+	 * answer; `has_more: true` is the client's signal that the list is short.
+	 * That value is also what keeps `ingestModelsListing` in
+	 * `packages/proxy/src/model-catalog.ts` off its "this listing is complete"
+	 * branch, so a truncated stitch merges into the catalog instead of
+	 * replacing it.
+	 */
+	private async fetchRemainingModelPages(
+		firstPage: AnthropicModelsPage,
+		account?: Account | null,
+		requestHeaders?: Headers,
+	): Promise<{
+		models: AnthropicModelSummary[];
+		hasMore: boolean;
+		lastId: string | null;
+	}> {
+		const models: AnthropicModelSummary[] = [];
+		let lastId = firstPage.last_id ?? null;
+
+		if (firstPage.has_more !== true) {
+			return { models, hasMore: false, lastId };
+		}
+
+		// Anthropic's own credentials, not the client's: `prepareHeaders` strips
+		// the client authorization whenever the account supplies one, exactly as
+		// the original request did. A passthrough account (none) keeps the
+		// client's, which is the only credential that request had either.
+		const outgoing = new Headers(requestHeaders ?? new Headers());
+		outgoing.delete("content-length");
+		outgoing.delete("content-type");
+		const headers = this.prepareHeaders(
+			outgoing,
+			account?.access_token ?? undefined,
+			account?.api_key ?? undefined,
+		);
+
+		for (let page = 0; page < MODELS_MAX_EXTRA_PAGES; page++) {
+			if (!lastId) return { models, hasMore: true, lastId };
+
+			const url = this.buildUrl(
+				"/v1/models",
+				`?after_id=${encodeURIComponent(lastId)}`,
+				account ?? undefined,
+			);
+
+			const controller = new AbortController();
+			const timeoutId = setTimeout(
+				() => controller.abort(),
+				MODELS_PAGE_TIMEOUT_MS,
+			);
+			let next: AnthropicModelsPage;
+			try {
+				const pageResponse = await fetch(url, {
+					method: "GET",
+					headers,
+					signal: controller.signal,
+				});
+				if (!pageResponse.ok) {
+					log.warn(
+						`Stopping the /v1/models stitch at HTTP ${pageResponse.status}; returning ${models.length} extra models with has_more: true`,
+					);
+					return { models, hasMore: true, lastId };
+				}
+				next = await pageResponse.json();
+			} catch (error) {
+				log.warn(
+					`Stopping the /v1/models stitch after a failed page; returning ${models.length} extra models with has_more: true:`,
+					error,
+				);
+				return { models, hasMore: true, lastId };
+			} finally {
+				clearTimeout(timeoutId);
+			}
+
+			if (!Array.isArray(next.data)) {
+				return { models, hasMore: true, lastId };
+			}
+			models.push(...next.data);
+			lastId = next.last_id ?? lastId;
+			if (next.has_more !== true) {
+				return { models, hasMore: false, lastId };
+			}
+		}
+
+		// The cap, not the end of the listing. Saying `has_more: false` here
+		// would claim a completeness we did not establish.
+		log.warn(
+			`Reached the ${MODELS_MAX_EXTRA_PAGES}-page cap stitching /v1/models; returning a partial listing with has_more: true`,
+		);
+		return { models, hasMore: true, lastId };
 	}
 
 	async extractTierInfo(response: Response): Promise<number | null> {
