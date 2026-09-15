@@ -47,15 +47,18 @@ describe("the home-directory row cannot win a prefix match", () => {
 			{ id: "home", canonicalPath: HOME },
 			{ id: "meta", canonicalPath: "/users/seanbugeja/code/claude-meta" },
 		]);
-		expect(snap.resolve("/users/seanbugeja/Code/claude-meta/src").projectId).toBe(
-			"meta",
-		);
+		expect(
+			snap.resolve("/users/seanbugeja/Code/claude-meta/src").projectId,
+		).toBe("meta");
 	});
 
 	test("runpod_workspace still resolves, the one case known to pass today", () => {
 		const snap = snapshot([
 			{ id: "home", canonicalPath: HOME },
-			{ id: "084f767d0b7bbb27", canonicalPath: "/users/seanbugeja/code/runpod_workspace" },
+			{
+				id: "084f767d0b7bbb27",
+				canonicalPath: "/users/seanbugeja/code/runpod_workspace",
+			},
 		]);
 		expect(
 			snap.resolve("/Users/seanbugeja/Code/runpod_workspace").projectId,

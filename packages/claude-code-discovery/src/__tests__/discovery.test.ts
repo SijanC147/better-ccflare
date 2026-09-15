@@ -23,7 +23,7 @@ function mkProject(encodedName: string): string {
 }
 
 function writeJsonl(dir: string, filename: string, lines: unknown[]): void {
-	const content = lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+	const content = `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`;
 	fs.writeFileSync(nodePath.join(dir, filename), content, { mode: 0o600 });
 }
 

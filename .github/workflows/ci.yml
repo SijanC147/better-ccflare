@@ -54,6 +54,20 @@ jobs:
         if: steps.changes.outputs.relevant != 'false'
         run: bun run typecheck
 
+      # SB23-1918. `bun run lint` cannot be this gate: it is
+      # `biome check --write --unsafe`, which mutates the tree and can exit 0
+      # having rewritten files, so it reports nothing. This is the read-only
+      # form. It fails on errors only — the 30 warnings and 4 infos in the tree
+      # are deliberate and nothing is suppressed, so gating them would force a
+      # cleanup pass on code that is as intended.
+      #
+      # A step inside this job rather than a job of its own, because both job
+      # names are required checks in ruleset `hextap/main` and a new one would
+      # need a ruleset change. A step needs none.
+      - name: Check formatting and lint
+        if: steps.changes.outputs.relevant != 'false'
+        run: bunx biome check .
+
       - name: Test
         if: steps.changes.outputs.relevant != 'false'
         run: bun test
