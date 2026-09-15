@@ -1,5 +1,29 @@
 export type ComboFamily = "fable" | "opus" | "sonnet" | "haiku";
 
+export const MS_PER_HOUR = 3_600_000;
+
+/**
+ * Upper bound on `ComboSlot.min_reset_remaining_ms`, shared by the API handler
+ * that stores the value and the dashboard field that renders it back.
+ *
+ * It lives here rather than beside either consumer because both need the same
+ * number and neither can import the other: `packages/dashboard-web` pulling
+ * `packages/http-api` would drag `database`, `proxy` and `providers` into the
+ * browser bundle, which is why the route catalog moved here in `#106`.
+ *
+ * Above `MAX_SAFE_INTEGER` a millisecond value stops being exactly
+ * representable, so `Number.isInteger` still reports true for `1e20` hours
+ * (`3.6e26` ms) and the value reaches the database unchanged. The ceiling is
+ * expressed in whole hours so the dashboard's hours field and the handler's
+ * millisecond check cannot disagree by a rounding step (SB23-2061).
+ */
+export const MAX_RESET_HOURS = Math.floor(
+	Number.MAX_SAFE_INTEGER / MS_PER_HOUR,
+);
+
+/** `MAX_RESET_HOURS` in milliseconds. The handler's inclusive upper bound. */
+export const MAX_MIN_RESET_REMAINING_MS = MAX_RESET_HOURS * MS_PER_HOUR;
+
 // Database row types (snake_case, INTEGER booleans — match SQLite storage)
 export interface ComboRow {
 	id: string;
