@@ -290,6 +290,12 @@ export const API_ROUTES: ApiRoute[] = [
 		summary: "Add a Meta account.",
 	},
 	{
+		method: "PATCH",
+		path: "/api/accounts/:accountId",
+		category: "Accounts",
+		summary: "Update an account's provider settings.",
+	},
+	{
 		method: "DELETE",
 		path: "/api/accounts/:accountId",
 		category: "Accounts",
