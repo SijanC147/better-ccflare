@@ -4,10 +4,10 @@
  * the guard that makes a drifted rule loud instead of silent.
  */
 
+import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { describe, expect, test } from "bun:test";
 import {
 	ClaudeCodeDiscovery,
 	encodePath,

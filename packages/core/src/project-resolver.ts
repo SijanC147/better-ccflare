@@ -123,7 +123,10 @@ function normalizePath(
  *
  * Both arguments must already be normalized by `normalizePath`.
  */
-export function isCatchAllPath(canonicalPath: string, homeDir: string): boolean {
+export function isCatchAllPath(
+	canonicalPath: string,
+	homeDir: string,
+): boolean {
 	if (canonicalPath === homeDir) return true;
 	return homeDir.startsWith(`${canonicalPath}/`) || canonicalPath === "/";
 }
@@ -139,7 +142,7 @@ function longestPrefixMatch(
 	for (const entry of projects) {
 		if (
 			normalized === entry.canonicalPath ||
-			normalized.startsWith(entry.canonicalPath + "/")
+			normalized.startsWith(`${entry.canonicalPath}/`)
 		) {
 			return entry;
 		}
@@ -161,7 +164,7 @@ function compileRule(
 		const patternNorm = normalizePath(rule.pattern, caseSensitive);
 		if (!patternNorm) return null;
 		matcher = (p: string) =>
-			p === patternNorm || p.startsWith(patternNorm + "/");
+			p === patternNorm || p.startsWith(`${patternNorm}/`);
 	} else if (rule.kind === "glob") {
 		let glob: InstanceType<typeof Bun.Glob>;
 		try {
