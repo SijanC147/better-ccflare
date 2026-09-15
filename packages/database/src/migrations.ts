@@ -1200,7 +1200,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
 					rate_limited_reason TEXT,
 					rate_limited_at INTEGER,
-					requires_reauth INTEGER DEFAULT 0
+					requires_reauth INTEGER DEFAULT 0,
+					consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
+					last_manual_reauth_at INTEGER
 				)
 			`).run();
 
@@ -1208,6 +1210,18 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			// Include every column the prior ALTERs added (billing_type, refresh_token_issued_at,
 			// peak_hours_pause_enabled, rate_limited_reason, rate_limited_at); otherwise the
 			// rebuild drops them and downstream selects fail with missing-column errors.
+			//
+			// consecutive_rate_limits and last_manual_reauth_at were missing from both
+			// this list and the account_tier rebuild below until SB23-2073. Their
+			// ALTERs run above this branch (:1096, :1157), so the columns exist by the
+			// time the rebuild runs and the omission silently reset one to its DEFAULT 0
+			// and the other to NULL. There is no constraint violation and no log line,
+			// which is why nothing caught it: a dropped column reads as an account that
+			// has simply never been rate limited or manually reauthenticated.
+			//
+			// Any future accounts column has to be added HERE and in that second list,
+			// not only to ensureSchema and runMigrations. That makes seven places, not
+			// the five CLAUDE.md used to name.
 			db.prepare(`
 				INSERT INTO accounts_new SELECT
 					id, name, provider, api_key,
@@ -1221,7 +1235,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					model_mappings, request_transformer, cross_region_mode, model_fallbacks,
 					auto_pause_on_overage_enabled, pause_reason,
 					billing_type, refresh_token_issued_at, peak_hours_pause_enabled,
-					rate_limited_reason, rate_limited_at, requires_reauth
+					rate_limited_reason, rate_limited_at, requires_reauth,
+					consecutive_rate_limits, last_manual_reauth_at
 				FROM accounts
 			`).run();
 
@@ -1586,7 +1601,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
 			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
 			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
-			       rate_limited_at, requires_reauth
+			       rate_limited_at, requires_reauth,
+			       consecutive_rate_limits, last_manual_reauth_at
 			FROM accounts
 		`).run();
 
