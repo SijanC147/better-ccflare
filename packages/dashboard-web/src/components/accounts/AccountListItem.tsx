@@ -133,10 +133,10 @@ export function AccountListItem({
 					: "border-border hover:border-muted-foreground/50"
 			}`}
 		>
-			<div className="flex items-center justify-between">
-				<div className="flex items-center gap-4">
-					<div>
-						<div className="flex items-center gap-2">
+			<div className="flex flex-wrap items-center justify-between gap-y-2">
+				<div className="flex min-w-0 flex-wrap items-center gap-4">
+					<div className="min-w-0">
+						<div className="flex flex-wrap items-center gap-2">
 							<p className="font-medium">{account.name}</p>
 							{isPrimary && (
 								<span className="px-2 py-0.5 text-xs font-medium bg-primary text-primary-foreground rounded-full">
@@ -153,7 +153,7 @@ export function AccountListItem({
 							{providerSupportsAutoFeatures(account.provider) && (
 								<>
 									<div className="flex items-center gap-2">
-										<span className="text-xs text-muted-foreground">
+										<span className="whitespace-nowrap text-xs text-muted-foreground">
 											Auto-fallback:
 										</span>
 										<Switch
@@ -163,7 +163,7 @@ export function AccountListItem({
 										/>
 									</div>
 									<div className="flex items-center gap-2">
-										<span className="text-xs text-muted-foreground">
+										<span className="whitespace-nowrap text-xs text-muted-foreground">
 											Auto-refresh:
 										</span>
 										<Switch
@@ -176,7 +176,7 @@ export function AccountListItem({
 							)}
 							{providerSupportsCustomBilling(account.provider) && (
 								<div className="flex items-center gap-2">
-									<span className="text-xs text-muted-foreground">
+									<span className="whitespace-nowrap text-xs text-muted-foreground">
 										Plan billing:
 									</span>
 									<Switch
@@ -189,7 +189,7 @@ export function AccountListItem({
 							{account.provider === "anthropic" &&
 								onAutoPauseOnOverageToggle && (
 									<div className="flex items-center gap-2">
-										<span className="text-xs text-muted-foreground">
+										<span className="whitespace-nowrap text-xs text-muted-foreground">
 											Auto-pause on overage:
 										</span>
 										<Switch
@@ -203,7 +203,7 @@ export function AccountListItem({
 								)}
 							{account.provider === "zai" && onPeakHoursPauseToggle && (
 								<div className="flex items-center gap-2">
-									<span className="text-xs text-muted-foreground">
+									<span className="whitespace-nowrap text-xs text-muted-foreground">
 										Peak hours pause:
 									</span>
 									<Switch
@@ -214,7 +214,7 @@ export function AccountListItem({
 								</div>
 							)}
 						</div>
-						<div className="flex items-center gap-2">
+						<div className="flex flex-wrap items-center gap-2">
 							<p className="text-sm text-muted-foreground">
 								{account.provider}
 							</p>
@@ -253,13 +253,15 @@ export function AccountListItem({
 							)}
 						</div>
 					</div>
-					<div className="flex items-center gap-2">
+					<div className="flex flex-wrap items-center gap-2">
 						{presenter.isRateLimited && (
 							<span title="Account is rate-limited - requests will be rejected until the limit resets">
 								<AlertCircle className="h-4 w-4 text-yellow-600" />
 							</span>
 						)}
-						<span className="text-sm">{presenter.requestCount} requests</span>
+						<span className="whitespace-nowrap text-sm">
+							{presenter.requestCount} requests
+						</span>
 						<span className="text-sm text-muted-foreground">
 							{presenter.sessionInfo}
 						</span>
@@ -332,7 +334,7 @@ export function AccountListItem({
 						)}
 					</div>
 				</div>
-				<div className="flex items-center gap-2">
+				<div className="flex flex-wrap items-center gap-2">
 					<Button
 						variant="ghost"
 						size="sm"
