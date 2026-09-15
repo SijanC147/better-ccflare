@@ -165,6 +165,59 @@ describe("api catalog, dynamic half", () => {
 
 		expect(unlisted).toEqual([]);
 	});
+
+	// SB23-2072. The two guards above are containment checks on the PATH, so a
+	// method the catalog never mentions is invisible to them as long as some
+	// other method on that prefix is listed. That is not hypothetical: it is
+	// exactly how `PATCH /api/accounts/:accountId` shipped in v3.15.0 and stayed
+	// missing, with this file green, because GET and DELETE on the same prefix
+	// were catalogued. The header above even names `/api/accounts/` as the
+	// example and the case still got through.
+	//
+	// This guard is method-aware. It still cannot check tail segments, so the
+	// dynamic half remains weaker than the static half.
+	test("every method a prefix branch handles appears in the catalog", () => {
+		const source = readFileSync(ROUTER_PATH, "utf8");
+		const lines = source.split("\n");
+
+		const branches: Array<{ prefix: string; line: number }> = [];
+		lines.forEach((line, index) => {
+			const match = line.match(/path\.startsWith\(\s*"([^"]+)"/);
+			if (match) branches.push({ prefix: match[1], line: index + 1 });
+		});
+
+		// Attribute each `method === "VERB"` to the nearest preceding prefix
+		// branch. Text slicing, not parsing: it can mis-attribute a check that
+		// sits between branches, so it is deliberately used only to find pairs
+		// the catalog is MISSING, never to reject catalog entries.
+		const pairs = new Set<string>();
+		lines.forEach((line, index) => {
+			const match = line.match(/method === "([A-Z]+)"/);
+			if (!match) return;
+			let nearest: { prefix: string; line: number } | null = null;
+			for (const branch of branches) {
+				if (branch.line <= index + 1) {
+					if (!nearest || branch.line > nearest.line) nearest = branch;
+				}
+			}
+			if (nearest) pairs.add(`${nearest.prefix} ${match[1]}`);
+		});
+
+		// Guard the extraction itself, the same way the tests above do: a regex
+		// that stopped matching would make this pass while checking nothing.
+		expect(pairs.size).toBeGreaterThan(20);
+
+		const missing = Array.from(pairs)
+			.filter((pair) => {
+				const [prefix, method] = pair.split(" ");
+				return !API_ROUTES.some(
+					(route) => route.method === method && route.path.startsWith(prefix),
+				);
+			})
+			.sort();
+
+		expect(missing).toEqual([]);
+	});
 });
 
 describe("path parameters", () => {
