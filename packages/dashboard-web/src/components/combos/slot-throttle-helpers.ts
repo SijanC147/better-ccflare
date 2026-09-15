@@ -1,15 +1,13 @@
-import type { ComboSlot } from "@better-ccflare/types";
+import {
+	type ComboSlot,
+	MAX_RESET_HOURS,
+	MS_PER_HOUR,
+} from "@better-ccflare/types";
 
-const MS_PER_HOUR = 3_600_000;
-
-/**
- * The largest number of hours the reset field accepts. Above this the
- * millisecond value stops being exactly representable, and the handler would
- * wave it through because it only checks `Number.isInteger` and `>= 0`.
- */
-export const MAX_RESET_HOURS = Math.floor(
-	Number.MAX_SAFE_INTEGER / MS_PER_HOUR,
-);
+// Both moved to packages/types in SB23-2061 so the handler enforces the same
+// ceiling this field renders. Re-exported because the card and its tests import
+// MAX_RESET_HOURS from here.
+export { MAX_RESET_HOURS };
 
 /**
  * A field the operator left blank is `null` (clear the threshold), a field

@@ -1,10 +1,11 @@
 import { providerAcceptsClientModel } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, NotFound } from "@better-ccflare/errors";
-import type {
-	ComboFamily,
-	ComboFamilyAssignment,
-	ComboWithSlots,
+import {
+	type ComboFamily,
+	type ComboFamilyAssignment,
+	type ComboWithSlots,
+	MAX_MIN_RESET_REMAINING_MS,
 } from "@better-ccflare/types";
 import { errorResponse } from "../utils/http-error";
 
@@ -349,14 +350,21 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 
 			if (min_reset_remaining_ms !== undefined) {
 				if (min_reset_remaining_ms !== null) {
+					// The upper bound is the half this check was missing
+					// (SB23-2061). `Number.isInteger` reports true for 3.6e26, so
+					// "1e20" hours passed every test here and reached the database
+					// above int64. Reject rather than clamp: a silent substitution
+					// is how `retry_attempts: 0` became 3, the largest value in
+					// play (mem:validation-fallback-picks-the-aggressive-end).
 					if (
 						typeof min_reset_remaining_ms !== "number" ||
 						!Number.isInteger(min_reset_remaining_ms) ||
-						min_reset_remaining_ms < 0
+						min_reset_remaining_ms < 0 ||
+						min_reset_remaining_ms > MAX_MIN_RESET_REMAINING_MS
 					) {
 						return errorResponse(
 							BadRequest(
-								"min_reset_remaining_ms must be a non-negative integer, or null",
+								`min_reset_remaining_ms must be an integer between 0 and ${MAX_MIN_RESET_REMAINING_MS}, or null`,
 							),
 						);
 					}
