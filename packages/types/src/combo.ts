@@ -51,9 +51,12 @@ export interface ComboSlot {
 	 * candidate while the account's representative utilization is at or above
 	 * this percentage (0-100).
 	 *
-	 * The rule is a conjunction: BOTH this and `min_reset_remaining_ms` must
-	 * be set before anything is skipped. null on either leaves routing exactly
-	 * as it was before the feature.
+	 * Only the CONFIGURED conditions are evaluated, and every configured one
+	 * must hold. This field set alone skips on utilization alone; null here
+	 * with `min_reset_remaining_ms` set skips on the reset clause alone; null
+	 * on both leaves routing exactly as it was before the feature. An earlier
+	 * version of this comment described a conjunction requiring both columns,
+	 * which was the behaviour `#107` shipped and `#112` corrected.
 	 */
 	max_utilization_percent: number | null;
 	/**
