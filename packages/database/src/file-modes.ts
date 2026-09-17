@@ -1,4 +1,5 @@
-import { chmodSync, statSync } from "node:fs";
+import { chmodSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { Logger } from "@better-ccflare/logger";
 
 const log = new Logger("DatabaseFileModes");
@@ -58,4 +59,49 @@ export function restrictDbFiles(dbPath: string): void {
 	restrictDbFile(dbPath);
 	restrictDbFile(`${dbPath}-wal`);
 	restrictDbFile(`${dbPath}-shm`);
+	restrictDbBackups(dbPath);
+}
+
+/**
+ * Bring every `<db>.backup.*` file beside the database to 0600.
+ *
+ * A backup holds the same plaintext credentials as the database it copies, so
+ * it needs the same mode. It does not get one by inheritance: the backup is
+ * written by `VACUUM INTO` (migrations.ts), which creates a fresh file whose
+ * mode comes from the process umask, not from the source. Under the default
+ * umask 022 that is 0644, whatever the live database is set to. Measured on a
+ * real install 2026-09-17, where the database and both sidecars were 0600 and
+ * two backups holding four access tokens and four refresh tokens were 0644
+ * (SB23-2235).
+ *
+ * Swept here, alongside the stale sidecars, rather than only fixed at creation:
+ * a backup written by an older binary is on disk now and nothing else will ever
+ * revisit it.
+ *
+ * Matches the pruner's prefix rule (`<basename>.backup.`) so the two agree on
+ * what belongs to this database, and deliberately does NOT require an integer
+ * suffix the way pruning does. Pruning skips a hand-renamed
+ * `db.backup.keep-this` to honour the operator's intent; a wrong MODE on that
+ * same file is not something anyone intends, and leaving it 0644 to respect a
+ * naming convention would protect the convention instead of the credentials.
+ * That also covers `.backup.<ts>.partial`, `-wal` and `-shm`, which carry
+ * database pages too.
+ */
+export function restrictDbBackups(dbPath: string): void {
+	const dir = dirname(dbPath);
+	const prefix = `${basename(dbPath)}.backup.`;
+
+	let entries: string[];
+	try {
+		entries = readdirSync(dir);
+	} catch (error) {
+		const err = error as NodeJS.ErrnoException;
+		if (err.code === "ENOENT") return;
+		log.warn(`Could not list ${dir} to restrict database backups: ${error}`);
+		return;
+	}
+
+	for (const name of entries) {
+		if (name.startsWith(prefix)) restrictDbFile(join(dir, name));
+	}
 }
