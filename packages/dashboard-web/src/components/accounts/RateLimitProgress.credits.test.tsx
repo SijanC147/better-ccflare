@@ -105,6 +105,23 @@ describe("RateLimitProgress — Codex credits", () => {
 		expect(html).toContain("Available");
 	});
 
+	it("renders a zero balance as the number, never as Available", () => {
+		// The single most consequential decision in this feature: `balance` stays
+		// the upstream string. "0.00" is a truthy string, so it renders as itself.
+		// Convert it to a number anywhere upstream of here and a real zero becomes
+		// falsy, falls through to the has_credits ladder, and an account with
+		// nothing left reads as "Available". That is the exact false reading the
+		// string was chosen to prevent, and nothing else in the suite catches it.
+		const html = renderCodex({
+			has_credits: true,
+			unlimited: false,
+			balance: "0.00",
+		});
+
+		expect(html).toContain("0.00");
+		expect(html).not.toContain("Available");
+	});
+
 	it("says None when upstream explicitly reported no credits", () => {
 		const html = renderCodex({
 			has_credits: false,
