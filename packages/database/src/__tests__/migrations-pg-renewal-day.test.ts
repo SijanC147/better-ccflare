@@ -127,5 +127,13 @@ describe("ensureSchemaPg — accounts.renewal_day", () => {
 		);
 		expect(createAccounts).toBeDefined();
 		expect(createAccounts).toMatch(/renewal_day INTEGER/i);
+		// The upgrade path asserts this and the fresh-install path did not, which
+		// is the asymmetry that matters: a DEFAULT here gives every account on a
+		// NEW PostgreSQL install a renewal day 1 nobody entered, the card renders
+		// a countdown for all of them, and a later PATCH clearing it fails the
+		// NOT NULL. Same SB23-1980 shape, arriving on the one path unwatched.
+		expect(createAccounts).not.toMatch(
+			/renewal_day INTEGER NOT NULL|renewal_day INTEGER DEFAULT/i,
+		);
 	});
 });
