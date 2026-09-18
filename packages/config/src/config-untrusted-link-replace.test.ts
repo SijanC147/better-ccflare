@@ -252,6 +252,53 @@ describe("an untrusted config symlink", () => {
 		}
 	});
 
+	it("still refuses when the untrusted directory is deeper in the chain", () => {
+		// The invariant the whole branch rests on, pinned. resolveLinkChain()
+		// checks directoryIsTrusted(dirname(current)) at hop 0, BEFORE the first
+		// lstat, so any null it returns later implies the configured path's own
+		// directory was trusted, which is what makes replaceUntrustedLink() decline
+		// on a deep refusal. Move that check below the lstat, or add an exit above
+		// it, and the replacement silently starts destroying operator links on
+		// deep-hop refusals with every other test still green.
+		//
+		// The cycle test above covers one such refusal. This covers the one a
+		// reader is most likely to assume is already covered. Raised by the
+		// security review of PR #145 as the missing pin rather than as a defect: it
+		// passes at this head and only fails on the reorder.
+		const root = mkdtempSync(join(tmpdir(), "better-ccflare-deep-"));
+		try {
+			const trusted = join(root, "trusted");
+			const shared = join(root, "shared");
+			const deep = join(root, "deep");
+			for (const dir of [trusted, shared, deep]) mkdirSync(dir);
+			// Explicit chmod, never mkdir's mode, which the umask masks.
+			chmodSync(trusted, 0o700);
+			chmodSync(deep, 0o700);
+			chmodSync(shared, 0o777);
+			expect(statSync(trusted).mode & 0o022).toBe(0);
+			expect(statSync(shared).mode & 0o022).not.toBe(0);
+
+			const real = join(deep, "real.json");
+			const mid = join(shared, "mid.json");
+			const configPath = join(trusted, "config.json");
+			writeFileSync(real, JSON.stringify({ lb_strategy: "session" }));
+			symlinkSync(real, mid);
+			symlinkSync(mid, configPath);
+
+			const config = new Config(configPath);
+			config.set("pg_password", "hunter2");
+
+			// The configured link is the operator's, in a directory only they can
+			// write, so it survives untouched even though the chain is refused.
+			expect(lstatSync(configPath).isSymbolicLink()).toBe(true);
+			expect(lstatSync(mid).isSymbolicLink()).toBe(true);
+			expect(readFileSync(real, "utf8")).not.toContain("hunter2");
+			expect(readFileSync(real, "utf8")).toContain("session");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("leaves a regular file in a shared directory alone", () => {
 		// Only a LINK is replaced. A regular config in a shared-writable directory
 		// was already accepted before this change and still is, so the new branch
