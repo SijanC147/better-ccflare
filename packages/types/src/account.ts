@@ -96,11 +96,26 @@ export interface RenewalStatus {
 	clamped: boolean;
 }
 
-/** Days in a Gregorian month. monthIndex is 0-based, as in the Date API. */
+const MONTH_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** True for a leap year under the proleptic Gregorian rule. */
+function isLeapYear(year: number): boolean {
+	return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/**
+ * Days in a Gregorian month. monthIndex is 0-based, as in the Date API.
+ *
+ * Deliberately pure arithmetic rather than the usual
+ * `new Date(Date.UTC(y, m + 1, 0)).getUTCDate()` trick. That form is correct,
+ * but `getUTCDate()` and `getDate()` return the same value for a midnight-UTC
+ * instant in UTC and in every zone east of it, so swapping one for the other
+ * is a silent defect that CI, which runs in UTC, can never fail on. Removing
+ * the Date call removes the substitution rather than testing around it.
+ */
 export function daysInMonth(year: number, monthIndex: number): number {
-	// Day 0 of the following month is the last day of this one. Date.UTC
-	// normalizes monthIndex 12 into January of year + 1 on its own.
-	return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+	if (monthIndex === 1) return isLeapYear(year) ? 29 : 28;
+	return MONTH_LENGTHS[monthIndex];
 }
 
 /**
