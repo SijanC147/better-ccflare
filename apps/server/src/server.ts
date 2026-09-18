@@ -2452,8 +2452,10 @@ async function handleGracefulShutdown(signal: string) {
 		await drainUsageCollector();
 		// The exporter buffers in memory only, so anything still queued is lost
 		// at exit unless it is posted now. Failures are already swallowed and
-		// warned about inside, so this cannot hold up shutdown.
-		await flushOpenObserve();
+		// warned about inside. `true` spends one attempt per stream even if a
+		// backoff window is open, because waiting the window out is not an
+		// option here: the records go either now or nowhere.
+		await flushOpenObserve(true);
 		await shutdown();
 		console.log("✅ Shutdown complete");
 		process.exit(0);
