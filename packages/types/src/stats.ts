@@ -199,6 +199,74 @@ export interface AnalyticsResponse {
 	modelPerformance: ModelPerformance[];
 }
 
+/**
+ * How `GET /api/analytics/models` splits its rows. `"model"` is one row per
+ * model; the others add a second dimension and so return one row per pair.
+ */
+export type AnalyticsModelsGroupBy = "model" | "account" | "project";
+
+/**
+ * One row of `GET /api/analytics/models`.
+ *
+ * Grouped on the `model` column. `original_model` and `applied_model` are
+ * different columns recording what the client asked for and what routing
+ * substituted; neither is aggregated here.
+ *
+ * Every token field is a plain sum and is never null: the columns carry
+ * `DEFAULT 0` and the collector writes `?? 0`, so a request that reported no
+ * usage contributes a real zero rather than being skipped.
+ */
+export interface AnalyticsModelRow {
+	model: string;
+	/** Present only when `groupBy=account`. The unattributed bucket is `NO_ACCOUNT_ID`. */
+	account?: string;
+	/** Present only when `groupBy=project`. Null is a real value: the request carried no project. */
+	project?: string | null;
+	requests: number;
+	successRequests: number;
+	errorRequests: number;
+	inputTokens: number;
+	cacheReadInputTokens: number;
+	cacheCreationInputTokens: number;
+	outputTokens: number;
+	totalTokens: number;
+	/** Cost on requests with `billing_type = 'plan'`. Plan-billed requests usually record 0. */
+	planCostUsd: number;
+	/** Cost on requests whose `billing_type` is neither NULL nor `'plan'`. */
+	apiCostUsd: number;
+	/** Every request's cost, including rows with a NULL `billing_type` that fall in neither bucket above. */
+	totalCostUsd: number;
+	/**
+	 * Mean `total_tokens` of a **successful** request. Null when the model has
+	 * no successful request in the window, which is not the same as 0.
+	 *
+	 * The denominator is the successful-row count, never `COUNT(*)`: a failed
+	 * request stores 0 tokens rather than NULL, so dividing by every row
+	 * silently reports a model as cheaper the more often it fails.
+	 */
+	avgTotalTokensPerSuccess: number | null;
+	/**
+	 * Mean of `output_tokens_per_second`. The one usage column with no
+	 * `DEFAULT 0`, so rows that recorded no rate are NULL and are skipped
+	 * rather than counted as zero. Null when no row recorded a rate.
+	 */
+	avgTokensPerSecond: number | null;
+}
+
+export interface AnalyticsModelsResponse {
+	meta: {
+		/** The effective range. An unknown input normalizes to `"24h"`. */
+		range: string;
+		groupBy: AnalyticsModelsGroupBy;
+		/** Which of the three model columns the grouping used. */
+		modelColumn: "model";
+		/** Rows with a NULL `model` are excluded, as in every other per-model aggregation. */
+		excludesNullModel: true;
+	};
+	/** Every model in the window. Deliberately uncapped, unlike `AnalyticsResponse`. */
+	models: AnalyticsModelRow[];
+}
+
 // Pool status for health check
 export interface PoolStatus {
 	configured: number; // Total accounts in database
