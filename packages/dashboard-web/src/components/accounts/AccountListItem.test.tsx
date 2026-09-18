@@ -291,17 +291,63 @@ describe("AccountListItem", () => {
 	});
 
 	it("puts the auto-behaviour switches in the menu with their current state", () => {
-		const toggles = accountMenuToggles(
-			{ ...baseAccount, autoFallbackEnabled: true, autoRefreshEnabled: false },
-			allHandlers,
+		// Each toggle is read in both positions. Asserting only the position the
+		// fixture happens to carry passes against `checked: true` hardcoded, which
+		// is a mutation that survived the first version of this test.
+		const on = new Map(
+			accountMenuToggles(
+				{
+					...baseAccount,
+					autoFallbackEnabled: true,
+					autoRefreshEnabled: true,
+					autoPauseOnOverageEnabled: true,
+				},
+				allHandlers,
+			).map((toggle) => [toggle.id, toggle]),
 		);
-		const byId = new Map(toggles.map((toggle) => [toggle.id, toggle]));
+		const off = new Map(
+			accountMenuToggles(
+				{
+					...baseAccount,
+					autoFallbackEnabled: false,
+					autoRefreshEnabled: false,
+					autoPauseOnOverageEnabled: false,
+				},
+				allHandlers,
+			).map((toggle) => [toggle.id, toggle]),
+		);
 
-		expect(byId.get("auto-fallback")?.checked).toBe(true);
-		expect(byId.get("auto-refresh")?.checked).toBe(false);
+		expect(on.get("auto-fallback")?.checked).toBe(true);
+		expect(off.get("auto-fallback")?.checked).toBe(false);
+		expect(on.get("auto-refresh")?.checked).toBe(true);
+		expect(off.get("auto-refresh")?.checked).toBe(false);
+		expect(on.get("auto-pause-on-overage")?.checked).toBe(true);
+		expect(off.get("auto-pause-on-overage")?.checked).toBe(false);
 		// Anthropic gets the overage toggle; zai's peak-hours toggle must not leak.
-		expect(byId.has("auto-pause-on-overage")).toBe(true);
-		expect(byId.has("peak-hours-pause")).toBe(false);
+		expect(on.has("auto-pause-on-overage")).toBe(true);
+		expect(on.has("peak-hours-pause")).toBe(false);
+	});
+
+	it("reads the zai peak-hours toggle in both positions and only for zai", () => {
+		const zaiOn = accountMenuToggles(
+			{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: true },
+			allHandlers,
+		).find((toggle) => toggle.id === "peak-hours-pause");
+		const zaiOff = accountMenuToggles(
+			{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: false },
+			allHandlers,
+		).find((toggle) => toggle.id === "peak-hours-pause");
+
+		expect(zaiOn?.checked).toBe(true);
+		expect(zaiOff?.checked).toBe(false);
+		// An absent value is off, not on: nothing invents a pause the operator
+		// never asked for.
+		expect(
+			accountMenuToggles(
+				{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: undefined },
+				allHandlers,
+			).find((toggle) => toggle.id === "peak-hours-pause")?.checked,
+		).toBe(false);
 	});
 
 	it("renders no switch labels in the visible card", () => {
