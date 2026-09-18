@@ -114,8 +114,16 @@ function isLeapYear(year: number): boolean {
  * the Date call removes the substitution rather than testing around it.
  */
 export function daysInMonth(year: number, monthIndex: number): number {
-	if (monthIndex === 1) return isLeapYear(year) ? 29 : 28;
-	return MONTH_LENGTHS[monthIndex];
+	// A monthIndex outside 0 to 11 is normalized the way the Date constructor
+	// does it, so 12 means January of the following year and -1 means December
+	// of the previous one. The Date-based form this replaced got that for free
+	// and callers outside this file may rely on it; a bare table lookup would
+	// return undefined while the signature promises a number.
+	const normalizedYear = year + Math.floor(monthIndex / 12);
+	const normalizedMonth = ((monthIndex % 12) + 12) % 12;
+
+	if (normalizedMonth === 1) return isLeapYear(normalizedYear) ? 29 : 28;
+	return MONTH_LENGTHS[normalizedMonth];
 }
 
 /**
