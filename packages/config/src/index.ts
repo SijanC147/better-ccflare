@@ -52,6 +52,80 @@ const log = new Logger("Config");
 const TEMP_FILE_STALE_AFTER_MS = 60_000;
 
 /**
+ * 0600 for the config file and 0700 for the directory holding it. The file
+ * holds pg_password, local_control_secret and upstream_maintainer_token, which
+ * is a GitHub PAT, and the directory holds the database beside it.
+ */
+const CONFIG_FILE_MODE = 0o600;
+const CONFIG_DIR_MODE = 0o700;
+
+/**
+ * Paths already reported as unenforceable, so the warning below lands once per
+ * process rather than once per load.
+ *
+ * Module-scoped because the condition is a property of the filesystem, not of a
+ * Config instance, and more than one Config can be constructed in a process.
+ * Keyed by path rather than a single boolean so a process holding two configs
+ * on different filesystems still hears about both; the set is bounded by the
+ * number of distinct config paths, which is one or two.
+ */
+const unenforceableModes = new Set<string>();
+
+/**
+ * chmod a path and then read the mode back, returning whether it actually
+ * changed.
+ *
+ * chmodSync reports success and changes nothing on Docker Desktop bind mounts
+ * from a macOS or Windows host and on FAT and exFAT volumes.
+ * docs/deployment.md:304 documents the config on a Docker volume, so that is a
+ * real layout, and the result was a guard that came out true on every load
+ * while the file stayed world-readable and nothing said so. Catching a chmod
+ * that throws was never enough (SB23-1686).
+ *
+ * Skipped entirely on Windows, and the skip is the load-bearing half. There
+ * statSync().mode & 0o777 reports 0666 for any writable file and 0444 for a
+ * read-only one, because Node derives st_mode from FILE_ATTRIBUTE_READONLY and
+ * there is no POSIX mode to read back. A re-stat without this branch would
+ * conclude the chmod did not take on every Windows start, trading a silent
+ * failure on bind mounts for a false alarm across a whole platform. Unverified
+ * on Windows, which neither author nor reviewer has: argued from libuv, the
+ * same rung as the win32 branch in writeTarget().
+ *
+ * Warns rather than throws, and the caller does not branch on the result.
+ * chmod fails legitimately on a bind-mounted volume and on a file owned by
+ * another user, and neither means the config is unusable, which is the
+ * convention packages/database/src/file-modes.ts already sets for the database
+ * files.
+ */
+function chmodAndVerify(path: string, mode: number, what: string): void {
+	chmodSync(path, mode);
+	if (process.platform === "win32") {
+		log.info(`Restricted ${what} permissions to ${modeText(mode)}`);
+		return;
+	}
+	const after = statSync(path).mode & 0o777;
+	if (after === mode) {
+		log.info(`Restricted ${what} permissions to ${modeText(mode)}`);
+		return;
+	}
+	if (unenforceableModes.has(path)) return;
+	unenforceableModes.add(path);
+	log.warn(
+		`chmod on the ${what} ${path} reported success but the mode is still ` +
+			`${modeText(after)} rather than ${modeText(mode)}, so it may be readable ` +
+			`by other local users. Filesystems without Unix modes behave this way, ` +
+			`including Docker bind mounts from a macOS or Windows host and FAT or ` +
+			`exFAT volumes. Move the config onto a filesystem that enforces modes, ` +
+			`or mount it so only this user can read it.`,
+	);
+}
+
+/** `0o600` for a log line, so a mode is never printed as the decimal 384. */
+function modeText(mode: number): string {
+	return `0${mode.toString(8).padStart(3, "0")}`;
+}
+
+/**
  * Escape a literal for use inside a RegExp. The config's basename is
  * user-supplied via BETTER_CCFLARE_CONFIG_PATH and normally contains a dot, so
  * it cannot go into a pattern unescaped.
@@ -461,6 +535,10 @@ export class Config extends EventEmitter {
 	 * documents the config on a Docker volume) or on a file owned by another
 	 * user, and neither case means the config is unusable.
 	 *
+	 * chmodAndVerify() reads the mode back afterwards, because a chmod that
+	 * reports success and changes nothing was the worst available shape here: the
+	 * guard came out true on every load while the file stayed world-readable.
+	 *
 	 * Acts on writeTarget(), which refuses to follow a symlink whose directory
 	 * another local user can write. chmod follows links, so without that refusal
 	 * a planted link turns this into a tool for changing an unrelated file's mode:
@@ -483,10 +561,8 @@ export class Config extends EventEmitter {
 				);
 				return;
 			}
-			if ((info.mode & 0o777) !== 0o600) {
-				chmodSync(target, 0o600);
-				log.info("Restricted config file permissions to 0600");
-			}
+			if ((info.mode & 0o777) === CONFIG_FILE_MODE) return;
+			chmodAndVerify(target, CONFIG_FILE_MODE, "config file");
 		} catch (error) {
 			log.warn(`Could not restrict config file permissions: ${error}`);
 		}
@@ -516,7 +592,9 @@ export class Config extends EventEmitter {
 	 * Warns rather than throws. chmod fails legitimately on a bind-mounted volume
 	 * or a directory owned by another user, and neither means the config is
 	 * unusable. It can also report success and change nothing, on Docker bind
-	 * mounts and FAT/exFAT; detecting that is SB23-1686 and is not done here.
+	 * mounts and FAT/exFAT, which chmodAndVerify() reads back and reports: the
+	 * directory is the one change that covers the database, so a silent no-op
+	 * here leaves the plaintext tokens traversable.
 	 */
 	private restrictConfigDir(): void {
 		const dir = dirname(this.configPath);
@@ -531,10 +609,8 @@ export class Config extends EventEmitter {
 			// Directories only. A non-directory here means something is badly wrong
 			// with the path; changing its mode would not help.
 			if (!info.isDirectory()) return;
-			if ((info.mode & 0o777) !== 0o700) {
-				chmodSync(dir, 0o700);
-				log.info("Restricted config directory permissions to 0700");
-			}
+			if ((info.mode & 0o777) === CONFIG_DIR_MODE) return;
+			chmodAndVerify(dir, CONFIG_DIR_MODE, "config directory");
 		} catch (error) {
 			log.warn(`Could not restrict config directory permissions: ${error}`);
 		}
@@ -751,10 +827,10 @@ export class Config extends EventEmitter {
 		const content = JSON.stringify(this.data, null, 2);
 		const target = this.writeTarget();
 		if (target === null) {
-			// An untrusted symlink. Writing through it hands the secrets to whoever
-			// planted it, and renaming over it destroys a link that may be the
-			// user's own. Neither is better than not persisting, and writeTarget()
-			// has already said why at error level.
+			// An untrusted link at the configured path is replaced rather than
+			// followed, so settings keep persisting. Every other refusal still
+			// refuses; writeTarget() has already said why at error level.
+			if (this.replaceUntrustedLink(content)) return;
 			log.error("Config not saved: the configured path cannot be trusted");
 			return;
 		}
@@ -847,7 +923,90 @@ export class Config extends EventEmitter {
 		}
 	}
 
-	private saveByRename(target: string, content: string): boolean {
+	/**
+	 * Replace an untrusted link at the configured path instead of following it,
+	 * so settings still persist.
+	 *
+	 * Before this, an untrusted link meant nothing was ever saved again. Writing
+	 * a fresh 0600 temp file and renaming it over the link path is no less safe
+	 * than refusing, because nothing is written through the link either way, and
+	 * it is strictly more useful: the planted link is destroyed rather than
+	 * followed and no unrelated file is touched. The cost is that a link an
+	 * operator placed deliberately in a shared-writable directory becomes a
+	 * regular file, which is the right outcome when the directory cannot be
+	 * trusted (SB23-1696).
+	 *
+	 * Only when the CONFIGURED path is itself a link whose own directory is
+	 * untrusted. A refusal from deeper in the chain leaves the configured link in
+	 * a directory only we can write, which makes it the operator's own link, and
+	 * renaming over it is exactly the destructive behaviour resolveLinkChain()
+	 * refuses in the cycle case. The same goes for a readlink failure and a
+	 * cycle: both keep refusing.
+	 *
+	 * The read stays refused whatever this does. A config another local user
+	 * controls is an authentication bypass through local_control_secret, not a
+	 * disclosure, so this.data is already empty by the time a save runs and what
+	 * lands on disk is ours.
+	 *
+	 * No in-place fallback, deliberately. saveByRename() opens with O_EXCL under
+	 * a random name, which cannot follow a planted link; writeFileSync() on the
+	 * configured path would follow one, and this branch runs precisely when
+	 * another local user can plant it.
+	 *
+	 * Returns false when this is not that case, so the caller refuses as before.
+	 */
+	private replaceUntrustedLink(content: string): boolean {
+		if (process.platform === "win32") return false;
+		let link: ReturnType<typeof lstatSync>;
+		try {
+			link = lstatSync(this.configPath);
+		} catch {
+			return false;
+		}
+		if (!link.isSymbolicLink()) return false;
+		// A link that belongs to us was created by us, because only root may chown
+		// a symlink, so it is the operator's own arrangement and destroying it is
+		// not this branch's business. That matters more than it looks:
+		// directoryIsTrusted() rejects any group or other writable directory, and
+		// on a distribution with umask 002 and per-user private groups mkdir
+		// ~/.config produces 0775 owned by the user and the user's own group. That
+		// directory is effectively private and is rejected anyway, and a dotfiles
+		// link inside it is exactly the arrangement resolveLinkChain() says it
+		// exists to support.
+		//
+		// Without this the misdetection turns from reversible into permanent.
+		// Refusing left the link and the settings intact, and chmod 700 on the
+		// directory restored everything. Replacing destroys the link, and since
+		// the read has already set this.data to {}, what lands in its place is a
+		// file of defaults: measured, 24 bytes, with local_control_secret
+		// regenerated and every existing client's secret invalidated.
+		//
+		// It costs the fix nothing. In a directory another user can write without
+		// the sticky bit they unlink ours and plant their own, which carries their
+		// uid and is still replaced; with the sticky bit they cannot unlink ours
+		// at all. The one case this gives up is a root process facing a link owned
+		// by the service user, which now refuses rather than replaces, and
+		// refusing is the safe direction.
+		const uid = process.getuid?.();
+		if (uid === undefined || link.uid === uid) return false;
+		if (this.directoryIsTrusted(dirname(this.configPath))) return false;
+		if (!this.saveByRename(this.configPath, content, false)) {
+			log.error(
+				`Config not saved: ${this.configPath} is an untrusted symlink and it could not be replaced`,
+			);
+			return true;
+		}
+		log.warn(
+			`Replaced the untrusted symlink at ${this.configPath} with a regular config file rather than writing through it. Its directory is writable by other local users, so anyone could have planted that link; move the config somewhere only you can write.`,
+		);
+		return true;
+	}
+
+	private saveByRename(
+		target: string,
+		content: string,
+		keepExistingOwner = true,
+	): boolean {
 		const tmpPath = `${target}.tmp-${randomUUID()}`;
 		try {
 			// "wx" is O_WRONLY|O_CREAT|O_EXCL: fails if the path exists at all,
@@ -871,7 +1030,13 @@ export class Config extends EventEmitter {
 				// has to as well: copy the existing owner onto the descriptor, and if
 				// that is not permitted, refuse the rename so the caller writes in
 				// place rather than changing who owns the config.
-				this.preserveOwnership(fd, target);
+				//
+				// Skipped when the target is an untrusted link being replaced.
+				// preserveOwnership() stats the target, which follows the link, so it
+				// would read the uid of whatever the planter pointed at and fchown our
+				// new config to them. That would hand over the file this branch exists
+				// to keep out of their hands.
+				if (keepExistingOwner) this.preserveOwnership(fd, target);
 				fsyncSync(fd);
 			} finally {
 				closeSync(fd);

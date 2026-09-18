@@ -102,6 +102,14 @@ export function OpenObserveCard() {
 					is sent and no connection is opened. Changes take effect on the next
 					request, with no restart.
 				</CardDescription>
+				<CardDescription>
+					Delivery is best effort and buffered in memory only. A batch the
+					endpoint refuses for a transient reason is retried, but it keeps its
+					place in time, so it is discarded before newer records are. Nothing is
+					written outside that buffer, so an endpoint that stays down costs a
+					fixed amount of memory and loses the oldest records first. Treat this
+					stream as telemetry, never as a billing or audit record.
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-4">
 				<div className="flex items-center justify-between">

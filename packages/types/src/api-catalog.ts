@@ -1,7 +1,17 @@
 /**
- * The inventory of every HTTP route this fork serves. Two consumers: the
- * dashboard's API playground, and `GET /api/meta/routes`, which serves this
- * array verbatim.
+ * The inventory of every HTTP route `packages/http-api/src/router.ts` serves.
+ * Two consumers: the dashboard's API playground, and `GET /api/meta/routes`,
+ * which serves this array verbatim.
+ *
+ * **This is not the whole served surface, and never has been.** The proxy
+ * endpoints under `/v1/*` and `/messages/*` are passthroughs to the upstream
+ * provider, handled in `apps/server/src/server.ts` and shaped by the provider
+ * adapters, so they never reach this router and belong in no entry here.
+ * `GET /v1/models` and `GET /v1/models/{id}` both ship and both are absent
+ * on purpose: their OpenAI-shaped bodies are produced in
+ * `processResponse` (`packages/providers/src/providers/anthropic/provider.ts`),
+ * not by a handler this file can name. Adding a `/v1/` entry would put a
+ * route in the playground that the router cannot serve.
  *
  * It lives in `@better-ccflare/types` rather than in the dashboard because
  * the server has to import it and does not depend on `dashboard-web`. It is
