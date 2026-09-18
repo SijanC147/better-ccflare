@@ -38,20 +38,88 @@
  *
  * Registration is process-wide and deliberately never undone. Bun runs every
  * test file in one process, so an `unregister` in one file would pull the DOM
- * out from under a later one. The leak was measured before it was accepted:
- * the only `typeof window` and `typeof document` sites outside this package
- * are local variables named `window` in `packages/proxy` and
- * `packages/providers`, which shadow the global and cannot see it.
+ * out from under a later one.
+ *
+ * That makes the blast radius the thing to measure, and the first version of
+ * this file measured the wrong thing. It checked for `typeof window` and
+ * `typeof document` sites elsewhere in the repo, found only local variables
+ * named `window` that shadow the global, and concluded the registration was
+ * contained. It was not. `GlobalRegistrator.register()` REPLACES 37 globals
+ * that Bun already implements, the network and stream family among them, and
+ * adds 488 more. The full suite caught it: four `processResponse - SSE` tests
+ * in `packages/providers` failed with
+ *
+ *     TypeError: The transform's 'readable' property must be a ReadableStream
+ *
+ * because `ReadableStream` stayed Bun's while `TransformStream` became
+ * happy-dom's, and `pipeThrough` will not cross implementations. Those tests
+ * pass alone and fail as soon as this module is loaded into the same process,
+ * which is how the cause was pinned.
+ *
+ * So the registration is followed by restoring Bun's own implementations of
+ * the globals the DOM does not need. The restore list is an explicit allowlist
+ * rather than an exclusion list, so a future happy-dom release that starts
+ * replacing something new leaves that one alone rather than silently keeping
+ * a replacement nobody reviewed.
  */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ReactElement } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
+/**
+ * Globals Bun implements and the DOM does not need, restored after
+ * registration so non-DOM code sharing the process keeps working.
+ *
+ * Streams are the ones that were measured to break. The rest are in the same
+ * family and are restored for the same reason: a `Response` or a `Blob` that
+ * crosses between implementations is the identical hazard waiting for the
+ * first test that exercises it, and a test that fails only when two unrelated
+ * files land in one Bun process is expensive to diagnose twice.
+ *
+ * Deliberately NOT restored, because happy-dom has to own them for React to
+ * work: `Event`, `EventTarget`, `CustomEvent`, `ErrorEvent`, `MessageEvent`,
+ * `CloseEvent`, `DOMException`, `navigator`, `addEventListener`,
+ * `removeEventListener`, `dispatchEvent`, `postMessage`, `MessagePort`.
+ */
+const BUN_OWNED = [
+	"ReadableStream",
+	"WritableStream",
+	"TransformStream",
+	"fetch",
+	"Request",
+	"Response",
+	"Headers",
+	"Blob",
+	"File",
+	"FormData",
+	"AbortController",
+	"AbortSignal",
+	"URL",
+	"WebSocket",
+	"atob",
+	"btoa",
+	"setTimeout",
+	"clearTimeout",
+	"setInterval",
+	"clearInterval",
+	"queueMicrotask",
+] as const;
+
 // Guarded because Bun runs every test file in one process: a second
 // registration from a second test file throws.
 if (typeof globalThis.document === "undefined") {
+	const scope = globalThis as unknown as Record<string, unknown>;
+	const native = new Map<string, unknown>();
+	for (const name of BUN_OWNED) {
+		if (name in scope) native.set(name, scope[name]);
+	}
+
 	GlobalRegistrator.register();
+
+	for (const [name, value] of native) {
+		if (scope[name] !== value) scope[name] = value;
+	}
 }
 
 // React 19 requires this flag before `act` will flush updates outside a
