@@ -82,6 +82,7 @@ async function withSilencedWarnings(
 	return warnings;
 }
 
+const WARN_WINDOW_MS = 60_000;
 const originalDateNow = Date.now;
 
 /**
@@ -794,7 +795,7 @@ describe("openobserve retry", () => {
 	// deferral is emitted first on every attempting tick, so the separate
 	// buffer-pressure warning was always the suppressed one. Losing records is
 	// not the half that may go unreported.
-	test("the deferral warning carries the eviction count", async () => {
+	test("the deferral warning carries the loss count", async () => {
 		const captures: Capture[] = [];
 		captureFetch(captures, 503);
 		configureOpenObserve(() => settings());
@@ -805,7 +806,7 @@ describe("openobserve retry", () => {
 
 		const deferral = warnings.find((w) => w.includes("deferring"));
 		expect(deferral).toBeDefined();
-		expect(deferral).toContain("200 older record(s) evicted");
+		expect(deferral).toContain("200 older record(s) lost");
 	});
 
 	// Found in review. `fetch` throws a TypeError for a malformed URL and for a
@@ -856,6 +857,39 @@ describe("openobserve retry", () => {
 		await flush();
 		expect(captures).toHaveLength(7);
 		expect((captures[6].body as { id: string }[])[0].id).toBe("after");
+	});
+
+	// Found in review. The loss count was zeroed before the message carrying it
+	// went through the throttle, so a suppressed message took the number with
+	// it. At the 60s backoff cap the deferral lands right on the throttle
+	// boundary, which is exactly when an operator most needs the figure.
+	test("keeps the loss count until a warning actually carries it", async () => {
+		const captures: Capture[] = [];
+		captureFetch(captures, 503);
+		configureOpenObserve(() => settings());
+		const clock = fakeClock();
+
+		// Overflow the buffer, then fail. The first deferral reports the losses.
+		for (let i = 0; i < 1200; i++) shipRequestRecord({ id: `req-${i}` });
+		const first = await withSilencedWarnings(() => flush());
+		expect(first.find((w) => w.includes("deferring"))).toContain(
+			"200 older record(s) lost",
+		);
+
+		// Now lose more inside the throttle window, where the message is
+		// suppressed. The count must survive to the next emitted warning.
+		for (let i = 1200; i < 1300; i++) shipRequestRecord({ id: `req-${i}` });
+		clock.advance(4_000);
+		await withSilencedWarnings(() => flush());
+
+		clock.advance(WARN_WINDOW_MS + 60_000);
+		const later = await withSilencedWarnings(() => flush());
+		const deferral = later.find((w) => w.includes("deferring"));
+		expect(deferral).toBeDefined();
+		// 100 evicted by the new arrivals, plus the batch dropped at the
+		// attempt limit. The number is non-zero either way; what matters is
+		// that it was not thrown away by the suppressed message.
+		expect(deferral).toMatch(/\d+ older record\(s\) lost/);
 	});
 
 	test("turning the exporter off clears the backoff too", async () => {

@@ -14,6 +14,16 @@ import { logBus } from "./log-bus";
  * bulk endpoint was verified against a live instance: `_timestamp` in
  * milliseconds is accepted, and a record without one is stamped at ingest.
  *
+ * The byte accounting holds by construction rather than by test, which is the
+ * only kind of argument available for it: every write to a buffer's `records`
+ * or `bytes` lives in one of five functions (`resetBuffer`, `evictOverflow`,
+ * `enqueue`, `requeue`, `takeBatch`), in each the array mutation and the byte
+ * adjustment are adjacent statements with no branch between them, and every
+ * `await` in this module is inside `post` or `flush` and never inside one of
+ * those five. So no mutator can be observed part-way through, and
+ * `bytes === sum(records[i].bytes)` survives any interleaving. Keep that true
+ * when editing: putting an `await` inside a mutator breaks it silently.
+ *
  * A batch that fails for a transient reason is kept and sent again later, but
  * there is no retry queue: the batch goes back into the same bounded buffer it
  * came from. That is the whole of the retry design, and it is what keeps the
@@ -210,17 +220,23 @@ let warnsSuppressed = 0;
 const logBuffer = emptyBuffer();
 const requestBuffer = emptyBuffer();
 
-function warnThrottled(message: string): void {
+/**
+ * Warn at most once per window. Returns whether the message was actually
+ * emitted, so a caller carrying a number in it can keep that number for the
+ * next attempt instead of discarding it into a suppressed message.
+ */
+function warnThrottled(message: string): boolean {
 	const now = Date.now();
 	if (now - lastWarnAt < WARN_THROTTLE_MS) {
 		warnsSuppressed++;
-		return;
+		return false;
 	}
 	const suffix =
 		warnsSuppressed > 0 ? ` (${warnsSuppressed} similar suppressed)` : "";
 	lastWarnAt = now;
 	warnsSuppressed = 0;
 	console.warn(`[openobserve] ${message}${suffix}`);
+	return true;
 }
 
 function currentSettings(): OpenObserveSettings | null {
@@ -399,12 +415,18 @@ function handleFailedBatch(
 	// so the pressure warning would always be the suppressed one. Losing
 	// records must not be the half that goes unreported.
 	const lost = buffer.dropped;
-	buffer.dropped = 0;
-	const evicted =
-		lost > 0 ? `; ${lost} older record(s) evicted to make room` : "";
-	warnThrottled(
-		`deferring ${batch.length} record(s) for stream ${stream}: ${reason}; next attempt in ${Math.round(wait / 1000)}s${evicted}`,
+	// "lost", not "evicted": buffer.dropped also counts the unserializable and
+	// oversized records enqueue rejected outright, which were never in the
+	// buffer to be evicted from it.
+	const losses = lost > 0 ? `; ${lost} older record(s) lost` : "";
+	const emitted = warnThrottled(
+		`deferring ${batch.length} record(s) for stream ${stream}: ${reason}; next attempt in ${Math.round(wait / 1000)}s${losses}`,
 	);
+	// Only clear the count once it has actually reached an operator. At the
+	// 60s backoff cap this message lands right on the throttle boundary, so
+	// zeroing unconditionally would discard the loss figure into a suppressed
+	// message and report it nowhere.
+	if (emitted) buffer.dropped = 0;
 }
 
 /**
@@ -480,10 +502,12 @@ async function runFlush(force: boolean): Promise<void> {
 				}
 			}
 			if (buffer.dropped > 0) {
-				warnThrottled(
+				// Same rule as the deferral message: keep the count until it has
+				// been reported, rather than losing it to a suppressed warning.
+				const emitted = warnThrottled(
 					`dropped ${buffer.dropped} record(s) for stream ${stream} under buffer pressure`,
 				);
-				buffer.dropped = 0;
+				if (emitted) buffer.dropped = 0;
 			}
 		}
 	} finally {
