@@ -1,4 +1,4 @@
-import type { UsageData, UsageWindow } from "../../usage-fetcher";
+import type { CodexCredits, UsageData, UsageWindow } from "../../usage-fetcher";
 
 export interface ParseCodexUsageHeadersOptions {
 	baseTimeMs?: number;
@@ -139,6 +139,51 @@ function readWindow(
 	};
 }
 
+/**
+ * Upstream writes these as JSON booleans, and codex-rs reads them back through
+ * a string parse, so the value arrives as the text "true" or "false". Anything
+ * else is absent rather than false: a header we cannot read is not upstream
+ * telling us "no".
+ */
+function parseHeaderBool(value: string | null): boolean | null {
+	if (value === null) return null;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "true") return true;
+	if (normalized === "false") return false;
+	return null;
+}
+
+/**
+ * The credit balance, or null when upstream did not report one.
+ *
+ * Gated on `x-codex-credits-has-credits` alone, mirroring codex-rs
+ * `parse_credits_snapshot`. Absent is omitted, never zeroed: rendering
+ * "0 credits" for an account upstream never spoke about is a confident lie in
+ * the direction that makes an operator stop using a working account.
+ */
+export function parseCodexCreditsHeaders(
+	headers: Headers,
+): CodexCredits | null {
+	const hasCredits = parseHeaderBool(
+		headers.get("x-codex-credits-has-credits"),
+	);
+	if (hasCredits === null) return null;
+
+	const balance = headers.get("x-codex-credits-balance");
+	const trimmedBalance = balance?.trim();
+
+	return {
+		has_credits: hasCredits,
+		// An unreadable `unlimited` is not "unlimited": default to the bounded
+		// reading, so a malformed header can never render "Unlimited".
+		unlimited:
+			parseHeaderBool(headers.get("x-codex-credits-unlimited")) ?? false,
+		// Kept as the upstream string so the dashboard prints what the Codex CLI
+		// prints. An empty header is no balance, not the empty string.
+		balance: trimmedBalance ? trimmedBalance : null,
+	};
+}
+
 export function parseCodexUsageHeaders(
 	headers: Headers,
 	options: ParseCodexUsageHeadersOptions = {},
@@ -187,8 +232,17 @@ export function parseCodexUsageHeaders(
 		return null;
 	}
 
+	// Deliberately inside the window gate, not above it: the credits line is
+	// rendered beside the weekly bar, and every measured response carrying the
+	// credits headers carried the window headers too. Returning usage data for a
+	// credits-only response would put accounts into the "has usage data" bucket
+	// that every admission and pool-average reader consults, which is a routing
+	// change and not this issue's.
+	const credits = parseCodexCreditsHeaders(headers);
+
 	return {
 		five_hour: fiveHour ?? { utilization: defaultUtilization, resets_at: null },
 		seven_day: sevenDay ?? { utilization: defaultUtilization, resets_at: null },
+		...(credits ? { credits } : {}),
 	};
 }
