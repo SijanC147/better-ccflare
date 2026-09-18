@@ -142,11 +142,23 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 				: groupBy === "project"
 					? ", r.project"
 					: "";
+		// `NULLS LAST` on both, and it is not cosmetic. Each dimension column
+		// is nullable — `r.project` by column definition, `a.name` because the
+		// LEFT JOIN yields NULL for a request with no account and for one whose
+		// `account_used` names a row no longer in `accounts` — and the default
+		// placement of a NULL under ASC differs by engine. Measured
+		// 2026-09-18 on SQLite 3.54.0 (bun:sqlite) and PostgreSQL 18.6 with
+		// three rows, one of them NULL: SQLite returned the NULL first,
+		// PostgreSQL returned it last. So the same window returned rows in two
+		// different orders on the two engines until this clause, and a caller
+		// diffing the response across a backend migration saw a change that
+		// was not there. Both engines accept `NULLS LAST` (SQLite since 3.30),
+		// and with it both returned a-proj, b-proj, NULL.
 		const dimensionOrder =
 			groupBy === "account"
-				? ", a.name ASC"
+				? ", a.name ASC NULLS LAST"
 				: groupBy === "project"
-					? ", r.project ASC"
+					? ", r.project ASC NULLS LAST"
 					: "";
 
 		try {
@@ -173,6 +185,20 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 						AS avg_total_tokens_per_success,
 					-- The one column with no DEFAULT 0, so NULL-skipping in AVG
 					-- is what we want, and only here.
+					-- The population differs from the average above on purpose,
+					-- and the two are not interchangeable. That one restricts
+					-- to successes because a failure stores 0 tokens, so a zero
+					-- would enter the mean and report a model as using fewer
+					-- tokens the more often it fails. This one has no zero to
+					-- exclude: the rate is written only when output tokens were
+					-- produced, gated on finalOutputTokens > 0 rather than on
+					-- success (usage-collector.ts:830), so a request that
+					-- produced none is already NULL and already skipped. The
+					-- populations are therefore genuinely different, because a
+					-- request can stream tokens at a measured rate and still be
+					-- recorded as failed, and that row is a real throughput
+					-- observation. Adding a success CASE here would discard a
+					-- measurement rather than exclude a zero.
 					-- This comment deliberately contains no apostrophe and no
 					-- question mark. convertPlaceholders in BunSqlAdapter scans
 					-- the raw statement and skips neither comments nor

@@ -439,6 +439,44 @@ describe("GET /api/analytics/models — avgTokensPerSecond", () => {
 
 		expect(row.avgTokensPerSecond).toBeNull();
 	});
+
+	it("counts a failed request that still measured a rate", async () => {
+		// This pins the one deliberate divergence between the two averages
+		// this endpoint returns. avgTotalTokensPerSuccess restricts to
+		// successes because a failure stores 0 tokens and that zero would
+		// enter the mean; avgTokensPerSecond does not, because the rate is
+		// written only when output tokens were produced, gated on
+		// `finalOutputTokens > 0` and not on success
+		// (usage-collector.ts:830), so a request that produced none is
+		// already NULL and already skipped. The two populations therefore
+		// differ by exactly this row: failed, and carrying a real measured
+		// rate.
+		//
+		// Chosen so the two candidate populations give different numbers. A
+		// success CASE would return 40, successes only; the intended
+		// NULL-skipping average over both returns 50. Equal values would make
+		// the assertion pass under either reading.
+		insertRequest({
+			id: "fr1",
+			model: "rate",
+			success: true,
+			tokensPerSecond: 40,
+		});
+		insertRequest({
+			id: "fr2",
+			model: "rate",
+			success: false,
+			tokensPerSecond: 60,
+		});
+
+		const [row] = await rowsFor("range=24h");
+
+		expect(row.avgTokensPerSecond).toBe(50);
+		// The neighbouring average is the contrast, and it reads the other
+		// way: the failed row contributes 0 tokens and is excluded, so this is
+		// the successful row alone rather than a mean over both.
+		expect(row.successRequests).toBe(1);
+	});
 });
 
 describe("GET /api/analytics/models — rows with no model", () => {
@@ -459,14 +497,70 @@ describe("GET /api/analytics/models — rows with no model", () => {
 
 describe("GET /api/analytics/models — ordering", () => {
 	it("orders by requests descending, then model ascending", async () => {
+		// The two equal-count models are inserted in the order c then a, which
+		// is the reverse of the order asserted. That is what makes this test
+		// cover the `r.model ASC` tiebreak rather than merely agree with it.
+		// Measured 2026-09-18: with a1 inserted before c1, removing the
+		// tiebreak from the handler left this test green, because the order
+		// SQLite then returned for the tied pair happened to match insertion
+		// order and so matched the assertion. An ORDER BY with no tiebreak
+		// gives an unspecified order for tied rows, so a fixture whose natural
+		// order already equals the answer cannot tell the clause is gone.
 		insertRequest({ id: "b1", model: "b-model" });
 		insertRequest({ id: "b2", model: "b-model" });
-		insertRequest({ id: "a1", model: "a-model" });
 		insertRequest({ id: "c1", model: "c-model" });
+		insertRequest({ id: "a1", model: "a-model" });
 
 		const rows = await rowsFor("range=24h");
 
 		expect(rows.map((r) => r.model)).toEqual(["b-model", "a-model", "c-model"]);
+	});
+
+	/**
+	 * These two pin the placement of the NULL dimension value, which is the one
+	 * part of this ORDER BY whose default differs between the two engines this
+	 * handler runs on. Measured 2026-09-18: on `ORDER BY project ASC` with one
+	 * NULL among three rows, SQLite returned the NULL first and PostgreSQL
+	 * 18.6 returned it last. The handler therefore says `NULLS LAST`
+	 * explicitly, and these assert it from the SQLite side, where the
+	 * unqualified clause puts the NULL first and so fails them.
+	 *
+	 * Asserting the full array rather than the NULL's index on purpose: an
+	 * index assertion still passes if the two named projects swap.
+	 */
+	it("places a null project last, not first, on groupBy=project", async () => {
+		insertRequest({ id: "n1", model: "shared", project: "b-proj" });
+		insertRequest({ id: "n2", model: "shared", project: null });
+		insertRequest({ id: "n3", model: "shared", project: "a-proj" });
+
+		const rows = await rowsFor("range=24h&groupBy=project");
+
+		expect(rows.map((r) => r.project)).toEqual(["a-proj", "b-proj", null]);
+	});
+
+	it("places the unattributed account last, not first, on groupBy=account", async () => {
+		// `a.name` is nullable here without the column being nullable: the
+		// LEFT JOIN yields NULL for a request with no account at all, which is
+		// this `null`, and for one naming an account row that no longer exists.
+		db.run(
+			"INSERT INTO accounts (id, name, created_at) VALUES ('ord-b', 'b-acct', ?)",
+			[Date.now()],
+		);
+		db.run(
+			"INSERT INTO accounts (id, name, created_at) VALUES ('ord-a', 'a-acct', ?)",
+			[Date.now()],
+		);
+		insertRequest({ id: "o1", model: "shared", accountUsed: "ord-b" });
+		insertRequest({ id: "o2", model: "shared", accountUsed: null });
+		insertRequest({ id: "o3", model: "shared", accountUsed: "ord-a" });
+
+		const rows = await rowsFor("range=24h&groupBy=account");
+
+		expect(rows.map((r) => r.account)).toEqual([
+			"a-acct",
+			"b-acct",
+			NO_ACCOUNT_ID,
+		]);
 	});
 });
 
