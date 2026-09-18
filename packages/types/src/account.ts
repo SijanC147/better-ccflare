@@ -80,6 +80,122 @@ export function computeReauthDeadline(params: {
 	};
 }
 
+// Subscription renewal day of month (SB23-2055). The operator enters a day
+// from 1 to 31 and that is exactly what is stored: a value clamped at write
+// time would lose the intent forever, so 31 stays 31 and February clamps to
+// the 28th or 29th only when the next occurrence is computed.
+export const RENEWAL_DAY_MIN = 1;
+export const RENEWAL_DAY_MAX = 31;
+
+export interface RenewalStatus {
+	/** ISO 8601 calendar date, YYYY-MM-DD, in the zone the caller asked for. */
+	nextRenewalAt: string;
+	/** Whole calendar days from today to that date. 0 means it renews today. */
+	daysUntilRenewal: number;
+	/** True when the stored day does not exist in the target month and was clamped. */
+	clamped: boolean;
+}
+
+/** Days in a Gregorian month. monthIndex is 0-based, as in the Date API. */
+export function daysInMonth(year: number, monthIndex: number): number {
+	// Day 0 of the following month is the last day of this one. Date.UTC
+	// normalizes monthIndex 12 into January of year + 1 on its own.
+	return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+}
+
+/**
+ * The calendar date in `timeZone` at the instant `epochMs`. Everything about a
+ * renewal day is calendar arithmetic, not instant arithmetic: a day of month
+ * names no point in time until a zone is chosen, and doing the maths on
+ * timestamps makes the answer wrong by a day for viewers far from UTC.
+ */
+function calendarPartsIn(
+	epochMs: number,
+	timeZone: string,
+): { year: number; monthIndex: number; day: number } {
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone,
+		year: "numeric",
+		month: "numeric",
+		day: "numeric",
+		era: "short",
+	}).formatToParts(new Date(epochMs));
+
+	const read = (type: string) => {
+		const found = parts.find((part) => part.type === type);
+		if (!found) throw new Error(`Intl did not return a ${type} part`);
+		return Number(found.value);
+	};
+
+	return {
+		year: read("year"),
+		monthIndex: read("month") - 1,
+		day: read("day"),
+	};
+}
+
+/**
+ * Next occurrence of a renewal day, and the whole days until it.
+ *
+ * Returns null when no renewal day is set. An unset day is not day 1: the
+ * account simply has no billing boundary recorded, and the dashboard renders
+ * nothing rather than a guess.
+ *
+ * `timeZone` defaults to UTC because the server has no viewer to ask. The
+ * dashboard passes the browser's own zone, so a viewer at UTC+14 does not see
+ * a countdown computed against yesterday's date.
+ */
+export function computeNextRenewal(params: {
+	renewalDay: number | null | undefined;
+	now?: number;
+	timeZone?: string;
+}): RenewalStatus | null {
+	const { renewalDay } = params;
+	if (
+		renewalDay == null ||
+		!Number.isInteger(renewalDay) ||
+		renewalDay < RENEWAL_DAY_MIN ||
+		renewalDay > RENEWAL_DAY_MAX
+	) {
+		return null;
+	}
+
+	const timeZone = params.timeZone ?? "UTC";
+	const today = calendarPartsIn(params.now ?? Date.now(), timeZone);
+
+	// This month first. If its clamped day has already passed, move on: a
+	// renewal day of 31 in a 30-day month lands on the 30th, so an account
+	// viewed on the 31st of a 31-day month rolls to next month correctly.
+	let year = today.year;
+	let monthIndex = today.monthIndex;
+	let day = Math.min(renewalDay, daysInMonth(year, monthIndex));
+
+	if (day < today.day) {
+		monthIndex += 1;
+		if (monthIndex > 11) {
+			monthIndex = 0;
+			year += 1;
+		}
+		day = Math.min(renewalDay, daysInMonth(year, monthIndex));
+	}
+
+	// Both operands are midnight UTC of a calendar date, so the difference is
+	// an exact whole number of days with no DST or offset term to carry.
+	const daysUntilRenewal = Math.round(
+		(Date.UTC(year, monthIndex, day) -
+			Date.UTC(today.year, today.monthIndex, today.day)) /
+			(24 * 60 * 60 * 1000),
+	);
+
+	const pad = (value: number) => String(value).padStart(2, "0");
+
+	return {
+		nextRenewalAt: `${String(year).padStart(4, "0")}-${pad(monthIndex + 1)}-${pad(day)}`,
+		daysUntilRenewal,
+		clamped: day !== renewalDay,
+	};
+}
+
 export type RateLimitReason =
 	| "upstream_429_with_reset"
 	/** @deprecated written by ccflare ≤ v3.5.x when no-reset 429s used a 5h ban.
@@ -313,6 +429,7 @@ export interface AccountRow {
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	last_manual_reauth_at?: number | null; // Timestamp of the last MANUAL reauthentication (CLI --reauthenticate or dashboard OAuth callback); NOT updated by automatic token refresh
 	consecutive_rate_limits?: number | null;
+	renewal_day?: number | null;
 }
 
 // Domain model - used throughout the application
@@ -353,6 +470,8 @@ export interface Account {
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	last_manual_reauth_at: number | null; // Timestamp of the last MANUAL reauthentication; NOT updated by automatic token refresh
 	consecutive_rate_limits: number;
+	/** Subscription renewal day of month, 1 to 31. null when the operator has not set one. */
+	renewal_day: number | null;
 }
 
 // Session statistics for 5-hour token window
@@ -411,6 +530,17 @@ export interface AccountResponse {
 	reauthDeadlineStatus: "ok" | "warning" | "critical" | "expired" | null;
 	daysUntilReauthRequired: number | null;
 	hoursUntilReauthRequired: number | null;
+	/** Subscription renewal day of month as the operator entered it, 1 to 31. */
+	renewalDay: number | null;
+	/**
+	 * Next renewal as an ISO 8601 calendar date, YYYY-MM-DD, computed in UTC.
+	 * Deliberately not a timestamp: a day of month names no instant, and a
+	 * midnight-UTC value would render as the previous day for any viewer west
+	 * of UTC. The dashboard recomputes both fields in the browser's own zone
+	 * from renewalDay using the same computeNextRenewal helper.
+	 */
+	nextRenewalAt: string | null;
+	daysUntilRenewal: number | null;
 }
 
 // UI display type - used in CLI and web dashboard
@@ -550,6 +680,7 @@ export function toAccount(row: AccountRow): Account {
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
 		last_manual_reauth_at: toNumOrNull(row.last_manual_reauth_at),
 		consecutive_rate_limits: toNum(row.consecutive_rate_limits),
+		renewal_day: toNumOrNull(row.renewal_day),
 	};
 }
 
@@ -600,6 +731,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 			modelFallbacks = null;
 		}
 	}
+
+	// Renewal is computed in UTC here because the server has no viewer zone to
+	// read. The dashboard recomputes it locally; see AccountResponse.nextRenewalAt.
+	const renewal = computeNextRenewal({ renewalDay: account.renewal_day });
 
 	// Manual reauthentication deadline (Claude OAuth accounts only, and only
 	// once they've been manually reauthenticated at least once under this
@@ -664,6 +799,9 @@ export function toAccountResponse(account: Account): AccountResponse {
 		reauthDeadlineStatus: reauthDeadline?.status ?? null,
 		daysUntilReauthRequired: reauthDeadline?.daysUntilDeadline ?? null,
 		hoursUntilReauthRequired: reauthDeadline?.hoursUntilDeadline ?? null,
+		renewalDay: account.renewal_day,
+		nextRenewalAt: renewal?.nextRenewalAt ?? null,
+		daysUntilRenewal: renewal?.daysUntilRenewal ?? null,
 	};
 }
 

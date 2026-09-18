@@ -126,6 +126,7 @@ export function ensureSchema(db: Database): void {
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
 			requires_reauth INTEGER DEFAULT 0,
 			last_manual_reauth_at INTEGER,
+			renewal_day INTEGER,
 			request_transformer TEXT
 		)
 	`);
@@ -1159,6 +1160,15 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added consecutive_rate_limits column to accounts table");
 		}
 
+		// Subscription renewal day of month, 1 to 31, operator-entered and nullable.
+		// This ALTER has to run ABOVE both accounts rebuilds, not below them: each
+		// rebuild copies by an explicit column list that now names renewal_day, so a
+		// database reaching the rebuild without the column would fail the SELECT.
+		if (!initialAccountsColumnNames.includes("renewal_day")) {
+			db.prepare("ALTER TABLE accounts ADD COLUMN renewal_day INTEGER").run();
+			log.info("Added renewal_day column to accounts table");
+		}
+
 		// Make refresh_token nullable (was NOT NULL, causing API-key providers to need workarounds)
 		const refreshTokenCol = accountsInfo.find(
 			(col) => col.name === "refresh_token",
@@ -1202,7 +1212,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					rate_limited_at INTEGER,
 					requires_reauth INTEGER DEFAULT 0,
 					consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
-					last_manual_reauth_at INTEGER
+					last_manual_reauth_at INTEGER,
+					renewal_day INTEGER
 				)
 			`).run();
 
@@ -1236,7 +1247,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					auto_pause_on_overage_enabled, pause_reason,
 					billing_type, refresh_token_issued_at, peak_hours_pause_enabled,
 					rate_limited_reason, rate_limited_at, requires_reauth,
-					consecutive_rate_limits, last_manual_reauth_at
+					consecutive_rate_limits, last_manual_reauth_at, renewal_day
 				FROM accounts
 			`).run();
 
@@ -1602,7 +1613,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
 			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
 			       rate_limited_at, requires_reauth,
-			       consecutive_rate_limits, last_manual_reauth_at
+			       consecutive_rate_limits, last_manual_reauth_at, renewal_day
 			FROM accounts
 		`).run();
 
