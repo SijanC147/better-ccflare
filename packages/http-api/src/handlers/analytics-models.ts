@@ -211,9 +211,15 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 				};
 
 				if (groupBy === "account") {
-					// Matches the sentinel the accounts filter accepts
-					// (query-filters.ts:117), so a row from this response can be
-					// fed straight back as `accounts=<value>`.
+					// The sentinel the accounts filter also uses, but NOT a
+					// value that always round-trips. Two different rows reach
+					// this bucket: a request with a NULL account_used, and a
+					// request whose account_used names a row no longer in
+					// `accounts`, which the LEFT JOIN also yields as NULL.
+					// `buildRequestFilters` matches only the first
+					// (query-filters.ts:128-131), so feeding this value back as
+					// `accounts=no_account` returns the NULL-attributed
+					// requests and not the orphaned ones.
 					base.account = row.account_name ?? NO_ACCOUNT_ID;
 				} else if (groupBy === "project") {
 					// Left null rather than given a placeholder name: "no

@@ -205,6 +205,28 @@ describe("GET /api/analytics/models — a NULL billing_type", () => {
 	});
 });
 
+describe("GET /api/analytics/models — a third billing_type", () => {
+	it("counts anything that is not 'plan' as api cost", async () => {
+		// `api_cost_usd` is `billing_type != 'plan'`, not `= 'api'`. With only
+		// 'plan' and 'api' ever inserted those two predicates are
+		// indistinguishable, so a third value is what pins the one actually
+		// written. Under `= 'api'` this cost would vanish from apiCostUsd
+		// while still appearing in totalCostUsd, and nothing else would notice.
+		insertRequest({
+			id: "third-billing",
+			model: "third",
+			billingType: "credits",
+			costUsd: 3,
+		});
+
+		const [row] = await rowsFor("range=24h");
+
+		expect(row.apiCostUsd).toBe(3);
+		expect(row.planCostUsd).toBe(0);
+		expect(row.totalCostUsd).toBe(3);
+	});
+});
+
 describe("GET /api/analytics/models — a NULL success", () => {
 	it("counts the row as neither a success nor, by subtraction, a silent loss", async () => {
 		// `success` is BOOLEAN with no NOT NULL and no default
@@ -226,17 +248,27 @@ describe("GET /api/analytics/models — a NULL success", () => {
 			totalTokens: 100,
 		});
 
+		// A stored integer that is neither 0 nor 1. This is what separates
+		// `success = TRUE` from `success != FALSE`: against 2 the first is
+		// false and the second is true, while against NULL both are false, so
+		// the NULL row above cannot tell the two predicates apart on its own.
+		db.run(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model, total_tokens)
+			 VALUES ('two-success', ?, 'POST', '/v1/messages', 200, 2, 'tri-state', 900)`,
+			[Date.now() - HOUR_MS],
+		);
+
 		const [row] = await rowsFor("range=24h");
 
-		expect(row.requests).toBe(2);
+		expect(row.requests).toBe(3);
 		expect(row.successRequests).toBe(1);
-		expect(row.errorRequests).toBe(1);
+		expect(row.errorRequests).toBe(2);
 		// requests and successRequests are both SQL counts, so the
 		// subtraction cannot go negative and cannot lose a row.
 		expect(
 			(row.successRequests as number) + (row.errorRequests as number),
 		).toBe(row.requests);
-		// The NULL row's tokens stay out of the successful average.
+		// Neither the NULL row nor the 2 row reaches the successful average.
 		expect(row.avgTotalTokensPerSuccess).toBe(100);
 	});
 });
@@ -344,6 +376,34 @@ describe("GET /api/analytics/models — the token average denominator", () => {
 		const overAllRows = 4000 / 3;
 
 		expect(row.avgTotalTokensPerSuccess).not.toBeCloseTo(overAllRows, 5);
+	});
+
+	it("promotes the division so a non-exact average keeps its fraction", async () => {
+		// The `* 1.0` in the SQL is the whole reason this value is not an
+		// integer, and the 4000/2 fixture above cannot see it: both engines
+		// integer-divide two integers, so dropping the promotion truncates
+		// silently and an exact division looks identical either way.
+		//
+		// Three successful rows totalling 1000 tokens divide to
+		// 333.3333333333333; without the promotion the same rows give 333.
+		db.run("DELETE FROM requests");
+		for (const [id, tokens] of [
+			["frac-1", 300],
+			["frac-2", 300],
+			["frac-3", 400],
+		] as const) {
+			insertRequest({
+				id,
+				model: "frac-model",
+				success: true,
+				totalTokens: tokens,
+			});
+		}
+
+		const [row] = await rowsFor("range=24h");
+
+		expect(row.avgTotalTokensPerSuccess).not.toBe(333);
+		expect(row.avgTotalTokensPerSuccess).toBeCloseTo(1000 / 3, 6);
 	});
 
 	it("reports null rather than 0 when a model has no successful request", async () => {
