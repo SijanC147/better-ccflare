@@ -142,9 +142,16 @@ describe("AlertsList", () => {
 	// pinned what a group CONTAINS, never what the button DOES with it, and a
 	// reviewer's mutation sending only members[0].id survived every test here.
 	// The expression now lives in groupMemberIds, which that file does pin.
-	// What remains genuinely untested is the wiring: that this button calls the
-	// handler at all, that it passes group.key, and the fan-out in
-	// useAcknowledgeAlerts. Closing those needs a DOM renderer.
+	// That fix is partial and measured as partial. Extracting the expression
+	// pins what groupMemberIds RETURNS, and a mutation truncating it now dies.
+	// A mutation replacing the call with `[group.members[0].id]` at this button
+	// still SURVIVES all 41 tests, because nothing here observes which
+	// expression the handler receives. The same gap, one level up.
+	//
+	// So the wiring is untested: that this button calls the handler at all,
+	// that it passes groupMemberIds(group) rather than a truncation, that it
+	// passes group.key, and the fan-out in useAcknowledgeAlerts. Closing any of
+	// them needs a DOM renderer in this package, which nothing here has.
 
 	test("disables only the pending group's button", () => {
 		const alerts = [
