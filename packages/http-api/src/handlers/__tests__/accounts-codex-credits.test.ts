@@ -1,0 +1,221 @@
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { Config } from "@better-ccflare/config";
+import {
+	BunSqlAdapter,
+	ensureSchema,
+	runMigrations,
+} from "@better-ccflare/database";
+import { usageCache } from "@better-ccflare/providers";
+import type { AccountResponse } from "@better-ccflare/types";
+import { createAccountsListHandler } from "../accounts";
+
+/**
+ * `normalizeCodexUsageData` rebuilds the usage object field by field, so a field
+ * it does not name is dropped between the parser and the dashboard with nothing
+ * failing. These tests are the reason a parser change alone is not enough:
+ * they assert `credits` survives on BOTH paths that reach the handler, the
+ * in-memory cache and the reparse of a stored response payload. SB23-2257.
+ */
+
+const ACCOUNT_ID = "codex-credits-acct";
+const CONFIG = {
+	getUsageThrottlingFiveHourEnabled: () => false,
+	getUsageThrottlingWeeklyEnabled: () => false,
+} as unknown as Config;
+
+type UsageWithCredits = {
+	five_hour: { utilization: number | null; resets_at: string | null };
+	seven_day: { utilization: number | null; resets_at: string | null };
+	credits?: {
+		has_credits: boolean;
+		unlimited: boolean;
+		balance: string | null;
+	};
+};
+
+describe("GET /api/accounts — Codex credits pass-through", () => {
+	let sqlite: Database;
+	let adapter: BunSqlAdapter;
+
+	beforeEach(async () => {
+		sqlite = new Database(":memory:");
+		ensureSchema(sqlite);
+		runMigrations(sqlite);
+		adapter = new BunSqlAdapter(sqlite);
+		// The cache is module-level and shared across tests in the process.
+		usageCache.delete(ACCOUNT_ID);
+		await adapter.run(
+			`INSERT INTO accounts (
+				id, name, provider, refresh_token, access_token, expires_at, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				ACCOUNT_ID,
+				"Codex credits",
+				"codex",
+				"refresh-token",
+				"access-token",
+				Date.now() + 3_600_000,
+				Date.now(),
+			],
+		);
+	});
+
+	afterEach(() => {
+		usageCache.delete(ACCOUNT_ID);
+		sqlite.close();
+	});
+
+	function makeHandler() {
+		const dbOps = {
+			getAdapter: () => adapter,
+			getStatsRepository: () => ({
+				getSessionStats: async () => new Map(),
+			}),
+			getLatestUsageSnapshot: async () => null,
+		};
+		return createAccountsListHandler(dbOps as never, CONFIG);
+	}
+
+	async function readUsage(): Promise<UsageWithCredits | null> {
+		const response = await makeHandler()();
+		const accounts = (await response.json()) as AccountResponse[];
+		const account = accounts.find((a) => a.id === ACCOUNT_ID);
+		return (account?.usageData as UsageWithCredits | null) ?? null;
+	}
+
+	/** A weekly-exhausted window, the state this feature exists to annotate. */
+	function exhaustedWindows() {
+		return {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(Date.now() + 129_600_000).toISOString(),
+			},
+		};
+	}
+
+	it("carries credits from the usage cache to the response", async () => {
+		usageCache.set(ACCOUNT_ID, {
+			...exhaustedWindows(),
+			credits: { has_credits: true, unlimited: false, balance: "9.99" },
+		} as never);
+
+		const usage = await readUsage();
+
+		expect(usage?.credits).toEqual({
+			has_credits: true,
+			unlimited: false,
+			balance: "9.99",
+		});
+		// The weekly bar and its reset must survive alongside the credits: the
+		// operator reads the balance against the countdown, not instead of it.
+		expect(usage?.seven_day.utilization).toBe(100);
+		expect(usage?.seven_day.resets_at).not.toBeNull();
+	});
+
+	it("omits the credits KEY when the cache has none", async () => {
+		usageCache.set(ACCOUNT_ID, exhaustedWindows() as never);
+
+		const usage = await readUsage();
+
+		expect(usage).not.toBeNull();
+		expect(usage && "credits" in usage).toBe(false);
+		expect(usage?.seven_day.utilization).toBe(100);
+	});
+
+	it("carries credits recovered from a stored response payload", async () => {
+		// The persisted path reparses raw headers, so it exercises the parser and
+		// the normalizer together. Nothing is in the cache here.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		await adapter.run(
+			`INSERT INTO requests (id, timestamp, method, path, account_used, model, success)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				"req-credits",
+				Date.now(),
+				"POST",
+				"/v1/messages",
+				ACCOUNT_ID,
+				"gpt-5.5",
+				1,
+			],
+		);
+		await adapter.run(
+			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
+			[
+				"req-credits",
+				JSON.stringify({
+					meta: { timestamp: Date.now() },
+					response: {
+						status: 200,
+						headers: {
+							"x-codex-primary-window-minutes": "300",
+							"x-codex-primary-used-percent": "0",
+							"x-codex-primary-reset-at": String(nowSeconds + 3600),
+							"x-codex-secondary-window-minutes": "10080",
+							"x-codex-secondary-used-percent": "100",
+							"x-codex-secondary-reset-at": String(nowSeconds + 129_600),
+							"x-codex-credits-has-credits": "true",
+							"x-codex-credits-unlimited": "false",
+							"x-codex-credits-balance": "42.50",
+						},
+					},
+				}),
+				Date.now(),
+			],
+		);
+
+		const usage = await readUsage();
+
+		expect(usage?.credits).toEqual({
+			has_credits: true,
+			unlimited: false,
+			balance: "42.50",
+		});
+		expect(usage?.seven_day.utilization).toBe(100);
+	});
+
+	it("omits the credits key on the persisted path when no credit header was stored", async () => {
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		await adapter.run(
+			`INSERT INTO requests (id, timestamp, method, path, account_used, model, success)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				"req-nocredits",
+				Date.now(),
+				"POST",
+				"/v1/messages",
+				ACCOUNT_ID,
+				"gpt-5.5",
+				1,
+			],
+		);
+		await adapter.run(
+			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
+			[
+				"req-nocredits",
+				JSON.stringify({
+					meta: { timestamp: Date.now() },
+					response: {
+						status: 200,
+						headers: {
+							"x-codex-secondary-window-minutes": "10080",
+							"x-codex-secondary-used-percent": "100",
+							"x-codex-secondary-reset-at": String(nowSeconds + 129_600),
+						},
+					},
+				}),
+				Date.now(),
+			],
+		);
+
+		const usage = await readUsage();
+
+		expect(usage).not.toBeNull();
+		expect(usage && "credits" in usage).toBe(false);
+	});
+});

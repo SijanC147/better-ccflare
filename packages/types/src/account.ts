@@ -301,6 +301,19 @@ export interface UsageSpend {
 	disabled_reason?: string | null;
 }
 
+/**
+ * Codex credit balance, carried from the `x-codex-credits-*` response headers.
+ *
+ * Mirrors `CodexCredits` in `@better-ccflare/providers`. The key is absent, not
+ * zeroed, when upstream sent no `x-codex-credits-has-credits`, and `balance`
+ * stays the upstream string so the dashboard prints what the Codex CLI prints.
+ */
+export interface CodexCreditsData {
+	has_credits: boolean;
+	unlimited: boolean;
+	balance: string | null;
+}
+
 export interface AnthropicUsageData {
 	five_hour?: UsageWindowData;
 	seven_day?: UsageWindowData;
@@ -313,6 +326,8 @@ export interface AnthropicUsageData {
 	// disambiguate with Array.isArray(usageData.limits).
 	limits?: UsageLimit[];
 	spend?: UsageSpend;
+	// Codex only. Absent unless upstream reported a credit balance.
+	credits?: CodexCreditsData;
 }
 
 // Usage data types for NanoGPT accounts

@@ -78,6 +78,21 @@ export interface UsageSpend {
 	disabled_reason?: string | null;
 }
 
+/**
+ * Codex credit balance, from the `x-codex-credits-*` response headers.
+ *
+ * Present only when upstream sent `x-codex-credits-has-credits`, mirroring
+ * codex-rs `parse_credits_snapshot`, which returns None on that same condition.
+ * `balance` stays the upstream string: parsing it into a number turns an
+ * unexpected format into a confident `0`, and a false zero on a credit balance
+ * reads as "this account is spent" when upstream said nothing of the kind.
+ */
+export interface CodexCredits {
+	has_credits: boolean;
+	unlimited: boolean;
+	balance: string | null;
+}
+
 export interface UsageData {
 	// Core windows — present on legacy payloads but ABSENT on limits[]-only
 	// payloads (Anthropic is migrating the flat windows into the generic limits[]).
@@ -94,6 +109,9 @@ export interface UsageData {
 	// entries. Per-model weekly caps (Fable/Opus/Sonnet) live ONLY here.
 	limits?: UsageLimit[];
 	spend?: UsageSpend;
+	// Codex only: the credit balance that lets an account keep serving after its
+	// weekly window is spent. Omitted entirely when upstream said nothing.
+	credits?: CodexCredits;
 	// Allow any additional fields Anthropic might add in the future
 	[key: string]: UsageWindow | ExtraUsage | UsageLimit[] | UsageSpend | unknown;
 }
