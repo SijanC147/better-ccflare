@@ -46,6 +46,7 @@ import {
 import type {
 	Account,
 	AnthropicUsageData,
+	CodexCreditsData,
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
@@ -116,6 +117,7 @@ function hasWindowInfo(window: {
 type CodexUsageInput = {
 	five_hour?: { utilization: number | null; resets_at: string | null } | null;
 	seven_day?: { utilization: number | null; resets_at: string | null } | null;
+	credits?: CodexCreditsData | null;
 };
 
 /**
@@ -157,8 +159,13 @@ function normalizeCodexUsageData(
 	// The percentage alone must be enough — a weekly value recovered from
 	// usage_snapshots may have no reset stored (accounts.rate_limit_reset keeps
 	// only the soonest one), and requiring a reset here is what used to discard it.
+	// This function rebuilds the object field by field, so anything not named
+	// here is dropped before it reaches the dashboard. A parser change alone
+	// ships nothing. Credits are spread conditionally so an absent balance stays
+	// an absent key rather than an explicit `credits: undefined`.
+	const credits = usage.credits ?? null;
 	return hasWindowInfo(five_hour) || hasWindowInfo(seven_day)
-		? { five_hour, seven_day }
+		? { five_hour, seven_day, ...(credits ? { credits } : {}) }
 		: null;
 }
 

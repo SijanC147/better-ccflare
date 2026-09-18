@@ -1,5 +1,9 @@
 import { computeWindowStartMs, registerUIRefresh } from "@better-ccflare/core";
-import type { AnthropicUsageData, FullUsageData } from "@better-ccflare/types";
+import type {
+	AnthropicUsageData,
+	CodexCreditsData,
+	FullUsageData,
+} from "@better-ccflare/types";
 import { useEffect, useState } from "react";
 import { formatRelativeReset } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
@@ -821,6 +825,41 @@ export function RateLimitProgress({
 					</div>
 				);
 			})}
+			{isCodex &&
+				(() => {
+					// Placed below the window rows, like the Anthropic overage block
+					// and deliberately NOT like the Kilo branch above, which returns
+					// early and so replaces the usage bar. A weekly-exhausted Codex
+					// card has to keep its bar and its reset countdown: the credits
+					// balance is what tells the operator the account can still serve,
+					// and it only means anything read next to the window it survives.
+					const credits = (usageData as { credits?: CodexCreditsData } | null)
+						?.credits;
+					// Absent is not zero. No header, no line.
+					if (!credits) return null;
+					const value = credits.unlimited
+						? "Unlimited"
+						: // `!= null`, not `!== null`: the object crosses a JSON boundary
+							// and is cast loosely here, so a `credits` with no `balance`
+							// key at all reads as undefined. Strict inequality would let
+							// that through and render an empty value next to the label.
+							credits.balance != null
+							? credits.balance
+							: // has_credits with no balance: upstream said there are
+								// credits but not how many, so say exactly that. "None"
+								// here, or a zero, would invent the amount.
+								credits.has_credits
+								? "Available"
+								: "None";
+					return (
+						<div className="flex items-center justify-between">
+							<span className="text-xs text-muted-foreground">Credits</span>
+							<span className="text-xs font-medium text-muted-foreground">
+								{value}
+							</span>
+						</div>
+					);
+				})()}
 			{hasAnthropicStyleData &&
 				(() => {
 					const spend = (
