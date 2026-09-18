@@ -20,6 +20,11 @@ import {
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
+import {
+	formatRenewalBadge,
+	formatRenewalDate,
+	viewerRenewal,
+} from "../../utils/renewal";
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -84,6 +89,9 @@ export function AccountListItem({
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const presenter = new AccountPresenter(account);
+	// Recomputed in the browser's zone rather than read from the response, whose
+	// nextRenewalAt and daysUntilRenewal are UTC-anchored. See utils/renewal.ts.
+	const renewal = viewerRenewal(account.renewalDay);
 	// Only hard-limit statuses mean the account is actually blocked; soft warnings
 	// like "allowed_warning" / "queueing_soft" mean the account is still usable.
 	const HARD_LIMIT_PREFIXES = [
@@ -299,6 +307,18 @@ export function AccountListItem({
 											: `Reauth in ${account.daysUntilReauthRequired}d`}
 								</span>
 							)}
+						{renewal && (
+							<span
+								className="text-sm text-muted-foreground"
+								title={`Subscription renews on ${formatRenewalDate(renewal)}${
+									renewal.clamped
+										? `. Day ${account.renewalDay} does not exist in that month, so it renews on its last day.`
+										: ""
+								}`}
+							>
+								{formatRenewalBadge(renewal)}
+							</span>
+						)}
 						{!presenter.isPaused && presenter.rateLimitStatus !== "OK" && (
 							<span
 								className={`text-sm ${

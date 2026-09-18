@@ -48,6 +48,9 @@ const baseAccount: Account = {
 	reauthDeadlineStatus: null,
 	daysUntilReauthRequired: null,
 	hoursUntilReauthRequired: null,
+	renewalDay: null,
+	nextRenewalAt: null,
+	daysUntilRenewal: null,
 };
 
 function renderAccount(
@@ -226,5 +229,32 @@ describe("AccountListItem", () => {
 		);
 		expect(enabledHtml).toContain('aria-pressed="true"');
 		expect(enabledHtml).toContain("lucide lucide-replace h-4 w-4 text-primary");
+	});
+
+	it("shows no renewal badge when the account has no renewal day", () => {
+		// An unset day is not day 1. Rendering nothing is the point: a countdown
+		// invented from a default would be a billing date the operator never gave.
+		expect(renderAccount(baseAccount)).not.toContain("Renews");
+	});
+
+	it("shows a renewal badge for an account with a renewal day", () => {
+		const html = renderAccount({ ...baseAccount, renewalDay: 15 });
+
+		expect(html).toContain("Renews");
+	});
+
+	it("renders the badge from renewalDay, not from the server's countdown", () => {
+		// nextRenewalAt and daysUntilRenewal arrive UTC-anchored. The component
+		// recomputes in the viewer's zone, so a deliberately absurd server
+		// countdown must not reach the badge.
+		const html = renderAccount({
+			...baseAccount,
+			renewalDay: 15,
+			nextRenewalAt: "1999-01-01",
+			daysUntilRenewal: 9999,
+		});
+
+		expect(html).not.toContain("9999");
+		expect(html).not.toContain("1999");
 	});
 });
