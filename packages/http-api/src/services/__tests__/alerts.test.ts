@@ -8,6 +8,7 @@ import type {
 	AlertsConfigPayload,
 	RunawayLoopGroup,
 } from "@better-ccflare/types";
+import { alertGroupKey } from "@better-ccflare/types";
 import {
 	AlertService,
 	buildRequestTokenAlert,
@@ -659,5 +660,105 @@ describe("anomaly alert cooldown scope (issue #411 regression)", () => {
 			service.stop();
 			sqlite.close();
 		}
+	});
+});
+
+describe("alertGroupKey pins the alert id contract", () => {
+	// The dashboard groups alerts by their id with the trailing cooldown
+	// bucket stripped. That is a string contract with buildThresholdAlertId,
+	// not a stored column, so it is pinned here on the producing side: a
+	// change to the id shape that moved the bucket off the end would break
+	// grouping silently, with every dashboard-side test still green.
+	const COOLDOWN_MINUTES = 60;
+
+	test("two timestamps in different buckets share one key", () => {
+		const first = buildThresholdAlertId(
+			"auth_failure",
+			"ICLD",
+			Date.UTC(2026, 8, 17, 5, 21, 4),
+			COOLDOWN_MINUTES,
+		);
+		const second = buildThresholdAlertId(
+			"auth_failure",
+			"ICLD",
+			Date.UTC(2026, 8, 17, 6, 21, 5),
+			COOLDOWN_MINUTES,
+		);
+
+		expect(first).not.toBe(second);
+		expect(alertGroupKey(first)).toBe("auth_failure:ICLD");
+		expect(alertGroupKey(second)).toBe("auth_failure:ICLD");
+	});
+
+	test("the four hourly ICLD alerts of the screenshot yield one key", () => {
+		// 5:21:04, 6:21:05, 7:21:05 and 8:21:06 on 2026-09-17, the run that
+		// motivated grouping. Four distinct ids, one group.
+		const ids = [
+			Date.UTC(2026, 8, 17, 5, 21, 4),
+			Date.UTC(2026, 8, 17, 6, 21, 5),
+			Date.UTC(2026, 8, 17, 7, 21, 5),
+			Date.UTC(2026, 8, 17, 8, 21, 6),
+		].map((ts) =>
+			buildThresholdAlertId("auth_failure", "ICLD", ts, COOLDOWN_MINUTES),
+		);
+
+		expect(new Set(ids).size).toBe(4);
+		expect(new Set(ids.map(alertGroupKey))).toEqual(
+			new Set(["auth_failure:ICLD"]),
+		);
+	});
+
+	test("a scope containing a colon survives the strip", () => {
+		// encodeScopePart is `${length}:${value}`, so an anomaly scope is
+		// itself colon-bearing. Stripping from the LAST colon is what makes
+		// this exact; stripping from the first would lose the scope.
+		const id = buildThresholdAlertId(
+			"anomaly_token_outlier",
+			"3:abc",
+			1_700_000_000_000,
+			COOLDOWN_MINUTES,
+		);
+
+		expect(alertGroupKey(id)).toBe("anomaly_token_outlier:3:abc");
+	});
+
+	test("a runaway-loop scope with null project and agent keeps its empty segments", () => {
+		const loop: RunawayLoopGroup = {
+			account: "acct",
+			model: "sonnet",
+			project: null,
+			agentUsed: null,
+			windowStartMs: 1_700_000_000_000 - 60_000,
+			windowEndMs: 1_700_000_000_000,
+			requests: 99,
+			requestsPerMinute: 99,
+			meanRequestSideTokens: 1_000,
+			requestSideTokenSpread: 0,
+		};
+
+		const first = buildRunawayLoopAlertId(loop, COOLDOWN_MINUTES);
+		const second = buildRunawayLoopAlertId(
+			{ ...loop, windowEndMs: loop.windowEndMs + 60 * 60 * 1000 },
+			COOLDOWN_MINUTES,
+		);
+
+		expect(first).not.toBe(second);
+		expect(alertGroupKey(first)).toBe("anomaly_runaway_loop:acct:sonnet::");
+		expect(alertGroupKey(first)).toBe(alertGroupKey(second));
+	});
+
+	test("the bucket is the only trailing numeric segment", () => {
+		// If a future change appended anything after the bucket, this fails:
+		// the stripped key would still carry a digit run at its end.
+		const id = buildThresholdAlertId(
+			"daily_spend",
+			"global",
+			1_700_000_000_000,
+			COOLDOWN_MINUTES,
+		);
+		const bucket = id.slice(id.lastIndexOf(":") + 1);
+
+		expect(bucket).toMatch(/^\d+$/);
+		expect(alertGroupKey(id)).toBe("daily_spend:global");
 	});
 });
