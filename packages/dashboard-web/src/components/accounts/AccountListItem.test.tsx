@@ -8,6 +8,24 @@ import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Account } from "../../api";
 import { AccountListItem } from "./AccountListItem";
+import {
+	type AccountMenuHandlers,
+	accountMenuActions,
+	accountMenuToggles,
+} from "./account-menu-items";
+
+/** Every optional callback supplied, so the item list is decided by the account. */
+const allHandlers: AccountMenuHandlers = {
+	renewalDay: true,
+	customEndpoint: true,
+	modelMappings: true,
+	requestTransformer: true,
+	autoPauseOnOverage: true,
+	peakHoursPause: true,
+	qwenReauth: true,
+	anthropicReauth: true,
+	codexReauth: true,
+};
 
 const baseAccount: Account = {
 	id: "account-1",
@@ -181,54 +199,137 @@ describe("AccountListItem", () => {
 		expect(html).not.toContain("Reauth overdue");
 	});
 
-	it("shows the request transformer action only for openai-compatible accounts", () => {
-		const onRequestTransformerChange = () => {};
-		const openAICompatibleHtml = renderAccount(
-			{
-				...baseAccount,
-				provider: "openai-compatible",
-			},
-			onRequestTransformerChange,
-		);
-		const anthropicCompatibleHtml = renderAccount(
-			{
-				...baseAccount,
-				provider: "anthropic-compatible",
-			},
-			onRequestTransformerChange,
+	// The request transformer control moved into the overflow menu. Radix renders
+	// a closed DropdownMenuContent as nothing under renderToStaticMarkup, so the
+	// two assertions below are split: the card's markup proves the control left
+	// the visible row, and accountMenuActions proves it is in the menu with the
+	// right configured state. Asserting the menu's markup would be vacuous.
+	it("no longer renders the request transformer button in the visible card", () => {
+		const html = renderAccount(
+			{ ...baseAccount, provider: "openai-compatible" },
+			() => {},
 		);
 
-		expect(openAICompatibleHtml).toContain(
-			'aria-label="Configure request transformer"',
+		expect(html).not.toContain('aria-label="Configure request transformer"');
+		expect(html).not.toContain("lucide-replace");
+	});
+
+	it("puts the request transformer in the menu only for openai-compatible accounts", () => {
+		const openAICompatible = accountMenuActions(
+			{ ...baseAccount, provider: "openai-compatible" },
+			allHandlers,
 		);
-		expect(anthropicCompatibleHtml).not.toContain(
-			'aria-label="Configure request transformer"',
+		const anthropicCompatible = accountMenuActions(
+			{ ...baseAccount, provider: "anthropic-compatible" },
+			allHandlers,
+		);
+
+		expect(openAICompatible.map((action) => action.id)).toContain(
+			"request-transformer",
+		);
+		expect(anthropicCompatible.map((action) => action.id)).not.toContain(
+			"request-transformer",
 		);
 	});
 
-	it("highlights the request transformer action when a transformer is enabled", () => {
-		const disabledHtml = renderAccount(
-			{
-				...baseAccount,
-				provider: "openai-compatible",
-			},
-			() => {},
+	it("omits the request transformer when the parent supplied no handler", () => {
+		const actions = accountMenuActions(
+			{ ...baseAccount, provider: "openai-compatible" },
+			{ ...allHandlers, requestTransformer: false },
 		);
-		const enabledHtml = renderAccount(
+
+		expect(actions.map((action) => action.id)).not.toContain(
+			"request-transformer",
+		);
+	});
+
+	it("marks the request transformer configured only when one is set", () => {
+		const disabled = accountMenuActions(
+			{ ...baseAccount, provider: "openai-compatible" },
+			allHandlers,
+		);
+		const enabled = accountMenuActions(
 			{
 				...baseAccount,
 				provider: "openai-compatible",
 				requestTransformer: "max-tokens-to-max-completion-tokens",
 			},
-			() => {},
+			allHandlers,
 		);
 
-		expect(disabledHtml).toContain('aria-pressed="false"');
-		expect(disabledHtml).not.toContain(
-			"lucide lucide-replace h-4 w-4 text-primary",
+		expect(
+			disabled.find((action) => action.id === "request-transformer")
+				?.configured,
+		).toBe(false);
+		expect(
+			enabled.find((action) => action.id === "request-transformer")?.configured,
+		).toBe(true);
+	});
+
+	it("renders an overflow menu trigger with an accessible name", () => {
+		const html = renderAccount(baseAccount);
+
+		// aria-haspopup proves Radix mounted the trigger rather than a bare button.
+		expect(html).toContain('aria-haspopup="menu"');
+		expect(html).toContain("More actions for test-account");
+		expect(html).toContain("lucide-ellipsis");
+	});
+
+	it("moves Remove and the setup actions out of the visible card", () => {
+		const html = renderAccount(baseAccount);
+
+		expect(html).not.toContain("lucide-trash2");
+		expect(html).not.toContain("lucide-edit-2");
+		expect(html).not.toContain("lucide-zap");
+	});
+
+	it("keeps Pause and Refresh usage visible with accessible names", () => {
+		const html = renderAccount(baseAccount);
+
+		expect(html).toContain('aria-label="Resume account"');
+		expect(html).toContain('aria-label="Refresh usage data"');
+	});
+
+	it("puts the auto-behaviour switches in the menu with their current state", () => {
+		const toggles = accountMenuToggles(
+			{ ...baseAccount, autoFallbackEnabled: true, autoRefreshEnabled: false },
+			allHandlers,
 		);
-		expect(enabledHtml).toContain('aria-pressed="true"');
-		expect(enabledHtml).toContain("lucide lucide-replace h-4 w-4 text-primary");
+		const byId = new Map(toggles.map((toggle) => [toggle.id, toggle]));
+
+		expect(byId.get("auto-fallback")?.checked).toBe(true);
+		expect(byId.get("auto-refresh")?.checked).toBe(false);
+		// Anthropic gets the overage toggle; zai's peak-hours toggle must not leak.
+		expect(byId.has("auto-pause-on-overage")).toBe(true);
+		expect(byId.has("peak-hours-pause")).toBe(false);
+	});
+
+	it("renders no switch labels in the visible card", () => {
+		const html = renderAccount(baseAccount);
+
+		expect(html).not.toContain("Auto-fallback:");
+		expect(html).not.toContain("Auto-refresh:");
+	});
+
+	it("offers one re-authenticate action per provider, never two", () => {
+		const anthropic = accountMenuActions(baseAccount, allHandlers).filter(
+			(action) => action.id === "reauth",
+		);
+		const codex = accountMenuActions(
+			{ ...baseAccount, provider: "codex" },
+			allHandlers,
+		).filter((action) => action.id === "reauth");
+		const withoutRefreshToken = accountMenuActions(
+			{ ...baseAccount, hasRefreshToken: false },
+			allHandlers,
+		).filter((action) => action.id === "reauth");
+
+		expect(anthropic).toHaveLength(1);
+		expect(anthropic[0]?.title).toContain("Anthropic");
+		expect(codex).toHaveLength(1);
+		expect(codex[0]?.title).toContain("Codex");
+		// An Anthropic account with no refresh token has nothing to re-authenticate.
+		expect(withoutRefreshToken).toHaveLength(0);
 	});
 
 	it("shows no renewal badge when the account has no renewal day", () => {

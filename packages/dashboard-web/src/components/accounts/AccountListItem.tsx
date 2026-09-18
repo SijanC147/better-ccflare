@@ -3,6 +3,7 @@ import {
 	AlertCircle,
 	CalendarClock,
 	Edit2,
+	Ellipsis,
 	Globe,
 	Hash,
 	KeyRound,
@@ -13,13 +14,12 @@ import {
 	Trash2,
 	Zap,
 } from "lucide-react";
+import type { ComponentType } from "react";
 import { useState } from "react";
 import type { Account } from "../../api";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
-	providerSupportsAutoFeatures,
-	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
 import {
 	formatRenewalBadge,
@@ -29,8 +29,35 @@ import {
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Switch } from "../ui/switch";
+import {
+	DropdownMenu,
+	DropdownMenuCheckboxItem,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import {
+	type AccountMenuActionId,
+	type AccountMenuHandlers,
+	type AccountMenuToggleId,
+	accountMenuActions,
+	accountMenuToggles,
+} from "./account-menu-items";
 import { RateLimitProgress } from "./RateLimitProgress";
+
+const ACTION_ICONS: Record<
+	AccountMenuActionId,
+	ComponentType<{ className?: string }>
+> = {
+	rename: Edit2,
+	priority: Zap,
+	"renewal-day": CalendarClock,
+	"custom-endpoint": Globe,
+	"model-mappings": Hash,
+	"request-transformer": Replace,
+	reauth: KeyRound,
+};
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -136,6 +163,40 @@ export function AccountListItem({
 		bedrockCrossRegionMode = account.crossRegionMode || "geographic";
 	}
 
+	const menuHandlers: AccountMenuHandlers = {
+		renewalDay: Boolean(onRenewalDayChange),
+		customEndpoint: Boolean(onCustomEndpointChange),
+		modelMappings: Boolean(onModelMappingsChange),
+		requestTransformer: Boolean(onRequestTransformerChange),
+		autoPauseOnOverage: Boolean(onAutoPauseOnOverageToggle),
+		peakHoursPause: Boolean(onPeakHoursPauseToggle),
+		qwenReauth: Boolean(onReauth),
+		anthropicReauth: Boolean(onAnthropicReauth),
+		codexReauth: Boolean(onCodexReauth),
+	};
+	const menuToggles = accountMenuToggles(account, menuHandlers);
+	const menuActions = accountMenuActions(account, menuHandlers);
+	const toggleHandlers: Record<AccountMenuToggleId, () => void> = {
+		"auto-fallback": () => onAutoFallbackToggle(account),
+		"auto-refresh": () => onAutoRefreshToggle(account),
+		"plan-billing": () => onBillingTypeToggle(account),
+		"auto-pause-on-overage": () => onAutoPauseOnOverageToggle?.(account),
+		"peak-hours-pause": () => onPeakHoursPauseToggle?.(account),
+	};
+	const actionHandlers: Record<AccountMenuActionId, () => void> = {
+		rename: () => onRename(account),
+		priority: () => onPriorityChange(account),
+		"renewal-day": () => onRenewalDayChange?.(account),
+		"custom-endpoint": () => onCustomEndpointChange?.(account),
+		"model-mappings": () => onModelMappingsChange?.(account),
+		"request-transformer": () => onRequestTransformerChange?.(account),
+		reauth: () => {
+			if (account.provider === "qwen") return onReauth?.(account);
+			if (account.provider === "codex") return onCodexReauth?.(account);
+			return onAnthropicReauth?.(account);
+		},
+	};
+
 	return (
 		<div
 			className={`border rounded-lg transition-colors space-y-4 ${compact ? "p-2" : "p-4"} ${
@@ -144,126 +205,66 @@ export function AccountListItem({
 					: "border-border hover:border-muted-foreground/50"
 			}`}
 		>
-			<div className="flex flex-wrap items-center justify-between gap-y-2">
-				<div className="flex min-w-0 flex-wrap items-center gap-4">
-					<div className="min-w-0">
-						<div className="flex flex-wrap items-center gap-2">
-							<p className="font-medium">{account.name}</p>
-							{isPrimary && (
-								<span className="px-2 py-0.5 text-xs font-medium bg-primary text-primary-foreground rounded-full">
-									Primary
-								</span>
-							)}
-							<span className="px-2 py-0.5 text-xs font-medium bg-secondary text-secondary-foreground rounded-full">
-								Priority: {account.priority}
-							</span>
-							<OAuthTokenStatusWithBoundary
-								accountName={account.name}
-								hasRefreshToken={account.hasRefreshToken}
-							/>
-							{providerSupportsAutoFeatures(account.provider) && (
-								<>
-									<div className="flex items-center gap-2">
-										<span className="whitespace-nowrap text-xs text-muted-foreground">
-											Auto-fallback:
-										</span>
-										<Switch
-											checked={account.autoFallbackEnabled}
-											onCheckedChange={() => onAutoFallbackToggle(account)}
-											title="Automatically switch back to this account from lower-priority ones when its rate limit resets. Requires multiple accounts with different priorities."
-										/>
-									</div>
-									<div className="flex items-center gap-2">
-										<span className="whitespace-nowrap text-xs text-muted-foreground">
-											Auto-refresh:
-										</span>
-										<Switch
-											checked={account.autoRefreshEnabled}
-											onCheckedChange={() => onAutoRefreshToggle(account)}
-											title="Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing."
-										/>
-									</div>
-								</>
-							)}
-							{providerSupportsCustomBilling(account.provider) && (
-								<div className="flex items-center gap-2">
-									<span className="whitespace-nowrap text-xs text-muted-foreground">
-										Plan billing:
-									</span>
-									<Switch
-										checked={account.billingType === "plan"}
-										onCheckedChange={() => onBillingTypeToggle(account)}
-										title="Toggle plan billing for this account"
-									/>
-								</div>
-							)}
-							{account.provider === "anthropic" &&
-								onAutoPauseOnOverageToggle && (
-									<div className="flex items-center gap-2">
-										<span className="whitespace-nowrap text-xs text-muted-foreground">
-											Auto-pause on overage:
-										</span>
-										<Switch
-											checked={account.autoPauseOnOverageEnabled ?? false}
-											onCheckedChange={() =>
-												onAutoPauseOnOverageToggle(account)
-											}
-											title="Automatically pause account when overage usage is detected. Note: detection only happens when Anthropic API reports overage, so some overage usage may occur before pausing. Account resumes when usage window resets."
-										/>
-									</div>
-								)}
-							{account.provider === "zai" && onPeakHoursPauseToggle && (
-								<div className="flex items-center gap-2">
-									<span className="whitespace-nowrap text-xs text-muted-foreground">
-										Peak hours pause:
-									</span>
-									<Switch
-										checked={account.peakHoursPauseEnabled ?? false}
-										onCheckedChange={() => onPeakHoursPauseToggle(account)}
-										title="Automatically pause this account during Zai peak hours (14:00–18:00 SGT)"
-									/>
-								</div>
-							)}
-						</div>
-						<div className="flex flex-wrap items-center gap-2">
+			<div className="space-y-2">
+				{/* Identity row: name, Primary, Priority, token status. Kept to four
+				    items so it cannot wrap; the switches that used to wrap it now
+				    live in the overflow menu. */}
+				<div className="flex min-w-0 flex-wrap items-center gap-2">
+					<p className="font-medium">{account.name}</p>
+					{isPrimary && (
+						<span className="px-2 py-0.5 text-xs font-medium bg-primary text-primary-foreground rounded-full">
+							Primary
+						</span>
+					)}
+					<span className="px-2 py-0.5 text-xs font-medium bg-secondary text-secondary-foreground rounded-full">
+						Priority: {account.priority}
+					</span>
+					<OAuthTokenStatusWithBoundary
+						accountName={account.name}
+						hasRefreshToken={account.hasRefreshToken}
+					/>
+				</div>
+				{/* Provider row */}
+				<div className="flex flex-wrap items-center gap-2">
+					<p className="text-sm text-muted-foreground">{account.provider}</p>
+					{account.provider === "bedrock" && bedrockProfile && (
+						<>
+							<span className="text-sm text-muted-foreground">•</span>
 							<p className="text-sm text-muted-foreground">
-								{account.provider}
+								Profile: {bedrockProfile}
 							</p>
-							{account.provider === "bedrock" && bedrockProfile && (
+							{bedrockRegion && (
 								<>
 									<span className="text-sm text-muted-foreground">•</span>
-									<p className="text-sm text-muted-foreground">
-										Profile: {bedrockProfile}
-									</p>
-									{bedrockRegion && (
-										<>
-											<span className="text-sm text-muted-foreground">•</span>
-											<div
-												className="flex items-center gap-1"
-												title={`Region: ${bedrockRegion}`}
-											>
-												<Globe className="h-3 w-3 text-muted-foreground" />
-												<p className="text-sm text-muted-foreground">
-													{bedrockRegion}
-												</p>
-											</div>
-										</>
-									)}
-									{bedrockCrossRegionMode && (
-										<>
-											<span className="text-sm text-muted-foreground">•</span>
-											<p
-												className="text-sm text-muted-foreground"
-												title="Cross-region inference mode"
-											>
-												{bedrockCrossRegionMode}
-											</p>
-										</>
-									)}
+									<div
+										className="flex items-center gap-1"
+										title={`Region: ${bedrockRegion}`}
+									>
+										<Globe className="h-3 w-3 text-muted-foreground" />
+										<p className="text-sm text-muted-foreground">
+											{bedrockRegion}
+										</p>
+									</div>
 								</>
 							)}
-						</div>
-					</div>
+							{bedrockCrossRegionMode && (
+								<>
+									<span className="text-sm text-muted-foreground">•</span>
+									<p
+										className="text-sm text-muted-foreground"
+										title="Cross-region inference mode"
+									>
+										{bedrockCrossRegionMode}
+									</p>
+								</>
+							)}
+						</>
+					)}
+				</div>
+				{/* Status row, with the actions pushed flush right by ml-auto so a
+				    wrapped actions line lands at the right edge rather than the left,
+				    which is what justify-between did before. */}
+				<div className="flex flex-wrap items-center gap-2">
 					<div className="flex flex-wrap items-center gap-2">
 						{presenter.isRateLimited && (
 							<span title="Account is rate-limited - requests will be rejected until the limit resets">
@@ -356,186 +357,122 @@ export function AccountListItem({
 							</span>
 						)}
 					</div>
-				</div>
-				<div className="flex flex-wrap items-center gap-2">
-					<Button
-						variant="ghost"
-						size="sm"
-						onClick={() => onRename(account)}
-						title="Rename account"
-					>
-						<Edit2 className="h-4 w-4" />
-					</Button>
-					<Button
-						variant="ghost"
-						size="sm"
-						onClick={() => onPriorityChange(account)}
-						title="Change account priority"
-					>
-						<Zap className="h-4 w-4" />
-					</Button>
-					{onRenewalDayChange && (
-						<Button
-							variant="ghost"
-							size="sm"
-							onClick={() => onRenewalDayChange(account)}
-							title={
-								account.renewalDay
-									? `Subscription renews on day ${account.renewalDay} of the month`
-									: "Set the subscription renewal day"
-							}
-						>
-							<CalendarClock
-								className={`h-4 w-4 ${account.renewalDay ? "text-primary" : ""}`}
-							/>
-						</Button>
-					)}
-					{onCustomEndpointChange && (
-						<Button
-							variant="ghost"
-							size="sm"
-							onClick={() => onCustomEndpointChange(account)}
-							title={
-								account.customEndpoint
-									? `Custom endpoint: ${account.customEndpoint}`
-									: "Set custom endpoint"
-							}
-						>
-							<Globe
-								className={`h-4 w-4 ${
-									account.customEndpoint ? "text-primary" : ""
-								}`}
-							/>
-						</Button>
-					)}
-					{onModelMappingsChange && (
-						<Button
-							variant="ghost"
-							size="sm"
-							onClick={() => onModelMappingsChange(account)}
-							title={
-								account.modelMappings
-									? `Model mappings configured (${Object.keys(account.modelMappings).length} mappings)`
-									: "Configure model mappings"
-							}
-						>
-							<Hash
-								className={`h-4 w-4 ${
-									account.modelMappings ? "text-primary" : ""
-								}`}
-							/>
-						</Button>
-					)}
-					{account.provider === "openai-compatible" &&
-						onRequestTransformerChange && (
+					{/* Actions. Only controls an operator reaches for while watching a
+					    card stay visible; configuration and the destructive Remove are
+					    in the overflow menu. */}
+					<div className="ml-auto flex flex-wrap items-center gap-2">
+						{(account.provider === "anthropic" ||
+							account.provider === "codex") && (
 							<Button
 								variant="ghost"
 								size="sm"
-								onClick={() => onRequestTransformerChange(account)}
-								aria-label="Configure request transformer"
-								aria-pressed={account.requestTransformer !== null}
+								className="h-8 gap-1 text-xs"
+								disabled={isRefreshingUsage}
+								onClick={async () => {
+									setIsRefreshingUsage(true);
+									try {
+										await onRefreshUsage(account);
+									} finally {
+										setIsRefreshingUsage(false);
+									}
+								}}
+								aria-label="Refresh usage data"
 								title={
-									account.requestTransformer
-										? "Request transformer: Max Tokens → Max Completion Tokens"
-										: "Configure request transformer"
+									account.provider === "codex"
+										? "Refresh usage data (sends one minimal Codex request — consumes a small slice of quota)"
+										: "Refresh usage data (restarts usage polling and refreshes token if expired)"
 								}
 							>
-								<Replace
-									className={`h-4 w-4 ${
-										account.requestTransformer ? "text-primary" : ""
-									}`}
+								<RefreshCw
+									className={`h-3.5 w-3.5 ${isRefreshingUsage ? "animate-spin" : ""}`}
 								/>
 							</Button>
 						)}
-					{account.provider === "qwen" && onReauth && (
-						<Button
-							variant="ghost"
-							size="sm"
-							onClick={() => onReauth(account)}
-							title="Re-authenticate this Qwen account (preserves all metadata)"
-						>
-							<KeyRound className="h-4 w-4" />
-						</Button>
-					)}
-					{account.provider === "anthropic" &&
-						account.hasRefreshToken &&
-						onAnthropicReauth && (
+						{showForceReset && (
 							<Button
-								variant="ghost"
+								variant="outline"
 								size="sm"
-								onClick={() => onAnthropicReauth(account)}
-								title="Re-authenticate this Anthropic account (preserves all metadata)"
+								className="h-8 gap-1 text-xs"
+								onClick={() => onForceResetRateLimit(account)}
+								title={
+									staleLockDetected
+										? "Reset stale rate limit lock (usage shows capacity available)"
+										: "Force clear rate limit state from database"
+								}
 							>
-								<KeyRound className="h-4 w-4" />
+								<RefreshCw className="h-3.5 w-3.5" />
+								Force Reset
 							</Button>
 						)}
-					{account.provider === "codex" && onCodexReauth && (
 						<Button
 							variant="ghost"
 							size="sm"
-							onClick={() => onCodexReauth(account)}
-							title="Re-authenticate this Codex account (preserves all metadata)"
+							onClick={() => onPauseToggle(account)}
+							aria-label={account.paused ? "Resume account" : "Pause account"}
+							title={account.paused ? "Resume account" : "Pause account"}
 						>
-							<KeyRound className="h-4 w-4" />
+							{account.paused ? (
+								<Play className="h-4 w-4" />
+							) : (
+								<Pause className="h-4 w-4" />
+							)}
 						</Button>
-					)}
-					{(account.provider === "anthropic" ||
-						account.provider === "codex") && (
-						<Button
-							variant="ghost"
-							size="sm"
-							className="h-8 gap-1 text-xs"
-							disabled={isRefreshingUsage}
-							onClick={async () => {
-								setIsRefreshingUsage(true);
-								try {
-									await onRefreshUsage(account);
-								} finally {
-									setIsRefreshingUsage(false);
-								}
-							}}
-							title={
-								account.provider === "codex"
-									? "Refresh usage data (sends one minimal Codex request — consumes a small slice of quota)"
-									: "Refresh usage data (restarts usage polling and refreshes token if expired)"
-							}
-						>
-							<RefreshCw
-								className={`h-3.5 w-3.5 ${isRefreshingUsage ? "animate-spin" : ""}`}
-							/>
-						</Button>
-					)}
-					{showForceReset && (
-						<Button
-							variant="outline"
-							size="sm"
-							className="h-8 gap-1 text-xs"
-							onClick={() => onForceResetRateLimit(account)}
-							title={
-								staleLockDetected
-									? "Reset stale rate limit lock (usage shows capacity available)"
-									: "Force clear rate limit state from database"
-							}
-						>
-							<RefreshCw className="h-3.5 w-3.5" />
-							Force Reset
-						</Button>
-					)}
-					<Button
-						variant="ghost"
-						size="sm"
-						onClick={() => onPauseToggle(account)}
-						title={account.paused ? "Resume account" : "Pause account"}
-					>
-						{account.paused ? (
-							<Play className="h-4 w-4" />
-						) : (
-							<Pause className="h-4 w-4" />
-						)}
-					</Button>
-					<Button variant="ghost" size="sm" onClick={() => onRemove(account)}>
-						<Trash2 className="h-4 w-4" />
-					</Button>
+						<DropdownMenu>
+							<DropdownMenuTrigger asChild>
+								<Button variant="ghost" size="sm" title="More">
+									<Ellipsis className="h-4 w-4" />
+									<span className="sr-only">
+										More actions for {account.name}
+									</span>
+								</Button>
+							</DropdownMenuTrigger>
+							<DropdownMenuContent align="end" className="w-64">
+								{menuToggles.map((toggle) => (
+									<DropdownMenuCheckboxItem
+										key={toggle.id}
+										checked={toggle.checked}
+										title={toggle.title}
+										// Keep the menu open so several toggles can be set in one
+										// visit; without this Radix closes on every select.
+										onSelect={(event) => event.preventDefault()}
+										onCheckedChange={toggleHandlers[toggle.id]}
+									>
+										{toggle.label}
+									</DropdownMenuCheckboxItem>
+								))}
+								{menuToggles.length > 0 && <DropdownMenuSeparator />}
+								{menuActions.map((action) => {
+									const Icon = ACTION_ICONS[action.id];
+									return (
+										<DropdownMenuItem
+											key={action.id}
+											title={action.title}
+											onClick={actionHandlers[action.id]}
+										>
+											<Icon
+												className={`mr-2 h-4 w-4 ${action.configured ? "text-primary" : ""}`}
+											/>
+											<span>{action.label}</span>
+											{action.configured && (
+												<span className="ml-auto pl-2 text-xs text-primary">
+													Configured
+												</span>
+											)}
+										</DropdownMenuItem>
+									);
+								})}
+								<DropdownMenuSeparator />
+								<DropdownMenuItem
+									className="text-destructive focus:text-destructive"
+									onClick={() => onRemove(account)}
+									title="Remove account"
+								>
+									<Trash2 className="mr-2 h-4 w-4" />
+									<span>Remove</span>
+								</DropdownMenuItem>
+							</DropdownMenuContent>
+						</DropdownMenu>
+					</div>
 				</div>
 			</div>
 			{account.sessionStats && (
