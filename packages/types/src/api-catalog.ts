@@ -27,6 +27,19 @@
  * router.ts and fails if a static route exists there but not here, so this
  * list cannot quietly fall behind the router. The dynamic half is guarded
  * more weakly; see that file.
+ *
+ * **Nothing guards the `query` arrays.** That test compares paths and methods
+ * only, so a query name here can be wrong, missing, or name a parameter no
+ * handler reads, and every suite still passes. When editing a handler's
+ * parameters, edit its entry by hand.
+ *
+ * A handler's parameters are not all in the handler. Every endpoint that
+ * calls `buildRequestFilters` (`packages/http-api/src/utils/query-filters.ts`)
+ * also reads `accounts`, `models`, `apiKeys`, `status` and `projects` through
+ * it, and those belong in the entry too: a caller building a request from
+ * `GET /api/meta/routes` cannot see the helper. Conversely `bucket` is
+ * derived from `range` inside `getRangeConfig` and is read from no query
+ * string, so it belongs in no entry.
  */
 
 export type ApiCategory =
@@ -185,14 +198,25 @@ export const API_ROUTES: ApiRoute[] = [
 		path: "/api/analytics",
 		category: "Stats",
 		summary: "Time-bucketed analytics series.",
-		query: ["range", "bucket", "model", "accountId", "projectId"],
+		query: [
+			"range",
+			"mode",
+			"modelBreakdown",
+			"accounts",
+			"models",
+			"apiKeys",
+			"status",
+			"projects",
+		],
 	},
 	{
 		method: "GET",
 		path: "/api/usage-history",
 		category: "Stats",
 		summary: "Token and cost usage over time.",
-		query: ["range", "accountId"],
+		// `account` is required: the handler returns 400 without it
+		// (`packages/http-api/src/handlers/usage-history.ts:22-26`).
+		query: ["range", "account", "window"],
 	},
 	{
 		method: "GET",
@@ -806,21 +830,55 @@ export const API_ROUTES: ApiRoute[] = [
 		path: "/api/insights/cache",
 		category: "Insights",
 		summary: "Prompt cache hit rates and savings.",
-		query: ["range"],
+		query: [
+			"range",
+			"threshold",
+			"accounts",
+			"models",
+			"apiKeys",
+			"status",
+			"projects",
+		],
 	},
 	{
 		method: "GET",
 		path: "/api/insights/anomalies",
 		category: "Insights",
 		summary: "Detected anomalies in traffic or cost.",
-		query: ["range"],
+		query: [
+			"range",
+			"zScoreThreshold",
+			"minBaselineRequests",
+			"loopWindowMinutes",
+			"loopMinRequests",
+			"loopSimilarityTolerance",
+			"misroutingMaxTotalTokens",
+			"misroutingMinOutputRateUsd",
+			"misroutingMinRequests",
+			"maxEventsPerDetector",
+			"accounts",
+			"models",
+			"apiKeys",
+			"status",
+			"projects",
+		],
 	},
 	{
 		method: "GET",
 		path: "/api/insights/context",
 		category: "Insights",
 		summary: "Context-window pressure across requests.",
-		query: ["range"],
+		query: [
+			"range",
+			"limit",
+			"topContributors",
+			"sessionGapMinutes",
+			"accounts",
+			"models",
+			"apiKeys",
+			"status",
+			"projects",
+		],
 	},
 	{
 		method: "GET",

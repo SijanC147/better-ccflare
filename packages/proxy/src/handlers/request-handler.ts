@@ -41,7 +41,22 @@ export function createRequestMetadata(req: Request, url: URL): RequestMeta {
 
 	// Optional explicit working-directory hint from the client (Path B attribution).
 	// When present the resolver uses this directly instead of the heuristic project string.
-	const cwdHint = req.headers.get("X-CCFlare-CWD") || null;
+	//
+	// `X-CCFlare-Path` is an accepted alias carrying the same absolute path
+	// (SB23-2268). Counted on the maintainer's host 2026-09-18: of the 21 files
+	// under ~/Code that set ANTHROPIC_CUSTOM_HEADERS, one named X-CCFlare-CWD and
+	// twenty named X-CCFlare-Path, so twenty projects were sending a header no
+	// code read. The alias fixes all twenty without editing files this repo does
+	// not own. It is a contract with configuration this tree cannot see: accept
+	// it, never rename onto it, never withdraw it.
+	//
+	// The value is a filesystem PATH fed to the resolver, which is why it belongs
+	// here and NOT in the project-NAME alias list at usage-collector.ts:135-153.
+	// X-CCFlare-CWD wins when both are present.
+	const cwdHint =
+		req.headers.get("X-CCFlare-CWD") ||
+		req.headers.get("X-CCFlare-Path") ||
+		null;
 
 	return {
 		id: crypto.randomUUID(),
