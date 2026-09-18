@@ -773,6 +773,18 @@ export class AnthropicProvider extends BaseProvider {
 		// starts with `/v1/models/` is a single-model lookup. Anthropic serves
 		// the same endpoint, so this is a passthrough plus the same per-entry
 		// translation the listing uses.
+		//
+		// This is a prefix test, not a shape test, so a deeper path such as
+		// `/v1/models/x/y` also lands here. That is harmless: the body is
+		// whatever the upstream returned for that path, and a non-model body
+		// falls out of `transformSingleModelResponse` untranslated. Tighten
+		// this to a single trailing segment only if Anthropic ever serves
+		// something else below `/v1/models/`.
+		//
+		// `requestMeta.path` is `url.pathname`
+		// (`packages/proxy/src/handlers/request-handler.ts`), so it carries no
+		// query string and a URL-encoded id stays encoded, which still matches
+		// this prefix.
 		if (
 			requestPath?.startsWith("/v1/models/") &&
 			requestPath.length > "/v1/models/".length &&
