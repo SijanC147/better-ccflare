@@ -827,10 +827,10 @@ export class Config extends EventEmitter {
 		const content = JSON.stringify(this.data, null, 2);
 		const target = this.writeTarget();
 		if (target === null) {
-			// An untrusted symlink. Writing through it hands the secrets to whoever
-			// planted it, and renaming over it destroys a link that may be the
-			// user's own. Neither is better than not persisting, and writeTarget()
-			// has already said why at error level.
+			// An untrusted link at the configured path is replaced rather than
+			// followed, so settings keep persisting. Every other refusal still
+			// refuses; writeTarget() has already said why at error level.
+			if (this.replaceUntrustedLink(content)) return;
 			log.error("Config not saved: the configured path cannot be trusted");
 			return;
 		}
@@ -923,7 +923,65 @@ export class Config extends EventEmitter {
 		}
 	}
 
-	private saveByRename(target: string, content: string): boolean {
+	/**
+	 * Replace an untrusted link at the configured path instead of following it,
+	 * so settings still persist.
+	 *
+	 * Before this, an untrusted link meant nothing was ever saved again. Writing
+	 * a fresh 0600 temp file and renaming it over the link path is no less safe
+	 * than refusing, because nothing is written through the link either way, and
+	 * it is strictly more useful: the planted link is destroyed rather than
+	 * followed and no unrelated file is touched. The cost is that a link an
+	 * operator placed deliberately in a shared-writable directory becomes a
+	 * regular file, which is the right outcome when the directory cannot be
+	 * trusted (SB23-1696).
+	 *
+	 * Only when the CONFIGURED path is itself a link whose own directory is
+	 * untrusted. A refusal from deeper in the chain leaves the configured link in
+	 * a directory only we can write, which makes it the operator's own link, and
+	 * renaming over it is exactly the destructive behaviour resolveLinkChain()
+	 * refuses in the cycle case. The same goes for a readlink failure and a
+	 * cycle: both keep refusing.
+	 *
+	 * The read stays refused whatever this does. A config another local user
+	 * controls is an authentication bypass through local_control_secret, not a
+	 * disclosure, so this.data is already empty by the time a save runs and what
+	 * lands on disk is ours.
+	 *
+	 * No in-place fallback, deliberately. saveByRename() opens with O_EXCL under
+	 * a random name, which cannot follow a planted link; writeFileSync() on the
+	 * configured path would follow one, and this branch runs precisely when
+	 * another local user can plant it.
+	 *
+	 * Returns false when this is not that case, so the caller refuses as before.
+	 */
+	private replaceUntrustedLink(content: string): boolean {
+		if (process.platform === "win32") return false;
+		let link: ReturnType<typeof lstatSync>;
+		try {
+			link = lstatSync(this.configPath);
+		} catch {
+			return false;
+		}
+		if (!link.isSymbolicLink()) return false;
+		if (this.directoryIsTrusted(dirname(this.configPath))) return false;
+		if (!this.saveByRename(this.configPath, content, false)) {
+			log.error(
+				`Config not saved: ${this.configPath} is an untrusted symlink and it could not be replaced`,
+			);
+			return true;
+		}
+		log.warn(
+			`Replaced the untrusted symlink at ${this.configPath} with a regular config file rather than writing through it. Its directory is writable by other local users, so anyone could have planted that link; move the config somewhere only you can write.`,
+		);
+		return true;
+	}
+
+	private saveByRename(
+		target: string,
+		content: string,
+		keepExistingOwner = true,
+	): boolean {
 		const tmpPath = `${target}.tmp-${randomUUID()}`;
 		try {
 			// "wx" is O_WRONLY|O_CREAT|O_EXCL: fails if the path exists at all,
@@ -947,7 +1005,13 @@ export class Config extends EventEmitter {
 				// has to as well: copy the existing owner onto the descriptor, and if
 				// that is not permitted, refuse the rename so the caller writes in
 				// place rather than changing who owns the config.
-				this.preserveOwnership(fd, target);
+				//
+				// Skipped when the target is an untrusted link being replaced.
+				// preserveOwnership() stats the target, which follows the link, so it
+				// would read the uid of whatever the planter pointed at and fchown our
+				// new config to them. That would hand over the file this branch exists
+				// to keep out of their hands.
+				if (keepExistingOwner) this.preserveOwnership(fd, target);
 				fsyncSync(fd);
 			} finally {
 				closeSync(fd);

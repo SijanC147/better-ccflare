@@ -282,12 +282,17 @@ describe("config file permissions", () => {
 		}
 	});
 
-	it("refuses to follow a config symlink in a directory others can write", () => {
+	it("replaces an untrusted config symlink rather than following it", () => {
 		// os.tmpdir() is one of the validator's allowed base directories, and on
 		// Linux that is /tmp at mode 1777, so another local user can plant a link
 		// there. Following it would write the secrets into a file they chose, and
 		// chmod follows links too: measured before the guard, an unrelated 0755
 		// file became 0600 simply because the link pointed at it.
+		//
+		// The link is destroyed rather than followed, and settings keep
+		// persisting (SB23-1696). Refusing to save was no safer, since nothing is
+		// written through the link either way, and it stopped the process
+		// persisting anything at all.
 		const shared = join(tmpdir(), `better-ccflare-shared-${process.pid}`);
 		const victim = mkdtempSync(join(tmpdir(), "better-ccflare-victim-"));
 		try {
@@ -303,9 +308,16 @@ describe("config file permissions", () => {
 			const config = new Config(link);
 			config.set("pg_password", "hunter2");
 
+			// The victim is untouched: not written through, and not chmodded.
 			expect(mode(unrelated)).toBe(0o755);
 			expect(readFileSync(unrelated, "utf8")).toBe("#!/bin/sh\n");
-			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+
+			// The link is gone, replaced by a regular 0600 file holding the secret.
+			expect(lstatSync(link).isSymbolicLink()).toBe(false);
+			expect(lstatSync(link).isFile()).toBe(true);
+			expect(mode(link)).toBe(0o600);
+			expect(readFileSync(link, "utf8")).toContain("hunter2");
+			expect(lstatSync(link).ino).not.toBe(lstatSync(unrelated).ino);
 		} finally {
 			rmSync(shared, { recursive: true, force: true });
 			rmSync(victim, { recursive: true, force: true });
@@ -372,7 +384,7 @@ describe("config file permissions", () => {
 		}
 	});
 
-	it("refuses a config symlink in a directory owned by another user", () => {
+	it("does not follow a config symlink in a directory owned by another user", () => {
 		// Two things this does and does not do, easy to conflate. It observes
 		// behaviour rather than asserting a call, which is what makes it real, but
 		// it reaches into process to get there. And it exercises the comparison,
@@ -380,6 +392,7 @@ describe("config file permissions", () => {
 		// POSIX's own ownership guarantee stays an argument rather than a
 		// measurement, because that would need a second user account.
 		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-mode-"));
+		const control = mkdtempSync(join(tmpdir(), "better-ccflare-ctl-"));
 		const realGetuid = process.getuid;
 		try {
 			const target = join(dir, "real.json");
@@ -393,17 +406,28 @@ describe("config file permissions", () => {
 			const config = new Config(link);
 			config.set("pg_password", "hunter2");
 
+			// The link's target never sees the secret, which is the property. The
+			// link itself is replaced rather than followed (SB23-1696), so what is
+			// left at the config path is a regular file of ours.
 			expect(readFileSync(target, "utf8")).not.toContain("hunter2");
-			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+			expect(lstatSync(link).isSymbolicLink()).toBe(false);
+			expect(mode(link)).toBe(0o600);
 
-			// Control: with the real uid the same layout works.
+			// Control, in its own directory because the link above is gone: with the
+			// real uid the same layout is followed and the target does see the write.
 			process.getuid = realGetuid;
-			const allowed = new Config(link);
+			const allowedTarget = join(control, "real.json");
+			const allowedLink = join(control, "config.json");
+			writeFileSync(allowedTarget, JSON.stringify({ lb_strategy: "session" }));
+			symlinkSync(allowedTarget, allowedLink);
+			const allowed = new Config(allowedLink);
 			allowed.set("pg_password", "hunter2");
-			expect(readFileSync(target, "utf8")).toContain("hunter2");
+			expect(readFileSync(allowedTarget, "utf8")).toContain("hunter2");
+			expect(lstatSync(allowedLink).isSymbolicLink()).toBe(true);
 		} finally {
 			process.getuid = realGetuid;
 			rmSync(dir, { recursive: true, force: true });
+			rmSync(control, { recursive: true, force: true });
 		}
 	});
 
