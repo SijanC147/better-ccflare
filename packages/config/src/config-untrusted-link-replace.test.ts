@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	chmodSync,
+	chownSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
@@ -12,6 +13,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { logBus } from "@better-ccflare/logger";
+import type { LogEvent } from "@better-ccflare/types";
 import { Config } from "./index";
 
 /**
@@ -31,6 +34,18 @@ import { Config } from "./index";
  * the link. That needs a second account, which this machine does not have, so
  * the ownership half stays an argument. Disclosed rather than counted.
  */
+
+function captureLogs(fn: () => void): LogEvent[] {
+	const captured: LogEvent[] = [];
+	const handler = (event: LogEvent) => captured.push(event);
+	logBus.on("log", handler);
+	try {
+		fn();
+	} finally {
+		logBus.off("log", handler);
+	}
+	return captured;
+}
 
 /** A directory another local user can write, which is what makes a link untrusted. */
 function sharedDir(label: string): string {
@@ -56,8 +71,29 @@ describe("an untrusted config symlink", () => {
 			const link = join(shared, "config.json");
 			symlinkSync(victim, link);
 
-			const config = new Config(link);
-			config.set("pg_password", "hunter2");
+			const logs = captureLogs(() => {
+				const config = new Config(link);
+				config.set("pg_password", "hunter2");
+			});
+
+			// The operator is told, at WARN, and told where. A replacement that
+			// happens silently leaves them believing their link is still in place,
+			// and the two outcomes of this branch are otherwise indistinguishable
+			// from outside: both return, and neither throws.
+			const replaced = logs.filter(
+				(event) =>
+					event.level === "WARN" &&
+					event.msg.includes("Replaced the untrusted symlink"),
+			);
+			expect(replaced).toHaveLength(1);
+			expect(replaced[0].msg).toContain(link);
+			expect(
+				logs.filter(
+					(event) =>
+						event.level === "ERROR" &&
+						event.msg.includes("could not be replaced"),
+				),
+			).toHaveLength(0);
 
 			// Nothing went through the link.
 			expect(readFileSync(victim, "utf8")).toBe("ssh-ed25519 AAAA\n");
@@ -73,27 +109,52 @@ describe("an untrusted config symlink", () => {
 		}
 	});
 
-	it("keeps the replacement ours, not the planter's", () => {
+	it("does not copy the link target's ownership onto the replacement", () => {
 		// preserveOwnership() stats the target to keep the previous owner across
-		// the rename, and statSync follows a link. Left on, it would read the uid
-		// of whatever the planter pointed at and fchown the new config to them,
-		// handing over the file this branch exists to keep out of their hands.
-		// A second account would test this directly; without one, asserting the
-		// replacement is still ours is what the machine can measure.
+		// the rename, and statSync follows a link. Left on, it would read the
+		// ownership of whatever the planter pointed at and fchown the new config to
+		// them, handing over the file this branch exists to keep out of their
+		// hands.
+		//
+		// A second account would exercise the uid half directly. This machine has
+		// none, so the group is the lever: a process may chown a file to any group
+		// it belongs to without root, so the victim gets a supplementary group and
+		// the replacement must not end up carrying it. That is the same attribute,
+		// read through the same followed link, by the same call.
+		const groups = process.getgroups?.() ?? [];
+		const primary = process.getgid?.();
+		const other = groups.find((g) => g !== primary);
 		const shared = sharedDir("owner");
 		const victimDir = mkdtempSync(join(tmpdir(), "better-ccflare-owner-"));
 		try {
+			if (other === undefined || primary === undefined) {
+				// Disclosed rather than silently passing: with one group there is no
+				// ownership attribute this process may change, so nothing is proved.
+				expect(process.platform).toBe("win32");
+				return;
+			}
 			const victim = join(victimDir, "theirs.json");
 			writeFileSync(victim, "{}\n");
+			chownSync(victim, process.getuid?.() as number, other);
+			expect(statSync(victim).gid).toBe(other);
+
+			// What a file created in this directory gets on its own, so the
+			// assertion below compares against the real inherited value rather than
+			// a guess about BSD group inheritance.
+			const control = join(shared, "control");
+			writeFileSync(control, "");
+			const inherited = statSync(control).gid;
+			expect(inherited).not.toBe(other);
+
 			const link = join(shared, "config.json");
 			symlinkSync(victim, link);
 
 			const config = new Config(link);
 			config.set("pg_password", "hunter2");
 
-			const uid = process.getuid?.();
-			expect(uid).toBeDefined();
-			expect(lstatSync(link).uid).toBe(uid as number);
+			expect(lstatSync(link).uid).toBe(process.getuid?.() as number);
+			expect(lstatSync(link).gid).toBe(inherited);
+			expect(lstatSync(link).gid).not.toBe(other);
 		} finally {
 			rmSync(shared, { recursive: true, force: true });
 			rmSync(victimDir, { recursive: true, force: true });
