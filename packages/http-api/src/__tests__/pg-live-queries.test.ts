@@ -76,6 +76,7 @@ import type {
 } from "@better-ccflare/database";
 import { NO_ACCOUNT_ID } from "@better-ccflare/types";
 import { createAnalyticsHandler } from "../handlers/analytics";
+import { createAnalyticsModelsHandler } from "../handlers/analytics-models";
 import {
 	createCombosListHandler,
 	createFamiliesListHandler,
@@ -887,6 +888,157 @@ describe.skipIf(!livePgAvailable)(
 					).toBeDefined();
 				},
 			);
+		});
+
+		describe("GET /api/analytics/models", () => {
+			// This handler's SQL uses shapes SQLite accepts unconditionally and
+			// PostgreSQL does not: CAST(NULL AS TEXT) in the select list, a
+			// LEFT JOIN whose joined column appears in both SELECT and GROUP BY,
+			// ORDER BY naming an output alias next to a table column, and
+			// integer division promoted with * 1.0. Its own suite is SQLite
+			// only, so without these cases the first PostgreSQL operator to
+			// call the route would be the one who found out.
+			const models = async (qs: string): Promise<Record<string, unknown>> => {
+				const res = await createAnalyticsModelsHandler(context)(
+					new URLSearchParams(qs),
+				);
+				expect(res.status).toBe(200);
+				return (await readJson(res)) as Record<string, unknown>;
+			};
+
+			liveIt("executes ungrouped and sums tokens per model", async () => {
+				await seedBaseline();
+				await seedRequest({
+					id: "pm-1",
+					timestamp: now - HOUR,
+					accountUsed: "acct-1",
+					success: true,
+					model: "claude-opus-4",
+					inputTokens: 100,
+					outputTokens: 50,
+				});
+				// Tokens set explicitly: seedRequest defaults them to 10 and 5
+				// (:472-475), so leaving them out makes the expected sums a
+				// property of the helper rather than of this fixture.
+				await seedRequest({
+					id: "pm-2",
+					timestamp: now - HOUR,
+					accountUsed: "acct-2",
+					success: false,
+					model: "claude-opus-4",
+					inputTokens: 0,
+					outputTokens: 0,
+				});
+
+				const body = await models("range=24h");
+				const rows = body.models as Array<Record<string, unknown>>;
+				const opus = rows.find((r) => r.model === "claude-opus-4");
+
+				expect(opus).toBeDefined();
+				expect(opus?.requests).toBe(2);
+				expect(opus?.successRequests).toBe(1);
+				expect(opus?.errorRequests).toBe(1);
+				expect(opus?.inputTokens).toBe(100);
+				expect(opus?.outputTokens).toBe(50);
+				// bigint sums arrive as strings over the PG wire; a row that
+				// came back as a string here would show up as a type mismatch
+				// rather than a number.
+				expect(typeof opus?.requests).toBe("number");
+			});
+
+			liveIt("executes both groupBy variants, which add the JOIN", async () => {
+				await seedBaseline();
+				await seedRequest({
+					id: "pm-g1",
+					timestamp: now - HOUR,
+					accountUsed: "acct-1",
+					success: true,
+					model: "claude-opus-4",
+					project: "proj-x",
+				});
+
+				const byAccount = await models("range=24h&groupBy=account");
+				const byProject = await models("range=24h&groupBy=project");
+
+				expect(Array.isArray(byAccount.models)).toBe(true);
+				expect(Array.isArray(byProject.models)).toBe(true);
+				expect(
+					(byAccount.models as Array<Record<string, unknown>>).some(
+						(r) => r.account === "primary",
+					),
+				).toBe(true);
+				expect(
+					(byProject.models as Array<Record<string, unknown>>).some(
+						(r) => r.project === "proj-x",
+					),
+				).toBe(true);
+			});
+
+			liveIt("executes with every shared filter and every range", async () => {
+				await seedBaseline();
+				await seedRequest({
+					id: "pm-f1",
+					timestamp: now - HOUR,
+					accountUsed: "acct-1",
+					success: true,
+					model: "claude-opus-4",
+					apiKeyId: "key-9",
+					apiKeyName: "ci",
+					project: "proj-x",
+				});
+
+				for (const range of ["1h", "6h", "24h", "7d", "30d", "bogus"]) {
+					expect((await models(`range=${range}`)).models).toBeDefined();
+				}
+				for (const qs of [
+					"range=24h&models=claude-opus-4",
+					"range=24h&accounts=primary",
+					`range=24h&accounts=${encodeURIComponent(NO_ACCOUNT_ID)}`,
+					"range=24h&apiKeys=ci",
+					"range=24h&status=success",
+					"range=24h&status=error",
+					"range=24h&projects=proj-x",
+					"range=24h&groupBy=account&models=claude-opus-4&status=success",
+				]) {
+					expect((await models(qs)).models).toBeDefined();
+				}
+			});
+
+			liveIt("computes the average over successful rows only", async () => {
+				await seedAccount({ id: "acct-avg", name: "avg-acct" });
+				await seedRequest({
+					id: "pm-a1",
+					timestamp: now - HOUR,
+					accountUsed: "acct-avg",
+					success: true,
+					model: "avg-model",
+					inputTokens: 1000,
+				});
+				await seedRequest({
+					id: "pm-a2",
+					timestamp: now - HOUR,
+					accountUsed: "acct-avg",
+					success: false,
+					model: "avg-model",
+				});
+
+				const rows = (await models("range=24h&models=avg-model"))
+					.models as Array<Record<string, unknown>>;
+
+				expect(rows).toHaveLength(1);
+				// total_tokens is seeded 0 by the helper, so the value itself is
+				// 0; what this pins is that the numeric division executes on PG
+				// and yields a number rather than erroring or returning a string.
+				expect(typeof rows[0].avgTotalTokensPerSuccess).toBe("number");
+			});
+
+			liveIt("rejects an unknown groupBy with 400", async () => {
+				await seedBaseline();
+				const res = await createAnalyticsModelsHandler(context)(
+					new URLSearchParams("range=24h&groupBy=apiKey"),
+				);
+				expect(res.status).toBe(400);
+			});
 		});
 
 		// -------------------------------------------------------------------

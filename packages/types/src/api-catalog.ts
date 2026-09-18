@@ -211,6 +211,21 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "GET",
+		path: "/api/analytics/models",
+		category: "Stats",
+		summary: "Per-model tokens, cost and counts. Uncapped.",
+		query: [
+			"range",
+			"groupBy",
+			"accounts",
+			"models",
+			"apiKeys",
+			"status",
+			"projects",
+		],
+	},
+	{
+		method: "GET",
 		path: "/api/usage-history",
 		category: "Stats",
 		summary: "Token and cost usage over time.",

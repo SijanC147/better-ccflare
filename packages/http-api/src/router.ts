@@ -60,6 +60,7 @@ import {
 	createAlertsStreamHandler,
 } from "./handlers/alerts";
 import { createAnalyticsHandler } from "./handlers/analytics";
+import { createAnalyticsModelsHandler } from "./handlers/analytics-models";
 import {
 	createApiKeyDeleteHandler,
 	createApiKeyDisableHandler,
@@ -259,6 +260,7 @@ export class APIRouter {
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
+		const analyticsModelsHandler = createAnalyticsModelsHandler(this.context);
 		const usageHistoryHandler = createUsageHistoryHandler(this.context);
 		const cacheInsightsHandler = createCacheInsightsHandler(this.context);
 		const anomalyInsightsHandler = createAnomalyInsightsHandler(this.context);
@@ -599,6 +601,9 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});
+		this.handlers.set("GET:/api/analytics/models", (_req, url) =>
+			analyticsModelsHandler(url.searchParams),
+		);
 		this.handlers.set("GET:/api/usage-history", (_req, url) =>
 			usageHistoryHandler(url.searchParams),
 		);
