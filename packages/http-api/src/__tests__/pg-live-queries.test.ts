@@ -975,6 +975,48 @@ describe.skipIf(!livePgAvailable)(
 			});
 
 			liveIt(
+				"breaks a tie on requests by model, which SQLite cannot check",
+				async () => {
+					// The `r.model ASC` tiebreak has been in the handler since
+					// #153 and, measured 2026-09-18, its removal leaves the
+					// whole SQLite suite green. Not because the SQLite fixture
+					// is weak: the same fixture reversed still passes, because
+					// this query on SQLite reaches the ORDER BY with its groups
+					// already in model order, so a stable sort keeps tied rows
+					// alphabetical with no tiebreak present. That makes the
+					// clause structurally unobservable from that engine and
+					// leaves it to this one, where PostgreSQL aggregates
+					// without any inherent group order and a tie really can
+					// come back either way.
+					//
+					// Two tied models named in reverse of the order asserted,
+					// so agreeing with the insert order is not enough to pass.
+					await seedBaseline();
+					await seedRequest({
+						id: "pm-t1",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "zzz-tie",
+					});
+					await seedRequest({
+						id: "pm-t2",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "aaa-tie",
+					});
+
+					const body = await models("range=24h");
+					const tied = (body.models as Array<Record<string, unknown>>)
+						.filter((r) => String(r.model).endsWith("-tie"))
+						.map((r) => r.model);
+
+					expect(tied).toEqual(["aaa-tie", "zzz-tie"]);
+				},
+			);
+
+			liveIt(
 				"places the null dimension value last, matching SQLite",
 				async () => {
 					// The one assertion in this file that is about agreement
