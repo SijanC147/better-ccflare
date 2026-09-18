@@ -828,28 +828,58 @@ export class AnthropicProvider extends BaseProvider {
 			return response;
 		}
 
+		// `JSON.parse("null")` is a successful parse that yields null, and
+		// optional chaining does not protect the base access: `body.error?.x`
+		// still throws when `body` itself is null. A throw here does not
+		// degrade to an untranslated body, it escapes `processResponse` into
+		// the catch in `packages/proxy/src/handlers/proxy-operations.ts`,
+		// which treats it as "this account failed" and moves to the next one.
+		// One intermediary answering `null` would therefore walk the whole
+		// account pool and report that every account failed.
+		if (body === null || typeof body !== "object") {
+			return response;
+		}
+
 		const headers = new Headers(response.headers);
-		// The re-serialized body has a different length, and was already
-		// decoded — a stale content-length or content-encoding truncates it.
+		// Belt and braces. `sanitizeProxyHeaders` in
+		// `packages/http-common/src/headers.ts` already dropped both of these
+		// before `processResponse` built the response this reads, so neither
+		// delete fires on the live path and a mutation removing either one
+		// survives the suite. They stay because the reason they exist is real:
+		// the body below is re-serialized to a different length after being
+		// decoded, so an inherited content-length or content-encoding would
+		// truncate it if this method were ever reached from a caller that did
+		// not sanitize first.
 		headers.delete("content-length");
 		headers.delete("content-encoding");
 		headers.set("content-type", "application/json");
 
 		if (!response.ok) {
+			// `type` and `code` are derived from ONE condition on purpose.
+			// Keying them separately (status for one, the upstream error type
+			// for the other) let them disagree: a 404 that is not Anthropic's
+			// envelope, such as a CDN page or `{"message": "Not Found"}`,
+			// produced `type: "api_error"` beside `code: "model_not_found"`.
+			// That pair is contradictory to a client, which reads `api_error`
+			// as a server fault worth retrying and `model_not_found` as its
+			// own bad id. OpenAI's real 404 pairs `invalid_request_error`
+			// with `model_not_found`.
+			const notFound =
+				response.status === 404 || body.error?.type === "not_found_error";
 			const translated = {
 				error: {
 					message:
 						body.error?.message ??
 						`Upstream returned HTTP ${response.status} for this model`,
-					// Anthropic's `not_found_error` is OpenAI's
-					// `invalid_request_error` with code `model_not_found`; every
-					// other upstream type is reported as itself so a caller can
-					// still tell a rate limit from a bad request.
-					type:
-						body.error?.type === "not_found_error"
-							? "invalid_request_error"
-							: (body.error?.type ?? "api_error"),
-					code: response.status === 404 ? "model_not_found" : null,
+					// Every upstream type that is not a not-found is reported as
+					// itself, so a caller can still tell a rate limit from a bad
+					// request.
+					type: notFound
+						? "invalid_request_error"
+						: (body.error?.type ?? "api_error"),
+					// Explicitly null rather than omitted: OpenAI emits the key,
+					// and dropping it changes the shape an SDK destructures.
+					code: notFound ? "model_not_found" : null,
 					param: null,
 				},
 			};
@@ -917,6 +947,13 @@ export class AnthropicProvider extends BaseProvider {
 			return response;
 		}
 
+		// Same null-body trap as the single-model path above: `body.data` on a
+		// literal `null` throws rather than returning undefined, and a throw
+		// out of `processResponse` is read as an account failure and fails the
+		// request over to the next account. Pre-existing here; fixed alongside
+		// the new path because one intermediary answering `null` would
+		// otherwise walk the whole pool.
+		if (body === null || typeof body !== "object") return response;
 		if (!Array.isArray(body.data)) return response;
 
 		const models = [...body.data];

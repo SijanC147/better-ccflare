@@ -205,6 +205,80 @@ describe("AnthropicProvider — GET /v1/models/{id} errors", () => {
 		expect(await out.text()).toBe("upstream is down");
 	});
 
+	it("pairs invalid_request_error with model_not_found on a 404 that is not Anthropic's envelope", async () => {
+		const provider = new AnthropicProvider();
+		const out = await provider.processResponse(
+			// A CDN or edge 404, with no Anthropic `error` object at all.
+			singleModelResponse(JSON.stringify({ message: "Not Found" }), {
+				status: 404,
+			}),
+			null,
+			new Headers(),
+		);
+
+		expect(out.status).toBe(404);
+		const body = await out.json();
+		// `type` and `code` must agree. `api_error` beside `model_not_found`
+		// tells a client both "retry, this is our fault" and "your id is
+		// wrong", and OpenAI's real 404 pairs invalid_request_error with
+		// model_not_found. Asserting only one of the two is what let these
+		// drift apart.
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(body.error.code).toBe("model_not_found");
+	});
+
+	it("maps an Anthropic not_found_error carrying a non-404 status to both fields", async () => {
+		const provider = new AnthropicProvider();
+		const out = await provider.processResponse(
+			singleModelResponse(
+				JSON.stringify({
+					type: "error",
+					error: { type: "not_found_error", message: "no such model" },
+				}),
+				{ status: 400 },
+			),
+			null,
+			new Headers(),
+		);
+
+		// The other half of the same pairing: the envelope says not-found
+		// while the status does not, and `code` must follow the envelope
+		// rather than staying null.
+		const body = await out.json();
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(body.error.code).toBe("model_not_found");
+	});
+
+	it("passes a literal null JSON body through instead of throwing", async () => {
+		const provider = new AnthropicProvider();
+
+		// `JSON.parse("null")` succeeds and yields null, so the try/catch
+		// around the parse does not catch this. A throw escaping
+		// processResponse is read by the proxy as an account failure, so one
+		// intermediary answering `null` would fail the request over every
+		// account in the pool and report that all of them failed.
+		for (const status of [200, 502]) {
+			const out = await provider.processResponse(
+				singleModelResponse("null", { status }),
+				null,
+				new Headers(),
+			);
+			expect(out.status).toBe(status);
+			expect(await out.text()).toBe("null");
+		}
+	});
+
+	it("passes a JSON array body through instead of translating it", async () => {
+		const provider = new AnthropicProvider();
+		const out = await provider.processResponse(
+			singleModelResponse("[]"),
+			null,
+			new Headers(),
+		);
+
+		expect(await out.text()).toBe("[]");
+	});
+
 	it("passes a 200 carrying no id through rather than inventing a model", async () => {
 		const provider = new AnthropicProvider();
 		const out = await provider.processResponse(
@@ -274,6 +348,67 @@ describe("AnthropicProvider — the two model routes do not shadow each other", 
 		// the upstream would have rejected.
 		const body = await out.json();
 		expect(body.object).toBeUndefined();
+	});
+
+	it("passes a literal null listing body through instead of throwing", async () => {
+		const provider = new AnthropicProvider();
+		const out = await provider.processResponse(
+			new Response("null", {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"x-better-ccflare-request-path": "/v1/models",
+				},
+			}),
+			null,
+			new Headers(),
+		);
+
+		// Same trap as the single-model path, on the older of the two. Kept
+		// here beside its sibling so the pair cannot be fixed on one side only.
+		expect(await out.text()).toBe("null");
+	});
+
+	it("drops a listing entry with no id rather than emitting an id-less model", async () => {
+		const provider = new AnthropicProvider();
+		const out = await provider.processResponse(
+			new Response(
+				JSON.stringify({
+					data: [
+						{ type: "model", display_name: "no id at all" },
+						{
+							type: "model",
+							id: "claude-real",
+							display_name: "Claude Real",
+							created_at: "2026-01-01T00:00:00Z",
+						},
+					],
+					has_more: false,
+					first_id: null,
+					last_id: "claude-real",
+				}),
+				{
+					status: 200,
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-path": "/v1/models",
+					},
+				},
+			),
+			null,
+			new Headers(),
+		);
+
+		const body = await out.json();
+		// The pre-map filter is the only thing standing between an entry with
+		// no id and `toOpenAIModelEntry`'s `model.id as string` cast, which
+		// would put `{"id": undefined}` in the listing. Nothing pinned that
+		// filter before, so deleting it passed the whole suite.
+		expect(body.data).toHaveLength(1);
+		expect(body.data[0].id).toBe("claude-real");
+		expect(body.data.some((m: { id?: string }) => m.id === undefined)).toBe(
+			false,
+		);
 	});
 
 	it("leaves an unrelated /v1 path alone", async () => {
