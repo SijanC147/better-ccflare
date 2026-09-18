@@ -26,7 +26,7 @@ function makeAlert(
 
 const HOUR = 60 * 60 * 1000;
 
-/** The four hourly ICLD alerts of the screenshot, plus one acknowledged row. */
+/** The four hourly ICLD alerts of the screenshot, plus two acknowledged rows. */
 function screenshotAlerts(): AlertEvent[] {
 	const base = Date.UTC(2026, 8, 17, 5, 21, 4);
 	const icld = [3, 2, 1, 0].map((n) =>
@@ -37,6 +37,10 @@ function screenshotAlerts(): AlertEvent[] {
 	);
 	return [
 		...icld,
+		// Two acknowledged members under ONE key. With a single acknowledged
+		// alert, counting groups and counting rows both give 1, so the count
+		// assertion could not tell them apart and a mutation counting groups
+		// survived. Two under one key makes it falsifying.
 		makeAlert({
 			id: "upstream_error:4:PRTN\u001f4xx:900",
 			type: "upstream_error",
@@ -44,6 +48,15 @@ function screenshotAlerts(): AlertEvent[] {
 			message: "3 client error (4xx) responses for account PRTN",
 			account: "PRTN",
 			timestamp: base - HOUR,
+			acknowledged: true,
+		}),
+		makeAlert({
+			id: "upstream_error:4:PRTN\u001f4xx:899",
+			type: "upstream_error",
+			title: "Upstream client errors",
+			message: "3 client error (4xx) responses for account PRTN",
+			account: "PRTN",
+			timestamp: base - 2 * HOUR,
 			acknowledged: true,
 		}),
 	];
@@ -65,7 +78,7 @@ describe("AlertsList", () => {
 		// count pins.
 		expect(html.match(/Acknowledge group/g)).toBeNull();
 		expect(html.match(/Account authentication failed/g)?.length).toBe(5);
-		expect(html).toContain("4 of the last 5 loaded");
+		expect(html).toContain("4 of the last 6 loaded");
 	});
 
 	test("puts the member count in the summary line, ahead of the fold", () => {
@@ -77,7 +90,7 @@ describe("AlertsList", () => {
 		// without expanding. The count has to be in there: a group row that
 		// hides its count reads as one event.
 		const firstSummary = html.slice(0, html.indexOf("</summary>"));
-		expect(firstSummary).toContain("4 of the last 5 loaded");
+		expect(firstSummary).toContain("4 of the last 6 loaded");
 		expect(firstSummary).toContain("Account authentication failed");
 	});
 
@@ -86,7 +99,7 @@ describe("AlertsList", () => {
 			<AlertsList alerts={screenshotAlerts()} unacknowledgedCount={4} />,
 		);
 
-		expect(html).toContain("Acknowledged (1 of the last 5 loaded)");
+		expect(html).toContain("Acknowledged (2 of the last 6 loaded)");
 		// Collapsed by default is the absence of the open attribute on every
 		// <details>, the group rows included.
 		expect(html).not.toContain("<details open");
@@ -122,9 +135,16 @@ describe("AlertsList", () => {
 	// The click itself is not asserted here. renderToStaticMarkup cannot
 	// dispatch events and this package has no DOM renderer, so a test that
 	// mounted the list and then checked a callback it never triggered would
-	// assert nothing while reading as though it did. The ids the button sends
-	// are group.members mapped to id, which packages/types/src/alerts.test.ts
-	// pins directly.
+	// assert nothing while reading as though it did.
+	//
+	// An earlier version of this comment claimed the ids the button sends were
+	// pinned in packages/types/src/alerts.test.ts. That was false: those tests
+	// pinned what a group CONTAINS, never what the button DOES with it, and a
+	// reviewer's mutation sending only members[0].id survived every test here.
+	// The expression now lives in groupMemberIds, which that file does pin.
+	// What remains genuinely untested is the wiring: that this button calls the
+	// handler at all, that it passes group.key, and the fan-out in
+	// useAcknowledgeAlerts. Closing those needs a DOM renderer.
 
 	test("disables only the pending group's button", () => {
 		const alerts = [

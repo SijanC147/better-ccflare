@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AlertEvent } from "./alerts";
-import { alertGroupKey, groupAlerts } from "./alerts";
+import { alertGroupKey, groupAlerts, groupMemberIds } from "./alerts";
 
 function makeAlert(
 	overrides: Partial<AlertEvent> & { id: string },
@@ -142,6 +142,45 @@ describe("groupAlerts", () => {
 		expect(open[0].key).toBe(acknowledged[0].key);
 		expect(open[0].members.map((m) => m.timestamp)).toEqual([400, 300]);
 		expect(acknowledged[0].members.map((m) => m.timestamp)).toEqual([200, 100]);
+	});
+
+	test("groupMemberIds returns every member id, newest first", () => {
+		// The group acknowledge button sends exactly this array. An inline
+		// `members.map` at the button was pinned by nothing: replacing it with
+		// `[members[0].id]` left every test green while acknowledging one
+		// member of four. This is that call site, made reachable.
+		const base = Date.UTC(2026, 8, 17, 5, 21, 4);
+		const alerts = [3, 2, 1, 0].map((n) =>
+			makeAlert({
+				id: `auth_failure:ICLD:${1000 + n}`,
+				timestamp: base + n * HOUR,
+			}),
+		);
+
+		const [group] = groupAlerts(alerts).open;
+
+		expect(groupMemberIds(group)).toEqual([
+			"auth_failure:ICLD:1003",
+			"auth_failure:ICLD:1002",
+			"auth_failure:ICLD:1001",
+			"auth_failure:ICLD:1000",
+		]);
+	});
+
+	test("groupMemberIds sends one id per member, never a truncation", () => {
+		// Explicitly negative: the failure this guards is sending fewer ids
+		// than the group has members, which acknowledges part of a group and
+		// leaves it to return.
+		const alerts = [4, 3, 2, 1, 0].map((n) =>
+			makeAlert({ id: `auth_failure:ICLD:${n}`, timestamp: n * HOUR }),
+		);
+
+		const [group] = groupAlerts(alerts).open;
+		const ids = groupMemberIds(group);
+
+		expect(ids).toHaveLength(group.members.length);
+		expect(ids).toHaveLength(5);
+		expect(new Set(ids).size).toBe(5);
 	});
 
 	test("returns empty partitions for no alerts", () => {

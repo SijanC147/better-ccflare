@@ -1,5 +1,5 @@
 import type { AlertEvent, AlertGroup } from "@better-ccflare/types";
-import { groupAlerts } from "@better-ccflare/types";
+import { groupAlerts, groupMemberIds } from "@better-ccflare/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, CheckCheck, TriangleAlert } from "lucide-react";
 import React from "react";
@@ -138,9 +138,7 @@ function AlertGroupRow({
 								size="sm"
 								variant="ghost"
 								disabled={groupPending}
-								onClick={() =>
-									onAcknowledgeGroup(group.members.map((m) => m.id))
-								}
+								onClick={() => onAcknowledgeGroup(groupMemberIds(group))}
 							>
 								<Check className="h-4 w-4 mr-1" />
 								Acknowledge group

@@ -114,6 +114,21 @@ export interface AlertGroup {
 	members: AlertEvent[];
 }
 
+/**
+ * The ids a group acknowledgement sends, captured at click time.
+ *
+ * This exists as a named function rather than an inline `map` at the button
+ * because the inline form was pinned by nothing: a reviewer replaced it with
+ * `[members[0].id]` and every test still passed, which would have
+ * acknowledged one member of a four-member group and left the group to
+ * return with three. This package has no DOM renderer, so the click cannot
+ * be dispatched in a test; moving the expression here moves it into code the
+ * tests can reach.
+ */
+export function groupMemberIds(group: AlertGroup): string[] {
+	return group.members.map((member) => member.id);
+}
+
 /** Open and acknowledged groups of one loaded page of alerts. */
 export interface GroupedAlerts {
 	open: AlertGroup[];
