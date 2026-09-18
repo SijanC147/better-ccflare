@@ -439,6 +439,44 @@ describe("GET /api/analytics/models — avgTokensPerSecond", () => {
 
 		expect(row.avgTokensPerSecond).toBeNull();
 	});
+
+	it("counts a failed request that still measured a rate", async () => {
+		// This pins the one deliberate divergence between the two averages
+		// this endpoint returns. avgTotalTokensPerSuccess restricts to
+		// successes because a failure stores 0 tokens and that zero would
+		// enter the mean; avgTokensPerSecond does not, because the rate is
+		// written only when output tokens were produced, gated on
+		// `finalOutputTokens > 0` and not on success
+		// (usage-collector.ts:830), so a request that produced none is
+		// already NULL and already skipped. The two populations therefore
+		// differ by exactly this row: failed, and carrying a real measured
+		// rate.
+		//
+		// Chosen so the two candidate populations give different numbers. A
+		// success CASE would return 40, successes only; the intended
+		// NULL-skipping average over both returns 50. Equal values would make
+		// the assertion pass under either reading.
+		insertRequest({
+			id: "fr1",
+			model: "rate",
+			success: true,
+			tokensPerSecond: 40,
+		});
+		insertRequest({
+			id: "fr2",
+			model: "rate",
+			success: false,
+			tokensPerSecond: 60,
+		});
+
+		const [row] = await rowsFor("range=24h");
+
+		expect(row.avgTokensPerSecond).toBe(50);
+		// The neighbouring average is the contrast, and it reads the other
+		// way: the failed row contributes 0 tokens and is excluded, so this is
+		// the successful row alone rather than a mean over both.
+		expect(row.successRequests).toBe(1);
+	});
 });
 
 describe("GET /api/analytics/models — rows with no model", () => {

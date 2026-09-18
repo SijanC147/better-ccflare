@@ -185,6 +185,20 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 						AS avg_total_tokens_per_success,
 					-- The one column with no DEFAULT 0, so NULL-skipping in AVG
 					-- is what we want, and only here.
+					-- The population differs from the average above on purpose,
+					-- and the two are not interchangeable. That one restricts
+					-- to successes because a failure stores 0 tokens, so a zero
+					-- would enter the mean and report a model as using fewer
+					-- tokens the more often it fails. This one has no zero to
+					-- exclude: the rate is written only when output tokens were
+					-- produced, gated on finalOutputTokens > 0 rather than on
+					-- success (usage-collector.ts:830), so a request that
+					-- produced none is already NULL and already skipped. The
+					-- populations are therefore genuinely different, because a
+					-- request can stream tokens at a measured rate and still be
+					-- recorded as failed, and that row is a real throughput
+					-- observation. Adding a success CASE here would discard a
+					-- measurement rather than exclude a zero.
 					-- This comment deliberately contains no apostrophe and no
 					-- question mark. convertPlaceholders in BunSqlAdapter scans
 					-- the raw statement and skips neither comments nor
