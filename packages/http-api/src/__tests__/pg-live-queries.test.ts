@@ -917,12 +917,17 @@ describe.skipIf(!livePgAvailable)(
 					inputTokens: 100,
 					outputTokens: 50,
 				});
+				// Tokens set explicitly: seedRequest defaults them to 10 and 5
+				// (:472-475), so leaving them out makes the expected sums a
+				// property of the helper rather than of this fixture.
 				await seedRequest({
 					id: "pm-2",
 					timestamp: now - HOUR,
 					accountUsed: "acct-2",
 					success: false,
 					model: "claude-opus-4",
+					inputTokens: 0,
+					outputTokens: 0,
 				});
 
 				const body = await models("range=24h");

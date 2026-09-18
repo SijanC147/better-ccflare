@@ -171,8 +171,13 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 					SUM(CASE WHEN r.success = TRUE THEN COALESCE(r.total_tokens, 0) ELSE 0 END) * 1.0
 						/ NULLIF(SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END), 0)
 						AS avg_total_tokens_per_success,
-					-- The one column with no DEFAULT 0, so AVG's NULL-skipping
-					-- is what we want and only here.
+					-- The one column with no DEFAULT 0, so NULL-skipping in AVG
+					-- is what we want, and only here.
+					-- This comment deliberately contains no apostrophe and no
+					-- question mark. convertPlaceholders in BunSqlAdapter scans
+					-- the raw statement and skips neither comments nor
+					-- apostrophes inside them, so either character here
+					-- corrupts the whole placeholder rewrite.
 					AVG(r.output_tokens_per_second) AS avg_tokens_per_second
 				FROM requests r
 				${join}
