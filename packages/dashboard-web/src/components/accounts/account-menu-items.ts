@@ -65,6 +65,84 @@ export interface AccountMenuHandlers {
 	codexReauth: boolean;
 }
 
+/** The subset of the card's props the menu needs. */
+export interface AccountMenuCallbacks {
+	onRename: (account: Account) => void;
+	onPriorityChange: (account: Account) => void;
+	onRenewalDayChange?: (account: Account) => void;
+	onCustomEndpointChange?: (account: Account) => void;
+	onModelMappingsChange?: (account: Account) => void;
+	onRequestTransformerChange?: (account: Account) => void;
+	onReauth?: (account: Account) => void;
+	onAnthropicReauth?: (account: Account) => void;
+	onCodexReauth?: (account: Account) => void;
+	onAutoFallbackToggle: (account: Account) => void;
+	onAutoRefreshToggle: (account: Account) => void;
+	onBillingTypeToggle: (account: Account) => void;
+	onAutoPauseOnOverageToggle?: (account: Account) => void;
+	onPeakHoursPauseToggle?: (account: Account) => void;
+}
+
+/**
+ * Derived from the callbacks rather than written out a second time, so a new
+ * optional control cannot be listed in one place and forgotten in the other.
+ */
+export function menuHandlersFrom(
+	callbacks: AccountMenuCallbacks,
+): AccountMenuHandlers {
+	return {
+		renewalDay: Boolean(callbacks.onRenewalDayChange),
+		customEndpoint: Boolean(callbacks.onCustomEndpointChange),
+		modelMappings: Boolean(callbacks.onModelMappingsChange),
+		requestTransformer: Boolean(callbacks.onRequestTransformerChange),
+		autoPauseOnOverage: Boolean(callbacks.onAutoPauseOnOverageToggle),
+		peakHoursPause: Boolean(callbacks.onPeakHoursPauseToggle),
+		qwenReauth: Boolean(callbacks.onReauth),
+		anthropicReauth: Boolean(callbacks.onAnthropicReauth),
+		codexReauth: Boolean(callbacks.onCodexReauth),
+	};
+}
+
+/**
+ * Binds each menu id to the callback it fires. Lives here rather than inline in
+ * the component so a test can assert which callback an id actually reaches: the
+ * closed menu renders as nothing, so routing an id to the wrong callback is
+ * otherwise invisible to the suite.
+ */
+export function bindAccountMenuHandlers(
+	account: Account,
+	callbacks: AccountMenuCallbacks,
+): {
+	toggle: Record<AccountMenuToggleId, () => void>;
+	action: Record<AccountMenuActionId, () => void>;
+} {
+	return {
+		toggle: {
+			"auto-fallback": () => callbacks.onAutoFallbackToggle(account),
+			"auto-refresh": () => callbacks.onAutoRefreshToggle(account),
+			"plan-billing": () => callbacks.onBillingTypeToggle(account),
+			"auto-pause-on-overage": () =>
+				callbacks.onAutoPauseOnOverageToggle?.(account),
+			"peak-hours-pause": () => callbacks.onPeakHoursPauseToggle?.(account),
+		},
+		action: {
+			rename: () => callbacks.onRename(account),
+			priority: () => callbacks.onPriorityChange(account),
+			"renewal-day": () => callbacks.onRenewalDayChange?.(account),
+			"custom-endpoint": () => callbacks.onCustomEndpointChange?.(account),
+			"model-mappings": () => callbacks.onModelMappingsChange?.(account),
+			"request-transformer": () =>
+				callbacks.onRequestTransformerChange?.(account),
+			reauth: () => {
+				if (account.provider === "qwen") return callbacks.onReauth?.(account);
+				if (account.provider === "codex")
+					return callbacks.onCodexReauth?.(account);
+				return callbacks.onAnthropicReauth?.(account);
+			},
+		},
+	};
+}
+
 export function accountMenuToggles(
 	account: Account,
 	handlers: AccountMenuHandlers,
@@ -146,7 +224,7 @@ export function accountMenuActions(
 			title: account.renewalDay
 				? `Subscription renews on day ${account.renewalDay} of the month`
 				: "Set the subscription renewal day",
-			configured: account.renewalDay !== null,
+			configured: Boolean(account.renewalDay),
 		});
 	}
 
@@ -157,7 +235,7 @@ export function accountMenuActions(
 			title: account.customEndpoint
 				? `Custom endpoint: ${account.customEndpoint}`
 				: "Set custom endpoint",
-			configured: account.customEndpoint !== null,
+			configured: Boolean(account.customEndpoint),
 		});
 	}
 
@@ -168,7 +246,7 @@ export function accountMenuActions(
 			title: account.modelMappings
 				? `Model mappings configured (${Object.keys(account.modelMappings).length} mappings)`
 				: "Configure model mappings",
-			configured: account.modelMappings !== null,
+			configured: Boolean(account.modelMappings),
 		});
 	}
 
@@ -179,7 +257,7 @@ export function accountMenuActions(
 			title: account.requestTransformer
 				? "Request transformer: Max Tokens → Max Completion Tokens"
 				: "Configure request transformer",
-			configured: account.requestTransformer !== null,
+			configured: Boolean(account.requestTransformer),
 		});
 	}
 

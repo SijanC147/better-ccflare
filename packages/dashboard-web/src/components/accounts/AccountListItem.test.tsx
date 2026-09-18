@@ -9,9 +9,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Account } from "../../api";
 import { AccountListItem } from "./AccountListItem";
 import {
+	type AccountMenuActionId,
 	type AccountMenuHandlers,
 	accountMenuActions,
 	accountMenuToggles,
+	bindAccountMenuHandlers,
+	menuHandlersFrom,
 } from "./account-menu-items";
 
 /** Every optional callback supplied, so the item list is decided by the account. */
@@ -376,6 +379,166 @@ describe("AccountListItem", () => {
 		expect(codex[0]?.title).toContain("Codex");
 		// An Anthropic account with no refresh token has nothing to re-authenticate.
 		expect(withoutRefreshToken).toHaveLength(0);
+	});
+
+	// The four tests below exist because four mutations survived the first
+	// version of this file: a menu id wired to the wrong callback, a `configured`
+	// flag hardcoded, a handler gate deleted, and qwen reauth routed to the
+	// Anthropic callback. None of them is visible in the rendered card, because a
+	// closed Radix menu renders as nothing.
+	it("fires the callback each toggle id is named for", () => {
+		const fired: string[] = [];
+		const spy = (name: string) => () => fired.push(name);
+		const bound = bindAccountMenuHandlers(baseAccount, {
+			onRename: spy("rename"),
+			onPriorityChange: spy("priority"),
+			onAutoFallbackToggle: spy("auto-fallback"),
+			onAutoRefreshToggle: spy("auto-refresh"),
+			onBillingTypeToggle: spy("plan-billing"),
+			onAutoPauseOnOverageToggle: spy("auto-pause-on-overage"),
+			onPeakHoursPauseToggle: spy("peak-hours-pause"),
+		});
+
+		bound.toggle["auto-fallback"]();
+		bound.toggle["auto-refresh"]();
+		bound.toggle["plan-billing"]();
+		bound.toggle["auto-pause-on-overage"]();
+		bound.toggle["peak-hours-pause"]();
+
+		expect(fired).toEqual([
+			"auto-fallback",
+			"auto-refresh",
+			"plan-billing",
+			"auto-pause-on-overage",
+			"peak-hours-pause",
+		]);
+	});
+
+	it("fires the callback each action id is named for", () => {
+		const fired: string[] = [];
+		const spy = (name: string) => () => fired.push(name);
+		const bound = bindAccountMenuHandlers(
+			{ ...baseAccount, provider: "openai-compatible" },
+			{
+				onRename: spy("rename"),
+				onPriorityChange: spy("priority"),
+				onRenewalDayChange: spy("renewal-day"),
+				onCustomEndpointChange: spy("custom-endpoint"),
+				onModelMappingsChange: spy("model-mappings"),
+				onRequestTransformerChange: spy("request-transformer"),
+				onAutoFallbackToggle: () => {},
+				onAutoRefreshToggle: () => {},
+				onBillingTypeToggle: () => {},
+			},
+		);
+
+		bound.action.rename();
+		bound.action.priority();
+		bound.action["renewal-day"]();
+		bound.action["custom-endpoint"]();
+		bound.action["model-mappings"]();
+		bound.action["request-transformer"]();
+
+		expect(fired).toEqual([
+			"rename",
+			"priority",
+			"renewal-day",
+			"custom-endpoint",
+			"model-mappings",
+			"request-transformer",
+		]);
+	});
+
+	it("routes reauth to the callback for the account's own provider", () => {
+		const fired: string[] = [];
+		const spy = (name: string) => () => fired.push(name);
+		const callbacks = {
+			onRename: () => {},
+			onPriorityChange: () => {},
+			onAutoFallbackToggle: () => {},
+			onAutoRefreshToggle: () => {},
+			onBillingTypeToggle: () => {},
+			onReauth: spy("qwen"),
+			onAnthropicReauth: spy("anthropic"),
+			onCodexReauth: spy("codex"),
+		};
+
+		bindAccountMenuHandlers(
+			{ ...baseAccount, provider: "qwen" },
+			callbacks,
+		).action.reauth();
+		bindAccountMenuHandlers(
+			{ ...baseAccount, provider: "codex" },
+			callbacks,
+		).action.reauth();
+		bindAccountMenuHandlers(baseAccount, callbacks).action.reauth();
+
+		expect(fired).toEqual(["qwen", "codex", "anthropic"]);
+	});
+
+	it("hides every optional action whose callback the parent did not supply", () => {
+		// menuHandlersFrom is what decides this, so an absent callback and a
+		// present one are both read here rather than assumed.
+		const none = menuHandlersFrom({
+			onRename: () => {},
+			onPriorityChange: () => {},
+			onAutoFallbackToggle: () => {},
+			onAutoRefreshToggle: () => {},
+			onBillingTypeToggle: () => {},
+		});
+		const ids = accountMenuActions(
+			{ ...baseAccount, provider: "openai-compatible" },
+			none,
+		).map((action) => action.id);
+
+		expect(ids).toEqual(["rename", "priority"]);
+		expect(none.renewalDay).toBe(false);
+		expect(
+			menuHandlersFrom({
+				onRename: () => {},
+				onPriorityChange: () => {},
+				onAutoFallbackToggle: () => {},
+				onAutoRefreshToggle: () => {},
+				onBillingTypeToggle: () => {},
+				onRenewalDayChange: () => {},
+			}).renewalDay,
+		).toBe(true);
+	});
+
+	it("marks endpoint, mappings and renewal day configured only when set", () => {
+		const unset = new Map(
+			accountMenuActions(baseAccount, allHandlers).map((a) => [a.id, a]),
+		);
+		const set = new Map(
+			accountMenuActions(
+				{
+					...baseAccount,
+					renewalDay: 15,
+					customEndpoint: "https://example.invalid",
+					modelMappings: { a: "b" },
+				},
+				allHandlers,
+			).map((a) => [a.id, a]),
+		);
+
+		const ids = [
+			"renewal-day",
+			"custom-endpoint",
+			"model-mappings",
+		] as const satisfies readonly AccountMenuActionId[];
+		for (const id of ids) {
+			expect(unset.get(id)?.configured).toBe(false);
+			expect(set.get(id)?.configured).toBe(true);
+		}
+		// An empty custom endpoint is not a configured one. The title ternary
+		// already treats it as unset; `configured` must agree, or the menu shows
+		// "Set custom endpoint" beside a "Configured" marker.
+		expect(
+			accountMenuActions(
+				{ ...baseAccount, customEndpoint: "" },
+				allHandlers,
+			).find((a) => a.id === "custom-endpoint")?.configured,
+		).toBe(false);
 	});
 
 	it("shows no renewal badge when the account has no renewal day", () => {

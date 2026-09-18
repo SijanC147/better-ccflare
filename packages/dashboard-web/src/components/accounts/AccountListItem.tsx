@@ -39,10 +39,11 @@ import {
 } from "../ui/dropdown-menu";
 import {
 	type AccountMenuActionId,
-	type AccountMenuHandlers,
-	type AccountMenuToggleId,
+	type AccountMenuCallbacks,
 	accountMenuActions,
 	accountMenuToggles,
+	bindAccountMenuHandlers,
+	menuHandlersFrom,
 } from "./account-menu-items";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -163,39 +164,28 @@ export function AccountListItem({
 		bedrockCrossRegionMode = account.crossRegionMode || "geographic";
 	}
 
-	const menuHandlers: AccountMenuHandlers = {
-		renewalDay: Boolean(onRenewalDayChange),
-		customEndpoint: Boolean(onCustomEndpointChange),
-		modelMappings: Boolean(onModelMappingsChange),
-		requestTransformer: Boolean(onRequestTransformerChange),
-		autoPauseOnOverage: Boolean(onAutoPauseOnOverageToggle),
-		peakHoursPause: Boolean(onPeakHoursPauseToggle),
-		qwenReauth: Boolean(onReauth),
-		anthropicReauth: Boolean(onAnthropicReauth),
-		codexReauth: Boolean(onCodexReauth),
+	// One object, passed to both the item builders and the binder, so the item
+	// list and the callback each id fires cannot drift apart.
+	const menuCallbacks: AccountMenuCallbacks = {
+		onRename,
+		onPriorityChange,
+		onRenewalDayChange,
+		onCustomEndpointChange,
+		onModelMappingsChange,
+		onRequestTransformerChange,
+		onReauth,
+		onAnthropicReauth,
+		onCodexReauth,
+		onAutoFallbackToggle,
+		onAutoRefreshToggle,
+		onBillingTypeToggle,
+		onAutoPauseOnOverageToggle,
+		onPeakHoursPauseToggle,
 	};
+	const menuHandlers = menuHandlersFrom(menuCallbacks);
 	const menuToggles = accountMenuToggles(account, menuHandlers);
 	const menuActions = accountMenuActions(account, menuHandlers);
-	const toggleHandlers: Record<AccountMenuToggleId, () => void> = {
-		"auto-fallback": () => onAutoFallbackToggle(account),
-		"auto-refresh": () => onAutoRefreshToggle(account),
-		"plan-billing": () => onBillingTypeToggle(account),
-		"auto-pause-on-overage": () => onAutoPauseOnOverageToggle?.(account),
-		"peak-hours-pause": () => onPeakHoursPauseToggle?.(account),
-	};
-	const actionHandlers: Record<AccountMenuActionId, () => void> = {
-		rename: () => onRename(account),
-		priority: () => onPriorityChange(account),
-		"renewal-day": () => onRenewalDayChange?.(account),
-		"custom-endpoint": () => onCustomEndpointChange?.(account),
-		"model-mappings": () => onModelMappingsChange?.(account),
-		"request-transformer": () => onRequestTransformerChange?.(account),
-		reauth: () => {
-			if (account.provider === "qwen") return onReauth?.(account);
-			if (account.provider === "codex") return onCodexReauth?.(account);
-			return onAnthropicReauth?.(account);
-		},
-	};
+	const bound = bindAccountMenuHandlers(account, menuCallbacks);
 
 	return (
 		<div
@@ -435,7 +425,7 @@ export function AccountListItem({
 										// Keep the menu open so several toggles can be set in one
 										// visit; without this Radix closes on every select.
 										onSelect={(event) => event.preventDefault()}
-										onCheckedChange={toggleHandlers[toggle.id]}
+										onCheckedChange={bound.toggle[toggle.id]}
 									>
 										{toggle.label}
 									</DropdownMenuCheckboxItem>
@@ -447,7 +437,7 @@ export function AccountListItem({
 										<DropdownMenuItem
 											key={action.id}
 											title={action.title}
-											onClick={actionHandlers[action.id]}
+											onClick={bound.action[action.id]}
 										>
 											<Icon
 												className={`mr-2 h-4 w-4 ${action.configured ? "text-primary" : ""}`}
