@@ -173,6 +173,74 @@ describe("GET /api/analytics/models — plan-billed models survive", () => {
 	});
 });
 
+describe("GET /api/analytics/models — a NULL billing_type", () => {
+	it("counts the cost in the total and in neither bucket, so plan + api != total", async () => {
+		// Not an oversight, and asserted here so it cannot change silently.
+		// `billing_type = 'plan'` and `billing_type != 'plan'` are BOTH false
+		// against NULL in SQL three-valued logic, so a NULL-billed request
+		// lands in neither CASE branch while SUM(COALESCE(cost_usd, 0)) still
+		// counts it. `analytics-account-costs.test.ts` documents the same
+		// behaviour for the per-account rows, so the two endpoints agree.
+		//
+		// A reader summing planCostUsd + apiCostUsd across models and
+		// comparing against totalCostUsd will find a shortfall exactly equal
+		// to the NULL-billed spend. That is the intended reading.
+		// Written with raw SQL on purpose: insertRequest coerces a null
+		// billingType to "api" (`row.billingType ?? "api"`), so the helper
+		// cannot express the case this test is about.
+		db.run(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model, cost_usd, billing_type)
+			 VALUES ('null-billing', ?, 'POST', '/v1/messages', 200, 1, 'unknown-billing', 7, NULL)`,
+			[Date.now() - HOUR_MS],
+		);
+
+		const [row] = await rowsFor("range=24h");
+
+		expect(row.planCostUsd).toBe(0);
+		expect(row.apiCostUsd).toBe(0);
+		expect(row.totalCostUsd).toBe(7);
+		expect((row.planCostUsd as number) + (row.apiCostUsd as number)).not.toBe(
+			row.totalCostUsd,
+		);
+	});
+});
+
+describe("GET /api/analytics/models — a NULL success", () => {
+	it("counts the row as neither a success nor, by subtraction, a silent loss", async () => {
+		// `success` is BOOLEAN with no NOT NULL and no default
+		// (migrations.ts:143), so a NULL is storable. `success = TRUE` is
+		// false against it, so successRequests excludes the row while
+		// COUNT(*) includes it, and errorRequests is computed in TypeScript
+		// as requests - successRequests. A NULL therefore reports as an
+		// error rather than vanishing, which is the safer of the two
+		// readings and is pinned here because nothing else states it.
+		db.run(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model, total_tokens)
+			 VALUES ('null-success', ?, 'POST', '/v1/messages', 200, NULL, 'tri-state', 500)`,
+			[Date.now() - HOUR_MS],
+		);
+		insertRequest({
+			id: "real-success",
+			model: "tri-state",
+			success: true,
+			totalTokens: 100,
+		});
+
+		const [row] = await rowsFor("range=24h");
+
+		expect(row.requests).toBe(2);
+		expect(row.successRequests).toBe(1);
+		expect(row.errorRequests).toBe(1);
+		// requests and successRequests are both SQL counts, so the
+		// subtraction cannot go negative and cannot lose a row.
+		expect(
+			(row.successRequests as number) + (row.errorRequests as number),
+		).toBe(row.requests);
+		// The NULL row's tokens stay out of the successful average.
+		expect(row.avgTotalTokensPerSuccess).toBe(100);
+	});
+});
+
 describe("GET /api/analytics/models — the models filter", () => {
 	it("returns exactly the named models, using the shared `models` parameter", async () => {
 		// Same parameter name buildRequestFilters reads (query-filters.ts:98).
