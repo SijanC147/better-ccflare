@@ -44,10 +44,16 @@
  * this file measured the wrong thing. It checked for `typeof window` and
  * `typeof document` sites elsewhere in the repo, found only local variables
  * named `window` that shadow the global, and concluded the registration was
- * contained. It was not. `GlobalRegistrator.register()` REPLACES 37 globals
+ * contained. It was not. `GlobalRegistrator.register()` REPLACES 35 globals
  * that Bun already implements, the network and stream family among them, and
- * adds 488 more. The full suite caught it: four `processResponse - SSE` tests
- * in `packages/providers` failed with
+ * adds 488 more. Those two counts come from a probe that snapshots
+ * `Object.getOwnPropertyNames(globalThis)` either side of the call and
+ * compares with `Object.is`, not `!==`: `NaN` is a global and `NaN !== NaN`,
+ * so a `!==` comparison reports it as replaced when nothing touched it. An
+ * earlier version of this comment said 37 for that reason.
+ *
+ * The full suite caught the breakage: four `processResponse - SSE` tests in
+ * `packages/providers` failed with
  *
  *     TypeError: The transform's 'readable' property must be a ReadableStream
  *
