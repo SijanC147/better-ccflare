@@ -974,6 +974,54 @@ describe.skipIf(!livePgAvailable)(
 				).toBe(true);
 			});
 
+			liveIt(
+				"places the null dimension value last, matching SQLite",
+				async () => {
+					// The one assertion in this file that is about agreement
+					// between the engines rather than about PostgreSQL
+					// accepting a statement. `ORDER BY <nullable> ASC` has no
+					// portable NULL placement: measured 2026-09-18, SQLite
+					// 3.54.0 returned the NULL first and PostgreSQL 18.6
+					// returned it last over the same three rows. The handler
+					// says NULLS LAST for that reason, and the SQLite suite
+					// asserts this same order, so the pair is what proves the
+					// two engines now agree. Remove the clause and one of the
+					// two fails whichever engine you are on.
+					await seedBaseline();
+					await seedRequest({
+						id: "pm-o1",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "claude-order",
+						project: "b-proj",
+					});
+					await seedRequest({
+						id: "pm-o2",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "claude-order",
+						project: null,
+					});
+					await seedRequest({
+						id: "pm-o3",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "claude-order",
+						project: "a-proj",
+					});
+
+					const byProject = await models("range=24h&groupBy=project");
+					const ordered = (byProject.models as Array<Record<string, unknown>>)
+						.filter((r) => r.model === "claude-order")
+						.map((r) => r.project);
+
+					expect(ordered).toEqual(["a-proj", "b-proj", null]);
+				},
+			);
+
 			liveIt("executes with every shared filter and every range", async () => {
 				await seedBaseline();
 				await seedRequest({

@@ -142,11 +142,23 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 				: groupBy === "project"
 					? ", r.project"
 					: "";
+		// `NULLS LAST` on both, and it is not cosmetic. Each dimension column
+		// is nullable — `r.project` by column definition, `a.name` because the
+		// LEFT JOIN yields NULL for a request with no account and for one whose
+		// `account_used` names a row no longer in `accounts` — and the default
+		// placement of a NULL under ASC differs by engine. Measured
+		// 2026-09-18 on SQLite 3.54.0 (bun:sqlite) and PostgreSQL 18.6 with
+		// three rows, one of them NULL: SQLite returned the NULL first,
+		// PostgreSQL returned it last. So the same window returned rows in two
+		// different orders on the two engines until this clause, and a caller
+		// diffing the response across a backend migration saw a change that
+		// was not there. Both engines accept `NULLS LAST` (SQLite since 3.30),
+		// and with it both returned a-proj, b-proj, NULL.
 		const dimensionOrder =
 			groupBy === "account"
-				? ", a.name ASC"
+				? ", a.name ASC NULLS LAST"
 				: groupBy === "project"
-					? ", r.project ASC"
+					? ", r.project ASC NULLS LAST"
 					: "";
 
 		try {

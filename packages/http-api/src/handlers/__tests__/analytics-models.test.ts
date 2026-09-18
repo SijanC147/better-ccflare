@@ -468,6 +468,53 @@ describe("GET /api/analytics/models — ordering", () => {
 
 		expect(rows.map((r) => r.model)).toEqual(["b-model", "a-model", "c-model"]);
 	});
+
+	/**
+	 * These two pin the placement of the NULL dimension value, which is the one
+	 * part of this ORDER BY whose default differs between the two engines this
+	 * handler runs on. Measured 2026-09-18: on `ORDER BY project ASC` with one
+	 * NULL among three rows, SQLite returned the NULL first and PostgreSQL
+	 * 18.6 returned it last. The handler therefore says `NULLS LAST`
+	 * explicitly, and these assert it from the SQLite side, where the
+	 * unqualified clause puts the NULL first and so fails them.
+	 *
+	 * Asserting the full array rather than the NULL's index on purpose: an
+	 * index assertion still passes if the two named projects swap.
+	 */
+	it("places a null project last, not first, on groupBy=project", async () => {
+		insertRequest({ id: "n1", model: "shared", project: "b-proj" });
+		insertRequest({ id: "n2", model: "shared", project: null });
+		insertRequest({ id: "n3", model: "shared", project: "a-proj" });
+
+		const rows = await rowsFor("range=24h&groupBy=project");
+
+		expect(rows.map((r) => r.project)).toEqual(["a-proj", "b-proj", null]);
+	});
+
+	it("places the unattributed account last, not first, on groupBy=account", async () => {
+		// `a.name` is nullable here without the column being nullable: the
+		// LEFT JOIN yields NULL for a request with no account at all, which is
+		// this `null`, and for one naming an account row that no longer exists.
+		db.run(
+			"INSERT INTO accounts (id, name, created_at) VALUES ('ord-b', 'b-acct', ?)",
+			[Date.now()],
+		);
+		db.run(
+			"INSERT INTO accounts (id, name, created_at) VALUES ('ord-a', 'a-acct', ?)",
+			[Date.now()],
+		);
+		insertRequest({ id: "o1", model: "shared", accountUsed: "ord-b" });
+		insertRequest({ id: "o2", model: "shared", accountUsed: null });
+		insertRequest({ id: "o3", model: "shared", accountUsed: "ord-a" });
+
+		const rows = await rowsFor("range=24h&groupBy=account");
+
+		expect(rows.map((r) => r.account)).toEqual([
+			"a-acct",
+			"b-acct",
+			NO_ACCOUNT_ID,
+		]);
+	});
 });
 
 describe("GET /api/analytics/models — groupBy", () => {
