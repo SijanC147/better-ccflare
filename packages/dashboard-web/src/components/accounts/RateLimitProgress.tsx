@@ -839,7 +839,11 @@ export function RateLimitProgress({
 					if (!credits) return null;
 					const value = credits.unlimited
 						? "Unlimited"
-						: credits.balance !== null
+						: // `!= null`, not `!== null`: the object crosses a JSON boundary
+							// and is cast loosely here, so a `credits` with no `balance`
+							// key at all reads as undefined. Strict inequality would let
+							// that through and render an empty value next to the label.
+							credits.balance != null
 							? credits.balance
 							: // has_credits with no balance: upstream said there are
 								// credits but not how many, so say exactly that. "None"

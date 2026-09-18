@@ -6,7 +6,7 @@ import {
 	ensureSchema,
 	runMigrations,
 } from "@better-ccflare/database";
-import { usageCache } from "@better-ccflare/providers";
+import { parseCodexUsageHeaders, usageCache } from "@better-ccflare/providers";
 import type { AccountResponse } from "@better-ccflare/types";
 import { createAccountsListHandler } from "../accounts";
 
@@ -115,6 +115,39 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
 		// operator reads the balance against the countdown, not instead of it.
 		expect(usage?.seven_day.utilization).toBe(100);
 		expect(usage?.seven_day.resets_at).not.toBeNull();
+	});
+
+	it("carries credits stored the way the live proxy path stores them", async () => {
+		// The test above hand-builds the cache entry, which proves the normalizer
+		// passes `credits` through but says nothing about whether anything ever
+		// puts it there. Both production writers store the parser's return value
+		// WHOLE — `response-processor.ts` sets `codexUsage` and the on-demand
+		// refresher in `apps/server` sets `fetchResult.data` — so this stores
+		// exactly that object and asserts the field survives the round trip. A
+		// field-by-field rebuild appearing at either writer would kill this test
+		// while every other test here stayed green.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const parsed = parseCodexUsageHeaders(
+			new Headers({
+				"x-codex-secondary-window-minutes": "10080",
+				"x-codex-secondary-used-percent": "100",
+				"x-codex-secondary-reset-at": String(nowSeconds + 129_600),
+				"x-codex-credits-has-credits": "true",
+				"x-codex-credits-unlimited": "false",
+				"x-codex-credits-balance": "7.25",
+			}),
+		);
+		expect(parsed?.credits).toBeDefined();
+		usageCache.set(ACCOUNT_ID, parsed as never);
+
+		const usage = await readUsage();
+
+		expect(usage?.credits).toEqual({
+			has_credits: true,
+			unlimited: false,
+			balance: "7.25",
+		});
+		expect(usage?.seven_day.utilization).toBe(100);
 	});
 
 	it("omits the credits KEY when the cache has none", async () => {

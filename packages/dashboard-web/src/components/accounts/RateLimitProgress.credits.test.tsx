@@ -82,6 +82,29 @@ describe("RateLimitProgress — Codex credits", () => {
 		expect(html).not.toContain("Unlimited");
 	});
 
+	it("says Available for a credits object carrying no balance key at all", () => {
+		// The object crosses a JSON boundary and is cast loosely in the component,
+		// so `balance` can be missing rather than null. A strict `!== null` would
+		// take the balance branch and render an empty value beside the label.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				provider="codex"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={100}
+				usageWindow="seven_day"
+				usageData={
+					{
+						five_hour: { utilization: 0, resets_at: null },
+						seven_day: { utilization: 100, resets_at: WEEKLY_RESET },
+						credits: { has_credits: true, unlimited: false },
+					} as unknown as AnthropicUsageData
+				}
+			/>,
+		);
+
+		expect(html).toContain("Available");
+	});
+
 	it("says None when upstream explicitly reported no credits", () => {
 		const html = renderCodex({
 			has_credits: false,
