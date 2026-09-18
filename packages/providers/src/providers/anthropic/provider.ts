@@ -41,6 +41,42 @@ type AnthropicModelsPage = {
 	last_id?: string | null;
 };
 
+/**
+ * One Anthropic model summary rendered as one OpenAI model object.
+ *
+ * Shared by the listing (`GET /v1/models`) and the single-model lookup
+ * (`GET /v1/models/{id}`) on purpose: they are the same per-entry contract,
+ * and a translation that drifted between them would put two different shapes
+ * of the same model in front of one client. One function means one mutation
+ * kills both.
+ *
+ * `display_name` and `created_at` survive as extra fields because
+ * `ingestModelsListing` in `packages/proxy/src/model-catalog.ts` reads them
+ * off the proxied listing body, and OpenAI clients ignore keys they do not
+ * know. An unparseable or absent `created_at` becomes 0 rather than NaN,
+ * which would serialize as `null` and break clients that expect a number.
+ */
+function toOpenAIModelEntry(model: AnthropicModelSummary): {
+	id: string;
+	object: string;
+	created: number;
+	owned_by: string;
+	display_name: string;
+	created_at: string | null;
+} {
+	const createdMs = model.created_at
+		? Date.parse(model.created_at)
+		: Number.NaN;
+	return {
+		id: model.id as string,
+		object: "model",
+		created: Number.isNaN(createdMs) ? 0 : Math.floor(createdMs / 1000),
+		owned_by: "anthropic",
+		display_name: model.display_name ?? (model.id as string),
+		created_at: model.created_at ?? null,
+	};
+}
+
 // Hard rate limit statuses that should block account usage
 const HARD_LIMIT_STATUSES = new Set([
 	"rate_limited",
@@ -722,10 +758,9 @@ export class AnthropicProvider extends BaseProvider {
 
 		// A model listing an OpenAI client asked for has to come back in the
 		// OpenAI shape; a native Anthropic client keeps Anthropic's.
-		if (
-			response.headers.get("x-better-ccflare-request-path") === "/v1/models" &&
-			!requestHeaders?.has("anthropic-version")
-		) {
+		const requestPath = response.headers.get("x-better-ccflare-request-path");
+		const nativeClient = requestHeaders?.has("anthropic-version") === true;
+		if (requestPath === "/v1/models" && !nativeClient) {
 			return this.transformModelsListResponse(
 				sanitizedResponse,
 				_account,
@@ -733,11 +768,152 @@ export class AnthropicProvider extends BaseProvider {
 			);
 		}
 
+		// `GET /v1/models/{id}`. The exact match above runs first, so the
+		// listing is never reached by this branch; a request path that only
+		// starts with `/v1/models/` is a single-model lookup. Anthropic serves
+		// the same endpoint, so this is a passthrough plus the same per-entry
+		// translation the listing uses.
+		//
+		// This is a prefix test, not a shape test, so a deeper path such as
+		// `/v1/models/x/y` also lands here. That is harmless: the body is
+		// whatever the upstream returned for that path, and a non-model body
+		// falls out of `transformSingleModelResponse` untranslated. Tighten
+		// this to a single trailing segment only if Anthropic ever serves
+		// something else below `/v1/models/`.
+		//
+		// `requestMeta.path` is `url.pathname`
+		// (`packages/proxy/src/handlers/request-handler.ts`), so it carries no
+		// query string and a URL-encoded id stays encoded, which still matches
+		// this prefix.
+		if (
+			requestPath?.startsWith("/v1/models/") &&
+			requestPath.length > "/v1/models/".length &&
+			!nativeClient
+		) {
+			return this.transformSingleModelResponse(sanitizedResponse);
+		}
+
 		// Add OpenAI-compatible finish_reason alongside Anthropic's stop_reason
 		return this.transformStreamToOpenAIFormat(
 			sanitizedResponse,
 			requestHeaders,
 		);
+	}
+
+	/**
+	 * Anthropic's `GET /v1/models/{id}` answer rendered in the OpenAI
+	 * single-model shape: `{id, object: "model", created, owned_by}`.
+	 *
+	 * Served by proxying to Anthropic rather than by reading the local model
+	 * catalog, and the choice is deliberate. The catalog's `source` can be
+	 * `fallback`, meaning a bundled or on-disk list rather than anything the
+	 * account was told (`packages/http-api/src/handlers/models.ts` documents
+	 * why a catalogue is not an entitlement claim). Serving from it would let
+	 * a miss 404 a model the account can really call, and a hit 200 a model
+	 * the plan refuses. The passthrough is the live entitlement of the account
+	 * that was actually routed to. It costs one upstream round trip per
+	 * lookup, which a single-model lookup is not issued often enough to feel.
+	 *
+	 * An upstream error is translated into OpenAI's error envelope rather than
+	 * passed through as Anthropic's, because a client that reached this
+	 * endpoint without `anthropic-version` is an OpenAI client and cannot read
+	 * the other shape. **The status code is preserved**: a 404 stays a 404, so
+	 * an unknown or unentitled id surfaces as OpenAI's 404-with-`error`, never
+	 * as an empty 200.
+	 *
+	 * Anything that is not a JSON body passes through untouched.
+	 */
+	private async transformSingleModelResponse(
+		response: Response,
+	): Promise<Response> {
+		if (!response.headers.get("content-type")?.toLowerCase().includes("json")) {
+			return response;
+		}
+
+		let body: AnthropicModelSummary & {
+			error?: { type?: string; message?: string };
+		};
+		try {
+			body = await response.clone().json();
+		} catch (error) {
+			log.warn("Could not parse the /v1/models/{id} body as JSON:", error);
+			return response;
+		}
+
+		// `JSON.parse("null")` is a successful parse that yields null, and
+		// optional chaining does not protect the base access: `body.error?.x`
+		// still throws when `body` itself is null. A throw here does not
+		// degrade to an untranslated body, it escapes `processResponse` into
+		// the catch in `packages/proxy/src/handlers/proxy-operations.ts`,
+		// which treats it as "this account failed" and moves to the next one.
+		// One intermediary answering `null` would therefore walk the whole
+		// account pool and report that every account failed.
+		if (body === null || typeof body !== "object") {
+			return response;
+		}
+
+		const headers = new Headers(response.headers);
+		// Belt and braces. `sanitizeProxyHeaders` in
+		// `packages/http-common/src/headers.ts` already dropped both of these
+		// before `processResponse` built the response this reads, so neither
+		// delete fires on the live path and a mutation removing either one
+		// survives the suite. They stay because the reason they exist is real:
+		// the body below is re-serialized to a different length after being
+		// decoded, so an inherited content-length or content-encoding would
+		// truncate it if this method were ever reached from a caller that did
+		// not sanitize first.
+		headers.delete("content-length");
+		headers.delete("content-encoding");
+		headers.set("content-type", "application/json");
+
+		if (!response.ok) {
+			// `type` and `code` are derived from ONE condition on purpose.
+			// Keying them separately (status for one, the upstream error type
+			// for the other) let them disagree: a 404 that is not Anthropic's
+			// envelope, such as a CDN page or `{"message": "Not Found"}`,
+			// produced `type: "api_error"` beside `code: "model_not_found"`.
+			// That pair is contradictory to a client, which reads `api_error`
+			// as a server fault worth retrying and `model_not_found` as its
+			// own bad id. OpenAI's real 404 pairs `invalid_request_error`
+			// with `model_not_found`.
+			const notFound =
+				response.status === 404 || body.error?.type === "not_found_error";
+			const translated = {
+				error: {
+					message:
+						body.error?.message ??
+						`Upstream returned HTTP ${response.status} for this model`,
+					// Every upstream type that is not a not-found is reported as
+					// itself, so a caller can still tell a rate limit from a bad
+					// request.
+					type: notFound
+						? "invalid_request_error"
+						: (body.error?.type ?? "api_error"),
+					// Explicitly null rather than omitted: OpenAI emits the key,
+					// and dropping it changes the shape an SDK destructures.
+					code: notFound ? "model_not_found" : null,
+					param: null,
+				},
+			};
+			return new Response(JSON.stringify(translated), {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}
+
+		// A 200 with no usable id is not a model. Passing it through unchanged
+		// is honest: inventing an OpenAI object around an empty body would
+		// tell the client a model exists when the upstream never said so.
+		if (typeof body.id !== "string" || body.id.length === 0) {
+			return response;
+		}
+
+		return new Response(JSON.stringify(toOpenAIModelEntry(body)), {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
 	}
 
 	/**
@@ -783,6 +959,13 @@ export class AnthropicProvider extends BaseProvider {
 			return response;
 		}
 
+		// Same null-body trap as the single-model path above: `body.data` on a
+		// literal `null` throws rather than returning undefined, and a throw
+		// out of `processResponse` is read as an account failure and fails the
+		// request over to the next account. Pre-existing here; fixed alongside
+		// the new path because one intermediary answering `null` would
+		// otherwise walk the whole pool.
+		if (body === null || typeof body !== "object") return response;
 		if (!Array.isArray(body.data)) return response;
 
 		const models = [...body.data];
@@ -797,21 +980,7 @@ export class AnthropicProvider extends BaseProvider {
 			object: "list",
 			data: models
 				.filter((model) => typeof model.id === "string" && model.id.length > 0)
-				.map((model) => {
-					const createdMs = model.created_at
-						? Date.parse(model.created_at)
-						: Number.NaN;
-					return {
-						id: model.id as string,
-						object: "model",
-						created: Number.isNaN(createdMs) ? 0 : Math.floor(createdMs / 1000),
-						owned_by: "anthropic",
-						// Kept for the model-catalog ingester, which reads these
-						// names off the proxied body.
-						display_name: model.display_name ?? model.id,
-						created_at: model.created_at ?? null,
-					};
-				}),
+				.map(toOpenAIModelEntry),
 			// `has_more` is the honest state of the stitched body, not of the
 			// first page: false only when the last page we read said so.
 			has_more: stitched.hasMore,
