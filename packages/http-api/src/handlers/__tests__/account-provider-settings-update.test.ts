@@ -323,4 +323,122 @@ describe("createAccountProviderSettingsUpdateHandler", () => {
 			(await handler(requestWith({ apiKey: NEW_KEY }), "missing")).status,
 		).toBe(404);
 	});
+
+	describe("renewalDay (SB23-2055)", () => {
+		async function renewalDayOf(id: string): Promise<number | null> {
+			const row = await dbOps
+				.getAdapter()
+				.get<{ renewal_day: number | null }>(
+					"SELECT renewal_day FROM accounts WHERE id = ?",
+					[id],
+				);
+			if (!row) throw new Error(`account ${id} missing`);
+			return row.renewal_day == null ? null : Number(row.renewal_day);
+		}
+
+		it("stores a day inside the range", async () => {
+			const id = await insertApiKeyAccount(dbOps, "zai");
+
+			expect((await handler(requestWith({ renewalDay: 15 }), id)).status).toBe(
+				200,
+			);
+			expect(await renewalDayOf(id)).toBe(15);
+		});
+
+		it("stores 31 as 31 rather than clamping it at write time", async () => {
+			// The operator's intent has to survive: a 31 clamped to 28 on the way
+			// in would never renew on the 31st again. February is handled when the
+			// next occurrence is computed, not here.
+			const id = await insertApiKeyAccount(dbOps, "zai");
+
+			expect((await handler(requestWith({ renewalDay: 31 }), id)).status).toBe(
+				200,
+			);
+			expect(await renewalDayOf(id)).toBe(31);
+		});
+
+		it("clears the day when sent null", async () => {
+			const id = await insertApiKeyAccount(dbOps, "zai");
+			await handler(requestWith({ renewalDay: 12 }), id);
+
+			expect(
+				(await handler(requestWith({ renewalDay: null }), id)).status,
+			).toBe(200);
+			expect(await renewalDayOf(id)).toBeNull();
+		});
+
+		it("rejects an out-of-range or non-integer day with 400 and changes nothing", async () => {
+			// SB23-1980 is the reason this is a rejection and not a fallback: an
+			// invalid retry_attempts silently became the default 3, which was the
+			// most aggressive value in play. A bad renewal day must not quietly
+			// become 1, and must not overwrite a good stored value.
+			const id = await insertApiKeyAccount(dbOps, "zai");
+			await handler(requestWith({ renewalDay: 9 }), id);
+
+			for (const bad of [0, 32, 1.5, -1, 100]) {
+				const res = await handler(requestWith({ renewalDay: bad }), id);
+				expect(res.status).toBe(400);
+				expect(await renewalDayOf(id)).toBe(9);
+			}
+		});
+
+		it("rejects a numeric string rather than coercing it", async () => {
+			// validateNumber converts "15" to 15 on its own, so the handler checks
+			// the type first. A client sending a day as a string has a bug, and a
+			// 200 here hides it until the value matters.
+			const id = await insertApiKeyAccount(dbOps, "zai");
+			await handler(requestWith({ renewalDay: 9 }), id);
+
+			for (const bad of ["15", true, [], {}]) {
+				const res = await handler(requestWith({ renewalDay: bad }), id);
+				expect(res.status).toBe(400);
+				expect(await renewalDayOf(id)).toBe(9);
+			}
+		});
+
+		it("names the bound in the rejection message", async () => {
+			const id = await insertApiKeyAccount(dbOps, "zai");
+			const res = await handler(requestWith({ renewalDay: 32 }), id);
+			const payload = (await res.json()) as {
+				error?: string;
+				message?: string;
+			};
+
+			expect(`${payload.error ?? ""}${payload.message ?? ""}`).toContain("31");
+		});
+
+		it("updates alongside an api key in one call", async () => {
+			const id = await insertApiKeyAccount(dbOps, "zai");
+
+			expect(
+				(await handler(requestWith({ apiKey: NEW_KEY, renewalDay: 3 }), id))
+					.status,
+			).toBe(200);
+
+			expect(await renewalDayOf(id)).toBe(3);
+			expect((await stored(dbOps, id)).api_key).toBe(NEW_KEY);
+		});
+
+		it("leaves the stored day alone when the field is absent", async () => {
+			// undefined is not null. Sending only an api key must not clear a day
+			// the operator set earlier.
+			const id = await insertApiKeyAccount(dbOps, "zai");
+			await handler(requestWith({ renewalDay: 22 }), id);
+
+			expect((await handler(requestWith({ apiKey: NEW_KEY }), id)).status).toBe(
+				200,
+			);
+			expect(await renewalDayOf(id)).toBe(22);
+		});
+
+		it("accepts renewalDay as the only field in the body", async () => {
+			// The empty-body guard counts assignments, so a body carrying only a
+			// renewal day must not fall through to "no provider settings supplied".
+			const id = await insertApiKeyAccount(dbOps, "anthropic");
+
+			expect((await handler(requestWith({ renewalDay: 28 }), id)).status).toBe(
+				200,
+			);
+		});
+	});
 });

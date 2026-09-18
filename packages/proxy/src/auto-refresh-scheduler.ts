@@ -433,6 +433,9 @@ export class AutoRefreshScheduler {
 				refresh_token_issued_at: null,
 				consecutive_rate_limits: 0,
 				last_manual_reauth_at: null,
+				// This minimal object exists only to drive a token refresh; the renewal
+				// day is billing metadata the refresh path never reads.
+				renewal_day: null,
 			};
 
 			// Emit request start event for analytics
@@ -993,6 +996,9 @@ export class AutoRefreshScheduler {
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
 					last_manual_reauth_at: null,
+					// This minimal object exists only to drive a token refresh; the renewal
+					// day is billing metadata the refresh path never reads.
+					renewal_day: null,
 				};
 
 				// Use refreshAccessTokenSafe to get deduplication and backoff handling
@@ -1185,6 +1191,9 @@ export class AutoRefreshScheduler {
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
 					last_manual_reauth_at: null,
+					// This minimal object exists only to drive a token refresh; the renewal
+					// day is billing metadata the refresh path never reads.
+					renewal_day: null,
 				};
 
 				// Register in refreshInFlight so concurrent request-triggered refreshes join this one

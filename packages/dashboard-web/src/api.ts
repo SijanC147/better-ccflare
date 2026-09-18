@@ -1113,6 +1113,20 @@ class API extends HttpClient {
 		}
 	}
 
+	/**
+	 * Sets or clears the subscription renewal day (SB23-2055). `null` clears it.
+	 *
+	 * The value is sent as a number, never as a string: the handler rejects a
+	 * non-number type with a 400 rather than coercing it, so a string would be
+	 * refused here rather than silently accepted.
+	 */
+	async updateAccountRenewalDay(
+		id: string,
+		renewalDay: number | null,
+	): Promise<void> {
+		await this.patch(`/api/accounts/${id}`, { renewalDay });
+	}
+
 	async removeAccount(
 		id: string,
 		_name: string,

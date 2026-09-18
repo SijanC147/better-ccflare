@@ -52,8 +52,11 @@ import type {
 	RequestTransformer,
 } from "@better-ccflare/types";
 import {
+	computeNextRenewal,
 	computeReauthDeadline,
 	isEligibleForReauthDeadline,
+	RENEWAL_DAY_MAX,
+	RENEWAL_DAY_MIN,
 	REQUEST_TRANSFORMERS,
 	requiresSessionDurationTracking,
 } from "@better-ccflare/types";
@@ -319,6 +322,7 @@ export function createAccountsListHandler(
 			billing_type: string | null;
 			pause_reason: string | null;
 			last_manual_reauth_at: number | null;
+			renewal_day: number | null;
 			requires_reauth: 0 | 1;
 		}>(
 			`
@@ -357,6 +361,7 @@ export function createAccountsListHandler(
 					billing_type,
 					pause_reason,
 					last_manual_reauth_at,
+					renewal_day,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -695,6 +700,10 @@ export function createAccountsListHandler(
 							: null,
 				});
 
+				const renewalDayValue =
+					account.renewal_day != null ? Number(account.renewal_day) : null;
+				const renewal = computeNextRenewal({ renewalDay: renewalDayValue });
+
 				return {
 					id: account.id,
 					name: account.name,
@@ -714,6 +723,12 @@ export function createAccountsListHandler(
 					reauthDeadlineStatus: reauthDeadline?.status ?? null,
 					daysUntilReauthRequired: reauthDeadline?.daysUntilDeadline ?? null,
 					hoursUntilReauthRequired: reauthDeadline?.hoursUntilDeadline ?? null,
+					// This list handler builds its own response object rather than
+					// calling toAccountResponse, so every field has to be added in
+					// both places or GET /api/accounts never carries it.
+					renewalDay: renewalDayValue,
+					nextRenewalAt: renewal?.nextRenewalAt ?? null,
+					daysUntilRenewal: renewal?.daysUntilRenewal ?? null,
 					pauseReason: account.pause_reason ?? null,
 					priority: Number(account.priority) || 0,
 					tokenStatus: account.token_valid ? "valid" : "expired",
@@ -3348,10 +3363,51 @@ export function createAccountProviderSettingsUpdateHandler(
 				updated.push("customEndpoint");
 			}
 
+			if (body.renewalDay !== undefined) {
+				// null clears the day. Any other value is validated and REJECTED with
+				// a 400 naming the bound when it is out of range: falling back to a
+				// default here would be the SB23-1980 shape, where retry_attempts: 0
+				// silently became 3 and an operator asking for none got the most.
+				let renewalDay: number | null = null;
+				if (body.renewalDay !== null) {
+					// validateNumber coerces a numeric string, so "15" would otherwise
+					// pass. A JSON body that sends a day as a string is a client bug,
+					// and answering 200 to it hides the bug until the value matters.
+					if (typeof body.renewalDay !== "number") {
+						return errorResponse(
+							BadRequest(
+								`renewalDay must be a number between ${RENEWAL_DAY_MIN} and ${RENEWAL_DAY_MAX}, or null to clear it`,
+							),
+						);
+					}
+
+					try {
+						renewalDay =
+							validateNumber(body.renewalDay, "renewalDay", {
+								min: RENEWAL_DAY_MIN,
+								max: RENEWAL_DAY_MAX,
+								integer: true,
+							}) ?? null;
+					} catch (error) {
+						return errorResponse(
+							BadRequest(
+								error instanceof ValidationError
+									? error.message
+									: `renewalDay must be an integer between ${RENEWAL_DAY_MIN} and ${RENEWAL_DAY_MAX}`,
+							),
+						);
+					}
+				}
+
+				assignments.push("renewal_day = ?");
+				values.push(renewalDay);
+				updated.push("renewalDay");
+			}
+
 			if (assignments.length === 0) {
 				return errorResponse(
 					BadRequest(
-						"No provider settings supplied. Send apiKey, customEndpoint, or both.",
+						"No provider settings supplied. Send apiKey, customEndpoint, renewalDay, or a combination.",
 					),
 				);
 			}

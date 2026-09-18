@@ -44,17 +44,24 @@ afterEach(() => {
 /** The seeded values. Both non-default, so a dropped column is visible. */
 const CONSECUTIVE = 7;
 const LAST_REAUTH = 1_757_000_000_000;
+/**
+ * SB23-2055's column. 17 is deliberately not 1: a rebuild that dropped the
+ * column would leave NULL, and a test seeded with a value the bug also produces
+ * cannot tell the two apart.
+ */
+const RENEWAL_DAY = 17;
 
 type AccountRow = {
 	id: string;
 	consecutive_rate_limits: number;
 	last_manual_reauth_at: number | null;
+	renewal_day: number | null;
 };
 
 function readAccount(db: Database): AccountRow {
 	return db
 		.query(
-			"SELECT id, consecutive_rate_limits, last_manual_reauth_at FROM accounts WHERE id = 'acc-1'",
+			"SELECT id, consecutive_rate_limits, last_manual_reauth_at, renewal_day FROM accounts WHERE id = 'acc-1'",
 		)
 		.get() as AccountRow;
 }
@@ -245,6 +252,100 @@ describe("accounts rebuild: account_tier removal branch", () => {
 		runMigrations(db);
 
 		expect(readAccount(db).consecutive_rate_limits).not.toBe(0);
+		db.close();
+	});
+});
+
+describe("accounts rebuild: renewal_day (SB23-2055)", () => {
+	/**
+	 * The renewal day is operator-entered and exists nowhere else, so a rebuild
+	 * that drops it destroys data no refresh can recover. Its ALTER runs above
+	 * both rebuild branches precisely so both column lists can name it.
+	 */
+	function seedWithRenewalDay(opts: {
+		refreshTokenNotNull: boolean;
+		withAccountTier: boolean;
+	}): string {
+		const path = freshDbPath();
+		const seed = new Database(path);
+		seed.run(legacyAccountsTable(opts));
+		seedAccount(seed);
+		seed.run(
+			"ALTER TABLE accounts ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0",
+		);
+		seed.run("ALTER TABLE accounts ADD COLUMN last_manual_reauth_at INTEGER");
+		seed.run("ALTER TABLE accounts ADD COLUMN renewal_day INTEGER");
+		seed.run(
+			`UPDATE accounts SET consecutive_rate_limits = ${CONSECUTIVE}, last_manual_reauth_at = ${LAST_REAUTH}, renewal_day = ${RENEWAL_DAY} WHERE id = 'acc-1'`,
+		);
+		seed.close();
+		return path;
+	}
+
+	it("survives the refresh_token NOT NULL rebuild with its value intact", () => {
+		const db = new Database(
+			seedWithRenewalDay({
+				refreshTokenNotNull: true,
+				withAccountTier: false,
+			}),
+		);
+		runMigrations(db);
+
+		expect(columnNames(db)).toContain("renewal_day");
+		expect(readAccount(db).renewal_day).toBe(RENEWAL_DAY);
+		db.close();
+	});
+
+	it("survives the account_tier removal rebuild with its value intact", () => {
+		// This branch never runs again once account_tier is gone, so it gets one
+		// chance to copy the value and there is no later pass to repair it.
+		const db = new Database(
+			seedWithRenewalDay({
+				refreshTokenNotNull: false,
+				withAccountTier: true,
+			}),
+		);
+		runMigrations(db);
+
+		expect(columnNames(db)).not.toContain("account_tier");
+		expect(columnNames(db)).toContain("renewal_day");
+		expect(readAccount(db).renewal_day).toBe(RENEWAL_DAY);
+		db.close();
+	});
+
+	it("does not silently reset the renewal day to NULL", () => {
+		// The negative form. NULL is exactly what a dropped column reads as, and
+		// it is also the legitimate "operator never set one" value, so asserting
+		// the number alone would not say which of the two happened.
+		const db = new Database(
+			seedWithRenewalDay({
+				refreshTokenNotNull: true,
+				withAccountTier: false,
+			}),
+		);
+		runMigrations(db);
+
+		expect(readAccount(db).renewal_day).not.toBeNull();
+		db.close();
+	});
+
+	it("adds the column to a database that has never seen it", () => {
+		// The ordinary upgrade: an install with none of the three columns. The
+		// ALTER has to run above the rebuild, or the rebuild's SELECT names a
+		// column that does not exist yet and the migration throws.
+		const path = freshDbPath();
+		const seed = new Database(path);
+		seed.run(
+			legacyAccountsTable({ refreshTokenNotNull: true, withAccountTier: true }),
+		);
+		seedAccount(seed);
+		seed.close();
+
+		const db = new Database(path);
+		runMigrations(db);
+
+		expect(columnNames(db)).toContain("renewal_day");
+		expect(readAccount(db).renewal_day).toBeNull();
 		db.close();
 	});
 });

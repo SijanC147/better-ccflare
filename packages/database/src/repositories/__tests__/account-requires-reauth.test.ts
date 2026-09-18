@@ -48,7 +48,8 @@ describe("AccountRepository requires_reauth", () => {
 				last_manual_reauth_at INTEGER,
 				request_transformer TEXT,
 				rate_limit_reset_at INTEGER,
-				consecutive_rate_limits INTEGER DEFAULT 0
+				consecutive_rate_limits INTEGER DEFAULT 0,
+				renewal_day INTEGER
 			)
 		`);
 		db.run(

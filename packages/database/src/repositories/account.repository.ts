@@ -56,7 +56,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				pause_reason,
 				refresh_token_issued_at,
 				last_manual_reauth_at,
-				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
+				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits,
+				renewal_day
 			FROM accounts
 			ORDER BY priority DESC
 		`);
@@ -87,7 +88,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				pause_reason,
 				refresh_token_issued_at,
 				last_manual_reauth_at,
-				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
+				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits,
+				renewal_day
 			FROM accounts
 			WHERE id = ?
 		`,

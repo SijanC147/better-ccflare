@@ -105,7 +105,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			last_manual_reauth_at BIGINT,
 			rate_limited_reason TEXT,
 			rate_limited_at BIGINT,
-			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
+			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
+			renewal_day INTEGER
 		)
 	`);
 
@@ -845,6 +846,15 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "requires_reauth",
 			definition:
 				"ALTER TABLE accounts ADD COLUMN requires_reauth INTEGER DEFAULT 0",
+		},
+		{
+			// Subscription renewal day of month, 1 to 31 (SB23-2055). Nullable and
+			// with no backfill: an absent value means the operator has not entered
+			// one, which is not the same as day 1. The SQLite side is INTEGER too;
+			// a 1 to 31 value never needs the BIGINT the epoch columns take.
+			table: "accounts",
+			column: "renewal_day",
+			definition: "ALTER TABLE accounts ADD COLUMN renewal_day INTEGER",
 		},
 		{
 			table: "requests",

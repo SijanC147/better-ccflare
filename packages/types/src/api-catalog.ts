@@ -303,7 +303,8 @@ export const API_ROUTES: ApiRoute[] = [
 		method: "PATCH",
 		path: "/api/accounts/:accountId",
 		category: "Accounts",
-		summary: "Update an account's provider settings.",
+		summary:
+			"Update an account's provider settings and subscription renewal day.",
 	},
 	{
 		method: "DELETE",
