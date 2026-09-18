@@ -1,6 +1,7 @@
 import { AccountPresenter } from "@better-ccflare/ui-common";
 import {
 	AlertCircle,
+	CalendarClock,
 	Edit2,
 	Globe,
 	Hash,
@@ -52,6 +53,7 @@ interface AccountListItemProps {
 	onRemove: (account: Account) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
+	onRenewalDayChange?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
 	onBillingTypeToggle: (account: Account) => void;
@@ -75,6 +77,7 @@ export function AccountListItem({
 	onRemove,
 	onRename,
 	onPriorityChange,
+	onRenewalDayChange,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
 	onBillingTypeToggle,
@@ -371,6 +374,22 @@ export function AccountListItem({
 					>
 						<Zap className="h-4 w-4" />
 					</Button>
+					{onRenewalDayChange && (
+						<Button
+							variant="ghost"
+							size="sm"
+							onClick={() => onRenewalDayChange(account)}
+							title={
+								account.renewalDay
+									? `Subscription renews on day ${account.renewalDay} of the month`
+									: "Set the subscription renewal day"
+							}
+						>
+							<CalendarClock
+								className={`h-4 w-4 ${account.renewalDay ? "text-primary" : ""}`}
+							/>
+						</Button>
+					)}
 					{onCustomEndpointChange && (
 						<Button
 							variant="ghost"

@@ -9,6 +9,7 @@ import {
 	AccountList,
 	AccountModelMappingsDialog,
 	AccountPriorityDialog,
+	AccountRenewalDayDialog,
 	AccountRequestTransformerDialog,
 	AnthropicReauthDialog,
 	CodexReauthDialog,
@@ -55,6 +56,13 @@ export function AccountsTab() {
 		account: null,
 	});
 	const [priorityDialog, setPriorityDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
+	const [renewalDayDialog, setRenewalDayDialog] = useState<{
 		isOpen: boolean;
 		account: Account | null;
 	}>({
@@ -497,6 +505,26 @@ export function AccountsTab() {
 		setPriorityDialog({ isOpen: true, account });
 	};
 
+	const handleRenewalDayChange = (account: Account) => {
+		setRenewalDayDialog({ isOpen: true, account });
+	};
+
+	const handleUpdateRenewalDay = async (
+		accountId: string,
+		renewalDay: number | null,
+	) => {
+		try {
+			await api.updateAccountRenewalDay(accountId, renewalDay);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+			// Rethrown so the dialog stays open and shows the reason. The handler
+			// answers 400 for an out-of-range day rather than substituting one, so
+			// closing on failure would look like the value had been accepted.
+			throw err;
+		}
+	};
+
 	const handleUpdatePriority = async (accountId: string, priority: number) => {
 		try {
 			await api.updateAccountPriority(accountId, priority);
@@ -711,6 +739,7 @@ export function AccountsTab() {
 						onRemove={handleRemoveAccount}
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
+						onRenewalDayChange={handleRenewalDayChange}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
 						onBillingTypeToggle={handleBillingTypeToggle}
@@ -770,6 +799,20 @@ export function AccountsTab() {
 						})
 					}
 					onUpdatePriority={handleUpdatePriority}
+				/>
+			)}
+
+			{renewalDayDialog.isOpen && renewalDayDialog.account && (
+				<AccountRenewalDayDialog
+					account={renewalDayDialog.account}
+					isOpen={renewalDayDialog.isOpen}
+					onOpenChange={(open) =>
+						setRenewalDayDialog({
+							isOpen: open,
+							account: open ? renewalDayDialog.account : null,
+						})
+					}
+					onUpdateRenewalDay={handleUpdateRenewalDay}
 				/>
 			)}
 
