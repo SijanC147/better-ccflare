@@ -331,6 +331,37 @@ describe("AccountListItem", () => {
 		expect(on.has("peak-hours-pause")).toBe(false);
 	});
 
+	it("reads the plan-billing toggle in both positions, on a provider that has it", () => {
+		// Every other fixture here is anthropic, and providerSupportsCustomBilling
+		// is true only for the two -compatible providers, so this toggle was never
+		// constructed by any test and `checked` could have been a literal with the
+		// suite green. It needs its own provider, not just its own assertion.
+		const onPlan = accountMenuToggles(
+			{ ...baseAccount, provider: "openai-compatible", billingType: "plan" },
+			allHandlers,
+		).find((toggle) => toggle.id === "plan-billing");
+		const onApi = accountMenuToggles(
+			{ ...baseAccount, provider: "openai-compatible", billingType: "api" },
+			allHandlers,
+		).find((toggle) => toggle.id === "plan-billing");
+
+		expect(onPlan?.checked).toBe(true);
+		expect(onApi?.checked).toBe(false);
+		// An absent billing type is not plan billing.
+		expect(
+			accountMenuToggles(
+				{ ...baseAccount, provider: "openai-compatible" },
+				allHandlers,
+			).find((toggle) => toggle.id === "plan-billing")?.checked,
+		).toBe(false);
+		// And an anthropic account gets no plan-billing toggle at all.
+		expect(
+			accountMenuToggles(baseAccount, allHandlers).some(
+				(toggle) => toggle.id === "plan-billing",
+			),
+		).toBe(false);
+	});
+
 	it("reads the zai peak-hours toggle in both positions and only for zai", () => {
 		const zaiOn = accountMenuToggles(
 			{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: true },
