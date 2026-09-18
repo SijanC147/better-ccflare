@@ -224,7 +224,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				agent_used = CASE WHEN ${agentWinsIncoming} THEN EXCLUDED.agent_used ELSE requests.agent_used END,
 				agent_attribution_source = CASE WHEN ${agentWinsIncoming} THEN EXCLUDED.agent_attribution_source ELSE requests.agent_attribution_source END,
 				-- stream_terminal_state uses preserve-first (COALESCE) — a later
-				-- re-finalization (e.g. updateUsage after handleEnd) shouldn't
+				-- re-finalization (e.g. updateUsage after handleEnd) must not
 				-- blank out the real SSE termination state the handleEnd path
 				-- recorded. A null incoming value means "I have nothing new",
 				-- not "the stream was clean".

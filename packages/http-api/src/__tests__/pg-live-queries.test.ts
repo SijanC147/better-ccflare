@@ -212,6 +212,38 @@ describe("SQL dialect hazards (static, always runs)", () => {
 		expect(hits).toEqual([]);
 	});
 
+	it("no SQL line comment contains an apostrophe", () => {
+		// The mirror of the rule above, and the more dangerous direction.
+		// convertPlaceholders() tracked string literals by toggling on every
+		// `'` without skipping comments, so one apostrophe in a comment left it
+		// believing a literal was open and every following `?` reached
+		// PostgreSQL as a literal `?`.
+		//
+		// Measured 2026-09-18 against PostgreSQL 18 on
+		// `-- The one column with no DEFAULT 0, so AVG's NULL-skipping`: four
+		// live cases returned HTTP 500 with `syntax error at or near "AND"`.
+		// The message names neither the apostrophe nor the `?`, so do not
+		// expect the error to lead you here. SQLite never sees the converted
+		// form, so 23 SQLite tests and 4 mutations were green throughout.
+		//
+		// convertPlaceholders() now skips `--` comments outright, which is what
+		// actually removes the class. This gate stays because a comment whose
+		// prose reads as an open literal is still a trap for anyone reading the
+		// SQL, and because it fails at `bun test` with no server, where the
+		// live harness needs DATABASE_URL.
+		//
+		// Unlike the sibling `?` rule this is NOT anchored to the start of the
+		// line. Line-start anchoring is blind to a trailing comment, and when
+		// this rule was first run with `^\s*--` it reported 3 sites while the
+		// unanchored form reported 6: migrations.ts:1942, :1945 and :1947 all
+		// trail real SQL on their line, and :1947 is followed by a `?` two
+		// lines later. That statement runs through bun:sqlite's db.prepare()
+		// rather than BunSqlAdapter, so it never reached the converter, but the
+		// shape is the live one.
+		const hits = offendingLines(sources, /--\s[^\n]*'/);
+		expect(hits).toEqual([]);
+	});
+
 	it("no jsonb existence operator is used", () => {
 		// PostgreSQL's `?`, `?|` and `?&` jsonb operators are destroyed by
 		// convertPlaceholders(). Use jsonb_exists()/jsonb_exists_any() if this
