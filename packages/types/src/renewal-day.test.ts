@@ -34,6 +34,15 @@ describe("daysInMonth", () => {
 		// `year % 4 === 0` rule returns 29 here and is wrong.
 		expect(daysInMonth(2100, 1)).toBe(28);
 	});
+
+	it("gives 29 days for February of a century that IS a leap year", () => {
+		// The other half of the century rule, and the half that is easy to omit:
+		// dropping the `|| year % 400 === 0` clause still passes every test above,
+		// because no year divisible by 400 appears in any of them. 2000 and 2400
+		// are leap years and a rule ending at `% 100 !== 0` calls them 28.
+		expect(daysInMonth(2000, 1)).toBe(29);
+		expect(daysInMonth(2400, 1)).toBe(29);
+	});
 });
 
 describe("computeNextRenewal: clamping to the month's last day", () => {
