@@ -87,6 +87,25 @@ import { createRoot } from "react-dom/client";
  * work: `Event`, `EventTarget`, `CustomEvent`, `ErrorEvent`, `MessageEvent`,
  * `CloseEvent`, `DOMException`, `navigator`, `addEventListener`,
  * `removeEventListener`, `dispatchEvent`, `postMessage`, `MessagePort`.
+ *
+ * `ReadableStream` is on the list and is a no-op today: happy-dom does not
+ * replace it, which is exactly why `pipeThrough` broke. It is listed so that a
+ * happy-dom release that starts replacing it does not reopen the same bug
+ * silently.
+ *
+ * THE TIMERS CARRY A COST, and it is measured rather than suspected.
+ * Restoring Bun's `setTimeout` takes those timers out of happy-dom's async
+ * task manager, so `happyDOM.waitUntilComplete()` no longer waits for them. A
+ * probe scheduling a 300ms timer and then awaiting `waitUntilComplete()` came
+ * back in **1ms with the callback unfired**. So `waitUntilComplete`, and
+ * anything else built on that task manager, will report "done" while work is
+ * outstanding. **Do not use it. Use React's `act`, which `mount` and `click`
+ * already do.**
+ *
+ * The trade was taken deliberately: Bun runs 391 test files in one process,
+ * and handing all of them happy-dom's timers to keep one convenience API
+ * working for a package that does not use it is the worse risk. A test that
+ * silently passes is worse than an API that is documented as unavailable.
  */
 const BUN_OWNED = [
 	"ReadableStream",
