@@ -2248,6 +2248,13 @@ const DEFAULT_SHUTDOWN_DRAIN_MS = 60_000;
 export const MAX_SHUTDOWN_DRAIN_MS = 15 * 60 * 1000;
 /** Budget for post-drain cleanup (DB writer, disposables) before force exit. */
 const SHUTDOWN_WATCHDOG_MARGIN_MS = 15_000;
+/**
+ * Slice of that margin the OpenObserve exporter may spend on its final flush.
+ * Deliberately a fraction: the exporter ships telemetry, the disposals that
+ * follow it persist data, so the exporter must never be able to consume the
+ * whole margin and let the watchdog force-exit before `shutdown()` runs.
+ */
+const SHUTDOWN_EXPORTER_FLUSH_MS = 5_000;
 
 export function readShutdownDrainMs(): number {
 	const raw = process.env[SHUTDOWN_DRAIN_MS_ENV];
@@ -2452,8 +2459,22 @@ async function handleGracefulShutdown(signal: string) {
 		await drainUsageCollector();
 		// The exporter buffers in memory only, so anything still queued is lost
 		// at exit unless it is posted now. Failures are already swallowed and
-		// warned about inside, so this cannot hold up shutdown.
-		await flushOpenObserve();
+		// warned about inside. `true` spends one attempt per stream even if a
+		// backoff window is open, because waiting the window out is not an
+		// option here: the records go either now or nowhere.
+		//
+		// Bounded, because a forced flush waits for any pass already running and
+		// that pass can be parked in a 10s request per batch. Left unbounded it
+		// could consume the whole SHUTDOWN_WATCHDOG_MARGIN_MS and let the
+		// watchdog force-exit before `shutdown()` disposes the DB writer, which
+		// trades the database's writes for the exporter's telemetry. Best effort
+		// means best effort within a budget.
+		await Promise.race([
+			flushOpenObserve(true).catch(() => {}),
+			new Promise<void>((resolve) =>
+				setTimeout(resolve, SHUTDOWN_EXPORTER_FLUSH_MS),
+			),
+		]);
 		await shutdown();
 		console.log("✅ Shutdown complete");
 		process.exit(0);
