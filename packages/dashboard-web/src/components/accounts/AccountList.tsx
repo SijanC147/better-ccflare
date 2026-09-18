@@ -167,7 +167,7 @@ export function AccountList({
 				<div
 					className={
 						compact
-							? "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2"
+							? "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 items-start gap-2"
 							: "space-y-2"
 					}
 				>
