@@ -52,6 +52,80 @@ const log = new Logger("Config");
 const TEMP_FILE_STALE_AFTER_MS = 60_000;
 
 /**
+ * 0600 for the config file and 0700 for the directory holding it. The file
+ * holds pg_password, local_control_secret and upstream_maintainer_token, which
+ * is a GitHub PAT, and the directory holds the database beside it.
+ */
+const CONFIG_FILE_MODE = 0o600;
+const CONFIG_DIR_MODE = 0o700;
+
+/**
+ * Paths already reported as unenforceable, so the warning below lands once per
+ * process rather than once per load.
+ *
+ * Module-scoped because the condition is a property of the filesystem, not of a
+ * Config instance, and more than one Config can be constructed in a process.
+ * Keyed by path rather than a single boolean so a process holding two configs
+ * on different filesystems still hears about both; the set is bounded by the
+ * number of distinct config paths, which is one or two.
+ */
+const unenforceableModes = new Set<string>();
+
+/**
+ * chmod a path and then read the mode back, returning whether it actually
+ * changed.
+ *
+ * chmodSync reports success and changes nothing on Docker Desktop bind mounts
+ * from a macOS or Windows host and on FAT and exFAT volumes.
+ * docs/deployment.md:304 documents the config on a Docker volume, so that is a
+ * real layout, and the result was a guard that came out true on every load
+ * while the file stayed world-readable and nothing said so. Catching a chmod
+ * that throws was never enough (SB23-1686).
+ *
+ * Skipped entirely on Windows, and the skip is the load-bearing half. There
+ * statSync().mode & 0o777 reports 0666 for any writable file and 0444 for a
+ * read-only one, because Node derives st_mode from FILE_ATTRIBUTE_READONLY and
+ * there is no POSIX mode to read back. A re-stat without this branch would
+ * conclude the chmod did not take on every Windows start, trading a silent
+ * failure on bind mounts for a false alarm across a whole platform. Unverified
+ * on Windows, which neither author nor reviewer has: argued from libuv, the
+ * same rung as the win32 branch in writeTarget().
+ *
+ * Warns rather than throws, and the caller does not branch on the result.
+ * chmod fails legitimately on a bind-mounted volume and on a file owned by
+ * another user, and neither means the config is unusable, which is the
+ * convention packages/database/src/file-modes.ts already sets for the database
+ * files.
+ */
+function chmodAndVerify(path: string, mode: number, what: string): void {
+	chmodSync(path, mode);
+	if (process.platform === "win32") {
+		log.info(`Restricted ${what} permissions to ${modeText(mode)}`);
+		return;
+	}
+	const after = statSync(path).mode & 0o777;
+	if (after === mode) {
+		log.info(`Restricted ${what} permissions to ${modeText(mode)}`);
+		return;
+	}
+	if (unenforceableModes.has(path)) return;
+	unenforceableModes.add(path);
+	log.warn(
+		`chmod on the ${what} ${path} reported success but the mode is still ` +
+			`${modeText(after)} rather than ${modeText(mode)}, so it may be readable ` +
+			`by other local users. Filesystems without Unix modes behave this way, ` +
+			`including Docker bind mounts from a macOS or Windows host and FAT or ` +
+			`exFAT volumes. Move the config onto a filesystem that enforces modes, ` +
+			`or mount it so only this user can read it.`,
+	);
+}
+
+/** `0o600` for a log line, so a mode is never printed as the decimal 384. */
+function modeText(mode: number): string {
+	return `0${mode.toString(8).padStart(3, "0")}`;
+}
+
+/**
  * Escape a literal for use inside a RegExp. The config's basename is
  * user-supplied via BETTER_CCFLARE_CONFIG_PATH and normally contains a dot, so
  * it cannot go into a pattern unescaped.
@@ -461,6 +535,10 @@ export class Config extends EventEmitter {
 	 * documents the config on a Docker volume) or on a file owned by another
 	 * user, and neither case means the config is unusable.
 	 *
+	 * chmodAndVerify() reads the mode back afterwards, because a chmod that
+	 * reports success and changes nothing was the worst available shape here: the
+	 * guard came out true on every load while the file stayed world-readable.
+	 *
 	 * Acts on writeTarget(), which refuses to follow a symlink whose directory
 	 * another local user can write. chmod follows links, so without that refusal
 	 * a planted link turns this into a tool for changing an unrelated file's mode:
@@ -483,10 +561,8 @@ export class Config extends EventEmitter {
 				);
 				return;
 			}
-			if ((info.mode & 0o777) !== 0o600) {
-				chmodSync(target, 0o600);
-				log.info("Restricted config file permissions to 0600");
-			}
+			if ((info.mode & 0o777) === CONFIG_FILE_MODE) return;
+			chmodAndVerify(target, CONFIG_FILE_MODE, "config file");
 		} catch (error) {
 			log.warn(`Could not restrict config file permissions: ${error}`);
 		}
@@ -516,7 +592,9 @@ export class Config extends EventEmitter {
 	 * Warns rather than throws. chmod fails legitimately on a bind-mounted volume
 	 * or a directory owned by another user, and neither means the config is
 	 * unusable. It can also report success and change nothing, on Docker bind
-	 * mounts and FAT/exFAT; detecting that is SB23-1686 and is not done here.
+	 * mounts and FAT/exFAT, which chmodAndVerify() reads back and reports: the
+	 * directory is the one change that covers the database, so a silent no-op
+	 * here leaves the plaintext tokens traversable.
 	 */
 	private restrictConfigDir(): void {
 		const dir = dirname(this.configPath);
@@ -531,10 +609,8 @@ export class Config extends EventEmitter {
 			// Directories only. A non-directory here means something is badly wrong
 			// with the path; changing its mode would not help.
 			if (!info.isDirectory()) return;
-			if ((info.mode & 0o777) !== 0o700) {
-				chmodSync(dir, 0o700);
-				log.info("Restricted config directory permissions to 0700");
-			}
+			if ((info.mode & 0o777) === CONFIG_DIR_MODE) return;
+			chmodAndVerify(dir, CONFIG_DIR_MODE, "config directory");
 		} catch (error) {
 			log.warn(`Could not restrict config directory permissions: ${error}`);
 		}
