@@ -41,6 +41,42 @@ type AnthropicModelsPage = {
 	last_id?: string | null;
 };
 
+/**
+ * One Anthropic model summary rendered as one OpenAI model object.
+ *
+ * Shared by the listing (`GET /v1/models`) and the single-model lookup
+ * (`GET /v1/models/{id}`) on purpose: they are the same per-entry contract,
+ * and a translation that drifted between them would put two different shapes
+ * of the same model in front of one client. One function means one mutation
+ * kills both.
+ *
+ * `display_name` and `created_at` survive as extra fields because
+ * `ingestModelsListing` in `packages/proxy/src/model-catalog.ts` reads them
+ * off the proxied listing body, and OpenAI clients ignore keys they do not
+ * know. An unparseable or absent `created_at` becomes 0 rather than NaN,
+ * which would serialize as `null` and break clients that expect a number.
+ */
+function toOpenAIModelEntry(model: AnthropicModelSummary): {
+	id: string;
+	object: string;
+	created: number;
+	owned_by: string;
+	display_name: string;
+	created_at: string | null;
+} {
+	const createdMs = model.created_at
+		? Date.parse(model.created_at)
+		: Number.NaN;
+	return {
+		id: model.id as string,
+		object: "model",
+		created: Number.isNaN(createdMs) ? 0 : Math.floor(createdMs / 1000),
+		owned_by: "anthropic",
+		display_name: model.display_name ?? (model.id as string),
+		created_at: model.created_at ?? null,
+	};
+}
+
 // Hard rate limit statuses that should block account usage
 const HARD_LIMIT_STATUSES = new Set([
 	"rate_limited",
@@ -722,10 +758,9 @@ export class AnthropicProvider extends BaseProvider {
 
 		// A model listing an OpenAI client asked for has to come back in the
 		// OpenAI shape; a native Anthropic client keeps Anthropic's.
-		if (
-			response.headers.get("x-better-ccflare-request-path") === "/v1/models" &&
-			!requestHeaders?.has("anthropic-version")
-		) {
+		const requestPath = response.headers.get("x-better-ccflare-request-path");
+		const nativeClient = requestHeaders?.has("anthropic-version") === true;
+		if (requestPath === "/v1/models" && !nativeClient) {
 			return this.transformModelsListResponse(
 				sanitizedResponse,
 				_account,
@@ -733,11 +768,110 @@ export class AnthropicProvider extends BaseProvider {
 			);
 		}
 
+		// `GET /v1/models/{id}`. The exact match above runs first, so the
+		// listing is never reached by this branch; a request path that only
+		// starts with `/v1/models/` is a single-model lookup. Anthropic serves
+		// the same endpoint, so this is a passthrough plus the same per-entry
+		// translation the listing uses.
+		if (
+			requestPath?.startsWith("/v1/models/") &&
+			requestPath.length > "/v1/models/".length &&
+			!nativeClient
+		) {
+			return this.transformSingleModelResponse(sanitizedResponse);
+		}
+
 		// Add OpenAI-compatible finish_reason alongside Anthropic's stop_reason
 		return this.transformStreamToOpenAIFormat(
 			sanitizedResponse,
 			requestHeaders,
 		);
+	}
+
+	/**
+	 * Anthropic's `GET /v1/models/{id}` answer rendered in the OpenAI
+	 * single-model shape: `{id, object: "model", created, owned_by}`.
+	 *
+	 * Served by proxying to Anthropic rather than by reading the local model
+	 * catalog, and the choice is deliberate. The catalog's `source` can be
+	 * `fallback`, meaning a bundled or on-disk list rather than anything the
+	 * account was told (`packages/http-api/src/handlers/models.ts` documents
+	 * why a catalogue is not an entitlement claim). Serving from it would let
+	 * a miss 404 a model the account can really call, and a hit 200 a model
+	 * the plan refuses. The passthrough is the live entitlement of the account
+	 * that was actually routed to. It costs one upstream round trip per
+	 * lookup, which a single-model lookup is not issued often enough to feel.
+	 *
+	 * An upstream error is translated into OpenAI's error envelope rather than
+	 * passed through as Anthropic's, because a client that reached this
+	 * endpoint without `anthropic-version` is an OpenAI client and cannot read
+	 * the other shape. **The status code is preserved**: a 404 stays a 404, so
+	 * an unknown or unentitled id surfaces as OpenAI's 404-with-`error`, never
+	 * as an empty 200.
+	 *
+	 * Anything that is not a JSON body passes through untouched.
+	 */
+	private async transformSingleModelResponse(
+		response: Response,
+	): Promise<Response> {
+		if (!response.headers.get("content-type")?.toLowerCase().includes("json")) {
+			return response;
+		}
+
+		let body: AnthropicModelSummary & {
+			error?: { type?: string; message?: string };
+		};
+		try {
+			body = await response.clone().json();
+		} catch (error) {
+			log.warn("Could not parse the /v1/models/{id} body as JSON:", error);
+			return response;
+		}
+
+		const headers = new Headers(response.headers);
+		// The re-serialized body has a different length, and was already
+		// decoded — a stale content-length or content-encoding truncates it.
+		headers.delete("content-length");
+		headers.delete("content-encoding");
+		headers.set("content-type", "application/json");
+
+		if (!response.ok) {
+			const translated = {
+				error: {
+					message:
+						body.error?.message ??
+						`Upstream returned HTTP ${response.status} for this model`,
+					// Anthropic's `not_found_error` is OpenAI's
+					// `invalid_request_error` with code `model_not_found`; every
+					// other upstream type is reported as itself so a caller can
+					// still tell a rate limit from a bad request.
+					type:
+						body.error?.type === "not_found_error"
+							? "invalid_request_error"
+							: (body.error?.type ?? "api_error"),
+					code: response.status === 404 ? "model_not_found" : null,
+					param: null,
+				},
+			};
+			return new Response(JSON.stringify(translated), {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}
+
+		// A 200 with no usable id is not a model. Passing it through unchanged
+		// is honest: inventing an OpenAI object around an empty body would
+		// tell the client a model exists when the upstream never said so.
+		if (typeof body.id !== "string" || body.id.length === 0) {
+			return response;
+		}
+
+		return new Response(JSON.stringify(toOpenAIModelEntry(body)), {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
 	}
 
 	/**
@@ -797,21 +931,7 @@ export class AnthropicProvider extends BaseProvider {
 			object: "list",
 			data: models
 				.filter((model) => typeof model.id === "string" && model.id.length > 0)
-				.map((model) => {
-					const createdMs = model.created_at
-						? Date.parse(model.created_at)
-						: Number.NaN;
-					return {
-						id: model.id as string,
-						object: "model",
-						created: Number.isNaN(createdMs) ? 0 : Math.floor(createdMs / 1000),
-						owned_by: "anthropic",
-						// Kept for the model-catalog ingester, which reads these
-						// names off the proxied body.
-						display_name: model.display_name ?? model.id,
-						created_at: model.created_at ?? null,
-					};
-				}),
+				.map(toOpenAIModelEntry),
 			// `has_more` is the honest state of the stitched body, not of the
 			// first page: false only when the last page we read said so.
 			has_more: stitched.hasMore,
