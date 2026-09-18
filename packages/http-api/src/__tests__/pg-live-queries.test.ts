@@ -1618,6 +1618,40 @@ describe.skipIf(!livePgAvailable)(
 				expect(row?.a).toBe("first");
 				expect(row?.b).toBe("second");
 			});
+
+			it("converts a placeholder that follows an apostrophe in a comment", async () => {
+				// The SB23-2286 reproduction, executed by a real server. On the
+				// pre-fix converter the apostrophe in the comment left the
+				// scanner believing a string literal was open, both `?` reached
+				// PostgreSQL untouched, and the server answered
+				// `syntax error at or near "AND"`. The statement below is the
+				// shape of the four cases that 500'd, reduced to the parts that
+				// matter: an odd apostrophe count, a comment, and two binds.
+				const row = await adapter.get<{ a: string; b: string }>(
+					`SELECT ? AS a,
+					        -- The one column with no DEFAULT 0, so AVG's NULL-skipping
+					        --   matters, and 'plan' rows differ from 'api' rows.
+					        ? AS b
+					 WHERE 'plan' = 'plan'`,
+					["first", "second"],
+				);
+				expect(row?.a).toBe("first");
+				expect(row?.b).toBe("second");
+			});
+
+			it("does not renumber a `?` inside a comment", async () => {
+				// The mirror defect. Before the fix the comment's `?` consumed
+				// $1, so `a` bound "second" and the statement either errored on
+				// a missing $3 or silently returned the wrong value.
+				const row = await adapter.get<{ a: string; b: string }>(
+					`SELECT ? AS a,
+					        -- is this a bind parameter? no, it is prose
+					        ? AS b`,
+					["first", "second"],
+				);
+				expect(row?.a).toBe("first");
+				expect(row?.b).toBe("second");
+			});
 		});
 	},
 );
