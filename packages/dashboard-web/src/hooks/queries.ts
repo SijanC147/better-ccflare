@@ -955,6 +955,34 @@ export const useAcknowledgeAlert = () => {
 	});
 };
 
+/**
+ * Acknowledges every member of one alert group, as a fan-out over the
+ * existing per-id route.
+ *
+ * Member ids are captured by the caller at click time, so an alert that
+ * arrives during the request (the ICLD condition re-fires hourly) is not
+ * swallowed: it stays unacknowledged and re-opens the group on the refetch.
+ * A server-side acknowledge-by-key could not make that promise.
+ *
+ * Promise.allSettled never rejects, and the per-id handler returns
+ * `{ ok: true }` even when the service did not find the id, so neither the
+ * settled results nor the response bodies carry the outcome. The refetch is
+ * what reports success, and it runs once in onSettled regardless.
+ *
+ * Separate from useAcknowledgeAlert on purpose: sharing that mutation would
+ * make one in-flight acknowledgement disable every button in the list.
+ */
+export const useAcknowledgeAlerts = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (ids: string[]) =>
+			Promise.allSettled(ids.map((id) => api.acknowledgeAlert(id))),
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.insightsAlerts() });
+		},
+	});
+};
+
 export const useUpdateProject = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
