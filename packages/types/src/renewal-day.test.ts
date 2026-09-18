@@ -35,6 +35,19 @@ describe("daysInMonth", () => {
 		expect(daysInMonth(2100, 1)).toBe(28);
 	});
 
+	it("normalizes a monthIndex outside 0 to 11, as the Date constructor does", () => {
+		// The Date-based form this replaced got this for free and its comment
+		// documented the 12 case as supported. A bare table lookup returns
+		// undefined while the signature promises a number, and
+		// `Math.min(day, undefined)` is NaN, which would reach the date string
+		// with nothing throwing. Unreachable from computeNextRenewal, which wraps
+		// before it calls, but daysInMonth is exported from packages/types.
+		expect(daysInMonth(2026, 12)).toBe(31); // January 2027
+		expect(daysInMonth(2026, -1)).toBe(31); // December 2025
+		expect(daysInMonth(2027, 13)).toBe(29); // February 2028, a leap year
+		expect(daysInMonth(2026, 13)).toBe(28); // February 2027
+	});
+
 	it("gives 29 days for February of a century that IS a leap year", () => {
 		// The other half of the century rule, and the half that is easy to omit:
 		// dropping the `|| year % 400 === 0` clause still passes every test above,
