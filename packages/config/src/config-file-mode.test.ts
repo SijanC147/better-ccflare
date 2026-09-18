@@ -282,17 +282,18 @@ describe("config file permissions", () => {
 		}
 	});
 
-	it("replaces an untrusted config symlink rather than following it", () => {
+	it("refuses to follow a config symlink in a directory others can write", () => {
 		// os.tmpdir() is one of the validator's allowed base directories, and on
 		// Linux that is /tmp at mode 1777, so another local user can plant a link
 		// there. Following it would write the secrets into a file they chose, and
 		// chmod follows links too: measured before the guard, an unrelated 0755
 		// file became 0600 simply because the link pointed at it.
 		//
-		// The link is destroyed rather than followed, and settings keep
-		// persisting (SB23-1696). Refusing to save was no safer, since nothing is
-		// written through the link either way, and it stopped the process
-		// persisting anything at all.
+		// The link here belongs to the test process, which is what keeps it in
+		// place. A link of our own is never replaced, because only root may chown
+		// a symlink, so one owned by us was created by us and is the operator's
+		// arrangement rather than a planted one. The replacement path and the
+		// ownership rule that bounds it live in config-untrusted-link-replace.test.ts.
 		const shared = join(tmpdir(), `better-ccflare-shared-${process.pid}`);
 		const victim = mkdtempSync(join(tmpdir(), "better-ccflare-victim-"));
 		try {
@@ -308,16 +309,9 @@ describe("config file permissions", () => {
 			const config = new Config(link);
 			config.set("pg_password", "hunter2");
 
-			// The victim is untouched: not written through, and not chmodded.
 			expect(mode(unrelated)).toBe(0o755);
 			expect(readFileSync(unrelated, "utf8")).toBe("#!/bin/sh\n");
-
-			// The link is gone, replaced by a regular 0600 file holding the secret.
-			expect(lstatSync(link).isSymbolicLink()).toBe(false);
-			expect(lstatSync(link).isFile()).toBe(true);
-			expect(mode(link)).toBe(0o600);
-			expect(readFileSync(link, "utf8")).toContain("hunter2");
-			expect(lstatSync(link).ino).not.toBe(lstatSync(unrelated).ino);
+			expect(lstatSync(link).isSymbolicLink()).toBe(true);
 		} finally {
 			rmSync(shared, { recursive: true, force: true });
 			rmSync(victim, { recursive: true, force: true });

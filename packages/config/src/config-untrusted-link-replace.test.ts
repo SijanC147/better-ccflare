@@ -47,6 +47,31 @@ function captureLogs(fn: () => void): LogEvent[] {
 	return captured;
 }
 
+/**
+ * Run `fn` with this process reading as a different user.
+ *
+ * The replacement only fires for a link this process does NOT own, because only
+ * root may chown a symlink, so a link owned by us was created by us. A test
+ * cannot create a link owned by someone else without a second account, so the
+ * comparison is moved instead of the link: `directoryIsTrusted()` and
+ * `replaceUntrustedLink()` both read `process.getuid`, so making it report a
+ * stranger puts a fixture link of ours on the planted side of both checks.
+ *
+ * This exercises the comparison, not the OS. POSIX's own guarantee that another
+ * user cannot substitute our link stays an argument, at the same rung as the
+ * ownership check PR #57 shipped. The repo already uses this technique in
+ * config-file-mode.test.ts and labels it the same way.
+ */
+function asStranger<T>(fn: () => T): T {
+	const real = process.getuid;
+	process.getuid = () => 999999;
+	try {
+		return fn();
+	} finally {
+		process.getuid = real;
+	}
+}
+
 /** A directory another local user can write, which is what makes a link untrusted. */
 function sharedDir(label: string): string {
 	const dir = join(tmpdir(), `better-ccflare-${label}-${process.pid}`);
@@ -71,10 +96,12 @@ describe("an untrusted config symlink", () => {
 			const link = join(shared, "config.json");
 			symlinkSync(victim, link);
 
-			const logs = captureLogs(() => {
-				const config = new Config(link);
-				config.set("pg_password", "hunter2");
-			});
+			const logs = captureLogs(() =>
+				asStranger(() => {
+					const config = new Config(link);
+					config.set("pg_password", "hunter2");
+				}),
+			);
 
 			// The operator is told, at WARN, and told where. A replacement that
 			// happens silently leaves them believing their link is still in place,
@@ -149,8 +176,10 @@ describe("an untrusted config symlink", () => {
 			const link = join(shared, "config.json");
 			symlinkSync(victim, link);
 
-			const config = new Config(link);
-			config.set("pg_password", "hunter2");
+			asStranger(() => {
+				const config = new Config(link);
+				config.set("pg_password", "hunter2");
+			});
 
 			expect(lstatSync(link).uid).toBe(process.getuid?.() as number);
 			expect(lstatSync(link).gid).toBe(inherited);
@@ -158,6 +187,45 @@ describe("an untrusted config symlink", () => {
 		} finally {
 			rmSync(shared, { recursive: true, force: true });
 			rmSync(victimDir, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves our own link alone in a group-writable private directory", () => {
+		// The case that makes the ownership rule load-bearing rather than tidy.
+		// directoryIsTrusted() rejects any group or other writable directory, and
+		// on a distribution with umask 002 and per-user private groups mkdir
+		// ~/.config produces 0775 owned by the user and the user's own group. That
+		// directory is effectively private, it is rejected anyway, and a dotfiles
+		// link inside it is the arrangement resolveLinkChain() exists to support.
+		//
+		// Replacing there would turn a reversible misdetection into a permanent
+		// one: the link is destroyed, and because the read already set data to {},
+		// what lands in its place is a file of defaults with local_control_secret
+		// regenerated, invalidating every existing client. Refusing leaves the link
+		// and the real config intact and chmod 700 on the directory restores it.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-privgrp-"));
+		try {
+			const real = join(dir, "real.json");
+			const link = join(dir, "config.json");
+			writeFileSync(real, JSON.stringify({ lb_strategy: "session" }));
+			symlinkSync(real, link);
+			// Group-writable, owned by us, like a private-group ~/.config. Explicit
+			// chmod, because mkdtemp's mode is masked by the umask.
+			chmodSync(dir, 0o775);
+			expect(statSync(dir).mode & 0o022).not.toBe(0);
+			expect(lstatSync(link).uid).toBe(process.getuid?.() as number);
+
+			const config = new Config(link);
+			config.set("pg_password", "hunter2");
+
+			// The link survives and its target keeps the operator's real config.
+			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+			expect(readFileSync(real, "utf8")).toContain("session");
+			// Nothing was written through it either, which is the pre-existing
+			// refusal and is what makes the misdetection reversible.
+			expect(readFileSync(real, "utf8")).not.toContain("hunter2");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -223,10 +291,15 @@ describe("an untrusted config symlink", () => {
 			const link = join(shared, "config.json");
 			symlinkSync(attacker, link);
 
-			const config = new Config(link);
-
-			expect(config.get("local_control_secret")).toBeUndefined();
-			expect(config.getLocalControlSecret()).not.toBe("ATTACKER-CHOSEN");
+			const config = asStranger(() => {
+				const probe = new Config(link);
+				// Both reads happen inside the stub: getLocalControlSecret() re-reads
+				// the file itself and was the reader that stayed unguarded longest.
+				expect(probe.get("local_control_secret")).toBeUndefined();
+				expect(probe.getLocalControlSecret()).not.toBe("ATTACKER-CHOSEN");
+				return probe;
+			});
+			expect(config).toBeDefined();
 			expect(readFileSync(link, "utf8")).not.toContain("ATTACKER-CHOSEN");
 			expect(lstatSync(link).isSymbolicLink()).toBe(false);
 		} finally {

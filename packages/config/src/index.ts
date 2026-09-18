@@ -964,6 +964,31 @@ export class Config extends EventEmitter {
 			return false;
 		}
 		if (!link.isSymbolicLink()) return false;
+		// A link that belongs to us was created by us, because only root may chown
+		// a symlink, so it is the operator's own arrangement and destroying it is
+		// not this branch's business. That matters more than it looks:
+		// directoryIsTrusted() rejects any group or other writable directory, and
+		// on a distribution with umask 002 and per-user private groups mkdir
+		// ~/.config produces 0775 owned by the user and the user's own group. That
+		// directory is effectively private and is rejected anyway, and a dotfiles
+		// link inside it is exactly the arrangement resolveLinkChain() says it
+		// exists to support.
+		//
+		// Without this the misdetection turns from reversible into permanent.
+		// Refusing left the link and the settings intact, and chmod 700 on the
+		// directory restored everything. Replacing destroys the link, and since
+		// the read has already set this.data to {}, what lands in its place is a
+		// file of defaults: measured, 24 bytes, with local_control_secret
+		// regenerated and every existing client's secret invalidated.
+		//
+		// It costs the fix nothing. In a directory another user can write without
+		// the sticky bit they unlink ours and plant their own, which carries their
+		// uid and is still replaced; with the sticky bit they cannot unlink ours
+		// at all. The one case this gives up is a root process facing a link owned
+		// by the service user, which now refuses rather than replaces, and
+		// refusing is the safe direction.
+		const uid = process.getuid?.();
+		if (uid === undefined || link.uid === uid) return false;
 		if (this.directoryIsTrusted(dirname(this.configPath))) return false;
 		if (!this.saveByRename(this.configPath, content, false)) {
 			log.error(
