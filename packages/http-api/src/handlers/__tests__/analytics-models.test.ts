@@ -497,10 +497,19 @@ describe("GET /api/analytics/models — rows with no model", () => {
 
 describe("GET /api/analytics/models — ordering", () => {
 	it("orders by requests descending, then model ascending", async () => {
+		// The two equal-count models are inserted in the order c then a, which
+		// is the reverse of the order asserted. That is what makes this test
+		// cover the `r.model ASC` tiebreak rather than merely agree with it.
+		// Measured 2026-09-18: with a1 inserted before c1, removing the
+		// tiebreak from the handler left this test green, because the order
+		// SQLite then returned for the tied pair happened to match insertion
+		// order and so matched the assertion. An ORDER BY with no tiebreak
+		// gives an unspecified order for tied rows, so a fixture whose natural
+		// order already equals the answer cannot tell the clause is gone.
 		insertRequest({ id: "b1", model: "b-model" });
 		insertRequest({ id: "b2", model: "b-model" });
-		insertRequest({ id: "a1", model: "a-model" });
 		insertRequest({ id: "c1", model: "c-model" });
+		insertRequest({ id: "a1", model: "a-model" });
 
 		const rows = await rowsFor("range=24h");
 
