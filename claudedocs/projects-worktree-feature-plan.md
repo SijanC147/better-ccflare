@@ -2,7 +2,13 @@
 
 **Date:** 2026-05-17
 **Author:** orchestrator (post 4-agent parallel investigation)
-**Status:** PLAN ONLY — no code changes proposed in this document
+**Status:** PARTLY SHIPPED. This was a plan when it was written on 2026-05-17 and parts of it
+have since been implemented. A line in this document reading as a proposal is not evidence that
+the feature is absent: grep the source before asserting anything here is unimplemented. Two
+sessions asserted `X-CCFlare-CWD` was unbuilt on the strength of §3 Path B below, one of them
+across a repo boundary into another project's brief (`SB23-1987`). Known shipped as of 2026-09-19:
+project discovery with the forward-slug resolver (`#116`), the `X-CCFlare-CWD` header, and
+`project_id` / `worktree_path` on `requests`.
 **Target branch when implementing:** `feature/projects-worktree-discovery`
 
 ---
@@ -200,7 +206,18 @@ The proxy already extracts a project string from headers + system prompt regex (
 
 This is the v1 attribution path. It buys exact project_id for any user who runs Claude Code from a discovered project.
 
-**Path B — explicit cwd header** (optional, v1.1):
+**Path B — explicit cwd header** (SHIPPED, not a proposal):
+
+`X-CCFlare-CWD` is read at `packages/proxy/src/handlers/request-handler.ts:44` and carried as
+`cwdHint` through `response-handler.ts:106` and `packages/types/src/api.ts:22`. The receiving half
+is complete. What does not exist is anything that **sends** it: measured 2026-09-17 against the live
+database, of 41,072 requests since 09-15 exactly one carried a `worktree_path`, and **zero**
+requests have a `worktree_path` with a null `project_id`, so nothing that had the input failed to
+resolve. The missing piece is host-level, a Claude Code hook in `claude-meta` that sets the header
+on every session (`SB23-2236`, related to `SB23-1296`). Do not look for a resolver regression in
+this repository.
+
+The original proposal follows, kept for its reasoning.
 
 Document a new optional header `X-CCFlare-CWD` (or extend `X-CCFlare-Project` to accept absolute paths). When present, the proxy bypasses the heuristic and feeds the header straight into the resolver. Users can populate it with a Claude Code wrapper script or environment-aware shell function. Add a 1-paragraph snippet to `README.md` showing a `~/.claude/hooks/preToolUse.sh` example.
 
