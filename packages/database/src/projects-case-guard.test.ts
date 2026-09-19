@@ -1,8 +1,30 @@
 import { describe, expect, test } from "bun:test";
+import type { ProjectsCaseModeDecision } from "./projects-case-guard";
 import {
 	decideProjectsCaseMode,
 	hasUppercaseDiscoveredPath,
 } from "./projects-case-guard";
+
+// `ProjectsCaseModeDecision` is a discriminated union on `action`, and only
+// two of its four members carry `message` while only two carry `record`. An
+// `expect(d.action).toBe("refuse")` proves the tag at runtime but narrows
+// nothing for the type checker, so every later `d.message` was a TS2339 that
+// the root tsconfig's test exclusion had been hiding.
+//
+// This is an assertion function rather than a cast: the `asserts` return type
+// narrows `decision` for everything after the call, so the reads that follow
+// are checked against the member they actually belong to.
+//
+// It is also stricter than what it replaces. Two cases below read `.message`
+// without asserting an action at all, so a guard that returned `adopt` with a
+// plausible message would have passed them. They pinned nothing about which
+// branch they were on; now they must.
+function assertAction<A extends ProjectsCaseModeDecision["action"]>(
+	decision: ProjectsCaseModeDecision,
+	action: A,
+): asserts decision is Extract<ProjectsCaseModeDecision, { action: A }> {
+	expect(decision.action).toBe(action);
+}
 
 // SB23-1988. A project's primary key is sha1(canonical_path).slice(0, 16), and
 // PROJECTS_CASE_SENSITIVE decides whether that path is stored lowercased. So
@@ -20,7 +42,7 @@ describe("decideProjectsCaseMode", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("refuse");
+		assertAction(decision, "refuse");
 		// The message must name the consequence, not just the condition: an
 		// operator who is only told "cannot change the setting" learns nothing
 		// about why, and reaches for the database by hand.
@@ -39,7 +61,7 @@ describe("decideProjectsCaseMode", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("refuse");
+		assertAction(decision, "refuse");
 		expect(decision.message).toContain("requests.project_id");
 	});
 
@@ -54,7 +76,7 @@ describe("decideProjectsCaseMode", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("record");
+		assertAction(decision, "record");
 		expect(decision.record).toBe(true);
 	});
 
@@ -67,7 +89,7 @@ describe("decideProjectsCaseMode", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("record");
+		assertAction(decision, "record");
 		expect(decision.record).toBe(false);
 	});
 
@@ -86,7 +108,7 @@ describe("decideProjectsCaseMode", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("refuse");
+		assertAction(decision, "refuse");
 		expect(decision.message).toContain("requests.project_id");
 	});
 
@@ -104,7 +126,7 @@ describe("decideProjectsCaseMode", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("adopt");
+		assertAction(decision, "adopt");
 		expect(decision.record).toBe(true);
 		expect(decision.message).toContain("12");
 	});
@@ -200,7 +222,7 @@ describe("decideProjectsCaseMode boundaries", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("refuse");
+		assertAction(decision, "refuse");
 		// Singular, because a message reading "1 projects" is the kind of
 		// detail an operator reads as carelessness in a message asking them
 		// to trust a refusal.
@@ -221,7 +243,7 @@ describe("decideProjectsCaseMode boundaries", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("adopt");
+		assertAction(decision, "adopt");
 		expect(decision.record).toBe(false);
 	});
 
@@ -234,7 +256,7 @@ describe("decideProjectsCaseMode boundaries", () => {
 			configPath: "/tmp/fixture/better-ccflare.json",
 			currentSource: "env",
 		});
-		expect(decision.action).toBe("record");
+		assertAction(decision, "record");
 		expect(decision.record).toBe(false);
 	});
 });
@@ -252,7 +274,7 @@ describe("the refusal tells a locked-out operator where to go", () => {
 			configPath: "/etc/better-ccflare/config.json",
 			currentSource: "file",
 		});
-		expect(decision.action).toBe("refuse");
+		assertAction(decision, "refuse");
 		expect(decision.message).toContain("/etc/better-ccflare/config.json");
 	});
 
@@ -269,6 +291,7 @@ describe("the refusal tells a locked-out operator where to go", () => {
 			configPath: "/c.json",
 			currentSource: "env",
 		});
+		assertAction(env, "refuse");
 		expect(env.message).toContain(
 			"PROJECTS_CASE_SENSITIVE environment variable",
 		);
@@ -281,6 +304,7 @@ describe("the refusal tells a locked-out operator where to go", () => {
 			configPath: "/c.json",
 			currentSource: "default",
 		});
+		assertAction(dflt, "refuse");
 		expect(dflt.message).toContain("platform default");
 	});
 });

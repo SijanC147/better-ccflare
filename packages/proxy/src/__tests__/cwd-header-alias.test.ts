@@ -80,6 +80,29 @@ describe("X-CCFlare-Path alias (SB23-2268)", () => {
 		expect(viaPath.matchedProjectPath).toBe(canonicalPath);
 	});
 
+	test("a tilde-prefixed X-CCFlare-Path reaches the resolver and resolves to null", () => {
+		// SB23-2355. 19 of the 20 aliased configs send a leading `~`, which the
+		// client never expands, so this is the value that actually arrives. The
+		// snapshot deliberately has a project row for the process's own working
+		// directory: before the absolute-path guard, path.resolve landed the
+		// tilde value under that cwd and it attributed there. `~` is not
+		// expanded proxy-side, because the proxy's home is not the client's.
+		const cwdProject = process.cwd().toLowerCase();
+		const snapshot = ResolverSnapshot.build(
+			[{ id: "cwd0000000000000", canonicalPath: cwdProject, enabled: true }],
+			[],
+			{ caseSensitive: false, homeDir: null },
+		);
+
+		const meta = metaFor({ "X-CCFlare-Path": "~/Code/tab-genius" });
+		expect(meta.cwdHint).toBe("~/Code/tab-genius");
+
+		const resolved = snapshot.resolve(meta.cwdHint);
+		expect(resolved.projectId).toBeNull();
+		expect(resolved.projectId).not.toBe("cwd0000000000000");
+		expect(resolved.worktreePath).toBeNull();
+	});
+
 	test("X-CCFlare-Path does not leak into the project NAME, which stays null", () => {
 		// The name aliases live in usage-collector.ts; a path must never become a
 		// display name. This is the mistake the issue names as the one that must

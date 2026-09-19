@@ -11,7 +11,7 @@ import type {
 // tests focus on the fields that actually differ.
 // ---------------------------------------------------------------------------
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	const base: Account = {
 		id: "test-account",
 		name: "test-account",
 		provider: "anthropic",
@@ -37,8 +37,20 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
-		...overrides,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		auto_pause_on_overage_enabled: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 	};
+	return Object.assign(base, overrides);
 }
 
 // Mock StrategyStore for testing — adds getAccountWeeklyReset on top of the
