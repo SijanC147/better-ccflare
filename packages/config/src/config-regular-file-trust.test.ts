@@ -207,6 +207,43 @@ describe("a regular file at the config path", () => {
 		}
 	});
 
+	it("is NOT reported for a config only we can write", () => {
+		// The negative half, and every other test here is positive. Without it a
+		// mutation widening the mask from 0o022 to 0o222 survives the entire config
+		// security suite, ten files and 216 assertions, because every existing test
+		// asserts the line IS emitted and none asserts it is not. Measured under that
+		// mutation: a 0600 config emits the line. So the warning would fire on every
+		// install on every boot and nothing would go red. Found by PR #176's review.
+		//
+		// 0644 is the more valuable of the two cases. That is what versions before
+		// PR #57 wrote, so it is what an upgrading install actually has on disk, and
+		// the message would be false about it: 0644 is world-READABLE, which
+		// chmodAndVerify() already reports, and not world-writable.
+		for (const mode of [0o600, 0o644]) {
+			const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-ok-"));
+			try {
+				const configPath = join(dir, "config.json");
+				writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+				chmodSync(configPath, mode);
+				// The premise: no group or other WRITE bit.
+				expect(statSync(configPath).mode & 0o022).toBe(0);
+
+				const logs = captureLogs(() => {
+					const config = new Config(configPath);
+					expect(config.get("lb_strategy")).toBe("session");
+				});
+
+				expect(
+					logs.filter((event) =>
+						event.msg.includes("its contents may not be yours"),
+					),
+				).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
+	});
+
 	it("is reported when only the GROUP can write it, not just other", () => {
 		// Kills a mask narrowed from 0o022 to 0o002. The case above uses 0666, which
 		// has both the group and the other write bit, so it survives that narrowing
@@ -231,13 +268,16 @@ describe("a regular file at the config path", () => {
 				expect(config.get("lb_strategy")).toBe("session");
 			});
 
-			expect(
-				logs.filter(
-					(event) =>
-						event.level === "ERROR" &&
-						event.msg.includes("its contents may not be yours"),
-				),
-			).toHaveLength(1);
+			const reportedGroup = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("its contents may not be yours"),
+			);
+			expect(reportedGroup).toHaveLength(1);
+			// The bit that was found is named, because "group-writable (gid N)" and
+			// "world-writable" call for different actions from an operator.
+			expect(reportedGroup[0].msg).toContain("group-writable (gid ");
+			expect(reportedGroup[0].msg).not.toContain("world-writable");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

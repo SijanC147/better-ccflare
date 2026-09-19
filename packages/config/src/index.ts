@@ -540,8 +540,9 @@ export class Config extends EventEmitter {
 				);
 				return null;
 			}
-			// Say so when another local user could have written these bytes, and read
-			// them anyway (SB23-2338).
+			const content = readFileSync(target, "utf8");
+			// Say so when another local user could have written these bytes. Read first
+			// and report after, deliberately (SB23-2338).
 			//
 			// Nothing else covers this. trustedRegularPath() reads the file's uid and
 			// link count, entryIsTrusted() reads directories, and neither looks at the
@@ -549,10 +550,25 @@ export class Config extends EventEmitter {
 			// measured by PR #172's review, where local_control_secret came back reading
 			// "WRITTEN-BY-ANOTHER-USER".
 			//
+			// Below readFileSync rather than above it, because log.error() emits on
+			// logBus synchronously and a listener that throws would land in this
+			// method's own catch and return null, turning a warning into a silently
+			// empty config. Both current listeners are guarded, so that was
+			// unreachable, but ordering it this way means no listener can ever change
+			// whether the config loads. Found by PR #176's review.
+			//
 			// Here rather than in trustedRegularPath() for two reasons. The statSync and
-			// the isFile() test are already done on this line, so no syscall is added.
-			// And this sees the file the symlink chain LANDS on, so a chain ending on a
-			// 0666 file in a shared sticky directory is covered by the same check.
+			// the isFile() test are already done above, so no syscall is added. And this
+			// sees the file the symlink chain LANDS on, so a chain ending on a 0666 file
+			// in a shared sticky directory is covered by the same check.
+			//
+			// win32 is excluded, and this is not caution. Node derives st_mode from
+			// FILE_ATTRIBUTE_READONLY there, so statSync reports 0666 for ANY writable
+			// file and 0o666 & 0o022 is 0o022: without the guard this fires on every
+			// boot for every Windows operator, about nothing, with no way to silence it.
+			// The same premise already gates chmodAndVerify(), writeTarget() and
+			// trustedRegularPath(). Found by PR #176's review, which noted this was the
+			// only mode read in the file without the guard.
 			//
 			// Warned and not refused, which is the whole decision on this issue, so the
 			// reasoning lives here rather than only in the commit. The issue calls a
@@ -568,15 +584,34 @@ export class Config extends EventEmitter {
 			// a macOS or Windows host, and FAT or exFAT, where chmod is a no-op. So the
 			// operator is told, precisely, and the process keeps running.
 			//
-			// Adopting everything except local_control_secret was considered and is
-			// deferred as new mechanism, not dismissed.
-			if ((info.mode & 0o022) !== 0 && !contentsNotOurs.has(target)) {
+			// Not adopting credential and endpoint fields from a writable config was
+			// considered and is deferred as new mechanism, not dismissed. It is a bigger
+			// job than "everything except local_control_secret": pg_enabled with pg_host
+			// and pg_password redirect every credential this process later persists,
+			// openobserve_* ships payloads, outbound_proxy redirects traffic, and
+			// ConfigData carries an index signature so an allowlist cannot be written as
+			// a subtraction.
+			if (
+				process.platform !== "win32" &&
+				(info.mode & 0o022) !== 0 &&
+				!contentsNotOurs.has(target)
+			) {
 				contentsNotOurs.add(target);
+				// Name the bit that was found. "group-writable (gid 20)" and
+				// "world-writable" call for different actions, and on macOS the default
+				// gid is staff, which every local account belongs to, while on a Linux
+				// using per-user groups the same bit is usually harmless.
+				const writers =
+					(info.mode & 0o020) !== 0
+						? (info.mode & 0o002) !== 0
+							? "group- and world-writable"
+							: `group-writable (gid ${info.gid})`
+						: "world-writable";
 				log.error(
-					`The config file ${target} is mode ${modeText(info.mode & 0o777)}, so another local user can write it and its contents may not be yours. They have been loaded: a config an attacker controls supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything, along with pg_host and pg_password. Inspect the file, or delete it so a fresh one is created, and move it onto a filesystem that enforces modes if chmod cannot.`,
+					`The config file ${target} is mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user can write it and its contents may not be yours. The WHOLE config has been loaded, not part of it. An attacker who writes this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. Inspect the file, or delete it so a fresh one is created, and move it onto a filesystem that enforces modes if chmod cannot.`,
 				);
 			}
-			return readFileSync(target, "utf8");
+			return content;
 		} catch (error) {
 			log.error(`Failed to read config file: ${error}`);
 			return null;
