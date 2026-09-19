@@ -35,8 +35,8 @@ function makeConfig(): Config {
 
 const testOauthConfig: OAuthProviderConfig = {
 	clientId: "test-client-id",
-	authorizationEndpoint: "https://example.com/oauth/authorize",
-	tokenEndpoint: "https://example.com/oauth/token",
+	authorizeUrl: "https://example.com/oauth/authorize",
+	tokenUrl: "https://example.com/oauth/token",
 	redirectUri: "http://localhost/callback",
 	scopes: ["openid"],
 };
@@ -150,9 +150,12 @@ describe("OAuthFlow.completeReauth", () => {
 
 	it("should UPDATE api_key for console mode (no refreshToken)", async () => {
 		// Override exchangeCode to return tokens without refreshToken (console mode)
+		// `OAuthTokens.refreshToken` is optional, not nullable, so absence is
+		// expressed by omitting the key. The code under test reads it as
+		// `!tokens.refreshToken` and `tokens.refreshToken || ""`, which treats
+		// absent and null alike, so this is the same case the test already ran.
 		mockExchangeCode.mockImplementation(async () => ({
 			accessToken: "console-access-token",
-			refreshToken: null,
 			expiresAt: Date.now() + 3_600_000,
 		}));
 
