@@ -385,17 +385,21 @@ describe("the chmod seam's NODE_ENV gate", () => {
 		"silently disarm the permission enforcement on the config file, which " +
 		"holds local_control_secret, pg_password and upstream_maintainer_token.";
 
-	it("reads NODE_ENV=test without setting it, and BUN_ENV and BUN_TEST unset", () => {
+	it("reads NODE_ENV=test without setting it", () => {
 		// The marker is measured here rather than taken from a note. A case that
 		// set NODE_ENV itself would pass against a guard keyed on anything at all
 		// and would prove nothing, which is the point #159's own gate test makes
 		// at config-path-refuses-default.test.ts:66.
 		expect(process.env.NODE_ENV).toBe("test");
-		// And the two that look like they would work and do not. A guard keyed on
-		// either would never fire, so this fails the moment that stops being true
-		// and someone reaches for one.
-		expect(process.env.BUN_ENV).toBeUndefined();
-		expect(process.env.BUN_TEST).toBeUndefined();
+		// BUN_ENV and BUN_TEST were asserted undefined here until PR #200's
+		// reviewer measured what that bought. Its MB1 keyed the gate on BUN_ENV,
+		// which is the exact mistake those assertions name, and they PASSED under
+		// it: BUN_ENV was still undefined, because keying a guard on a variable
+		// does not set it. The mutation died on the two tests that use the seam
+		// for real. So the pair killed no mutation of the source and could only
+		// fail on a developer who exports BUN_ENV, which is a false red with no
+		// true red behind it. The measurement itself is dated in the docstring at
+		// chmod-seam.ts, which is where "I checked these two" belongs.
 	});
 
 	it("refuses to swap the chmod when NODE_ENV is not test", () => {
