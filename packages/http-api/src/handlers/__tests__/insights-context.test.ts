@@ -164,6 +164,18 @@ describe("context insights handler (SQLite integration)", () => {
 					}
 				},
 			} as unknown as APIContext["dbOps"],
+			// The handlers under test do not read alerts. The methods reject rather
+			// than resolving empty, so a handler that starts using this fails loudly
+			// instead of silently seeing no alerts.
+			alertService: {
+				listAlerts: () => Promise.reject(new Error("alertService not stubbed")),
+				getUnacknowledgedCount: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAlert: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAll: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+			},
 		};
 	});
 
@@ -466,6 +478,18 @@ describe("context insights handler (SQLite integration)", () => {
 					},
 				}),
 			} as unknown as APIContext["dbOps"],
+			// The handlers under test do not read alerts. The methods reject rather
+			// than resolving empty, so a handler that starts using this fails loudly
+			// instead of silently seeing no alerts.
+			alertService: {
+				listAlerts: () => Promise.reject(new Error("alertService not stubbed")),
+				getUnacknowledgedCount: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAlert: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAll: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+			},
 		};
 		const response = await createContextInsightsHandler(failing)(
 			new URLSearchParams(),

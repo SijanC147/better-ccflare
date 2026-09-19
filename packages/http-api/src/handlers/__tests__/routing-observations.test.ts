@@ -37,20 +37,17 @@ describe("createRoutingObservationsHandler", () => {
 	});
 
 	it("wraps getRoutingObservations() under the observations key, keyed by family", async () => {
-		const readObservations = mock(
-			() =>
-				({
-					fable: {
-						family: "fable",
-						order: [
-							{ id: "acc-1", name: "Alice" },
-							{ id: "acc-2", name: "Bob" },
-						],
-						model: "claude-fable-5",
-						observedAtMs: 1_700_000_000_000,
-					},
-				}) as unknown as () => Record<string, RoutingObservation>,
-		);
+		const readObservations = mock(() => ({
+			fable: {
+				family: "fable",
+				order: [
+					{ id: "acc-1", name: "Alice" },
+					{ id: "acc-2", name: "Bob" },
+				],
+				model: "claude-fable-5",
+				observedAtMs: 1_700_000_000_000,
+			},
+		}));
 
 		const handler = createRoutingObservationsHandler(readObservations);
 		const response = await handler();
@@ -71,23 +68,20 @@ describe("createRoutingObservationsHandler", () => {
 	});
 
 	it("reflects multiple families independently", async () => {
-		const readObservations = mock(
-			() =>
-				({
-					opus: {
-						family: "opus",
-						order: [{ id: "acc-1", name: "Alice" }],
-						model: "claude-opus-4-6",
-						observedAtMs: 1_000,
-					},
-					sonnet: {
-						family: "sonnet",
-						order: [{ id: "acc-2", name: "Bob" }],
-						model: "claude-sonnet-5-0",
-						observedAtMs: 2_000,
-					},
-				}) as unknown as () => Record<string, RoutingObservation>,
-		);
+		const readObservations = mock(() => ({
+			opus: {
+				family: "opus",
+				order: [{ id: "acc-1", name: "Alice" }],
+				model: "claude-opus-4-6",
+				observedAtMs: 1_000,
+			},
+			sonnet: {
+				family: "sonnet",
+				order: [{ id: "acc-2", name: "Bob" }],
+				model: "claude-sonnet-5-0",
+				observedAtMs: 2_000,
+			},
+		}));
 
 		const handler = createRoutingObservationsHandler(readObservations);
 		const response = await handler();

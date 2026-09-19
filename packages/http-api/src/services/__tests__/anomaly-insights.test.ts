@@ -773,6 +773,11 @@ describe("detectTokenOutliers", () => {
 		const baselineRows = lognormalBaselineRows(200, 7, 100, 0.15);
 		const baselines = computeBaselines(baselineRows, 10);
 		const approxMedian = baselines[0].approxMedianTotalTokens;
+		// The baseline rows above always produce a median. Assert it rather than
+		// letting a null multiply into NaN, which compares false against every
+		// later threshold and would read as the outlier simply not flagging.
+		expect(approxMedian).not.toBeNull();
+		if (approxMedian === null) throw new Error("baseline produced no median");
 		const spikeValue = Math.round(approxMedian * 100);
 
 		const scoringRows = [req({ id: "huge-spike", inputTokens: spikeValue })];

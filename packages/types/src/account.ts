@@ -476,7 +476,7 @@ export interface Account {
 	name: string;
 	provider: string;
 	api_key: string | null;
-	refresh_token: string;
+	refresh_token: string | null;
 	access_token: string | null;
 	expires_at: number | null;
 	request_count: number;

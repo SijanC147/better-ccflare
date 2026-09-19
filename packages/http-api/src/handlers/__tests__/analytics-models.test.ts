@@ -271,7 +271,7 @@ describe("GET /api/analytics/models — a NULL success", () => {
 		// subtraction cannot go negative and cannot lose a row.
 		expect(
 			(row.successRequests as number) + (row.errorRequests as number),
-		).toBe(row.requests);
+		).toBe(row.requests as number);
 		// Neither the NULL row nor the 2 row reaches the successful average.
 		expect(row.avgTotalTokensPerSuccess).toBe(100);
 	});

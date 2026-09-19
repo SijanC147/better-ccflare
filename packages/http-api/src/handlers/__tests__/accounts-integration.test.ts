@@ -48,7 +48,7 @@ const mockGetRepresentativeUtilization = (
 	if (!usageData) return 70;
 	const utils = Object.values(usageData)
 		.filter(
-			(v): v is { utilization: number } =>
+			(v): v is { utilization: number; resets_at: null } =>
 				v != null && typeof v.utilization === "number",
 		)
 		.map((v) => v.utilization);
@@ -56,11 +56,14 @@ const mockGetRepresentativeUtilization = (
 };
 const mockGetRepresentativeWindow = () => "seven_day";
 
+// Every member is called with arguments by the mocked handlers below. Declaring
+// them as `() => {}` infers a zero-parameter signature, so each call site was a
+// TS2554 that nothing ran.
 const mockLog = {
-	info: () => {},
-	warn: () => {},
-	debug: () => {},
-	error: () => {},
+	info: (..._args: unknown[]) => {},
+	warn: (..._args: unknown[]) => {},
+	debug: (..._args: unknown[]) => {},
+	error: (..._args: unknown[]) => {},
 };
 
 const mockClearAccountRefreshCache = (_accountId: string) => {
@@ -68,17 +71,26 @@ const mockClearAccountRefreshCache = (_accountId: string) => {
 };
 
 const mockCliCommands = {
-	removeAccount: () => ({ success: true, message: "Account removed" }),
-	pauseAccount: () => ({ success: true, message: "Account paused" }),
-	resumeAccount: () => ({ success: true, message: "Account resumed" }),
+	removeAccount: (..._args: unknown[]) => ({
+		success: true,
+		message: "Account removed",
+	}),
+	pauseAccount: (..._args: unknown[]) => ({
+		success: true,
+		message: "Account paused",
+	}),
+	resumeAccount: (..._args: unknown[]) => ({
+		success: true,
+		message: "Account resumed",
+	}),
 };
 
 const mockDbOps = {
 	getDatabase: () => mockDatabase,
-	updateAccountPriority: () => {},
-	renameAccount: () => {},
-	setAutoFallbackEnabled: () => {},
-	forceResetAccountRateLimit: () => true,
+	updateAccountPriority: (..._args: unknown[]) => {},
+	renameAccount: (..._args: unknown[]) => {},
+	setAutoFallbackEnabled: (..._args: unknown[]) => {},
+	forceResetAccountRateLimit: (..._args: unknown[]) => true,
 };
 
 // Mock Database instance
@@ -88,14 +100,31 @@ const mockDatabase = {
 	// biome-ignore lint/suspicious/noExplicitAny: partial mock whose `run` is reassigned per-test with varying signatures; no single interface fits all
 } as any;
 
-const mockQuery = {
+// Both members are reassigned per test with rows of varying width and are
+// called with the bind parameters of the SQL they stand in for. Left to
+// inference the literal below is `() => never[]` and `() => null`, which
+// rejects every reassignment and every call site at once.
+const mockQuery: {
+	all: (...args: unknown[]) => MockAccountRow[];
+	get: (...args: unknown[]) => MockAccountGetRow | null | undefined;
+} = {
 	all: () => [],
 	get: () => null,
 };
 
-// Mock response helpers
+// Mock response helpers. These are not `Response` objects and the mocked
+// handlers do not return one: the tests read `ok`, `status` and `json()` only,
+// and a real `Response` would put every payload through JSON serialisation,
+// which these fixtures rely on not happening.
+interface MockResponse {
+	ok: boolean;
+	status: number;
+	headers: Headers;
+	json: () => Promise<unknown>;
+}
+
 // biome-ignore lint/suspicious/noExplicitAny: test fixture accepts arbitrarily-shaped response payloads across call sites
-const mockJsonResponse = (data: any) => ({
+const mockJsonResponse = (data: any): MockResponse => ({
 	ok: true,
 	json: async () => data,
 	status: 200,
@@ -103,7 +132,7 @@ const mockJsonResponse = (data: any) => ({
 });
 
 // biome-ignore lint/suspicious/noExplicitAny: test fixture accepts arbitrarily-shaped error payloads and reads error.status
-const mockErrorResponse = (error: any) => ({
+const mockErrorResponse = (error: any): MockResponse => ({
 	ok: false,
 	json: async () => error,
 	status: error.status || 400,
@@ -156,6 +185,8 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 					created_at: Date.now() - 86400000,
 					expires_at: Date.now() + 86400000,
 					rate_limited_until: null,
+					rate_limited_reason: null,
+					rate_limited_at: null,
 					rate_limit_reset: null,
 					rate_limit_status: null,
 					rate_limit_remaining: null,
@@ -213,6 +244,8 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 					created_at: Date.now() - 86400000,
 					expires_at: Date.now() + 86400000,
 					rate_limited_until: null,
+					rate_limited_reason: null,
+					rate_limited_at: null,
 					rate_limit_reset: null,
 					rate_limit_status: null,
 					rate_limit_remaining: null,
@@ -263,6 +296,8 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 					created_at: Date.now() - 86400000,
 					expires_at: Date.now() + 86400000,
 					rate_limited_until: null,
+					rate_limited_reason: null,
+					rate_limited_at: null,
 					rate_limit_reset: null,
 					rate_limit_status: null,
 					rate_limit_remaining: null,
@@ -308,7 +343,11 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 			mockQuery.all = () => [];
 		});
 
-		function makeOAuthAccount(overrides: Record<string, unknown> = {}) {
+		// The return annotation keeps the literal below contextually typed, so
+		// `rate_limited: 0` stays `0 | 1` rather than widening to `number`.
+		function makeOAuthAccount(
+			overrides: Record<string, unknown> = {},
+		): MockAccountRow {
 			return {
 				id: "oauth-account-1",
 				name: "Claude OAuth Account",
@@ -321,6 +360,8 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 				created_at: Date.now() - 86400000,
 				expires_at: Date.now() + 86400000,
 				rate_limited_until: null,
+				rate_limited_reason: null,
+				rate_limited_at: null,
 				rate_limit_reset: null,
 				rate_limit_status: null,
 				rate_limit_remaining: null,
@@ -364,7 +405,9 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 			expect(clearSqlCalled).toBe(true);
 			expect(clearSqlArgs).toEqual(["oauth-account-1"]);
 			expect(response.ok).toBe(true);
-			const body = await response.json();
+			const body = (await response.json()) as Array<{
+				rateLimitedUntil: number | null;
+			}>;
 			expect(body[0].rateLimitedUntil).toBeNull();
 		});
 
@@ -472,7 +515,11 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 			const removeHandler = createMockAccountRemoveHandler();
 
 			// Setup: Account exists in database
-			mockQuery.get = () => ({ id: "test-account-id" });
+			mockQuery.get = () => ({
+				id: "test-account-id",
+				name: "test-account-name",
+				provider: "anthropic",
+			});
 
 			// Mock successful removal
 			mockCliCommands.removeAccount = () => ({
@@ -501,6 +548,7 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 
 			// Setup: Anthropic account exists in database
 			mockQuery.get = () => ({
+				id: "test-account-id",
 				name: "test-account-name",
 				provider: "anthropic",
 			});
@@ -521,12 +569,10 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 
 			// Setup: Non-Anthropic account exists
 			mockQuery.get = () => ({
+				id: "test-account-id",
 				name: "test-account-name",
 				provider: "openai-compatible",
 			});
-
-			// Clear any previous calls
-			mockUsageCache.delete.calls = [];
 
 			// Execute the handler
 			const response = await reloadHandler({} as Request, "test-account-id");
@@ -558,6 +604,8 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 					created_at: Date.now() - 86400000,
 					expires_at: Date.now() + 86400000,
 					rate_limited_until: futureTimestamp,
+					rate_limited_reason: null,
+					rate_limited_at: null,
 					rate_limit_reset: null,
 					rate_limit_status: "allowed_warning",
 					rate_limit_remaining: null,
@@ -874,6 +922,22 @@ interface MockAccountRow {
 	rate_limited_until: number | null;
 	rate_limited_reason: string | null;
 	rate_limited_at: number | null;
+	// Derived in the real query as a `0 | 1` alias
+	// (packages/http-api/src/handlers/accounts.ts:318 and :379). The mocked
+	// list handler assigns it when it clears a stale rate limit.
+	rate_limited: 0 | 1;
+	// The fixtures below build full account rows; the handlers read the columns
+	// named above and nothing else.
+	[column: string]: unknown;
+}
+
+// The shape the mocked single-row lookups return. Tests set the three columns
+// the mocked handlers read, plus `access_token` where the case needs it.
+interface MockAccountGetRow {
+	id: string;
+	name: string;
+	provider: string;
+	access_token?: string | null;
 }
 
 // Mock factory functions to create handlers with our mocked dependencies
@@ -881,7 +945,7 @@ function createMockAccountsListHandler(
 	CACHE_FRESHNESS_THRESHOLD_MS: number,
 	fetchData: typeof mockFetchUsageData = mockFetchUsageData,
 ) {
-	return async (): Promise<Response> => {
+	return async (): Promise<MockResponse> => {
 		const now = Date.now();
 		const sessionDuration = 5 * 60 * 60 * 1000; // 5 hours
 
@@ -984,7 +1048,7 @@ function createMockAccountsListHandler(
 }
 
 function createMockAccountRemoveHandler() {
-	return async (req: Request, accountName: string): Promise<Response> => {
+	return async (req: Request, accountName: string): Promise<MockResponse> => {
 		try {
 			const body = await req.json();
 
@@ -1019,7 +1083,7 @@ function createMockAccountRemoveHandler() {
 }
 
 function createMockAccountReloadHandler() {
-	return async (_req: Request, accountId: string): Promise<Response> => {
+	return async (_req: Request, accountId: string): Promise<MockResponse> => {
 		try {
 			const account = mockQuery.get(accountId);
 
@@ -1051,7 +1115,7 @@ function createMockAccountReloadHandler() {
 }
 
 function createMockAccountForceResetRateLimitHandler() {
-	return async (_req: Request, accountId: string): Promise<Response> => {
+	return async (_req: Request, accountId: string): Promise<MockResponse> => {
 		try {
 			const account = mockQuery.get(accountId);
 			if (!account) {
