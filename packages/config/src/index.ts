@@ -689,7 +689,7 @@ export class Config extends EventEmitter {
 					// who is tired of the line rather than the one who checked. The
 					// measurement is free here, so nothing is bought by asking.
 					log.warn(
-						`The config file ${target} reads mode ${modeText(info.mode & 0o777)}, but chmod on it reported success and changed nothing, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${target} is decided at the mount or on the host, not by these bits, and this process cannot see it. The config holds local_control_secret, pg_password and a GitHub PAT, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
+						`The config file ${target} reads mode ${modeText(info.mode & 0o777)}, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${target} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
 					);
 				}
 			}
