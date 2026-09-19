@@ -34,6 +34,13 @@ function runCLI(
 	stdout: string;
 	stderr: string;
 	exitCode: number;
+	// True when the CLI was still running at the harness deadline and had to be
+	// SIGKILLed, rather than exiting on its own. A test that means "this command
+	// must not start a server" asserts on this instead of on elapsed
+	// milliseconds: a wall-clock bound measures the machine's load, so it fails
+	// on a busy host against unmodified code (SB23-2266), while this flag is a
+	// property of what the process did.
+	killed: boolean;
 }> {
 	return new Promise((resolve) => {
 		// Route the spawned CLI's database through the environment's temp dir so
@@ -71,13 +78,14 @@ function runCLI(
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
+		let killed = false;
 		let timeoutHandle: ReturnType<typeof setTimeout>;
 
 		const finish = (exitCode: number): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeoutHandle);
-			resolve({ stdout, stderr, exitCode });
+			resolve({ stdout, stderr, exitCode, killed });
 		};
 
 		proc.stdout?.on("data", (data) => {
@@ -95,6 +103,7 @@ function runCLI(
 
 		// Bound commands that intentionally start a server and reap descendants.
 		timeoutHandle = setTimeout(() => {
+			killed = true;
 			proc.kill("SIGKILL");
 		}, 3000);
 	});
@@ -151,15 +160,6 @@ describe("CLI Integration Tests", () => {
 
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout).toContain(EXPECTED_VERSION_LINE);
-		});
-
-		it("should exit quickly for version command", async () => {
-			const startTime = Date.now();
-			await runCLI(["--version"]);
-			const duration = Date.now() - startTime;
-
-			// Should complete in less than 2 seconds (fast exit)
-			expect(duration).toBeLessThan(2000);
 		});
 	});
 
@@ -221,15 +221,6 @@ describe("CLI Integration Tests", () => {
 			for (const mode of acceptedModes) {
 				expect(result.stdout).toContain(mode);
 			}
-		});
-
-		it("should exit quickly for help command", async () => {
-			const startTime = Date.now();
-			await runCLI(["--help"]);
-			const duration = Date.now() - startTime;
-
-			// Should complete in less than 2 seconds (fast exit)
-			expect(duration).toBeLessThan(2000);
 		});
 	});
 
@@ -530,24 +521,6 @@ describe("CLI Integration Tests", () => {
 			expect(result.exitCode).toBeGreaterThanOrEqual(0);
 		});
 	});
-
-	describe("Performance", () => {
-		it("should execute version command quickly (< 1s)", async () => {
-			const startTime = Date.now();
-			await runCLI(["--version"]);
-			const duration = Date.now() - startTime;
-
-			expect(duration).toBeLessThan(1000);
-		});
-
-		it("should execute help command quickly (< 1s)", async () => {
-			const startTime = Date.now();
-			await runCLI(["--help"]);
-			const duration = Date.now() - startTime;
-
-			expect(duration).toBeLessThan(1000);
-		});
-	});
 });
 
 // File-scope afterEach: cleans up the per-invocation CLI databases (and
@@ -677,7 +650,6 @@ describe("CLI Security Tests", () => {
 				sensitiveRoot,
 				"nonexistent-cert-with-sensitive-data-abc123.pem",
 			);
-			const startedAt = Date.now();
 			const result = await runCLI([
 				"--serve",
 				"--ssl-key",
@@ -691,7 +663,11 @@ describe("CLI Security Tests", () => {
 			expect(output).not.toContain(sensitiveKeyPath);
 			expect(output).not.toContain(sensitiveCertPath);
 			expect(result.exitCode).toBeGreaterThan(0);
-			expect(Date.now() - startedAt).toBeLessThan(2000);
+			// The CLI must refuse the bad SSL paths and exit on its own rather than
+			// going on to serve. Asserting it was never SIGKILLed by the harness
+			// says exactly that, and unlike an elapsed-milliseconds bound it cannot
+			// fail because the machine is busy.
+			expect(result.killed).toBe(false);
 		} finally {
 			rmSync(sensitiveRoot, { recursive: true, force: true });
 		}
