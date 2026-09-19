@@ -8,8 +8,14 @@ import {
 } from "./force-account-model";
 import { mapModelName, providerAcceptsClientModel } from "./model-mappings";
 
+// `Object.assign` rather than a `{ ...base, ...overrides }` spread: spreading a
+// `Partial<Account>` over a complete object widens every overridable property to
+// include `undefined`, so the declared `: Account` return type would not hold.
+// Assigning to `const base: Account` first also checks the literal against
+// Account directly, which is what surfaced the eleven required fields missing
+// below. Same fix as packages/load-balancer in PR #180.
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	const base: Account = {
 		id: "acc-1",
 		name: "codex-account",
 		provider: "codex",
@@ -36,8 +42,19 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: JSON.stringify({ opus: "gpt-5.6-sol" }),
 		cross_region_mode: null,
 		model_fallbacks: null,
-		...overrides,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 	};
+	return Object.assign(base, overrides);
 }
 
 afterEach(() => {
