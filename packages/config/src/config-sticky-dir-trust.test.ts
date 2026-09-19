@@ -157,7 +157,9 @@ describe("a config symlink in a sticky directory", () => {
 			expect(msg).not.toContain(
 				"Move the config somewhere only you can write, or replace the link with a regular file.",
 			);
-			expect(msg).not.toContain("owned by another user, or writable by other");
+			expect(msg).not.toContain(
+				"is owned by another user, or is writable by other",
+			);
 		} finally {
 			fx.cleanup();
 			rmSync(home, { recursive: true, force: true });
@@ -198,7 +200,9 @@ describe("a config symlink in a sticky directory", () => {
 			expect(refusals.length).toBeGreaterThan(0);
 			const msg = refusals[0].msg;
 
-			expect(msg).toContain("owned by another user, or writable by other");
+			expect(msg).toContain(
+				"is owned by another user, or is writable by other",
+			);
 			expect(msg).toContain(
 				"Move the config somewhere only you can write, or replace the link with a regular file.",
 			);

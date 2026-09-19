@@ -107,6 +107,20 @@ const contentsNotOurs = new Set<string>();
  * `sticky-entry` deliberately does not distinguish absent, multi-linked and
  * foreign-owned, because those three share one `lstatSync` and one catch and the
  * caller genuinely does not know which one it hit.
+ *
+ * Two things the messages state more narrowly than the branches can, disclosed
+ * rather than branched on:
+ *
+ * `directory` is also returned when `statSync(dirname)` THREW, where nothing
+ * about ownership or mode was read. The message leads with "could not be
+ * examined" for that reason. Reachable through a dangling link into a directory
+ * that does not exist.
+ *
+ * `sticky-entry` is also returned when `process.getuid` is unavailable, before
+ * any `lstat` runs, so the message's "one of those is not true" describes an
+ * entry nothing looked at. Unreachable from both callers, which return earlier
+ * on an undefined uid (`writeTarget()` on win32, `replaceUntrustedLink()`
+ * explicitly), so a branch for it would be untestable code rather than a fix.
  */
 type RefusedTrust = "directory" | "sticky-entry";
 type EntryTrust = "trusted" | RefusedTrust;
@@ -1302,8 +1316,9 @@ export class Config extends EventEmitter {
 			);
 		}
 		return (
-			`Refusing the config path ${this.configPath}: ${hop} sits in a directory owned ` +
-			`by another user, or writable by other local users without the sticky bit, so ` +
+			`Refusing the config path ${this.configPath}: ${hop} sits in a directory that ` +
+			`could not be examined, or is owned by another user, or is writable by other ` +
+			`local users without the sticky bit, so ` +
 			`another local user can plant or replace what is at ${hop} and it cannot be ` +
 			`trusted with secrets. Move the config somewhere only you can write, or replace ` +
 			`the link with a regular file. ${fellBack}`
