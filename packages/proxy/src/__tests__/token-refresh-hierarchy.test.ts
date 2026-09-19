@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
 import {
@@ -31,7 +30,6 @@ type SchedulerProbe = PublicSurface<AutoRefreshScheduler> & {
 };
 
 describe("Auto-Refresh Token Hierarchy", () => {
-	let db: Database;
 	let dbOps: DatabaseOperations;
 	let scheduler: AutoRefreshScheduler;
 	let mockProxyContext: ProxyContext;
@@ -49,7 +47,6 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		// Initialize test database
 		DatabaseFactory.initialize(TEST_DB_PATH);
 		dbOps = DatabaseFactory.getInstance();
-		db = dbOps.getDatabase();
 
 		// Create mock proxy context
 		mockProxyContext = {
@@ -60,11 +57,10 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		} as ProxyContext;
 
 		// Initialize scheduler
-		// `AutoRefreshScheduler` takes a `BunSqlAdapter`; `getDatabase()` returns
-		// the raw `bun:sqlite` handle. The paths exercised below never touch the
-		// adapter, which is why this suite has always passed the handle. The
-		// sibling auto-refresh suites state the same gap the same way.
-		scheduler = new AutoRefreshScheduler(db as never, mockProxyContext);
+		// `getAdapter()` returns the `BunSqlAdapter` the constructor declares.
+		// `getDatabase()` returns the raw `bun:sqlite` handle and is marked
+		// deprecated for exactly this reason, so passing it needed an assertion.
+		scheduler = new AutoRefreshScheduler(dbOps.getAdapter(), mockProxyContext);
 	});
 
 	afterAll(() => {
