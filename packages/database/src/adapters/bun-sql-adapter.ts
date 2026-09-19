@@ -11,6 +11,7 @@ import type { SQL } from "bun";
  *      renumbered. Escaped quotes (`''`) fall out of the toggle naturally: the
  *      first closes the literal and the second reopens it.
  *   2. `--` line comments, up to and including the end of the line.
+ *   3. `/* *\/` block comments, up to and including the closing marker.
  *
  * Case 2 is not cosmetic. Before it existed, one apostrophe in a comment left
  * the scanner believing a string literal was open, so every `?` after it stayed
@@ -28,8 +29,14 @@ import type { SQL } from "bun";
  * this. Exported for that reason: the unit tests in
  * `__tests__/bun-sql-adapter-convert-placeholders.test.ts` call it directly.
  *
- * Known gap: block comments (slash-star) are not skipped. No statement in this
- * repo uses one, and the static gate does not accept them either.
+ * Block comments are skipped for the same reason as line comments: an
+ * apostrophe or a `?` inside one reproduces both defects exactly. No statement
+ * in this repo uses a block comment today, so this is closing the class rather
+ * than fixing a live site. It is deliberately NOT mirrored by a static gate:
+ * measured 2026-09-19, a `/*`-plus-apostrophe regex over the same 96 scanned
+ * files reports 9 hits and every one is an ordinary TypeScript JSDoc line. A
+ * static gate cannot tell a doc comment from SQL; this parser only ever sees
+ * SQL, so it can.
  */
 export function convertPlaceholders(sql: string): string {
 	let result = "";
@@ -57,6 +64,22 @@ export function convertPlaceholders(sql: string): string {
 		if (ch === "-" && sql[i + 1] === "-") {
 			const nl = sql.indexOf("\n", i);
 			const end = nl === -1 ? sql.length : nl;
+			result += sql.slice(i, end);
+			i = end - 1;
+			continue;
+		}
+
+		// Copy a `/* */` block comment through verbatim. Like the `--` branch
+		// this runs only outside a string literal, so a `'/*'` operand is
+		// unaffected: the inString branch above has already consumed it.
+		//
+		// Nesting is not tracked. PostgreSQL nests block comments, so a nested
+		// one closes early here and leaves a stray `*/` in the statement. That
+		// fails loudly at Parse time rather than misnumbering a placeholder,
+		// which is the failure mode this function exists to prevent.
+		if (ch === "/" && sql[i + 1] === "*") {
+			const close = sql.indexOf("*/", i + 2);
+			const end = close === -1 ? sql.length : close + 2;
 			result += sql.slice(i, end);
 			i = end - 1;
 			continue;
