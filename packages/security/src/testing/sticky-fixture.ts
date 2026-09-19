@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
  * A world-writable, sticky directory for tests that need one, with entry names
@@ -70,28 +70,56 @@ export function stickyFixture(label: string): StickyFixture {
 	if (!createdByUs) rmSync(made, { recursive: true, force: true });
 	const dir = createdByUs ? made : tmpdir();
 
-	// Before anything runs in it: the path must be real, and it must not contain
-	// the working tree. `cleanup()` never removes `dir` on the fallback route, but
-	// a caller that ignores the contract and removes it recursively would
-	// otherwise take the repository with it.
+	// Before anything runs in it: the path must be real, and it must not overlap
+	// the working tree in either direction.
+	//
+	// Both directions, because the two hazards are different and only one of them
+	// is the obvious one. If `dir` CONTAINS the working tree, a caller that
+	// ignores the cleanup contract and removes `dir` recursively takes the
+	// repository with it. If `dir` is INSIDE the working tree, which is what
+	// `TMPDIR` pointed at a path in the repository produces on the fallback
+	// route, then every entry this fixture writes lands in the live tree and the
+	// recursive removal on the created route deletes a directory of the
+	// repository's. Every incident behind this guard in this project was the
+	// second shape, a fixture path that silently resolved into live files, so a
+	// check for the first shape alone would not have fired on any of them.
+	//
+	// Resolved first, so a relative TMPDIR cannot dodge both comparisons by never
+	// sharing a prefix with an absolute cwd.
+	//
+	// Every refusal below removes `made` first when we still hold it. A throw
+	// that leaks the directory it just created is worst precisely in the case
+	// the overlap check is written for: measured here, the refusal left
+	// `<worktree>/tmp-probe/better-ccflare-...-dir-ul8Ll0` behind at mode 1777,
+	// inside the repository, which is the outcome the guard exists to prevent.
+	const refuse = (message: string): never => {
+		if (createdByUs) rmSync(made, { recursive: true, force: true });
+		throw new Error(message);
+	};
+
 	if (dir.length === 0) {
-		throw new Error("stickyFixture: resolved an empty directory path");
+		refuse("stickyFixture: resolved an empty directory path");
 	}
-	const cwd = process.cwd();
-	if (cwd === dir || cwd.startsWith(`${dir}/`)) {
-		throw new Error(
-			`stickyFixture: refusing a directory that contains the working tree (dir=${dir}, cwd=${cwd})`,
+	const resolvedDir = resolve(dir);
+	const cwd = resolve(process.cwd());
+	if (
+		resolvedDir === cwd ||
+		cwd.startsWith(`${resolvedDir}/`) ||
+		resolvedDir.startsWith(`${cwd}/`)
+	) {
+		refuse(
+			`stickyFixture: refusing a directory that overlaps the working tree (dir=${resolvedDir}, cwd=${cwd})`,
 		);
 	}
 
 	const info = statSync(dir);
 	if ((info.mode & 0o1000) === 0) {
-		throw new Error(
+		refuse(
 			`stickyFixture: ${dir} is not sticky (mode ${(info.mode & 0o7777).toString(8)}); see SB23-2319`,
 		);
 	}
 	if ((info.mode & 0o022) === 0) {
-		throw new Error(
+		refuse(
 			`stickyFixture: ${dir} is not group- or world-writable (mode ${(info.mode & 0o7777).toString(8)})`,
 		);
 	}
