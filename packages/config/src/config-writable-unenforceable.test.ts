@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdtempSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
@@ -132,9 +138,9 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 			expect(unenforceableModes.has(configPath)).toBe(false);
 
 			// The negative half.
-			expect(logs.filter((event) => event.msg.includes(WARN_MARK))).toHaveLength(
-				0,
-			);
+			expect(
+				logs.filter((event) => event.msg.includes(WARN_MARK)),
+			).toHaveLength(0);
 		});
 	});
 
@@ -162,14 +168,73 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 			const logs = captureLogs(() => {
 				new Config(second);
 			});
-			expect(logs.filter((event) => event.msg.includes(ERROR_MARK))).toHaveLength(
-				0,
-			);
-			expect(logs.filter((event) => event.msg.includes(WARN_MARK))).toHaveLength(
-				0,
-			);
+			expect(
+				logs.filter((event) => event.msg.includes(ERROR_MARK)),
+			).toHaveLength(0);
+			expect(
+				logs.filter((event) => event.msg.includes(WARN_MARK)),
+			).toHaveLength(0);
 		});
 	});
+
+	it.skipIf(process.platform !== "darwin")(
+		"still loads the config, and still errors, when the chmod THROWS",
+		() => {
+			// The regression the inner try/catch exists for. The chmod now runs
+			// inside readRegularFile()'s own try, so without its own catch a throw
+			// lands in the outer one, returns null, and turns a warning about a
+			// writable config into a silently empty config. That is the shape PR
+			// #176's review found one line down from here, and nothing else in this
+			// file reaches it.
+			//
+			// A macOS uchg flag is the fixture: it makes chmodSync throw EPERM while
+			// the file stays readable, unprivileged. Measured 2026-09-19. Linux has
+			// chattr +i but it needs root, so this skips there and says so rather
+			// than mocking node:fs, which would prove a stub was called.
+			//
+			// The level stays ERROR. A throw means a real filesystem refused a real
+			// chmod, which is a mode-enforcing filesystem, so the mode read above is
+			// evidence.
+			withFixture((dir) => {
+				const configPath = join(dir, "config.json");
+				writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+				chmodSync(configPath, 0o666);
+				const flag = Bun.spawnSync(["chflags", "uchg", configPath]);
+				expect(flag.exitCode).toBe(0);
+				try {
+					const logs = captureLogs(() => {
+						const config = new Config(configPath);
+						// The assertion that matters: loaded, not silently empty.
+						expect(config.get("lb_strategy")).toBe("session");
+					});
+
+					expect(
+						logs.filter(
+							(event) =>
+								event.level === "ERROR" && event.msg.includes(ERROR_MARK),
+						),
+					).toHaveLength(1);
+					// The chmod failure is reported in its own right, at warn, rather
+					// than swallowed.
+					expect(
+						logs.filter((event) =>
+							event.msg.includes("Could not restrict config file permissions"),
+						).length,
+					).toBeGreaterThan(0);
+					// And not mislabelled as a filesystem that ignores modes. It does
+					// not ignore them; it refused.
+					expect(
+						logs.filter((event) => event.msg.includes(WARN_MARK)),
+					).toHaveLength(0);
+					// The mode really did not move, so the fixture proved its premise.
+					expect(statSync(configPath).mode & 0o777).toBe(0o666);
+				} finally {
+					// Before withFixture's rmSync, which cannot remove a uchg file.
+					Bun.spawnSync(["chflags", "nouchg", configPath]);
+				}
+			});
+		},
+	);
 
 	it("says nothing at all for a config only we can write", () => {
 		// The predicate's own negative, so a mask widened from 0o022 to 0o222 dies
