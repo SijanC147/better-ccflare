@@ -209,19 +209,30 @@ describe("Token Health HTTP API Integration", () => {
 			const healthReport = checkAllAccountsHealth(mockAccounts);
 
 			const account1 = healthReport.accounts.find(
-				(acc) => acc.name === "test-account-1",
+				(acc) => acc.accountName === "test-account-1",
 			);
 			const account2 = healthReport.accounts.find(
-				(acc) => acc.name === "test-account-2",
+				(acc) => acc.accountName === "test-account-2",
 			);
 
-			// OAuth accounts should have daysUntilExpiration if they have expiration dates
-			if (account1?.daysUntilExpiration !== undefined) {
-				expect(account1?.daysUntilExpiration).toBeGreaterThan(0);
-			}
-			if (account2?.daysUntilExpiration !== undefined) {
-				expect(account2?.daysUntilExpiration).toBeGreaterThan(0);
-			}
+			// Assert the lookups found something. Guarding each assertion behind
+			// `!== undefined` is what let this test run empty for as long as the
+			// lookups used `acc.name`, which TokenHealthStatus does not have.
+			expect(account1).toBeDefined();
+			expect(account2).toBeDefined();
+
+			// test-account-1 is seeded healthy, refreshed 30 days ago and
+			// expiring in 14, so its estimate is still in the future.
+			expect(account1?.daysUntilExpiration).toBeGreaterThan(0);
+
+			// test-account-2 is seeded expired on purpose: no
+			// refresh_token_issued_at, so the estimate falls back to created_at
+			// and lands past the 90 day maximum. The monitor treats
+			// `daysUntilExpiration <= 0` as the expired branch
+			// (packages/proxy/src/handlers/token-health-monitor.ts:99), so a
+			// value at or below zero is the behaviour under test, not a defect.
+			expect(account2?.daysUntilExpiration).toBeLessThanOrEqual(0);
+			expect(account2?.status).toBe("expired");
 		});
 	});
 
@@ -282,7 +293,7 @@ describe("Error Handling", () => {
 	it("should handle missing account gracefully", () => {
 		const healthReport = checkAllAccountsHealth(mockAccounts);
 		const missingAccount = healthReport.accounts.find(
-			(acc) => acc.name === "nonexistent-account",
+			(acc) => acc.accountName === "nonexistent-account",
 		);
 
 		expect(missingAccount).toBeUndefined();
