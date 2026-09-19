@@ -22,6 +22,7 @@
  */
 import { Database } from "bun:sqlite";
 import { beforeAll, describe, expect, it, mock } from "bun:test";
+import { ensureSchema, runMigrations } from "@better-ccflare/database";
 
 type QueryCall = { sql: string; params: unknown[] };
 
@@ -80,32 +81,16 @@ async function captureEligibilityQuery(): Promise<QueryCall> {
  */
 function seedDb(): Database {
 	const db = new Database(":memory:");
-	db.run(`
-		CREATE TABLE accounts (
-			id TEXT PRIMARY KEY,
-			name TEXT,
-			provider TEXT,
-			refresh_token TEXT,
-			access_token TEXT,
-			expires_at INTEGER,
-			rate_limit_reset INTEGER,
-			custom_endpoint TEXT,
-			paused INTEGER,
-			auto_pause_on_overage_enabled INTEGER,
-			pause_reason TEXT,
-			auto_refresh_enabled INTEGER,
-			rate_limited_until INTEGER,
-			requires_reauth INTEGER DEFAULT 0
-		)
-	`);
+	ensureSchema(db);
+	runMigrations(db);
 
 	const insert = db.prepare(`
 		INSERT INTO accounts
 			(id, name, provider, refresh_token, access_token, expires_at,
 			 rate_limit_reset, custom_endpoint, paused,
 			 auto_pause_on_overage_enabled, pause_reason, auto_refresh_enabled,
-			 rate_limited_until)
-		VALUES (?, ?, 'anthropic', 'rt', 'at', NULL, NULL, NULL, ?, ?, ?, 1, NULL)
+			 rate_limited_until, created_at)
+		VALUES (?, ?, 'anthropic', 'rt', 'at', NULL, NULL, NULL, ?, ?, ?, 1, NULL, 1)
 	`);
 
 	// name, paused, auto_pause_on_overage_enabled, pause_reason

@@ -159,6 +159,172 @@ describe("a regular file at the config path", () => {
 		}
 	});
 
+	it("is loaded but reported when other local users can write it", () => {
+		// The file is OURS, so trustedRegularPath() passes it: uid matches, one name.
+		// Nothing else looks at the file's own mode, so before this it was adopted in
+		// silence. Measured by PR #172's review, where local_control_secret came back
+		// reading a value written by somebody else (SB23-2338).
+		//
+		// The decision this pins is that the config is still LOADED. Refusing was
+		// rejected: loadConfig() assigns this.data before restrictConfigFile() runs,
+		// so a refusal that self-heals would find 0600 on the next boot and adopt the
+		// identical bytes, and a refusal that does not self-heal is a permanent outage
+		// on the filesystems where chmod is a no-op, which is where the standing
+		// exposure actually lives. The middle assertion below is the decision.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-mode-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+			// Explicit chmod, never writeFileSync's mode option: under umask 022 a
+			// requested 0o666 lands 0644, which has no group or other WRITE bit, so
+			// the condition under test would not hold and this test would fail
+			// without saying why.
+			chmodSync(configPath, 0o666);
+			expect(statSync(configPath).mode & 0o022).not.toBe(0);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				// Loaded, not refused. This is the decision.
+				expect(config.get("lb_strategy")).toBe("session");
+			});
+
+			const reported = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("its contents may not be yours"),
+			);
+			expect(reported).toHaveLength(1);
+			expect(reported[0].msg).toContain(configPath);
+			// The field that makes this an authentication bypass rather than a
+			// disclosure has to be named, because chmodAndVerify()'s existing warning
+			// already covers readability and an operator who has seen that one will
+			// read this as the same thing.
+			expect(reported[0].msg).toContain("local_control_secret");
+			// And the window is closed on the way out, by the existing chmod.
+			expect(statSync(configPath).mode & 0o777).toBe(0o600);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("is NOT reported for a config only we can write", () => {
+		// The negative half, and every other test here is positive. Without it a
+		// mutation widening the mask from 0o022 to 0o222 survives the entire config
+		// security suite, ten files and 216 assertions, because every existing test
+		// asserts the line IS emitted and none asserts it is not. Measured under that
+		// mutation: a 0600 config emits the line. So the warning would fire on every
+		// install on every boot and nothing would go red. Found by PR #176's review.
+		//
+		// 0644 is the more valuable of the two cases. That is what versions before
+		// PR #57 wrote, so it is what an upgrading install actually has on disk, and
+		// the message would be false about it: 0644 is world-READABLE, which
+		// chmodAndVerify() already reports, and not world-writable.
+		for (const mode of [0o600, 0o644]) {
+			const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-ok-"));
+			try {
+				const configPath = join(dir, "config.json");
+				writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+				chmodSync(configPath, mode);
+				// The premise: no group or other WRITE bit.
+				expect(statSync(configPath).mode & 0o022).toBe(0);
+
+				const logs = captureLogs(() => {
+					const config = new Config(configPath);
+					expect(config.get("lb_strategy")).toBe("session");
+				});
+
+				expect(
+					logs.filter((event) =>
+						event.msg.includes("its contents may not be yours"),
+					),
+				).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("is reported when only the GROUP can write it, not just other", () => {
+		// Kills a mask narrowed from 0o022 to 0o002. The case above uses 0666, which
+		// has both the group and the other write bit, so it survives that narrowing
+		// and says nothing about which bits are checked. Found by mutation, not by
+		// reading: the narrowed mask passed the whole file.
+		//
+		// A group-writable config is the realistic shape of the two. A shared group
+		// is how an operator gives a service account access, and 0660 is what a
+		// umask of 007 produces, so this is the mode a real install arrives at
+		// without anybody choosing it.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-grp-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+			chmodSync(configPath, 0o660);
+			// The point of this fixture: group write set, other write clear.
+			expect(statSync(configPath).mode & 0o020).not.toBe(0);
+			expect(statSync(configPath).mode & 0o002).toBe(0);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				expect(config.get("lb_strategy")).toBe("session");
+			});
+
+			const reportedGroup = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("its contents may not be yours"),
+			);
+			expect(reportedGroup).toHaveLength(1);
+			// The bit that was found is named, because "group-writable (gid N)" and
+			// "world-writable" call for different actions from an operator.
+			expect(reportedGroup[0].msg).toContain("group-writable (gid ");
+			expect(reportedGroup[0].msg).not.toContain("world-writable");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports a writable config once per path, not once per reader", () => {
+		// getLocalControlSecret() re-reads the file itself, so without the module
+		// Set the same boot emits the line more than once and an operator learns to
+		// scroll past it.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-dedup-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+			chmodSync(configPath, 0o666);
+			expect(statSync(configPath).mode & 0o022).not.toBe(0);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				// Put the mode back before the next reader. Without this the test
+				// proves nothing and a mutation deleting the dedupe survives it,
+				// which is how this fixture was found: restrictConfigFile() lands
+				// 0600 during construction, so on a mode-enforcing filesystem no
+				// later read can meet the condition again and the Set is never
+				// consulted twice.
+				//
+				// Restoring it models the case the Set exists for, a filesystem
+				// where chmod is a no-op so every read sees a writable file. Docker
+				// bind mounts from a macOS or Windows host, and FAT or exFAT, which
+				// this host cannot mount for a test.
+				chmodSync(configPath, 0o666);
+				config.getLocalControlSecret();
+				chmodSync(configPath, 0o666);
+				config.getLocalControlSecret();
+			});
+
+			expect(
+				logs.filter(
+					(event) =>
+						event.level === "ERROR" &&
+						event.msg.includes("its contents may not be yours"),
+				),
+			).toHaveLength(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("is diagnosed as a directory, not as a hardlink, when it is one", () => {
 		// A directory has nlink >= 2 and is owned by us, so it reached the hardlink
 		// branch and was told it was "a regular file with 2 names", advising the

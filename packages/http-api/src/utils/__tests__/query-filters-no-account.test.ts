@@ -17,24 +17,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import "@better-ccflare/core";
+import { ensureSchema, runMigrations } from "@better-ccflare/database";
 import { NO_ACCOUNT_ID } from "@better-ccflare/types";
 import { buildRequestFilters } from "../query-filters";
 
 function makeDb(): Database {
 	const db = new Database(":memory:");
-	db.run(`
-		CREATE TABLE requests (
-			id TEXT PRIMARY KEY,
-			timestamp INTEGER NOT NULL,
-			account_used TEXT
-		)
-	`);
-	db.run(`
-		CREATE TABLE accounts (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL
-		)
-	`);
+	ensureSchema(db);
+	runMigrations(db);
 	return db;
 }
 
@@ -43,13 +33,17 @@ function insertRequest(
 	row: { id: string; timestamp: number; account_used: string | null },
 ) {
 	db.run(
-		"INSERT INTO requests (id, timestamp, account_used) VALUES (?, ?, ?)",
+		"INSERT INTO requests (id, timestamp, method, path, account_used) VALUES (?, ?, 'POST', '/v1/messages', ?)",
 		[row.id, row.timestamp, row.account_used],
 	);
 }
 
 function insertAccount(db: Database, row: { id: string; name: string }) {
-	db.run("INSERT INTO accounts (id, name) VALUES (?, ?)", [row.id, row.name]);
+	db.run("INSERT INTO accounts (id, name, created_at) VALUES (?, ?, ?)", [
+		row.id,
+		row.name,
+		Date.now(),
+	]);
 }
 
 describe("buildRequestFilters — no-account drill-down binding", () => {
