@@ -240,9 +240,20 @@ export function parseCodexUsageHeaders(
 	// change and not this issue's.
 	const credits = parseCodexCreditsHeaders(headers);
 
+	// Absent is null, never zeroed. A window upstream never reported is not a
+	// window at zero percent: a captured Pro response carries only the weekly
+	// window, and a manufactured `{ utilization: 0, resets_at: null }` passes
+	// every `!= null` check downstream, so the card rendered a confident "0% of
+	// five hours used" for a window that does not exist for that account.
+	//
+	// The key stays present rather than being omitted. `usage-throttling.ts:137`
+	// gates its only Codex-reachable branch on `"five_hour" in data && "seven_day"
+	// in data`, and it reads this object raw out of `usageCache`. Dropping a key
+	// would make a weekly-only payload match no branch, losing an exhausted weekly
+	// window from throttling, which admits an account that should be held.
 	return {
-		five_hour: fiveHour ?? { utilization: defaultUtilization, resets_at: null },
-		seven_day: sevenDay ?? { utilization: defaultUtilization, resets_at: null },
+		five_hour: fiveHour ?? null,
+		seven_day: sevenDay ?? null,
 		...(credits ? { credits } : {}),
 	};
 }

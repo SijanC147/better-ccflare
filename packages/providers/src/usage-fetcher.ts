@@ -96,8 +96,12 @@ export interface CodexCredits {
 export interface UsageData {
 	// Core windows — present on legacy payloads but ABSENT on limits[]-only
 	// payloads (Anthropic is migrating the flat windows into the generic limits[]).
-	five_hour?: UsageWindow;
-	seven_day?: UsageWindow;
+	// `null` is an explicit "upstream did not report this window", distinct from
+	// a reported zero. Every reader tests `!= null` or truthiness, so null reads
+	// as absent, while the key stays present for the `"five_hour" in data` shape
+	// guards that route raw parser output (usage-throttling.ts:137).
+	five_hour?: UsageWindow | null;
+	seven_day?: UsageWindow | null;
 	seven_day_oauth_apps?: UsageWindow;
 	seven_day_opus?: UsageWindow | null;
 	// New fields from 2025-11 API update (all optional for backward compatibility)

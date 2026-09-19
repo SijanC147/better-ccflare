@@ -118,8 +118,11 @@ describe("recordCodexUsageSnapshot", () => {
 
 	it("drops synthetic windows and writes nothing when every window is synthetic", async () => {
 		const { dbOps, calls } = makeDbOps();
-		// parseCodexUsageHeaders fills an absent window with resets_at: null and
-		// the default utilization — recording that would write a false 0%.
+		// A window upstream never reported is now `null` from the parser and is
+		// rejected by the object check. What this case covers is the window that
+		// WAS reported and carried no usable reset header: `toUsageWindow` yields
+		// `resets_at: null` for it too, and recording it would write a row that
+		// cannot be placed on a window boundary.
 		const wrote = await recordCodexUsageSnapshot(
 			dbOps,
 			"a",
