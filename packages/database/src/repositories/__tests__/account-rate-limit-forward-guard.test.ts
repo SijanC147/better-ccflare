@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
+import { ensureSchema, runMigrations } from "../../migrations";
 import { AccountRepository } from "../account.repository";
 
 function makeDb(): { db: Database; repo: AccountRepository } {
@@ -14,41 +15,8 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 
 	// Minimal schema — includes consecutive_rate_limits, which
 	// markAccountRateLimited SELECTs back after every write.
-	db.run(`
-		CREATE TABLE accounts (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			provider TEXT DEFAULT 'anthropic',
-			api_key TEXT,
-			refresh_token TEXT DEFAULT '',
-			access_token TEXT,
-			expires_at INTEGER,
-			created_at INTEGER NOT NULL,
-			last_used INTEGER,
-			request_count INTEGER DEFAULT 0,
-			total_requests INTEGER DEFAULT 0,
-			rate_limited_until INTEGER,
-			rate_limited_reason TEXT,
-			rate_limited_at INTEGER,
-			consecutive_rate_limits INTEGER DEFAULT 0,
-			session_start INTEGER,
-			session_request_count INTEGER DEFAULT 0,
-			paused INTEGER DEFAULT 0,
-			rate_limit_reset INTEGER,
-			rate_limit_status TEXT,
-			rate_limit_remaining INTEGER,
-			priority INTEGER DEFAULT 0,
-			auto_fallback_enabled INTEGER DEFAULT 0,
-			auto_refresh_enabled INTEGER DEFAULT 0,
-			auto_pause_on_overage_enabled INTEGER DEFAULT 0,
-			custom_endpoint TEXT,
-			model_mappings TEXT,
-			cross_region_mode TEXT,
-			model_fallbacks TEXT,
-			billing_type TEXT,
-			pause_reason TEXT
-		)
-	`);
+	ensureSchema(db);
+	runMigrations(db);
 
 	const adapter = new BunSqlAdapter(db);
 	const repo = new AccountRepository(adapter);
