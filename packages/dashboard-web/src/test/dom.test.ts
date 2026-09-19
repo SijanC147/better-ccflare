@@ -65,3 +65,23 @@ test("byText matches exactly, not by prefix", () => {
 
 	expect(byText(host, "button", "Acknowledge grou").length).toBe(0);
 });
+
+test("happyDOM's async API is poisoned rather than silently wrong", () => {
+	// `dom.ts` restores Bun's timers, which hides them from happy-dom's task
+	// manager, so `waitUntilComplete()` would return with work outstanding:
+	// measured at 1ms against a 300ms timer. A comment is a check and checks
+	// get missed, so `dom.ts` replaces the method with a thrower.
+	//
+	// This test exists because the poison is itself a claim. The reviewer that
+	// proposed it flagged as unproven whether `globalThis.happyDOM` is
+	// writable or an accessor, and an accessor would discard the assignment
+	// silently, which is the same failure class the poison prevents. Asserting
+	// the throw is how that stops being unproven.
+	const hd = (globalThis as Record<string, unknown>).happyDOM as
+		| Record<string, unknown>
+		| undefined;
+	expect(hd).toBeDefined();
+	for (const name of ["waitUntilComplete", "whenAsyncComplete"]) {
+		expect(() => (hd?.[name] as () => void)()).toThrow(/Use React's act/);
+	}
+});

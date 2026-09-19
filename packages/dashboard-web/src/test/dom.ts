@@ -34,13 +34,16 @@
  * moved, since leaving it would have sent the next reader looking for a gap
  * that had been closed.
  *
- * Import order inside a test file does not matter, which is worth stating
- * because it looks as though it should. ES module imports are hoisted, so
- * `react-dom/client` is always evaluated before the registration below runs
- * whatever order the source is written in. That is measured to be fine:
- * `react-dom` reads the global scope when a root is created rather than when
- * it is loaded, so a module graph built against an empty global scope still
- * mounts once `document` exists.
+ * IMPORT THIS BEFORE ANY MODULE THAT TOUCHES THE DOM AT LOAD TIME. An earlier
+ * version of this comment said import order does not matter, on the reasoning
+ * that ES imports hoist. A reviewer falsified it with two test files differing
+ * only in order, against a module reading `typeof document` at load: imported
+ * above this one it sees no DOM and fails, below it sees a DOM and passes.
+ * Module evaluation order in the importer is source order.
+ *
+ * The claim is true for `react-dom/client` alone, and the reason is not
+ * hoisting: `dom.ts` imports `react-dom/client` itself, so react-dom is always
+ * a dependency of the registration module and always evaluates after it.
  *
  * Registration is process-wide and deliberately never undone. Bun runs every
  * test file in one process, so an `unregister` in one file would pull the DOM
@@ -94,10 +97,38 @@ import { createRoot } from "react-dom/client";
  * `CloseEvent`, `DOMException`, `navigator`, `addEventListener`,
  * `removeEventListener`, `dispatchEvent`, `postMessage`, `MessagePort`.
  *
- * `ReadableStream` is on the list and is a no-op today: happy-dom does not
- * replace it, which is exactly why `pipeThrough` broke. It is listed so that a
- * happy-dom release that starts replacing it does not reopen the same bug
- * silently.
+ * ONLY `TransformStream` IS LOAD-BEARING TODAY. Deleting this whole loop fails
+ * exactly four tests, all the `processResponse - SSE` case in
+ * `packages/providers`, and nothing else. The other twenty entries are a
+ * forward guard: they cost nothing, and a happy-dom release that starts
+ * replacing one of them cannot reopen the `pipeThrough` mismatch without
+ * somebody reviewing it. The list reads as though it were derived from
+ * failures; it was derived from one failure plus a generalisation, and that is
+ * the honest description.
+ *
+ * `ReadableStream` is the clearest case of that: happy-dom does not replace it
+ * at all, which is precisely why the mismatch happened, so its entry is a
+ * no-op kept as a guard.
+ *
+ * `URL` AND `Blob` MOVE TOGETHER. Restoring `URL` alone makes
+ * `URL.createObjectURL` throw on a happy-dom Blob. It works only because
+ * `Blob` and `File` are restored alongside it, so splitting them is the trap.
+ * happy-dom resolves relative URLs through its own imported URL rather than
+ * `globalThis.URL`, so `location.href`, `document.baseURI`, `anchor.href` and
+ * `img.src` are byte-identical either way.
+ *
+ * RESTORING `fetch` REMOVES RELATIVE-URL RESOLUTION. Bun's `fetch` needs an
+ * absolute URL; happy-dom's resolves against `location`. So `fetch("/api/x")`
+ * throws `ERR_INVALID_URL` here, and a test that needs one must stub
+ * `globalThis.fetch` rather than reach for `happyDOM.setURL`. Keeping Bun's is
+ * still the safer default: in the reviewer's no-restore arm the same probe made
+ * a real outbound request and got a 404 from the live better-ccflare on 8080,
+ * which is an accident a test suite must not be able to have. Call sites this
+ * will meet: `ProjectsTab.tsx` and `PostgresConfigCard.tsx`.
+ *
+ * `PerformanceObserver` and `PerformanceObserverEntryList` are also replaced by
+ * registration and are on neither list. Nothing in `packages` or `apps` uses
+ * them, so they are named here rather than handled.
  *
  * THE TIMERS CARRY A COST, and it is measured rather than suspected.
  * Restoring Bun's `setTimeout` takes those timers out of happy-dom's async
@@ -150,6 +181,27 @@ if (typeof globalThis.document === "undefined") {
 
 	for (const [name, value] of native) {
 		if (scope[name] !== value) scope[name] = value;
+	}
+
+	// Make the timer consequence loud instead of documented. happy-dom's task
+	// manager counts timers it created, and the restore above hides every
+	// later timer from it, so `waitUntilComplete()` returns while work is
+	// outstanding: measured at 1ms with a 300ms timer unfired. A test reaching
+	// for it would assert a stale DOM and pass for the wrong reason.
+	//
+	// A comment is a check and checks get missed, so this throws instead.
+	// Verified before shipping that the write takes: `globalThis.happyDOM` is
+	// a writable, configurable data property, the methods are inherited rather
+	// than own, and assigning a thrower and calling it produces the throw.
+	const happyDom = scope.happyDOM as Record<string, unknown> | undefined;
+	if (happyDom) {
+		for (const name of ["waitUntilComplete", "whenAsyncComplete"]) {
+			happyDom[name] = () => {
+				throw new Error(
+					`happyDOM.${name}() does not work in packages/dashboard-web: src/test/dom.ts restores Bun's timers, so happy-dom's task manager never sees them and this would resolve early. Use React's act, which mount and click already do.`,
+				);
+			};
+		}
 	}
 }
 
