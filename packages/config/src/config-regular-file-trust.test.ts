@@ -175,6 +175,67 @@ describe("a regular file at the config path", () => {
 		}
 	});
 
+	it("still reports the outcome on a second Config for the same path", () => {
+		// SB23-2379, a regression this PR's own dedup introduced and the reviewer
+		// found. `loadConfig()`'s refusal branch used to emit nothing of its own
+		// and rely on the diagnosis from `writeTarget()`. Once that diagnosis was
+		// deduplicated per process, the SECOND Config for the same path fell back
+		// to defaults in TOTAL SILENCE, which is a worse log than the duplicate
+		// paragraph the dedup removed.
+		//
+		// Two instances is the whole point and one would not catch it, the same
+		// way one refused save could not separate a deduplicated outcome line from
+		// an undeduplicated one in the test above. A dedup needs two events.
+		//
+		// `oauth.ts:878` and `:971` construct a fresh Config inside
+		// request-handling bodies, so this is a real second instance in one
+		// process, not a test artefact.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-second-config-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(
+				configPath,
+				JSON.stringify({ local_control_secret: "ATTACKER-CHOSEN" }),
+				{ mode: 0o600 },
+			);
+
+			const logs = captureLogs(() => {
+				asStranger(() => {
+					new Config(configPath);
+					new Config(configPath);
+				});
+			});
+
+			// The diagnosis is deduplicated, which is SB23-2357 working.
+			const diagnoses = logs.filter(
+				(event) =>
+					event.level === "ERROR" && event.msg.includes("not by us (uid "),
+			);
+			expect(diagnoses).toHaveLength(1);
+
+			// The outcome is not, and this is the assertion that fails if the new
+			// line is deleted or routed through refuse().
+			const outcomes = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("Config not loaded:") &&
+					event.msg.includes("running on defaults"),
+			);
+			expect(outcomes).toHaveLength(2);
+
+			// Pin what the outcome line claims, because the failure being fixed is
+			// a log that does not say what happened. It must name the consequence,
+			// not repeat the cause.
+			expect(outcomes[1].msg).toContain(configPath);
+			expect(outcomes[1].msg).toContain("local_control_secret is regenerated");
+			// And it must not restate the diagnosis, which may be far back in the
+			// log or absent from what the operator is reading.
+			expect(outcomes[1].msg).not.toContain("not by us (uid ");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("is refused when it is a hardlink, whatever uid it reports", () => {
 		// The "or root" half of the ownership test is why one name is required. A
 		// hardlink carries the inode's owner to a new name, and macOS has no

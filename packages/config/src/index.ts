@@ -521,7 +521,30 @@ export class Config extends EventEmitter {
 			// config an attacker supplied.
 			const trusted = this.writeTarget();
 			if (trusted === null) {
-				// writeTarget() has already said why, at error level.
+				// writeTarget() has said WHY, at error level, and says it once per
+				// process. This line is the OUTCOME, and it is deliberately not routed
+				// through refuse() (SB23-2379).
+				//
+				// Without it this branch reported nothing of its own and relied
+				// entirely on the diagnosis above. Once SB23-2357 deduplicated that
+				// diagnosis, the SECOND and later Config built for the same path in one
+				// process fell back to defaults in total silence, which is a worse log
+				// than the duplicate paragraph the dedup removed. Not hypothetical:
+				// packages/http-api/src/handlers/oauth.ts:878 and :971 construct a
+				// fresh Config inside request-handling bodies, and apps/server and
+				// packages/cli-commands build their own.
+				//
+				// So the rule this file now follows everywhere is diagnosis once,
+				// outcome every time. saveConfig() and readLocalControlSecretFromDisk()
+				// already had their outcome lines; loadConfig() was the one refusal
+				// path with none. Found by PR #190's review.
+				//
+				// It names the consequence rather than repeating the cause, because the
+				// cause may be thousands of lines back in the log, or absent from this
+				// process's output entirely if the operator started reading late.
+				log.error(
+					`Config not loaded: ${this.configPath} cannot be trusted, so this process is running on defaults. local_control_secret is regenerated, which presents as clients intermittently failing to authenticate. The reason was logged once, above.`,
+				);
 				this.data = {};
 				// Harden the directory anyway. Everything else in this branch is
 				// about the file we refused to read, but the directory holds the
