@@ -47,6 +47,17 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -175,6 +186,8 @@ describe("selectAccountsForRequest — force account model", () => {
 					model: "gpt-5.6-sol",
 					priority: 0,
 					enabled: true,
+					max_utilization_percent: null,
+					min_reset_remaining_ms: null,
 				},
 			],
 		};

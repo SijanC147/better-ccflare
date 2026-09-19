@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -49,6 +50,10 @@ function makeAccount(): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 	};
 }
 
@@ -124,7 +129,7 @@ async function run(
 	fetchImpl: typeof globalThis.fetch,
 ): Promise<void> {
 	const originalFetch = globalThis.fetch;
-	globalThis.fetch = fetchImpl as never;
+	fetchSlot.fetch = fetchImpl as never;
 	const bodyBuffer = makeRequestBody();
 	const req = new Request("https://proxy.local/v1/messages", {
 		method: "POST",
@@ -146,7 +151,7 @@ async function run(
 		const msg = e instanceof Error ? e.message : String(e);
 		if (!msg.includes("UsageCollector not initialized")) throw e;
 	} finally {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	}
 }
 

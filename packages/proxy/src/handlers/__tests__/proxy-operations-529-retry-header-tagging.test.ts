@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -50,6 +51,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -162,7 +167,7 @@ describe("proxyWithAccount — 529 in-place retry response tagging", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		for (const key of ENV_KEYS) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -171,7 +176,7 @@ describe("proxyWithAccount — 529 in-place retry response tagging", () => {
 
 	it("re-tags stream and custom-tools metadata headers on the retry response", async () => {
 		let fetchCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			fetchCount++;
 			if (fetchCount === 1) {
 				return new Response(
@@ -237,7 +242,7 @@ describe("proxyWithAccount — 529 in-place retry response tagging", () => {
 	});
 	for (const caller of ["authenticated-key-record", undefined])
 		it(`Codex caller identity comes only from authenticated dispatch (${caller ?? "none"})`, async () => {
-			globalThis.fetch = mock(
+			fetchSlot.fetch = mock(
 				async () =>
 					new Response("{}", {
 						headers: { "content-type": "application/json" },

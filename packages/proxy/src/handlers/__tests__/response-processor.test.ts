@@ -37,6 +37,17 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		cross_region_mode: null,
 		model_fallbacks: null,
 		consecutive_rate_limits: 0,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		auto_pause_on_overage_enabled: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }

@@ -48,6 +48,9 @@ function makeAccount(id: string, overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -81,7 +84,16 @@ function makeContext(opts: {
 				getAccount: mock(async () => opts.dbAccount ?? null),
 				setRequiresReauth,
 				updateAccountTokens: mock(async () => {}),
-				updateAccountTokensIfRefreshTokenMatches: mock(async () => true),
+				// The parameter is declared, unused here, because one case below
+				// replaces this mock with one that reads the account id
+				// (`recordPendingRotation(id, ...)`). Seeded as `async () => true`
+				// the property infers `Mock<() => Promise<boolean>>` and that
+				// replacement is not assignable. Production takes five arguments
+				// (`DatabaseOperations.updateAccountTokensIfRefreshTokenMatches`);
+				// only the first is read by any test here.
+				updateAccountTokensIfRefreshTokenMatches: mock(
+					async (_accountId: string) => true,
+				),
 				updateAccountTokensIfRefreshTokenAbsent: mock(async () => true),
 				flagRequiresReauthIfTokenMatches: mock(async () => true),
 			},

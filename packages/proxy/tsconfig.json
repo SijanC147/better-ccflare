@@ -4,5 +4,41 @@
 		"module": "esnext",
 		"moduleResolution": "bundler"
 	},
-	"include": ["src/**/*"]
+	"include": ["src/**/*"],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's `**/__tests__`, `**/*.test.ts` and
+	// `**/*.test.tsx` entries and brings this package's test files into the
+	// program. Same mechanism as packages/http-api (SB23-2304). Wired into the
+	// root `typecheck` script; without that script entry the gate never runs.
+	//
+	// The files listed below are the 21 of 108 that SB23-2344 did not reach.
+	// They carry 63 of the 329 errors this package measured when the exclusion
+	// came off. Each is a named file rather than a glob so that a NEW test file
+	// is typechecked by default and removing a line from this list is the whole
+	// of what it takes to gate one more. SB23-2385 tracks clearing them.
+	"exclude": [
+		"node_modules",
+		"dist",
+		"src/__tests__/cache-body-store.test.ts",
+		"src/__tests__/cache-keepalive-scheduler.test.ts",
+		"src/__tests__/memory-leak.test.ts",
+		"src/__tests__/project-attribution.test.ts",
+		"src/__tests__/proxy-model-capacity.test.ts",
+		"src/__tests__/response-handler-anthropic-terminal-recovery.test.ts",
+		"src/__tests__/response-handler-worker-protocol.test.ts",
+		"src/__tests__/sse-parsing.test.ts",
+		"src/__tests__/token-refresh-hierarchy.test.ts",
+		"src/__tests__/usage-collector-attribution-tristate.test.ts",
+		"src/__tests__/usage-collector-lifecycle.test.ts",
+		"src/__tests__/usage-collector-payload-meta.test.ts",
+		"src/__tests__/usage-collector-stream-terminal-state.test.ts",
+		"src/handlers/__tests__/agent-interceptor.header.test.ts",
+		"src/handlers/__tests__/agent-interceptor.precedence.test.ts",
+		"src/handlers/__tests__/agent-interceptor.rewrite-guard.test.ts",
+		"src/handlers/__tests__/oauth-features.test.ts",
+		"src/handlers/__tests__/proxy-operations-529-retry-gate.test.ts",
+		"src/handlers/__tests__/proxy-operations-count-tokens.test.ts",
+		"src/handlers/__tests__/response-processor-clone-cancel.test.ts",
+		"src/handlers/__tests__/response-processor-parseusage-disposal.test.ts"
+	]
 }

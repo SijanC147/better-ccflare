@@ -56,6 +56,11 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 		...overrides,
 	};
 }

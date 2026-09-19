@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import { CodexProvider } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import * as usageCollectorModule from "../../usage-collector";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -48,6 +49,10 @@ function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -116,7 +121,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		if (originalSyntheticCountTokensEnv === undefined) {
 			delete process.env[CODEX_SYNTHETIC_COUNT_TOKENS_ENV];
 		} else {
@@ -129,7 +134,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("count_tokens should not call upstream or refresh Codex");
 		});
-		globalThis.fetch = fetchMock;
+		fetchSlot.fetch = fetchMock;
 
 		const bodyBuffer = new TextEncoder().encode(
 			JSON.stringify({
@@ -167,7 +172,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("malformed count_tokens should not call upstream Codex");
 		});
-		globalThis.fetch = fetchMock;
+		fetchSlot.fetch = fetchMock;
 
 		const bodyBuffer = new TextEncoder().encode("{not-json").buffer;
 		const ctx = makeProxyContext();
@@ -202,7 +207,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 				"count_tokens should not call upstream even when synthetic estimates are disabled",
 			);
 		});
-		globalThis.fetch = fetchMock;
+		fetchSlot.fetch = fetchMock;
 
 		const bodyBuffer = new TextEncoder().encode(
 			JSON.stringify({
@@ -248,7 +253,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 				headers: { "content-type": "application/json" },
 			});
 		});
-		globalThis.fetch = fetchMock;
+		fetchSlot.fetch = fetchMock;
 
 		const collector = {
 			handleStart: mock(() => {}),

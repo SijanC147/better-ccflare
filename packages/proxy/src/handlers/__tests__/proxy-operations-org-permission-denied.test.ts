@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { resetDefaultCircuitBreaker } from "../../circuit-breaker";
 import * as usageCollectorModule from "../../usage-collector";
 import { clearFamilyExhaustionCache } from "../model-capacity";
@@ -59,6 +60,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -190,7 +195,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		collectorSpy.mockRestore();
 		usageCache.clear();
 		clearFamilyExhaustionCache();
@@ -199,7 +204,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 	});
 
 	it("benches the account and fails over instead of forwarding the 403", async () => {
-		globalThis.fetch = mock(async () => orgPermissionDenied403());
+		fetchSlot.fetch = mock(async () => orgPermissionDenied403());
 
 		const ctx = makeCtx();
 		const account = makeAccount();
@@ -222,7 +227,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 	});
 
 	it("records one audit row carrying status 403 and the org_permission_denied reason", async () => {
-		globalThis.fetch = mock(async () => orgPermissionDenied403());
+		fetchSlot.fetch = mock(async () => orgPermissionDenied403());
 
 		const ctx = makeCtx();
 		const account = makeAccount();
@@ -243,7 +248,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 	it("matches on error.type, not on the message wording", async () => {
 		// The wording Claude Code shows the user on /v1/messages differs from the
 		// usage endpoint's. Anthropic owns that copy; the routing must not.
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(
 					JSON.stringify({
@@ -273,7 +278,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 		// bench is real information — unlike a keepalive 429, which can be a
 		// synthetic per-IP burst artifact. The history row is still suppressed:
 		// no client ever saw this request.
-		globalThis.fetch = mock(async () => orgPermissionDenied403());
+		fetchSlot.fetch = mock(async () => orgPermissionDenied403());
 
 		const ctx = makeCtx();
 		const account = makeAccount();
@@ -292,7 +297,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 	});
 
 	it("leaves a 403 whose error.type is not permission_error untouched", async () => {
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(
 					JSON.stringify({
@@ -322,7 +327,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 	it("leaves a non-JSON 403 untouched (edge/WAF block pages must not drain the pool)", async () => {
 		// Such a block typically rejects every account identically. Benching one
 		// account per attempt is the pool-drain failure mode of issue #301.
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response("<html>403 Forbidden</html>", {
 					status: 403,

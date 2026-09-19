@@ -17,6 +17,17 @@ import * as rateLimitCooldownModule from "../rate-limit-cooldown";
 import { handleRateLimitResponse } from "../response-processor";
 import { createSseRateLimitSniffer } from "../sse-rate-limit-sniffer";
 
+/**
+ * `ResponseHandlerOptions.requestBody` is `ArrayBuffer | null`, and production
+ * supplies `RequestBodyContext.getBuffer()` (`proxy.ts:360`). These fixtures
+ * passed the `Uint8Array` that `TextEncoder.encode` returns, a shape no caller
+ * produces; the tests passed because both carry `byteLength` and neither is
+ * read as an `ArrayBuffer` on the path they exercise.
+ */
+function encodeRequestBody(json: string): ArrayBuffer {
+	return new TextEncoder().encode(json).buffer;
+}
+
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
 		id: "acct-mid-1",
@@ -52,6 +63,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -256,7 +271,7 @@ describe("forwardToClient — real mid-stream sniffer call form", () => {
 					path: "/v1/messages",
 					account,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(body, {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -402,7 +417,7 @@ describe("forwardToClient — mid-stream keepalive exemption", () => {
 					path: "/v1/messages",
 					account,
 					requestHeaders: makeKeepaliveHeaders(),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(body, {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -490,7 +505,7 @@ describe("forwardToClient — mid-stream keepalive exemption", () => {
 					path: "/v1/messages",
 					account,
 					requestHeaders: forgedHeaders,
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(body, {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },

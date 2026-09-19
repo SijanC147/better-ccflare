@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import * as usageCollectorModule from "../../usage-collector";
 import { clearFamilyExhaustionCache } from "../model-capacity";
 import { proxyWithAccount } from "../proxy-operations";
@@ -57,6 +58,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -216,7 +221,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		collectorSpy.mockRestore();
 		usageCache.clear();
 		clearFamilyExhaustionCache();
@@ -228,7 +233,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	// measured returning three identical bare 429s, and not once did one succeed.
 	it("fails over without benching on a bare 429", async () => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return burst429();
 		});
@@ -259,7 +264,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	// of the rejected request).
 	it("leaves the account routable for the very next request", async () => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return calls === 1 ? burst429() : ok200();
 		});
@@ -280,7 +285,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	// must bench exactly as it did before this change.
 	it("still benches a 429 carrying a reset hint", async () => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return burst429({
 				"anthropic-ratelimit-unified-reset": String(
@@ -310,7 +315,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	// prefixes rather than probing known names, so this benches too.
 	it("still benches a 429 carrying only per-window headers", async () => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return burst429({
 				"anthropic-ratelimit-unified-5h-status": "rejected",
@@ -342,7 +347,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 		"rejected",
 	])("still benches unified status %s", async (status) => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return burst429({ "anthropic-ratelimit-unified-status": status });
 		});
@@ -360,7 +365,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	// handled earlier in the path. It must keep its own audit reason.
 	it("leaves the out_of_credits path unchanged", async () => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return burst429({
 				"anthropic-ratelimit-unified-overage-disabled-reason": "out_of_credits",
@@ -385,7 +390,7 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 	// benched nor recorded — the burst is the scheduler's own doing.
 	it("records nothing for a keepalive probe's bare 429", async () => {
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			return burst429();
 		});

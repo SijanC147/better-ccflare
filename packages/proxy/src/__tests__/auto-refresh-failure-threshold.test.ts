@@ -7,6 +7,7 @@
  */
 import { describe, expect, it, mock } from "bun:test";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	return new AutoRefreshScheduler(
 		db as never,
 		makeProxyContext() as never,
-	) as AutoRefreshScheduler & {
+	) as unknown as PublicSurface<AutoRefreshScheduler> & {
 		recordRefreshFailure(id: string, name: string, ctx: string): Promise<void>;
 		consecutiveFailures: Map<string, number>;
 		FAILURE_THRESHOLD: number;
@@ -191,7 +192,7 @@ describe("AutoRefreshScheduler — consecutive failure threshold", () => {
 		const scheduler = new AutoRefreshScheduler(
 			db as never,
 			makeProxyContext() as never,
-		) as AutoRefreshScheduler & {
+		) as unknown as PublicSurface<AutoRefreshScheduler> & {
 			recordRefreshFailure(
 				id: string,
 				name: string,

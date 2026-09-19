@@ -11,6 +11,7 @@ import {
 	fetchOpenAICompatibleModelsPreview,
 	getOpenAICompatibleModels,
 } from "../openai-compatible-model-catalog";
+import { fetchSlot } from "./fetch-slot";
 
 /**
  * The per-account model list for openai-compatible accounts, read from that
@@ -63,7 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	globalThis.fetch = originalFetch;
+	fetchSlot.fetch = originalFetch;
 	// getOpenAICompatibleModels() writes into the process-wide derived-defaults
 	// registry (provider-model-defaults.ts); left uncleared it leaks into any
 	// other test file that runs in the same bun process.
@@ -73,11 +74,11 @@ afterEach(() => {
 
 describe("getOpenAICompatibleModels", () => {
 	it("reads the account's own list and dedupes ids", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 
 		const listing = await getOpenAICompatibleModels(
 			"acc-oai",
@@ -95,7 +96,7 @@ describe("getOpenAICompatibleModels", () => {
 	it("requests the standard /v1/models path with a bearer token", async () => {
 		let requestedUrl: string | undefined;
 		let requestedAuth: string | null | undefined;
-		globalThis.fetch = (async (
+		fetchSlot.fetch = async (
 			input: string | URL | Request,
 			init?: RequestInit,
 		) => {
@@ -105,7 +106,7 @@ describe("getOpenAICompatibleModels", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		}) as typeof globalThis.fetch;
+		};
 
 		await getOpenAICompatibleModels("acc-oai", makeCtx(makeAccount()));
 
@@ -115,13 +116,13 @@ describe("getOpenAICompatibleModels", () => {
 
 	it("appends /v1/models when the endpoint has no /v1 suffix", async () => {
 		let requestedUrl: string | undefined;
-		globalThis.fetch = (async (input: string | URL | Request) => {
+		fetchSlot.fetch = async (input: string | URL | Request) => {
 			requestedUrl = String(input);
 			return new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		}) as typeof globalThis.fetch;
+		};
 
 		await getOpenAICompatibleModels(
 			"acc-oai",
@@ -133,15 +134,14 @@ describe("getOpenAICompatibleModels", () => {
 
 	// The reason the cache exists.
 	it("serves the last successful list when the endpoint stops answering", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 		await getOpenAICompatibleModels("acc-oai", makeCtx(makeAccount()));
 
-		globalThis.fetch = (async () =>
-			new Response("nope", { status: 500 })) as typeof globalThis.fetch;
+		fetchSlot.fetch = async () => new Response("nope", { status: 500 });
 		const listing = await getOpenAICompatibleModels(
 			"acc-oai",
 			makeCtx(makeAccount()),
@@ -158,15 +158,14 @@ describe("getOpenAICompatibleModels", () => {
 	// Unlike Codex, a second account never inherits a first account's listing —
 	// each openai-compatible account points at an arbitrary, unrelated endpoint.
 	it("does not borrow another account's listing", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 		await getOpenAICompatibleModels("acc-oai", makeCtx(makeAccount()));
 
-		globalThis.fetch = (async () =>
-			new Response("nope", { status: 401 })) as typeof globalThis.fetch;
+		fetchSlot.fetch = async () => new Response("nope", { status: 401 });
 		const listing = await getOpenAICompatibleModels(
 			"acc-other",
 			makeCtx(makeAccount({ id: "acc-other" })),
@@ -180,11 +179,11 @@ describe("getOpenAICompatibleModels", () => {
 	// no listing of its own could resolve to the first account's private
 	// endpoint's model ids. openai-compatible must opt out of that sharing.
 	it("does not let one account's derived defaults resolve for another account", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 
 		await getOpenAICompatibleModels("acc-oai", makeCtx(makeAccount()));
 
@@ -206,22 +205,22 @@ describe("getOpenAICompatibleModels", () => {
 	});
 
 	it("treats a listing with no usable models as a failure", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify({ data: [] }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 
 		expect(
 			await getOpenAICompatibleModels("acc-oai", makeCtx(makeAccount())),
 		).toBeNull();
 
 		// And the account is not stuck: a later real answer still lands.
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 		const listing = await getOpenAICompatibleModels(
 			"acc-oai",
 			makeCtx(makeAccount()),
@@ -258,11 +257,11 @@ describe("fetchOpenAICompatibleModelsPreview", () => {
 	// typed — this is the same live fetch as getOpenAICompatibleModels, minus
 	// the accountId-keyed cache and derived-defaults side effects.
 	it("returns the account's own listing for raw apiKey/endpoint", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 
 		const preview = await fetchOpenAICompatibleModelsPreview(
 			"sk-test",
@@ -285,8 +284,7 @@ describe("fetchOpenAICompatibleModelsPreview", () => {
 	});
 
 	it("throws on an HTTP error from the endpoint", async () => {
-		globalThis.fetch = (async () =>
-			new Response("unauthorized", { status: 401 })) as typeof globalThis.fetch;
+		fetchSlot.fetch = async () => new Response("unauthorized", { status: 401 });
 
 		await expect(
 			fetchOpenAICompatibleModelsPreview(
@@ -297,11 +295,11 @@ describe("fetchOpenAICompatibleModelsPreview", () => {
 	});
 
 	it("throws when the listing came back with no usable models", async () => {
-		globalThis.fetch = (async () =>
+		fetchSlot.fetch = async () =>
 			new Response(JSON.stringify({ data: [] }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			});
 
 		await expect(
 			fetchOpenAICompatibleModelsPreview(
