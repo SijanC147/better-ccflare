@@ -34,8 +34,8 @@ import {
 } from "@better-ccflare/core";
 import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
-import { resolveConfigPath } from "./paths";
 import { chmodForConfig } from "./chmod-seam";
+import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
 import {
 	validateRuntimeRetry,

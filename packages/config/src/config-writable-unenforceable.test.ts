@@ -100,82 +100,82 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 	it.skipIf(process.platform === "win32")(
 		"warns rather than erroring, and says the mode is not evidence",
 		() => {
-		withFixture((dir) => {
-			const configPath = join(dir, "config.json");
-			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
-			// Explicit chmod, never writeFileSync's mode option: that option is
-			// masked by the umask, and under umask 022 a requested 0o666 lands 0644,
-			// which has no group or other WRITE bit, so the condition under test
-			// would not hold and the test would pass against reverted source.
-			chmodSync(configPath, 0o666);
-			expect(statSync(configPath).mode & 0o022).not.toBe(0);
+			withFixture((dir) => {
+				const configPath = join(dir, "config.json");
+				writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+				// Explicit chmod, never writeFileSync's mode option: that option is
+				// masked by the umask, and under umask 022 a requested 0o666 lands 0644,
+				// which has no group or other WRITE bit, so the condition under test
+				// would not hold and the test would pass against reverted source.
+				chmodSync(configPath, 0o666);
+				expect(statSync(configPath).mode & 0o022).not.toBe(0);
 
-			// Stand in for the filesystem, by swapping the chmod rather than by
-			// pre-seeding the Set that records its result. tmpdir() here is APFS or
-			// tmpfs and does enforce modes, and no unprivileged fixture can produce
-			// one that does not AND presents a group- or world-writable mode: a FAT
-			// volume attached through DiskArbitration gives 0700, and mounting one
-			// with a writable mask needs root.
-			//
-			// This is the whole of SB23-2365. A chmod that succeeds and changes
-			// nothing is exactly what a Docker bind mount from a macOS host does, so
-			// with the file left at a real 0666 the chmod, the re-stat and the
-			// compare in chmodAndVerify() all run for real and the compare reads
-			// 0666. Pre-seeding selected this branch while running none of them.
-			let logs: LogEvent[] = [];
-			withChmodThatDoesNothing(() => {
-				logs = captureLogs(() => {
-					const config = new Config(configPath);
-					// Still loaded. PR #176's decision is unchanged by the level.
-					expect(config.get("lb_strategy")).toBe("session");
+				// Stand in for the filesystem, by swapping the chmod rather than by
+				// pre-seeding the Set that records its result. tmpdir() here is APFS or
+				// tmpfs and does enforce modes, and no unprivileged fixture can produce
+				// one that does not AND presents a group- or world-writable mode: a FAT
+				// volume attached through DiskArbitration gives 0700, and mounting one
+				// with a writable mask needs root.
+				//
+				// This is the whole of SB23-2365. A chmod that succeeds and changes
+				// nothing is exactly what a Docker bind mount from a macOS host does, so
+				// with the file left at a real 0666 the chmod, the re-stat and the
+				// compare in chmodAndVerify() all run for real and the compare reads
+				// 0666. Pre-seeding selected this branch while running none of them.
+				let logs: LogEvent[] = [];
+				withChmodThatDoesNothing(() => {
+					logs = captureLogs(() => {
+						const config = new Config(configPath);
+						// Still loaded. PR #176's decision is unchanged by the level.
+						expect(config.get("lb_strategy")).toBe("session");
+					});
 				});
+
+				// The measurement itself, which nothing pinned before this change: the
+				// compare ran, found the mode had not moved, and said so naming both
+				// modes. Whole message with toBe, not a pair of toContain and
+				// not.toContain: a blocklist of two strings cannot catch a sentence
+				// nobody thought to list, and a mutation that ADDED one has survived
+				// that shape in this exact file family.
+				const measured = logs.filter((event) =>
+					event.msg.startsWith("chmod on the config file"),
+				);
+				expect(measured).toHaveLength(1);
+				expect(measured[0].level).toBe("WARN");
+				expect(measured[0].msg).toBe(
+					`chmod on the config file ${configPath} reported success but the mode is still ` +
+						"0666 rather than 0600, so it may be readable " +
+						"by other local users. Filesystems without Unix modes behave this way, " +
+						"including Docker bind mounts from a macOS or Windows host and FAT or " +
+						"exFAT volumes. Move the config onto a filesystem that enforces modes, " +
+						"or mount it so only this user can read it.",
+				);
+
+				const warned = logs.filter(
+					(event) => event.level === "WARN" && event.msg.includes(WARN_MARK),
+				);
+				expect(warned).toHaveLength(1);
+				expect(warned[0].msg).toBe(
+					`The config file ${configPath} reads mode 0666, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${configPath} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
+				);
+
+				// The negative half. Without it a mutation that emits BOTH lines, or
+				// that ignores the measurement and keeps erroring, passes on the
+				// assertions above alone.
+				expect(
+					logs.filter((event) => event.msg.includes(ERROR_MARK)),
+				).toHaveLength(0);
+				expect(logs.filter((event) => event.level === "ERROR")).toHaveLength(0);
+				// The measurement must precede the level it decides. Deleting the
+				// chmodAndVerify() call at the report site leaves the Set empty there,
+				// so the level is chosen as "took" and this file's ERROR-free assertion
+				// above fails. That mutation is the acceptance line for SB23-2365 and it
+				// survived 187 pass before this test swapped its fixture.
+				const order = logs.map((event) => event.msg);
+				expect(
+					order.findIndex((msg) => msg.startsWith("chmod on the config file")),
+				).toBeLessThan(order.findIndex((msg) => msg.includes(WARN_MARK)));
 			});
-
-			// The measurement itself, which nothing pinned before this change: the
-			// compare ran, found the mode had not moved, and said so naming both
-			// modes. Whole message with toBe, not a pair of toContain and
-			// not.toContain: a blocklist of two strings cannot catch a sentence
-			// nobody thought to list, and a mutation that ADDED one has survived
-			// that shape in this exact file family.
-			const measured = logs.filter((event) =>
-				event.msg.startsWith("chmod on the config file"),
-			);
-			expect(measured).toHaveLength(1);
-			expect(measured[0].level).toBe("WARN");
-			expect(measured[0].msg).toBe(
-				`chmod on the config file ${configPath} reported success but the mode is still ` +
-					"0666 rather than 0600, so it may be readable " +
-					"by other local users. Filesystems without Unix modes behave this way, " +
-					"including Docker bind mounts from a macOS or Windows host and FAT or " +
-					"exFAT volumes. Move the config onto a filesystem that enforces modes, " +
-					"or mount it so only this user can read it.",
-			);
-
-			const warned = logs.filter(
-				(event) => event.level === "WARN" && event.msg.includes(WARN_MARK),
-			);
-			expect(warned).toHaveLength(1);
-			expect(warned[0].msg).toBe(
-				`The config file ${configPath} reads mode 0666, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${configPath} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
-			);
-
-			// The negative half. Without it a mutation that emits BOTH lines, or
-			// that ignores the measurement and keeps erroring, passes on the
-			// assertions above alone.
-			expect(
-				logs.filter((event) => event.msg.includes(ERROR_MARK)),
-			).toHaveLength(0);
-			expect(logs.filter((event) => event.level === "ERROR")).toHaveLength(0);
-			// The measurement must precede the level it decides. Deleting the
-			// chmodAndVerify() call at the report site leaves the Set empty there,
-			// so the level is chosen as "took" and this file's ERROR-free assertion
-			// above fails. That mutation is the acceptance line for SB23-2365 and it
-			// survived 187 pass before this test swapped its fixture.
-			const order = logs.map((event) => event.msg);
-			expect(
-				order.findIndex((msg) => msg.startsWith("chmod on the config file")),
-			).toBeLessThan(order.findIndex((msg) => msg.includes(WARN_MARK)));
-		});
 		},
 	);
 
