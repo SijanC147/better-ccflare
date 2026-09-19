@@ -68,8 +68,18 @@ const CONFIG_DIR_MODE = 0o700;
  * Keyed by path rather than a single boolean so a process holding two configs
  * on different filesystems still hears about both; the set is bounded by the
  * number of distinct config paths, which is one or two.
+ *
+ * Exported for tests, and that is the only reason. readRegularFile() branches on
+ * it to decide whether a writable config is reported at ERROR or WARN, and no
+ * unprivileged fixture on macOS or Linux can reach the WARN side: a FAT volume
+ * attached through DiskArbitration presents its files 0700, which has no group
+ * or other write bit and so never meets the predicate, and mounting one with a
+ * writable mask needs root (`mount_msdos -m 777` fails with "msdos filesystem is
+ * not available" unprivileged, measured 2026-09-19). A test therefore marks the
+ * path here and constructs a Config, which exercises the real call site rather
+ * than a copy of its logic.
  */
-const unenforceableModes = new Set<string>();
+export const unenforceableModes = new Set<string>();
 
 /**
  * Config paths already reported as writable by other local users, so the warning
@@ -78,7 +88,8 @@ const unenforceableModes = new Set<string>();
  * getLocalControlSecret() re-reads the file on its own, so without this the line
  * appears more than once per boot. Same technique and same reason as
  * unenforceableModes above. Deliberately never cleared: on a filesystem that
- * cannot enforce modes the condition is permanent, and repeating it every boot is
+ * cannot enforce modes, or where the chmod is refused, the condition is
+ * permanent and repeating it every boot is
  * the point, while repeating it three times in one boot is noise.
  */
 const contentsNotOurs = new Set<string>();
@@ -607,9 +618,80 @@ export class Config extends EventEmitter {
 							? "group- and world-writable"
 							: `group-writable (gid ${info.gid})`
 						: "world-writable";
-				log.error(
-					`The config file ${target} is mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user can write it and its contents may not be yours. The WHOLE config has been loaded, not part of it. An attacker who writes this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. Inspect the file, or delete it so a fresh one is created, and move it onto a filesystem that enforces modes if chmod cannot.`,
-				);
+				// Close the window here rather than waiting for restrictConfigFile()
+				// a few lines up the caller, because WHETHER THE CHMOD TAKES decides
+				// the level of the report below and the report has to go out now
+				// (SB23-2350).
+				//
+				// Its own try/catch, and that is not defensive tidiness. This block
+				// sits inside readRegularFile()'s try, so a chmodSync that throws
+				// would land in the outer catch, return null, and turn a warning
+				// about a writable config into a silently empty config. That is the
+				// shape PR #176's review found one line down from here.
+				//
+				// A chmod that throws is treated as enforcing, so the report stays at
+				// ERROR. The reachable throwing cases are a read-only mount and a
+				// macOS uchg flag, both on filesystems that do enforce modes, where
+				// the mode read above is real evidence. A file owned by another user
+				// cannot reach here at all: trustedRegularPath() refuses on uid before
+				// readRegularFile() is called.
+				//
+				// restrictConfigFile() still runs afterwards and is not redundant. It
+				// covers the modes this branch never sees, and on a mode-enforcing
+				// filesystem it early-returns on the 0600 this call just landed, while
+				// on a mode-ignoring one chmodAndVerify() silences its own second
+				// warning through the same Set.
+				// Three outcomes, not two, and the third is why. A chmod that THREW
+				// leaves the file exactly as writable as it was found, so the
+				// "brought to 0600, does not repeat" sentences the took branch ends
+				// on would both be false, in a security message, in the one case a
+				// test covers. A uchg flag survives a reboot, so that line does
+				// repeat. Found by review before the verdict, on the first draft,
+				// which reported the throw at the took branch's text.
+				let chmodOutcome: "took" | "noop" | "threw" = "took";
+				try {
+					chmodAndVerify(target, CONFIG_FILE_MODE, "config file");
+					if (unenforceableModes.has(target)) chmodOutcome = "noop";
+				} catch (error) {
+					chmodOutcome = "threw";
+					log.warn(`Could not restrict config file permissions: ${error}`);
+				}
+				if (chmodOutcome === "took") {
+					log.error(
+						`The config file ${target} was mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user could write it and its contents may not be yours. It has been brought to 0600, which closes the window but not its effect: the WHOLE config was already loaded, not part of it, and the next write persists whatever was in it. An attacker who wrote this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. Inspect the file, or delete it so a fresh one is created. This line does not repeat on the next boot, because the file is 0600 now.`,
+					);
+				} else if (chmodOutcome === "threw") {
+					// ERROR, and the level is right for the same reason the took
+					// branch's is: a filesystem that REFUSES a chmod is one that
+					// enforces modes, so the mode read above is evidence. What differs
+					// is that nothing was fixed, so the operator has to fix it.
+					log.error(
+						`The config file ${target} is mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user can write it and its contents may not be yours. The chmod to 0600 FAILED, reported just above, so it is still ${modeText(info.mode & 0o777)} and this line repeats on every boot until that is fixed. The WHOLE config has been loaded, not part of it. An attacker who writes this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. A read-only mount and a macOS uchg flag are the usual causes. Inspect the file, clear whatever refuses the chmod, or delete it so a fresh one is created.`,
+					);
+				} else {
+					// The whole point of SB23-2350. chmod reported success and changed
+					// nothing, so this filesystem has no Unix modes to set, and a mode
+					// it cannot enforce is not evidence about who can write the file in
+					// either direction. Docker Desktop bind mounts from a macOS or
+					// Windows host present every file 0777 and are the realistic case;
+					// FAT and exFAT are the other.
+					//
+					// ERROR here would fire on every boot forever with nothing the
+					// operator can do, and ship to OpenObserve each time. An alarm that
+					// cannot be cleared trains its reader to ignore alarms, which costs
+					// more than this warning buys. So the level says what is true: we
+					// could not measure this, and the answer is at the mount.
+					//
+					// Not silenced by a config key or an environment variable, which
+					// was the other candidate. The same switch that silences an
+					// unfixable alarm silences a real exposure on a filesystem that
+					// does enforce modes, and it would be set by exactly the operator
+					// who is tired of the line rather than the one who checked. The
+					// measurement is free here, so nothing is bought by asking.
+					log.warn(
+						`The config file ${target} reads mode ${modeText(info.mode & 0o777)}, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${target} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
+					);
+				}
 			}
 			return content;
 		} catch (error) {
