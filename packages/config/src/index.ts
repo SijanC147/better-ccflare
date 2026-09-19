@@ -95,6 +95,66 @@ export const unenforceableModes = new Set<string>();
 const contentsNotOurs = new Set<string>();
 
 /**
+ * Why a hop failed the walk's trust check, rather than whether it failed
+ * (SB23-2318).
+ *
+ * A boolean could not carry this, and the single message it forced named the
+ * directory in both cases. `directory` and `sticky-entry` call for opposite
+ * actions: the first says move the config out of a directory others can write,
+ * the second says the directory is fine and the entry inside it is what is
+ * missing or is not ours.
+ *
+ * `sticky-entry` deliberately does not distinguish absent, multi-linked and
+ * foreign-owned, because those three share one `lstatSync` and one catch and the
+ * caller genuinely does not know which one it hit.
+ *
+ * Two things the messages state more narrowly than the branches can, disclosed
+ * rather than branched on:
+ *
+ * `directory` is also returned when `statSync(dirname)` THREW, where nothing
+ * about ownership or mode was read. The message leads with "could not be
+ * examined" for that reason. Reachable through a dangling link into a directory
+ * that does not exist.
+ *
+ * `sticky-entry` is also returned when `process.getuid` is unavailable, before
+ * any `lstat` runs, so the message's "one of those is not true" describes an
+ * entry nothing looked at. Unreachable from both callers, which return earlier
+ * on an undefined uid (`writeTarget()` on win32, `replaceUntrustedLink()`
+ * explicitly), so a branch for it would be untestable code rather than a fix.
+ */
+type RefusedTrust = "directory" | "sticky-entry";
+type EntryTrust = "trusted" | RefusedTrust;
+
+/**
+ * Refusal diagnoses already emitted, so each distinct one lands once per
+ * process rather than once per reader (SB23-2357).
+ *
+ * Three readers re-run the trust check on one boot: loadConfig(),
+ * readLocalControlSecretFromDisk(), and the saveConfig() that
+ * getLocalControlSecret() performs after generating a replacement secret. Each
+ * printed the same multi-sentence paragraph, while the writable-config warning
+ * beside it deduplicated through contentsNotOurs. The asymmetry was the issue;
+ * this is the side it was settled on, because the condition is one fact about
+ * one path and repeating the explanation three times is what trains an operator
+ * to scroll past it.
+ *
+ * What is NOT deduplicated, deliberately: saveConfig()'s "Config not saved"
+ * line. That one reports an OPERATION, and each refused save is a separate lost
+ * write, so suppressing the second would hide a settings change that did not
+ * persist. The split is diagnosis once, outcome every time.
+ *
+ * Keyed on the message rather than on the path, so a hop that starts failing
+ * for a different reason mid-process still says so. Bounded by the number of
+ * distinct refusal texts, which is the number of distinct (path, hop, reason)
+ * triples a process can produce.
+ *
+ * Never cleared, matching unenforceableModes and contentsNotOurs: the condition
+ * is a fact about the filesystem, so it persists for the process's lifetime and
+ * repeating it on the next boot is the point.
+ */
+const refusalsEmitted = new Set<string>();
+
+/**
  * chmod a path and then read the mode back, returning whether it actually
  * changed.
  *
@@ -461,7 +521,30 @@ export class Config extends EventEmitter {
 			// config an attacker supplied.
 			const trusted = this.writeTarget();
 			if (trusted === null) {
-				// writeTarget() has already said why, at error level.
+				// writeTarget() has said WHY, at error level, and says it once per
+				// process. This line is the OUTCOME, and it is deliberately not routed
+				// through refuse() (SB23-2379).
+				//
+				// Without it this branch reported nothing of its own and relied
+				// entirely on the diagnosis above. Once SB23-2357 deduplicated that
+				// diagnosis, the SECOND and later Config built for the same path in one
+				// process fell back to defaults in total silence, which is a worse log
+				// than the duplicate paragraph the dedup removed. Not hypothetical:
+				// packages/http-api/src/handlers/oauth.ts:878 and :971 construct a
+				// fresh Config inside request-handling bodies, and apps/server and
+				// packages/cli-commands build their own.
+				//
+				// So the rule this file now follows everywhere is diagnosis once,
+				// outcome every time. saveConfig() and readLocalControlSecretFromDisk()
+				// already had their outcome lines; loadConfig() was the one refusal
+				// path with none. Found by PR #190's review.
+				//
+				// It names the consequence rather than repeating the cause, because the
+				// cause may be thousands of lines back in the log, or absent from this
+				// process's output entirely if the operator started reading late.
+				log.error(
+					`Config not loaded: ${this.configPath} cannot be trusted, so this process is running on defaults. local_control_secret is regenerated, which presents as clients intermittently failing to authenticate. The reason was logged once, above.`,
+				);
 				this.data = {};
 				// Harden the directory anyway. Everything else in this branch is
 				// about the file we refused to read, but the directory holds the
@@ -904,10 +987,9 @@ export class Config extends EventEmitter {
 		for (let hop = 0; hop < 40; hop++) {
 			// One message per refusal, naming the hop that failed, rather than one
 			// per directory examined: the predicate itself stays silent.
-			if (!this.entryIsTrusted(current)) {
-				log.error(
-					`Refusing the config path ${this.configPath}: ${current} sits in a directory owned by another user or writable by other local users, so it cannot be trusted with secrets. Move the config somewhere only you can write, or replace the link with a regular file.`,
-				);
+			const trust = this.entryIsTrusted(current);
+			if (trust !== "trusted") {
+				this.refuse(this.refusalMessage(current, trust));
 				return null;
 			}
 			let info: ReturnType<typeof lstatSync>;
@@ -927,7 +1009,7 @@ export class Config extends EventEmitter {
 				// it and destroy a link the operator manages: the same destructive
 				// behaviour PR #57 removed from the cycle case. Nothing is disclosed
 				// by refusing, since the trust check has already passed.
-				log.error(
+				this.refuse(
 					`The config path ${this.configPath} passes through the symlink ${current}, which could not be read (${error}); refusing to read or write it`,
 				);
 				return null;
@@ -939,7 +1021,7 @@ export class Config extends EventEmitter {
 		// relocated to the cycle case. A cycle has no valid target. The bound
 		// refuses nothing the kernel would have resolved: Linux gives up at 40
 		// nested links and macOS at 32.
-		log.error(
+		this.refuse(
 			`The config path ${this.configPath} has more than 40 symlink hops, which is a cycle; refusing to read or write it`,
 		);
 		return null;
@@ -974,11 +1056,32 @@ export class Config extends EventEmitter {
 	 * not group or other writable, so a gate conditioned on writability skips
 	 * precisely that case.
 	 *
-	 * And measured rather than argued: `chmodSync` cannot set the sticky bit on
-	 * Linux (SB23-2319), so any rule reading the directory's sticky bit passes on
-	 * macOS and fails in CI against the 1777 fixture at
-	 * config-file-mode.test.ts:597. Reading nothing from the directory is what
-	 * makes this rule give the same answer on both platforms.
+	 * A third reason used to stand here and it was wrong, so it is corrected
+	 * rather than deleted (SB23-2340). It read: `chmodSync` cannot set the sticky
+	 * bit on Linux (SB23-2319), so any rule reading the directory's sticky bit
+	 * passes on macOS and fails in CI. That conflates a fact about `chmodSync`
+	 * with a claim about the rule's testability, and the second does not follow:
+	 * `/tmp` is already 1777 on Linux, and `stickyFixture()` in
+	 * @better-ccflare/security/testing uses exactly that when the chmod route
+	 * fails, so a directory-conditioned rule IS testable on both platforms today.
+	 *
+	 * Measured while correcting it, docker, 2026-09-19, Bun 1.3.14 and Node 22 on
+	 * the same alpine kernel, mode read back from statSync:
+	 *
+	 *                                        Bun      Node
+	 *   mkdirSync(0o1777), umask 022         0755     1755
+	 *   mkdirSync(0o1777), umask 0           0777     1777
+	 *   mkdirSync(0o777) then chmod 0o1777   0777     1777
+	 *   os.tmpdir()                          1777     1777
+	 *
+	 * So `mkdirSync` with an explicit mode is NOT the alternate route SB23-2340
+	 * proposed: Bun drops S_ISVTX there too, the umask row rules out masking as
+	 * the cause, and Node keeping the bit on the same kernel confirms it is Bun.
+	 * A pre-built sticky directory, which is the fixture that shipped, is the
+	 * route that works.
+	 *
+	 * The rule is unchanged. It never rested on this reason, and the two above it
+	 * are each sufficient on their own.
 	 *
 	 * The single-name requirement is not redundant with the ownership test, and it
 	 * is the "or root" half that needs it. A hardlink carries the inode's owner to
@@ -1042,13 +1145,13 @@ export class Config extends EventEmitter {
 		// unreadable, which trades a narrow exposure for a total outage.
 		const ownedByUs = uid === undefined || own.uid === uid || own.uid === 0;
 		if (!ownedByUs) {
-			log.error(
+			this.refuse(
 				`Refusing the config path ${this.configPath}: it is a regular file owned by uid ${own.uid}, not by us (uid ${uid}), so another local user chose its contents. A config they control sets local_control_secret, which is an authentication bypass on the local control endpoint, along with pg_host and pg_password. The process starts on defaults instead, and local_control_secret is regenerated on every restart, which presents as clients intermittently failing to authenticate. If this is a container with the config bind-mounted from the host, the file carries its host owner and the image's chown does not apply to a bind mount: run chown -R ${uid}:${uid} on the mounted directories on the host, not just on the file, or use a named volume. See docs/deployment.md. Otherwise move the config somewhere only you can write, or remove that file so a fresh one is created.`,
 			);
 			return null;
 		}
 		if (own.nlink !== 1) {
-			log.error(
+			this.refuse(
 				`Refusing the config path ${this.configPath}: it is a regular file with ${own.nlink} names, so it is a hardlink to a file elsewhere and its contents were not written as our config. A uid of ours does not prove we created the entry, because a hardlink carries the owner of the file it points at. Remove that name so a fresh config is created.`,
 			);
 			return null;
@@ -1126,26 +1229,26 @@ export class Config extends EventEmitter {
 	 * directory (/tmp is uid 0 and 1777 on both macOS and Linux) so that a stubbed
 	 * uid is refused by this line rather than by the ownership test above it.
 	 */
-	private entryIsTrusted(entry: string): boolean {
+	private entryIsTrusted(entry: string): EntryTrust {
 		let info: ReturnType<typeof statSync>;
 		try {
 			info = statSync(dirname(entry));
 		} catch {
 			// Silent: the walk reports one message naming the hop that failed.
-			return false;
+			return "directory";
 		}
 		const uid = process.getuid?.();
 		const ownedByUs = uid === undefined || info.uid === uid || info.uid === 0;
-		if (!ownedByUs) return false;
-		if ((info.mode & 0o022) === 0) return true;
+		if (!ownedByUs) return "directory";
+		if ((info.mode & 0o022) === 0) return "trusted";
 		// Sticky, so removal and renaming are restricted to the entry's owner, the
 		// directory's owner and root (S_ISVTX, 0o1000).
-		if ((info.mode & 0o1000) === 0) return false;
+		if ((info.mode & 0o1000) === 0) return "directory";
 		// Ownership cannot be established without a uid to compare, so refuse.
 		// Unreachable from the walk, which returns early on win32, but the sticky
 		// exception is the one branch where an unknown uid would widen trust
 		// rather than narrow it, so it does not rely on the caller.
-		if (uid === undefined) return false;
+		if (uid === undefined) return "sticky-entry";
 		try {
 			// lstat, not stat: the entry's own ownership is the claim, and a link
 			// here would substitute the uid of whatever it points at, which is the
@@ -1169,15 +1272,84 @@ export class Config extends EventEmitter {
 			// outside this directory. On Linux the same conjunct also covers a
 			// hardlink to one of our symlinks, which is what an attacker gets on a
 			// host running fs.protected_hardlinks=0.
-			if (own.nlink !== 1) return false;
-			return own.uid === uid;
+			if (own.nlink !== 1) return "sticky-entry";
+			return own.uid === uid ? "trusted" : "sticky-entry";
 		} catch {
 			// Nothing there. A sticky directory says who may remove an entry, never
 			// who may create one, so an absent entry is the attacker's to plant and
 			// there is no ownership to test. Refuse; the non-sticky rule above is
 			// what a create in a shared directory still has to satisfy.
-			return false;
+			return "sticky-entry";
 		}
+	}
+
+	/**
+	 * Emit a refusal diagnosis at most once per process (SB23-2357). See
+	 * refusalsEmitted above for what this does not cover.
+	 */
+	private refuse(message: string): void {
+		if (refusalsEmitted.has(message)) return;
+		refusalsEmitted.add(message);
+		log.error(message);
+	}
+
+	/**
+	 * The refusal text for a hop the walk rejected, chosen from WHY it was
+	 * rejected (SB23-2318).
+	 *
+	 * One message covered both reasons before this, and it named only the
+	 * directory: "sits in a directory owned by another user or writable by other
+	 * local users ... Move the config somewhere only you can write." That is true
+	 * of the `directory` reason and false of the `sticky-entry` one, where the
+	 * directory is exactly what the sticky exception permits and the failure is
+	 * the entry at the end of the hop. An operator following it literally moves
+	 * the file and the refusal follows it, because moving does not create an
+	 * entry at the name the walk is checking.
+	 *
+	 * Each branch names only what its own predicate read. `directory` read
+	 * `statSync(dirname)`; `sticky-entry` read `lstatSync(entry)` for existence,
+	 * nlink and uid, and says so as a disjunction, because the three share one
+	 * catch and one return and the code does not know which of them failed.
+	 * Asserting the specific one would be the failure mode this family has shipped
+	 * twice: a message stating something the code did not check.
+	 *
+	 * The defaults sentence is conditional, and that is not hedging. writeTarget()
+	 * is reached from loadConfig(), readLocalControlSecretFromDisk(),
+	 * restrictConfigFile(), sweepStaleTempFiles() and saveConfig(), so an
+	 * unconditional "the process starts on defaults" would be false on every save
+	 * refusal after boot. restrictConfigDir() is deliberately NOT in that list: it
+	 * reads dirname(this.configPath) directly and never calls writeTarget(), which
+	 * is why it still runs on a refusal path. An earlier version of this list named
+	 * it and omitted the other two; corrected by PR #190's review.
+	 */
+	private refusalMessage(hop: string, reason: RefusedTrust): string {
+		const uid = process.getuid?.();
+		const fellBack =
+			`If this line appears at startup then the config was not read and this process ` +
+			`is running on defaults, which regenerates local_control_secret, so anything ` +
+			`holding the previous one stops authenticating against the local control endpoint.`;
+		if (reason === "sticky-entry") {
+			return (
+				`Refusing the config path ${this.configPath}: ${hop} sits in a sticky ` +
+				`directory, where this path is trusted only when an entry already exists at ` +
+				`that exact name, has exactly one hard link, and is owned by uid ` +
+				`${uid ?? "unknown"}. One of those is not true of ${hop}. A sticky bit ` +
+				`restricts who may remove an entry, never who may create one, so a name that ` +
+				`does not exist yet is another local user's to claim first, and a name with a ` +
+				`second hard link was not written as our config. Create that entry yourself ` +
+				`before starting, or point the config at a directory no other local user can ` +
+				`write. Moving the config to another name in the same shared directory does ` +
+				`not satisfy this. ${fellBack}`
+			);
+		}
+		return (
+			`Refusing the config path ${this.configPath}: ${hop} sits in a directory that ` +
+			`could not be examined, or is owned by another user, or is writable by other ` +
+			`local users without the sticky bit, so ` +
+			`another local user can plant or replace what is at ${hop} and it cannot be ` +
+			`trusted with secrets. Move the config somewhere only you can write, or replace ` +
+			`the link with a regular file. ${fellBack}`
+		);
 	}
 
 	private saveConfig(): void {
@@ -1347,7 +1519,11 @@ export class Config extends EventEmitter {
 		// refusing is the safe direction.
 		const uid = process.getuid?.();
 		if (uid === undefined || link.uid === uid) return false;
-		if (this.entryIsTrusted(this.configPath)) return false;
+		// === "trusted", never truthiness. entryIsTrusted() returns a reason
+		// since SB23-2318 and every reason string is truthy, so a bare test here
+		// made this method return false for a link it was supposed to replace.
+		// TypeScript accepts a truthy union, so only the wider suite caught it.
+		if (this.entryIsTrusted(this.configPath) === "trusted") return false;
 		if (!this.saveByRename(this.configPath, content, false)) {
 			log.error(
 				`Config not saved: ${this.configPath} is an untrusted symlink and it could not be replaced`,

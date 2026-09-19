@@ -107,6 +107,14 @@ describe("a regular file at the config path", () => {
 					expect(config.get("local_control_secret")).toBeUndefined();
 					expect(config.get("lb_strategy")).toBeUndefined();
 					expect(config.getLocalControlSecret()).not.toBe("ATTACKER-CHOSEN");
+
+					// A SECOND refused save, and it is the whole point of the
+					// per-operation assertion below. With one save, "Config not saved
+					// appeared once" is true whether that line deduplicates or not, so
+					// the mutation that routes it through refuse() survives: measured,
+					// 7 pass 0 fail. Two refused saves are what separates the two
+					// behaviours.
+					config.set("lb_strategy", "round-robin");
 				});
 			});
 			// Refused, not replaced: replaceUntrustedLink() only ever acts on a
@@ -125,28 +133,36 @@ describe("a regular file at the config path", () => {
 				(event) =>
 					event.level === "ERROR" && event.msg.includes("not by us (uid "),
 			);
-			// Three, measured, and traced by stack rather than reasoned, because an
-			// earlier version of this comment got the three wrong. They are
+			// ONE, since SB23-2357. Three readers still refuse, and they are
 			// loadConfig(), readLocalControlSecretFromDisk(), and saveConfig() by
 			// way of the set() that getLocalControlSecret() performs after
-			// generating a replacement secret. The SAVE is the one easy to miss.
+			// generating a replacement secret; the SAVE is the one easy to miss.
+			// They now share one diagnosis, because the writable-config warning
+			// beside this one already deduplicated through a module Set and the
+			// asymmetry was the issue.
 			//
 			// Note what does NOT contribute: the two config.get() calls above
 			// produce zero refusals, because get() reads this.data and never
 			// re-checks the path. So "every reader re-runs the trust check" is
 			// false; three specific operations do.
 			//
-			// Unlike the writable-config warning added in PR #176, this refusal is
-			// not deduplicated per path, and that asymmetry is recorded as a
-			// follow-up rather than fixed here: three separate refused operations
-			// arguably should each say so.
-			//
-			// Asserting the exact count rather than "at least one" is deliberate,
-			// and the brittleness is the point: making getLocalControlSecret() skip
-			// a set() it knows will be refused is a plausible cleanup that would
-			// drop this to 2, and it should fail here rather than pass quietly.
-			// Found by PR #182's review, which corrected this comment.
-			expect(refusals).toHaveLength(3);
+			// toBe(1) and not toBeLessThanOrEqual(1), because this one assertion
+			// has to kill BOTH mutations. Removing the Set check makes it 3;
+			// making refuse() return unconditionally makes it 0. A bound in either
+			// direction alone survives one of them. The path is a fresh mkdtemp
+			// and refusalsEmitted is keyed on the message, so nothing this test
+			// pre-seeds can make it pass.
+			expect(refusals).toHaveLength(1);
+			// And the outcome is still reported per operation. This is the half
+			// that must NOT be deduplicated: each refused save is a separate lost
+			// write. Deduplicating it too would pass the assertion above while
+			// hiding a settings change that never persisted.
+			const notSaved = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("Config not saved: the configured path cannot"),
+			);
+			expect(notSaved).toHaveLength(2);
 			// Both uids, so the operator can act without reproducing anything.
 			expect(refusals[0].msg).toContain(`owned by uid ${strangerFileUid}`);
 			expect(refusals[0].msg).toContain("bind-mounted from the host");
@@ -159,6 +175,67 @@ describe("a regular file at the config path", () => {
 		}
 	});
 
+	it("still reports the outcome on a second Config for the same path", () => {
+		// SB23-2379, a regression this PR's own dedup introduced and the reviewer
+		// found. `loadConfig()`'s refusal branch used to emit nothing of its own
+		// and rely on the diagnosis from `writeTarget()`. Once that diagnosis was
+		// deduplicated per process, the SECOND Config for the same path fell back
+		// to defaults in TOTAL SILENCE, which is a worse log than the duplicate
+		// paragraph the dedup removed.
+		//
+		// Two instances is the whole point and one would not catch it, the same
+		// way one refused save could not separate a deduplicated outcome line from
+		// an undeduplicated one in the test above. A dedup needs two events.
+		//
+		// `oauth.ts:878` and `:971` construct a fresh Config inside
+		// request-handling bodies, so this is a real second instance in one
+		// process, not a test artefact.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-second-config-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(
+				configPath,
+				JSON.stringify({ local_control_secret: "ATTACKER-CHOSEN" }),
+				{ mode: 0o600 },
+			);
+
+			const logs = captureLogs(() => {
+				asStranger(() => {
+					new Config(configPath);
+					new Config(configPath);
+				});
+			});
+
+			// The diagnosis is deduplicated, which is SB23-2357 working.
+			const diagnoses = logs.filter(
+				(event) =>
+					event.level === "ERROR" && event.msg.includes("not by us (uid "),
+			);
+			expect(diagnoses).toHaveLength(1);
+
+			// The outcome is not, and this is the assertion that fails if the new
+			// line is deleted or routed through refuse().
+			const outcomes = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("Config not loaded:") &&
+					event.msg.includes("running on defaults"),
+			);
+			expect(outcomes).toHaveLength(2);
+
+			// Pin what the outcome line claims, because the failure being fixed is
+			// a log that does not say what happened. It must name the consequence,
+			// not repeat the cause.
+			expect(outcomes[1].msg).toContain(configPath);
+			expect(outcomes[1].msg).toContain("local_control_secret is regenerated");
+			// And it must not restate the diagnosis, which may be far back in the
+			// log or absent from what the operator is reading.
+			expect(outcomes[1].msg).not.toContain("not by us (uid ");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("is refused when it is a hardlink, whatever uid it reports", () => {
 		// The "or root" half of the ownership test is why one name is required. A
 		// hardlink carries the inode's owner to a new name, and macOS has no
@@ -166,9 +243,14 @@ describe("a regular file at the config path", () => {
 		// and produce an entry that lstats as uid 0 with two names. Measured in
 		// PR #169's review.
 		//
-		// 0o777 on the directory, and nothing sticky: this rule consults no
-		// directory, and chmodSync cannot set the sticky bit on Linux anyway
-		// (SB23-2319), so a sticky fixture would pass here and fail in CI.
+		// 0o777 on the directory, and nothing sticky, because this rule consults no
+		// directory at all. The second half of this note used to say a sticky
+		// fixture "would pass here and fail in CI" because chmodSync cannot set
+		// S_ISVTX on Linux, and that was a claim about the rule drawn from a fact
+		// about chmodSync (SB23-2340). stickyFixture() in
+		// @better-ccflare/security/testing builds one on Linux from /tmp, so a
+		// sticky fixture is available on both platforms; it is simply irrelevant
+		// to a rule that reads nothing from the directory.
 		const dir = join(tmpdir(), `better-ccflare-regular-hl-${process.pid}`);
 		const other = mkdtempSync(join(tmpdir(), "better-ccflare-regular-oth-"));
 		try {
