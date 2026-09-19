@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 // Without this the enum is undefined when strategy.ts runs. Same pattern as stats-session-cost.test.ts.
 import "@better-ccflare/core";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
+import { ensureSchema, runMigrations } from "../../migrations";
 import { AccountRepository } from "../account.repository";
 
 // ---------------------------------------------------------------------------
@@ -24,38 +25,8 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 	const db = new Database(":memory:");
 
 	// Minimal schema — only the columns AccountRepository touches
-	db.run(`
-		CREATE TABLE accounts (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			provider TEXT DEFAULT 'anthropic',
-			api_key TEXT,
-			refresh_token TEXT DEFAULT '',
-			access_token TEXT,
-			expires_at INTEGER,
-			created_at INTEGER NOT NULL,
-			last_used INTEGER,
-			request_count INTEGER DEFAULT 0,
-			total_requests INTEGER DEFAULT 0,
-			rate_limited_until INTEGER,
-			session_start INTEGER,
-			session_request_count INTEGER DEFAULT 0,
-			paused INTEGER DEFAULT 0,
-			rate_limit_reset INTEGER,
-			rate_limit_status TEXT,
-			rate_limit_remaining INTEGER,
-			priority INTEGER DEFAULT 0,
-			auto_fallback_enabled INTEGER DEFAULT 0,
-			auto_refresh_enabled INTEGER DEFAULT 0,
-			auto_pause_on_overage_enabled INTEGER DEFAULT 0,
-			custom_endpoint TEXT,
-			model_mappings TEXT,
-			cross_region_mode TEXT,
-			model_fallbacks TEXT,
-			billing_type TEXT,
-			pause_reason TEXT
-		)
-	`);
+	ensureSchema(db);
+	runMigrations(db);
 
 	const adapter = new BunSqlAdapter(db);
 	const repo = new AccountRepository(adapter);
