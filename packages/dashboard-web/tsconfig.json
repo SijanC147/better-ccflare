@@ -15,8 +15,22 @@
 		"skipLibCheck": true,
 		"noFallthroughCasesInSwitch": true,
 		"noUncheckedSideEffectImports": false,
+		// `paths` REPLACES the inherited map rather than merging with it, so
+		// the root's `@better-ccflare/*` entries have to be restated here or
+		// every workspace import falls back to node_modules. That fallback
+		// resolves for packages whose `main` is `./src/index.ts` and fails for
+		// `@better-ccflare/agents`, whose manifest points at an unbuilt
+		// `dist/`, which is why a bare package-level run reported TS2307 in
+		// packages/proxy. `packages/types/src/context.ts` imports
+		// `@better-ccflare/proxy`, so proxy enters this program through the
+		// type graph even though no dashboard-web source file imports it.
+		// Measured: adding these leaves `bun run build:dashboard` output
+		// byte-identical at 19,293,156 bytes across 23 files.
 		"paths": {
-			"@/*": ["./src/*"]
+			"@/*": ["./src/*"],
+			"@better-ccflare/*": ["../../packages/*/src"],
+			"@better-ccflare/server": ["../../apps/server/src/server.ts"],
+			"@better-ccflare/dashboard-web/dist/*": ["../dashboard-web/dist/*"]
 		}
 	},
 	"include": ["src/**/*"],

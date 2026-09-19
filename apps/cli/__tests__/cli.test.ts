@@ -19,6 +19,10 @@ const CLI_PATH = join(process.cwd(), "apps/cli/src/main.ts");
 // files accumulate across repeated suite invocations under $TMPDIR.
 const createdDbPaths = new Set<string>();
 
+// Same idea for the per-invocation config homes runCLI() hands the spawned CLI,
+// so they are removed rather than left behind under $TMPDIR.
+const createdConfigHomes = new Set<string>();
+
 /**
  * Helper function to run CLI command and get output
  * Available to all test suites
@@ -41,10 +45,23 @@ function runCLI(
 		// TMPDIR nor HOME is writable.
 		const cliDbPath = `${process.env.TMPDIR || "/tmp"}/better-ccflare-cli-test-${process.pid}-${Date.now()}.db`;
 		createdDbPaths.add(cliDbPath);
+		// The database was already routed away from ~/.config, but the config
+		// file beside it was not: the CLI constructs `new Config()` with no path
+		// argument, which resolved to the operator's real
+		// ~/.config/better-ccflare/better-ccflare.json for every invocation that
+		// did not pass its own redirect. Give the whole helper a default one, so
+		// a test has to opt out rather than remember to opt in. The individual
+		// tests that set XDG_CONFIG_HOME or BETTER_CCFLARE_CONFIG_PATH still
+		// override it, because options.env is spread afterwards.
+		const cliConfigHome = mkdtempSync(
+			join(tmpdir(), `better-ccflare-cli-test-config-${process.pid}-`),
+		);
+		createdConfigHomes.add(cliConfigHome);
 		const proc = spawn("bun", ["--no-orphans", "run", CLI_PATH, ...args], {
 			cwd: options.cwd,
 			env: {
 				...process.env,
+				XDG_CONFIG_HOME: cliConfigHome,
 				...options.env,
 				NODE_ENV: "test",
 				BETTER_CCFLARE_DB_PATH: cliDbPath,
@@ -551,6 +568,14 @@ afterEach(() => {
 		}
 	}
 	createdDbPaths.clear();
+	for (const configHome of createdConfigHomes) {
+		try {
+			rmSync(configHome, { recursive: true, force: true });
+		} catch (_e) {
+			// Ignore cleanup errors
+		}
+	}
+	createdConfigHomes.clear();
 });
 
 /**

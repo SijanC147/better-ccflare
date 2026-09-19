@@ -577,8 +577,8 @@ async function collapseAccountDuplicatesPreservingStatePg(
 			    ORDER BY COALESCE(refresh_token_issued_at, 0) DESC, created_at DESC, ctid::text ASC
 			    LIMIT 1) AS merged_api_key,
 			   -- Read from the SAME freshest row as the three token fields
-			   -- above, using the identical ordering, so the survivor's
-			   -- issued-at always describes the tokens it actually holds.
+			   -- above, using the identical ordering, so the issued-at on the
+			   -- survivor always describes the tokens it actually holds.
 			   (SELECT refresh_token_issued_at FROM accounts
 			    WHERE name = $1 AND provider = $2 AND COALESCE(custom_endpoint, '') = $3
 			      AND refresh_token IS NOT NULL AND refresh_token <> ''
@@ -638,8 +638,9 @@ async function collapseAccountDuplicatesPreservingStatePg(
 			   -- Must come from the SAME row as refresh_token/access_token/
 			   -- expires_at above (all four are read from the single freshest
 			   -- row), not recomputed as MAX across the group. Taking the group
-			   -- MAX independently can pair row A's tokens with row B's newer
-			   -- issued-at, so the stored "when were these tokens issued" no
+			   -- MAX independently can pair the tokens of row A with the newer
+			   -- issued-at of row B, so the stored "when were these tokens
+			   -- issued" no
 			   -- longer describes the tokens actually held — which silently
 			   -- misleads anything reasoning about token freshness. The SQLite
 			   -- path already sources it from the merged row; this matches it.

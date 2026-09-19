@@ -204,11 +204,53 @@ describe("SQL dialect hazards (static, always runs)", () => {
 	});
 
 	it("no SQL line comment contains a `?`", () => {
-		// convertPlaceholders() only skips single-quoted string literals. A `?`
-		// inside a `--` comment is renumbered like a real placeholder and
-		// silently shifts every following $N by one. Matched on the raw line:
-		// an SQL comment lives inside a template literal, not a TS comment.
-		const hits = offendingLines(sources, /^\s*--\s[^\n]*\?/, { raw: true });
+		// convertPlaceholders() skips a `--` comment, so a `?` inside one is no
+		// longer renumbered. This gate stays because a comment holding a `?` is
+		// still a trap for anyone reading the SQL, and because it fails at
+		// `bun test` with no server, where the live harness needs DATABASE_URL.
+		//
+		// Matched on the raw line: an SQL comment lives inside a template
+		// literal, not a TS comment, and stripNonSql() deletes `??` and `?.`,
+		// which this rule should still see.
+		//
+		// NOT anchored to the start of the line. `^\s*--` is blind to a comment
+		// that trails real SQL on its line, which is the same hazard the sibling
+		// apostrophe rule below carried before #160 widened it. Proven by
+		// mutation on 2026-09-19: appending a `?` to the trailing comment at
+		// migrations.ts:1942 survives `^\s*--` and is killed by the form below.
+		const hits = offendingLines(sources, /--\s[^\n]*\?/, { raw: true });
+		expect(hits).toEqual([]);
+	});
+
+	it("no SQL line comment contains an apostrophe", () => {
+		// The mirror of the rule above, and the more dangerous direction.
+		// convertPlaceholders() tracked string literals by toggling on every
+		// `'` without skipping comments, so one apostrophe in a comment left it
+		// believing a literal was open and every following `?` reached
+		// PostgreSQL as a literal `?`.
+		//
+		// Measured 2026-09-18 against PostgreSQL 18 on
+		// `-- The one column with no DEFAULT 0, so AVG's NULL-skipping`: four
+		// live cases returned HTTP 500 with `syntax error at or near "AND"`.
+		// The message names neither the apostrophe nor the `?`, so do not
+		// expect the error to lead you here. SQLite never sees the converted
+		// form, so 23 SQLite tests and 4 mutations were green throughout.
+		//
+		// convertPlaceholders() now skips `--` comments outright, which is what
+		// actually removes the class. This gate stays because a comment whose
+		// prose reads as an open literal is still a trap for anyone reading the
+		// SQL, and because it fails at `bun test` with no server, where the
+		// live harness needs DATABASE_URL.
+		//
+		// Like the sibling `?` rule above this is NOT anchored to the start of
+		// the line. Line-start anchoring is blind to a trailing comment, and when
+		// this rule was first run with `^\s*--` it reported 3 sites while the
+		// unanchored form reported 6: migrations.ts:1942, :1945 and :1947 all
+		// trail real SQL on their line, and :1947 is followed by a `?` two
+		// lines later. That statement runs through bun:sqlite's db.prepare()
+		// rather than BunSqlAdapter, so it never reached the converter, but the
+		// shape is the live one.
+		const hits = offendingLines(sources, /--\s[^\n]*'/);
 		expect(hits).toEqual([]);
 	});
 
@@ -974,6 +1016,96 @@ describe.skipIf(!livePgAvailable)(
 				).toBe(true);
 			});
 
+			liveIt(
+				"breaks a tie on requests by model, which SQLite cannot check",
+				async () => {
+					// The `r.model ASC` tiebreak has been in the handler since
+					// #153 and, measured 2026-09-18, its removal leaves the
+					// whole SQLite suite green. Not because the SQLite fixture
+					// is weak: the same fixture reversed still passes, because
+					// this query on SQLite reaches the ORDER BY with its groups
+					// already in model order, so a stable sort keeps tied rows
+					// alphabetical with no tiebreak present. That makes the
+					// clause structurally unobservable from that engine and
+					// leaves it to this one, where PostgreSQL aggregates
+					// without any inherent group order and a tie really can
+					// come back either way.
+					//
+					// Two tied models named in reverse of the order asserted,
+					// so agreeing with the insert order is not enough to pass.
+					await seedBaseline();
+					await seedRequest({
+						id: "pm-t1",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "zzz-tie",
+					});
+					await seedRequest({
+						id: "pm-t2",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "aaa-tie",
+					});
+
+					const body = await models("range=24h");
+					const tied = (body.models as Array<Record<string, unknown>>)
+						.filter((r) => String(r.model).endsWith("-tie"))
+						.map((r) => r.model);
+
+					expect(tied).toEqual(["aaa-tie", "zzz-tie"]);
+				},
+			);
+
+			liveIt(
+				"places the null dimension value last, matching SQLite",
+				async () => {
+					// The one assertion in this file that is about agreement
+					// between the engines rather than about PostgreSQL
+					// accepting a statement. `ORDER BY <nullable> ASC` has no
+					// portable NULL placement: measured 2026-09-18, SQLite
+					// 3.54.0 returned the NULL first and PostgreSQL 18.6
+					// returned it last over the same three rows. The handler
+					// says NULLS LAST for that reason, and the SQLite suite
+					// asserts this same order, so the pair is what proves the
+					// two engines now agree. Remove the clause and one of the
+					// two fails whichever engine you are on.
+					await seedBaseline();
+					await seedRequest({
+						id: "pm-o1",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "claude-order",
+						project: "b-proj",
+					});
+					await seedRequest({
+						id: "pm-o2",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "claude-order",
+						project: null,
+					});
+					await seedRequest({
+						id: "pm-o3",
+						timestamp: now - HOUR,
+						accountUsed: "acct-1",
+						success: true,
+						model: "claude-order",
+						project: "a-proj",
+					});
+
+					const byProject = await models("range=24h&groupBy=project");
+					const ordered = (byProject.models as Array<Record<string, unknown>>)
+						.filter((r) => r.model === "claude-order")
+						.map((r) => r.project);
+
+					expect(ordered).toEqual(["a-proj", "b-proj", null]);
+				},
+			);
+
 			liveIt("executes with every shared filter and every range", async () => {
 				await seedBaseline();
 				await seedRequest({
@@ -1276,9 +1408,13 @@ describe.skipIf(!livePgAvailable)(
 					["agent-b", "agent-c"],
 					"claude-opus-4",
 				);
-				expect(Object.keys(await dbOps.getAllAgentPreferences())).toHaveLength(
-					3,
-				);
+				// getAllAgentPreferences returns an Array on both dialects, so the
+				// assertion is on its length. Object.keys() was the previous form
+				// and held only on SQLite: the bun SQL driver returns an array
+				// carrying four extra enumerable own properties (count, command,
+				// lastInsertRowid, affectedRows), so Object.keys() read 7 for the
+				// same 3 rows on PostgreSQL.
+				expect(await dbOps.getAllAgentPreferences()).toHaveLength(3);
 				expect(await dbOps.deleteAgentPreference("agent-a")).toBe(true);
 			});
 		});
@@ -1323,8 +1459,24 @@ describe.skipIf(!livePgAvailable)(
 					rateLimitedUntil: now + HOUR,
 				});
 
+				// clearExpiredRateLimits returns ClearedRateLimit[], never a count.
+				// The previous form asserted toBe(1) against that array, so it
+				// could never pass on either dialect once the live harness ran.
+				// .map() also strips the four extra enumerable own properties the
+				// bun SQL driver hangs off its result arrays, which toEqual would
+				// otherwise compare.
 				const cleared = await dbOps.clearExpiredRateLimits(now);
-				expect(cleared).toBe(1);
+				expect(cleared.map((row) => row.id)).toEqual(["acct-expired"]);
+
+				// The UPDATE arm is the reason this test exists: its PG branch
+				// reads `count` where the SQLite branch reads `changes`. Assert
+				// the write actually landed, not just that the SELECT found the row.
+				const expired = await adapter.get<{
+					rate_limited_until: number | null;
+				}>("SELECT rate_limited_until FROM accounts WHERE id = ?", [
+					"acct-expired",
+				]);
+				expect(expired?.rate_limited_until).toBeNull();
 
 				const still = await adapter.get<{ rate_limited_until: number | null }>(
 					"SELECT rate_limited_until FROM accounts WHERE id = ?",
@@ -1581,6 +1733,40 @@ describe.skipIf(!livePgAvailable)(
 				// the source expression is identical.
 				const row = await adapter.get<{ a: string; b: string }>(
 					"SELECT COALESCE(NULL, ?) AS a, COALESCE(NULL, ?) AS b",
+					["first", "second"],
+				);
+				expect(row?.a).toBe("first");
+				expect(row?.b).toBe("second");
+			});
+
+			it("converts a placeholder that follows an apostrophe in a comment", async () => {
+				// The SB23-2286 reproduction, executed by a real server. On the
+				// pre-fix converter the apostrophe in the comment left the
+				// scanner believing a string literal was open, both `?` reached
+				// PostgreSQL untouched, and the server answered
+				// `syntax error at or near "AND"`. The statement below is the
+				// shape of the four cases that 500'd, reduced to the parts that
+				// matter: an odd apostrophe count, a comment, and two binds.
+				const row = await adapter.get<{ a: string; b: string }>(
+					`SELECT ? AS a,
+					        -- The one column with no DEFAULT 0, so AVG's NULL-skipping
+					        --   matters, and 'plan' rows differ from 'api' rows.
+					        ? AS b
+					 WHERE 'plan' = 'plan'`,
+					["first", "second"],
+				);
+				expect(row?.a).toBe("first");
+				expect(row?.b).toBe("second");
+			});
+
+			it("does not renumber a `?` inside a comment", async () => {
+				// The mirror defect. Before the fix the comment's `?` consumed
+				// $1, so `a` bound "second" and the statement either errored on
+				// a missing $3 or silently returned the wrong value.
+				const row = await adapter.get<{ a: string; b: string }>(
+					`SELECT ? AS a,
+					        -- is this a bind parameter? no, it is prose
+					        ? AS b`,
 					["first", "second"],
 				);
 				expect(row?.a).toBe("first");

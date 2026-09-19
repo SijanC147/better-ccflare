@@ -48,6 +48,13 @@ const account: Account = {
 	hasRefreshToken: false,
 	sessionStats: null,
 	isPrimary: false,
+	lastManualReauthAt: null,
+	reauthDeadlineStatus: null,
+	daysUntilReauthRequired: null,
+	hoursUntilReauthRequired: null,
+	renewalDay: null,
+	nextRenewalAt: null,
+	daysUntilRenewal: null,
 };
 
 describe("AccountRequestTransformerDialog", () => {

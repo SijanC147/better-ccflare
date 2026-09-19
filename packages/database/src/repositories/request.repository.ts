@@ -224,7 +224,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				agent_used = CASE WHEN ${agentWinsIncoming} THEN EXCLUDED.agent_used ELSE requests.agent_used END,
 				agent_attribution_source = CASE WHEN ${agentWinsIncoming} THEN EXCLUDED.agent_attribution_source ELSE requests.agent_attribution_source END,
 				-- stream_terminal_state uses preserve-first (COALESCE) — a later
-				-- re-finalization (e.g. updateUsage after handleEnd) shouldn't
+				-- re-finalization (e.g. updateUsage after handleEnd) must not
 				-- blank out the real SSE termination state the handleEnd path
 				-- recorded. A null incoming value means "I have nothing new",
 				-- not "the stream was clean".
@@ -640,6 +640,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		const whereClause = since ? "WHERE r.timestamp > ?" : "";
 		const params = since ? [since] : [];
 
+		// a.name must be named in GROUP BY: SQLite tolerates a bare
+		// non-aggregated column and picks an arbitrary row, PostgreSQL rejects
+		// the statement with 42803. Group cardinality is unchanged because the
+		// join is on accounts.id, the primary key, so at most one accounts row
+		// matches each r.account_used value, NULL included.
 		const rows = await this.query<{
 			account_id: string;
 			account_name: string | null;
@@ -655,7 +660,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			FROM requests r
 			LEFT JOIN accounts a ON r.account_used = a.id
 			${whereClause}
-			GROUP BY r.account_used
+			GROUP BY r.account_used, a.name
 			ORDER BY request_count DESC
 		`,
 			params,

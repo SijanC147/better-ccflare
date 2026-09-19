@@ -1939,12 +1939,12 @@ export function runApiKeyStorageMigration(db: Database): void {
 				expires_at = NULL
 			WHERE
 				provider = 'anthropic'
-				AND api_key IS NULL  -- Console accounts should have api_key, but if missing and refresh_token has value, it's likely a console account
+				AND api_key IS NULL  -- Console accounts should have api_key, but if missing and refresh_token has a value, this is likely a console account
 				AND refresh_token IS NOT NULL
 				AND refresh_token != ''
-				AND access_token IS NULL  -- OAuth accounts have access_token, console accounts don't
+				AND access_token IS NULL  -- OAuth accounts have access_token, console accounts do not
 				AND (
-					expires_at IS NULL  -- Console accounts don't have token expiration
+					expires_at IS NULL  -- Console accounts do not have token expiration
 					OR expires_at = 0   -- Or have invalid/zero expiration
 					OR expires_at < ?   -- Or expired more than 24h ago (likely not a valid OAuth token)
 				)
