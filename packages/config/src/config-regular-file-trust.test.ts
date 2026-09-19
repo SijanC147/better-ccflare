@@ -182,9 +182,14 @@ describe("a regular file at the config path", () => {
 		// and produce an entry that lstats as uid 0 with two names. Measured in
 		// PR #169's review.
 		//
-		// 0o777 on the directory, and nothing sticky: this rule consults no
-		// directory, and chmodSync cannot set the sticky bit on Linux anyway
-		// (SB23-2319), so a sticky fixture would pass here and fail in CI.
+		// 0o777 on the directory, and nothing sticky, because this rule consults no
+		// directory at all. The second half of this note used to say a sticky
+		// fixture "would pass here and fail in CI" because chmodSync cannot set
+		// S_ISVTX on Linux, and that was a claim about the rule drawn from a fact
+		// about chmodSync (SB23-2340). stickyFixture() in
+		// @better-ccflare/security/testing builds one on Linux from /tmp, so a
+		// sticky fixture is available on both platforms; it is simply irrelevant
+		// to a rule that reads nothing from the directory.
 		const dir = join(tmpdir(), `better-ccflare-regular-hl-${process.pid}`);
 		const other = mkdtempSync(join(tmpdir(), "better-ccflare-regular-oth-"));
 		try {

@@ -1019,11 +1019,32 @@ export class Config extends EventEmitter {
 	 * not group or other writable, so a gate conditioned on writability skips
 	 * precisely that case.
 	 *
-	 * And measured rather than argued: `chmodSync` cannot set the sticky bit on
-	 * Linux (SB23-2319), so any rule reading the directory's sticky bit passes on
-	 * macOS and fails in CI against the 1777 fixture at
-	 * config-file-mode.test.ts:597. Reading nothing from the directory is what
-	 * makes this rule give the same answer on both platforms.
+	 * A third reason used to stand here and it was wrong, so it is corrected
+	 * rather than deleted (SB23-2340). It read: `chmodSync` cannot set the sticky
+	 * bit on Linux (SB23-2319), so any rule reading the directory's sticky bit
+	 * passes on macOS and fails in CI. That conflates a fact about `chmodSync`
+	 * with a claim about the rule's testability, and the second does not follow:
+	 * `/tmp` is already 1777 on Linux, and `stickyFixture()` in
+	 * @better-ccflare/security/testing uses exactly that when the chmod route
+	 * fails, so a directory-conditioned rule IS testable on both platforms today.
+	 *
+	 * Measured while correcting it, docker, 2026-09-19, Bun 1.3.14 and Node 22 on
+	 * the same alpine kernel, mode read back from statSync:
+	 *
+	 *                                        Bun      Node
+	 *   mkdirSync(0o1777), umask 022         0755     1755
+	 *   mkdirSync(0o1777), umask 0           0777     1777
+	 *   mkdirSync(0o777) then chmod 0o1777   0777     1777
+	 *   os.tmpdir()                          1777     1777
+	 *
+	 * So `mkdirSync` with an explicit mode is NOT the alternate route SB23-2340
+	 * proposed: Bun drops S_ISVTX there too, the umask row rules out masking as
+	 * the cause, and Node keeping the bit on the same kernel confirms it is Bun.
+	 * A pre-built sticky directory, which is the fixture that shipped, is the
+	 * route that works.
+	 *
+	 * The rule is unchanged. It never rested on this reason, and the two above it
+	 * are each sufficient on their own.
 	 *
 	 * The single-name requirement is not redundant with the ownership test, and it
 	 * is the "or root" half that needs it. A hardlink carries the inode's owner to
