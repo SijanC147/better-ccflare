@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+	chmodSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -65,8 +71,18 @@ export function stickyFixture(label: string): StickyFixture {
 
 	const token = `better-ccflare-${label}-${process.pid}-${randomUUID().slice(0, 8)}`;
 	const made = mkdtempSync(join(tmpdir(), `${token}-dir-`));
-	chmodSync(made, 0o1777);
-	const createdByUs = (statSync(made).mode & 0o1000) !== 0;
+	// Anything that throws between here and the route decision must not leak the
+	// directory we just created. chmodSync and statSync can both fail for reasons
+	// that have nothing to do with the sticky bit (EPERM, ENOSPC, EIO), and the
+	// leak would then outlive the process.
+	let createdByUs: boolean;
+	try {
+		chmodSync(made, 0o1777);
+		createdByUs = (statSync(made).mode & 0o1000) !== 0;
+	} catch (error) {
+		rmSync(made, { recursive: true, force: true });
+		throw error;
+	}
 	if (!createdByUs) rmSync(made, { recursive: true, force: true });
 	const dir = createdByUs ? made : tmpdir();
 
@@ -84,8 +100,17 @@ export function stickyFixture(label: string): StickyFixture {
 	// second shape, a fixture path that silently resolved into live files, so a
 	// check for the first shape alone would not have fired on any of them.
 	//
-	// Resolved first, so a relative TMPDIR cannot dodge both comparisons by never
-	// sharing a prefix with an absolute cwd.
+	// realpath, not resolve. `resolve()` makes a path absolute but does not follow
+	// symlinks, and on macOS that is the difference between a guard that works and
+	// one that cannot fire: `tmpdir()` reports /var/folders/... while
+	// `process.cwd()` reports /private/var/folders/..., because /var is a symlink
+	// to /private/var. A prefix test between two spellings of the same place
+	// matches nothing. Linux has no such symlink on /tmp so the defect is
+	// invisible there, which is the wrong way round, because the fallback route
+	// is the Linux one. Found by this PR's reviewer as F1.
+	//
+	// Each side falls back to `resolve()` when the path does not exist, since
+	// realpathSync throws on a missing path and an absolute comparison beats none.
 	//
 	// Every refusal below removes `made` first when we still hold it. A throw
 	// that leaks the directory it just created is worst precisely in the case
@@ -100,8 +125,15 @@ export function stickyFixture(label: string): StickyFixture {
 	if (dir.length === 0) {
 		refuse("stickyFixture: resolved an empty directory path");
 	}
-	const resolvedDir = resolve(dir);
-	const cwd = resolve(process.cwd());
+	const real = (p: string): string => {
+		try {
+			return realpathSync(p);
+		} catch {
+			return resolve(p);
+		}
+	};
+	const resolvedDir = real(dir);
+	const cwd = real(process.cwd());
 	if (
 		resolvedDir === cwd ||
 		cwd.startsWith(`${resolvedDir}/`) ||
