@@ -435,7 +435,12 @@ export interface AccountRow {
 	name: string;
 	provider: string | null;
 	api_key: string | null;
-	refresh_token: string;
+	// `refresh_token TEXT` carries no NOT NULL, four queries guard it with
+	// `IS NOT NULL`, and the token-health monitor has a `no-refresh-token`
+	// status reached by `!!account.refresh_token`. Declaring it `string` made
+	// this interface, whose job is to mirror the schema, the one field in the
+	// block that did not (SB23-2384).
+	refresh_token: string | null;
 	access_token: string | null;
 	expires_at: number | null;
 	created_at: number;

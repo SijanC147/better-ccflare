@@ -850,26 +850,18 @@ describe("OAuth session persistence must be awaited (Codex P2)", () => {
 	});
 
 	it("anthropic reauth init returns an error when session insert fails", async () => {
-		// Seed an anthropic account so reauth passes its pre-checks.
-		await realDbOps.createOAuthSession(
-			"seed-session-id",
-			"reauth-persist-acct",
-			"seed-verifier",
-			"claude-oauth",
-			undefined,
-			10,
-		);
-		// `DatabaseOperations` has no account-creation method, so the seed this
-		// block used to attempt (`realDbOps.createAccount?.(...)`) short-circuited
-		// on an undefined property and inserted nothing. It is removed rather
-		// than left as a no-op that reads like a working fixture.
-		//
-		// The consequence is that this case only ever reaches the handler's
-		// pre-checks and never the failing session insert it is named for. The
-		// invariant it does prove, that no success response is returned when the
-		// session row could not be persisted, holds on both paths, so the test is
-		// kept. Seeding an account for real is SB23-2372.
+		// `DatabaseOperations` exposes no account-creation method, so the seed
+		// this block used to attempt (`realDbOps.createAccount?.(...)`) was an
+		// optional call on an undefined property: it short-circuited and
+		// inserted nothing. Seed through the adapter instead, which is how the
+		// handler reads the row back (SB23-2384).
 		const account = { id: globalThis.crypto.randomUUID() };
+		await realDbOps
+			.getAdapter()
+			.run(
+				"INSERT INTO accounts (id, name, provider, created_at) VALUES (?, ?, ?, ?)",
+				[account.id, "reauth-persist-acct", "anthropic", Date.now()],
+			);
 
 		const handler = createAnthropicReauthInitHandler(
 			withFailingSessionInsert(realDbOps),
@@ -887,13 +879,13 @@ describe("OAuth session persistence must be awaited (Codex P2)", () => {
 		const res = await handler(req);
 		const data = await res.json();
 
-		// The handler may reject earlier in its pre-checks depending on seed
-		// state; the invariant under test is that it never returns a success
-		// response when the session row could not be persisted.
-		if (res.status === 200) {
-			expect(data.success).not.toBe(true);
-		} else {
-			expect(data.error).toBeDefined();
-		}
+		// Pin the reason, not just the status. A 404 (no account seeded), a 400
+		// (wrong provider) and a failure inside `createOAuthFlow` are all
+		// non-200 with an `error` field, so asserting only that the call failed
+		// is what let the dead seed go unnoticed. The rejected insert's own
+		// message is the one string that appears on no other path.
+		expect(res.status).toBe(500);
+		expect(data.error).toContain("simulated session insert failure");
+		expect(data.success).not.toBe(true);
 	});
 });
