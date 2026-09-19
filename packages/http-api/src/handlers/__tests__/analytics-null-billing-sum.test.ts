@@ -13,12 +13,14 @@
  * 30d costs and `first_api_ts` (:105, :107, :109), the time series (:164) and
  * the per-account breakdown (:238).
  *
- * A NULL reaches `requests.billing_type` in ordinary traffic: `UsageCollector`
- * assigns `state.billingType` only on the response-headers path, so a request
- * that fails before headers arrive leaves it undefined and `insertRequest`
- * writes `data.billingType || null`. On the live host every such row is a 429.
- * The rows below carry cost so the arithmetic is visible, which a real 429
- * would not.
+ * A NULL reaches `requests.billing_type` in ordinary traffic because
+ * `UsageCollector` is not the only writer. Its billing-type detection runs in
+ * `handleStart`, but the terminal-error paths in `proxy-operations.ts` call
+ * `dbOps.saveRequest` directly and pass no billing type, so `insertRequest`
+ * stores `data.billingType || null` as NULL. Four of those sites write a 429
+ * (out_of_credits, windowless, model_fallback_429, all_models_exhausted_429),
+ * and on the live host every one of the 20 NULL rows is a 429. The rows below
+ * carry cost so the arithmetic is visible, which a real 429 would not.
  */
 
 import { Database } from "bun:sqlite";

@@ -188,9 +188,10 @@ describe("GET /api/analytics/models — a NULL billing_type", () => {
 		// Written with raw SQL on purpose: the local insertRequest helper
 		// above defaults billingType to "api", so it cannot express the case
 		// this test is about. The production insertRequest does NOT coerce;
-		// it writes `data.billingType || null`, so a NULL is reachable in
-		// ordinary traffic. Every NULL row on the live host is a 429 that
-		// failed before response headers arrived.
+		// it writes `data.billingType || null`. A NULL is reachable in ordinary
+		// traffic because the terminal-error paths in `proxy-operations.ts`
+		// call `saveRequest` directly, bypassing UsageCollector's billing-type
+		// detection. Every NULL row on the live host is a 429 from one of them.
 		db.run(
 			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model, cost_usd, billing_type)
 			 VALUES ('null-billing', ?, 'POST', '/v1/messages', 200, 1, 'unknown-billing', 7, NULL)`,
