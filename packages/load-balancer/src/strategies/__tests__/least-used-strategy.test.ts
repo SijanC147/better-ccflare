@@ -7,7 +7,7 @@ import type {
 } from "@better-ccflare/types";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	const base: Account = {
 		id: "a",
 		name: "a",
 		provider: "anthropic",
@@ -40,8 +40,13 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
-		...overrides,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 	};
+	return Object.assign(base, overrides);
 }
 
 class MockStore implements StrategyStore {
