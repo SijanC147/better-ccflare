@@ -1261,6 +1261,16 @@ export class Config extends EventEmitter {
 	}
 
 	/**
+	 * Emit a refusal diagnosis at most once per process (SB23-2357). See
+	 * refusalsEmitted above for what this does not cover.
+	 */
+	private refuse(message: string): void {
+		if (refusalsEmitted.has(message)) return;
+		refusalsEmitted.add(message);
+		log.error(message);
+	}
+
+	/**
 	 * The refusal text for a hop the walk rejected, chosen from WHY it was
 	 * rejected (SB23-2318).
 	 *
@@ -1281,20 +1291,14 @@ export class Config extends EventEmitter {
 	 * twice: a message stating something the code did not check.
 	 *
 	 * The defaults sentence is conditional, and that is not hedging. writeTarget()
-	 * is reached from loadConfig(), restrictConfigFile(), restrictConfigDir() and
-	 * saveConfig(), so an unconditional "the process starts on defaults" would be
-	 * false on every save refusal after boot.
+	 * is reached from loadConfig(), readLocalControlSecretFromDisk(),
+	 * restrictConfigFile(), sweepStaleTempFiles() and saveConfig(), so an
+	 * unconditional "the process starts on defaults" would be false on every save
+	 * refusal after boot. restrictConfigDir() is deliberately NOT in that list: it
+	 * reads dirname(this.configPath) directly and never calls writeTarget(), which
+	 * is why it still runs on a refusal path. An earlier version of this list named
+	 * it and omitted the other two; corrected by PR #190's review.
 	 */
-	/**
-	 * Emit a refusal diagnosis at most once per process (SB23-2357). See
-	 * refusalsEmitted above for what this does not cover.
-	 */
-	private refuse(message: string): void {
-		if (refusalsEmitted.has(message)) return;
-		refusalsEmitted.add(message);
-		log.error(message);
-	}
-
 	private refusalMessage(hop: string, reason: RefusedTrust): string {
 		const uid = process.getuid?.();
 		const fellBack =
