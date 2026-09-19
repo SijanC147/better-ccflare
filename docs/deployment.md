@@ -368,6 +368,41 @@ networks:
     driver: bridge
 ```
 
+### Bind-mounted config must be owned by the container user
+
+`./config:/config` above is a **host bind mount**, and the `chown` in the Dockerfile does not
+apply to it: a bind mount shadows whatever the image created at that path, so the files carry
+their **host** owner at runtime.
+
+The container runs as `better-ccflare`. If you create `./config/better-ccflare.json` yourself on
+the host, it is owned by your host user, and the server refuses to read it:
+
+```
+Refusing the config path /config/better-ccflare.json: it is a regular file owned by uid 501,
+not by us, so another local user chose its contents.
+```
+
+That refusal is deliberate. From inside the container a config owned by a different uid is a
+config another user controls, and such a config supplies `local_control_secret`, which
+authenticates its author against the local control endpoint, along with `pg_host` and
+`pg_password`. The server starts on defaults instead, and `local_control_secret` is regenerated
+on every restart, which presents as clients intermittently failing to authenticate.
+
+Two ways to avoid it:
+
+- **Let the server create the file.** Bind-mount an empty directory owned by the container's
+  uid and gid and start the server; it writes the config itself at 0600.
+- **Or chown what you seed.** Find the uid and gid the image assigns to `better-ccflare`, then
+  `sudo chown -R <uid>:<gid> ./config ./data` on the host before starting.
+
+A Docker **named volume** rather than a host bind mount avoids this entirely, because the image's
+`chown` applies to it on first use.
+
+Note that `chmod` is frequently a no-op on bind mounts from a macOS or Windows host, so the
+server may also report that it could not bring the config to 0600. The config holds
+`pg_password`, `local_control_secret` and `upstream_maintainer_token`, so on such a host keep it
+on a filesystem that enforces modes, or in a named volume.
+
 ### Building and Running
 
 ```bash

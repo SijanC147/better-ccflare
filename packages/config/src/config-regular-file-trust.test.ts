@@ -88,27 +88,60 @@ describe("a regular file at the config path", () => {
 				{ mode: 0o600 },
 			);
 
+			const strangerFileUid = statSync(configPath).uid;
+
 			// Every read inside the stub, not just the construction. Each reader
 			// re-runs the trust check, so leaving getLocalControlSecret() outside
 			// measured the honest answer to a different question: out there the
 			// file really is ours, so trusting it is correct. That cost one round
 			// here and it is the same mistake as asserting on a fixture whose
 			// premise has lapsed.
-			asStranger(() => {
-				const config = new Config(configPath);
+			const logs = captureLogs(() => {
+				asStranger(() => {
+					const config = new Config(configPath);
 
-				// Neither the initial load nor getLocalControlSecret()'s own re-read
-				// may adopt it. The second is a separate reader and was the one
-				// still returning an attacker value when only the first was gated
-				// in PR #57.
-				expect(config.get("local_control_secret")).toBeUndefined();
-				expect(config.get("lb_strategy")).toBeUndefined();
-				expect(config.getLocalControlSecret()).not.toBe("ATTACKER-CHOSEN");
+					// Neither the initial load nor getLocalControlSecret()'s own
+					// re-read may adopt it. The second is a separate reader and was
+					// the one still returning an attacker value when only the first
+					// was gated in PR #57.
+					expect(config.get("local_control_secret")).toBeUndefined();
+					expect(config.get("lb_strategy")).toBeUndefined();
+					expect(config.getLocalControlSecret()).not.toBe("ATTACKER-CHOSEN");
+				});
 			});
 			// Refused, not replaced: replaceUntrustedLink() only ever acts on a
 			// symlink, so a regular file we do not own is left exactly as it was
 			// rather than renamed over, which would destroy a file of theirs.
 			expect(readFileSync(configPath, "utf8")).toContain("ATTACKER-CHOSEN");
+
+			// The refusal has to be diagnosable from the log alone, because the
+			// case an operator actually hits is a container with the config
+			// bind-mounted from the host, where the file carries its host owner and
+			// the image's chown does not reach it. Measured on Linux for SB23-2339:
+			// process uid 1001 against file uid 501 refuses, which is exactly the
+			// compose layout docs/deployment.md documents. Without the hint the
+			// operator sees a uid mismatch and no reason for it.
+			const refusals = logs.filter(
+				(event) =>
+					event.level === "ERROR" && event.msg.includes("not by us (uid "),
+			);
+			// Three, measured, and the number is the point rather than incidental.
+			// Each reader re-runs writeTarget() and refuses independently: the
+			// initial load, then each getLocalControlSecret(), which cannot short
+			// out on this.data because the refusal left it empty. So unlike the
+			// writable-config warning added in PR #176, this refusal is NOT
+			// deduplicated per path. Asserting the exact count rather than "at
+			// least one" means adding or removing a reader fails here and whoever
+			// did it reads this comment. The asymmetry between the two messages is
+			// recorded as a follow-up, not fixed in this change.
+			expect(refusals).toHaveLength(3);
+			// Both uids, so the operator can act without reproducing anything.
+			expect(refusals[0].msg).toContain(`owned by uid ${strangerFileUid}`);
+			expect(refusals[0].msg).toContain("bind-mounted from the host");
+			expect(refusals[0].msg).toContain("named volume");
+			// And what the failure looks like from the outside, which is the part
+			// that otherwise reads as an intermittent auth bug.
+			expect(refusals[0].msg).toContain("regenerated on every restart");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
