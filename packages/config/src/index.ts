@@ -770,6 +770,82 @@ export class Config extends EventEmitter {
 		return null;
 	}
 
+	/**
+	 * Trust a regular file already sitting at the configured path, or refuse it.
+	 *
+	 * Until SB23-2317 this was an unconditional `return this.configPath`, so a
+	 * regular file was the one route into the config that was never checked at
+	 * all. Every ownership and sticky-bit rule from SB23-1696 and SB23-2267
+	 * governs the symlink case. An attacker who pre-creates a regular file at the
+	 * config path before the process first boots therefore chose our entire
+	 * config: `local_control_secret`, which is an authentication bypass on the
+	 * local control endpoint rather than a disclosure, and `pg_host` with
+	 * `pg_password` pointing at a database they own. They also own the file, so
+	 * the 0600 that restrictConfigFile() applies is theirs to undo.
+	 *
+	 * Deliberately blind to the containing directory, which is the opposite of the
+	 * symlink rule and of this issue's own original acceptance criterion. Three
+	 * reasons, in increasing order of how hard they are to argue with:
+	 *
+	 * A symlink is dangerous because it REDIRECTS the write to a file somebody
+	 * else chose. A regular file redirects nothing; the write lands where we were
+	 * told. So the directory's writability is not what makes it dangerous, and
+	 * requiring a private directory would refuse the case
+	 * config-file-mode.test.ts:589 exists to protect, where an install
+	 * legitimately keeps its config in a shared directory.
+	 *
+	 * A directory-conditioned rule would also be wrong on its own terms. An
+	 * attacker who OWNS a 0755 directory can hardlink a file into it, and 0755 is
+	 * not group or other writable, so a gate conditioned on writability skips
+	 * precisely that case.
+	 *
+	 * And measured rather than argued: `chmodSync` cannot set the sticky bit on
+	 * Linux (SB23-2319), so any rule reading the directory's sticky bit passes on
+	 * macOS and fails in CI against the 1777 fixture at
+	 * config-file-mode.test.ts:597. Reading nothing from the directory is what
+	 * makes this rule give the same answer on both platforms.
+	 *
+	 * The single-name requirement is not redundant with the ownership test, and it
+	 * is the "or root" half that needs it. A hardlink carries the inode's owner to
+	 * a new name, and macOS has no fs.protected_hardlinks, so an ordinary user can
+	 * run `ln /etc/hosts ./hosts-hl` and produce an entry that lstats as uid 0
+	 * with two names. Measured during PR #169's review. Without nlink, that entry
+	 * is accepted as root-owned.
+	 *
+	 * Cost, disclosed: a config an operator deliberately hardlinked is refused,
+	 * even in a directory only they can write. The sticky branch in entryIsTrusted()
+	 * already made that trade, for the same reason and at the same rung.
+	 *
+	 * Returns the path when it is ours to use, or null having said why at error
+	 * level, which every writeTarget() caller already handles.
+	 */
+	private trustedRegularPath(
+		own: NonNullable<ReturnType<typeof lstatSync>>,
+	): string | null {
+		// POSIX ownership does not describe Windows ACLs and Stats.uid there is
+		// synthesised, so this check cannot mean anything. Same rung and the same
+		// reasoning as the win32 branch in writeTarget() below.
+		if (process.platform === "win32") return this.configPath;
+		const uid = process.getuid?.();
+		// An unreadable uid is treated as ours, matching entryIsTrusted(). Refusing
+		// instead would make every regular config file on such a platform
+		// unreadable, which trades a narrow exposure for a total outage.
+		const ownedByUs = uid === undefined || own.uid === uid || own.uid === 0;
+		if (!ownedByUs) {
+			log.error(
+				`Refusing the config path ${this.configPath}: it is a regular file owned by uid ${own.uid}, not by us, so another local user chose its contents. A config they control sets local_control_secret, which is an authentication bypass on the local control endpoint, along with pg_host and pg_password. Move the config somewhere only you can write, or remove that file so a fresh one is created.`,
+			);
+			return null;
+		}
+		if (own.nlink !== 1) {
+			log.error(
+				`Refusing the config path ${this.configPath}: it is a regular file with ${own.nlink} names, so it is a hardlink to a file elsewhere and its contents were not written as our config. A uid of ours does not prove we created the entry, because a hardlink carries the owner of the file it points at. Remove that name so a fresh config is created.`,
+			);
+			return null;
+		}
+		return this.configPath;
+	}
+
 	private writeTarget(): string | null {
 		let link: ReturnType<typeof lstatSync>;
 		try {
@@ -778,7 +854,7 @@ export class Config extends EventEmitter {
 			// Nothing there yet. Write where we were told.
 			return this.configPath;
 		}
-		if (!link.isSymbolicLink()) return this.configPath;
+		if (!link.isSymbolicLink()) return this.trustedRegularPath(link);
 
 		// POSIX mode bits do not describe Windows ACLs. Stats.mode there is
 		// synthesised from the read-only attribute, and directories commonly
