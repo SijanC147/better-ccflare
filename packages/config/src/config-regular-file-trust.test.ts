@@ -125,15 +125,27 @@ describe("a regular file at the config path", () => {
 				(event) =>
 					event.level === "ERROR" && event.msg.includes("not by us (uid "),
 			);
-			// Three, measured, and the number is the point rather than incidental.
-			// Each reader re-runs writeTarget() and refuses independently: the
-			// initial load, then each getLocalControlSecret(), which cannot short
-			// out on this.data because the refusal left it empty. So unlike the
-			// writable-config warning added in PR #176, this refusal is NOT
-			// deduplicated per path. Asserting the exact count rather than "at
-			// least one" means adding or removing a reader fails here and whoever
-			// did it reads this comment. The asymmetry between the two messages is
-			// recorded as a follow-up, not fixed in this change.
+			// Three, measured, and traced by stack rather than reasoned, because an
+			// earlier version of this comment got the three wrong. They are
+			// loadConfig(), readLocalControlSecretFromDisk(), and saveConfig() by
+			// way of the set() that getLocalControlSecret() performs after
+			// generating a replacement secret. The SAVE is the one easy to miss.
+			//
+			// Note what does NOT contribute: the two config.get() calls above
+			// produce zero refusals, because get() reads this.data and never
+			// re-checks the path. So "every reader re-runs the trust check" is
+			// false; three specific operations do.
+			//
+			// Unlike the writable-config warning added in PR #176, this refusal is
+			// not deduplicated per path, and that asymmetry is recorded as a
+			// follow-up rather than fixed here: three separate refused operations
+			// arguably should each say so.
+			//
+			// Asserting the exact count rather than "at least one" is deliberate,
+			// and the brittleness is the point: making getLocalControlSecret() skip
+			// a set() it knows will be refused is a plausible cleanup that would
+			// drop this to 2, and it should fail here rather than pass quietly.
+			// Found by PR #182's review, which corrected this comment.
 			expect(refusals).toHaveLength(3);
 			// Both uids, so the operator can act without reproducing anything.
 			expect(refusals[0].msg).toContain(`owned by uid ${strangerFileUid}`);

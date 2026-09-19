@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
@@ -14,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { stickyFixture } from "@better-ccflare/security/testing";
 import { Config } from "./index";
 
 /**
@@ -57,68 +57,11 @@ import { Config } from "./index";
  */
 
 /**
- * A sticky directory inside an allowed base path, with entry names scoped to this
- * run and a cleanup that only removes what it made.
- *
- * Two routes, because no single one works on both platforms, and that is measured
- * rather than assumed. The first version of this helper did `mkdtemp` then
- * `chmodSync(dir, 0o1777)` and asserted the sticky bit, which passed on macOS and
- * failed all three tests on Linux CI at the assertion. Probed on both:
- *
- *   macOS   chmodSync(dir, 0o1777) -> 1777
- *   Linux   chmodSync(dir, 0o1777) -> 0777, S_ISVTX silently dropped
- *
- * It is Bun, not the kernel or the filesystem. In the same container, coreutils
- * `chmod 1777` yields `drwxrwxrwt` while `chmodSync` yields 0777, for an octal
- * literal, the same value in decimal, and the string "1777" alike, and as root, so
- * privilege is not the cause either. Reading it back is fine: `statSync("/tmp")`
- * reports 1777 on Linux, which is why the feature itself works there and only this
- * fixture did not. Tracked as SB23-2319.
- *
- * So: try to make one, and if the sticky bit did not take, use the base directory
- * itself, which Linux supplies already sticky and root-owned as /tmp. macOS cannot
- * take that route, because there os.tmpdir() is a private /var/folders directory at
- * 0700. Whichever route ran, both properties are asserted at the end, so there is
- * no platform on which these tests pass without a sticky directory.
- *
- * The cleanup contract is the reason this returns an object rather than a path. On
- * the Linux route the directory IS os.tmpdir(), so a test doing
- * `rmSync(dir, { recursive: true })` in its finally would delete the whole of /tmp.
- * Entries are therefore handed out by `entry()`, removed individually, and the
- * recursive removal is applied only to a directory this helper created.
+ * The sticky directory these tests need is built by the shared fixture in
+ * @better-ccflare/security/testing. Two routes, because Bun's chmodSync silently
+ * drops S_ISVTX on Linux and os.tmpdir() is 0700 on macOS; the helper's own doc
+ * comment carries the measurement (SB23-2319).
  */
-function stickyFixture(label: string): {
-	dir: string;
-	entry: (name: string) => string;
-	cleanup: () => void;
-} {
-	const token = `better-ccflare-${label}-${process.pid}-${randomUUID().slice(0, 8)}`;
-	const made = mkdtempSync(join(tmpdir(), `${token}-dir-`));
-	chmodSync(made, 0o1777);
-	const createdByUs = (statSync(made).mode & 0o1000) !== 0;
-	if (!createdByUs) rmSync(made, { recursive: true, force: true });
-	const dir = createdByUs ? made : tmpdir();
-
-	const info = statSync(dir);
-	expect(info.mode & 0o1000).not.toBe(0);
-	expect(info.mode & 0o022).not.toBe(0);
-
-	const entries: string[] = [];
-	return {
-		dir,
-		entry(name: string): string {
-			const path = join(dir, `${token}-${name}`);
-			entries.push(path);
-			return path;
-		},
-		cleanup(): void {
-			// Individually, and lstat-based, so a symlink is unlinked rather than
-			// followed. Never recursive on a directory we did not create.
-			for (const path of entries) rmSync(path, { force: true });
-			if (createdByUs) rmSync(made, { recursive: true, force: true });
-		},
-	};
-}
 
 describe("a config symlink in a sticky directory", () => {
 	it("is followed for read and write when the link is ours", () => {
