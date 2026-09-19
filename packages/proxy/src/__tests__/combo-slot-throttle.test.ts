@@ -83,6 +83,34 @@ function makeSlot(overrides: Partial<ComboSlot> = {}): ComboSlot {
 	};
 }
 
+/** The two fields the throttle rule reads, as `isSlotThrottled` receives them. */
+type ThrottleThresholds = Pick<
+	ComboSlot,
+	"max_utilization_percent" | "min_reset_remaining_ms"
+>;
+
+/**
+ * A slot whose unset thresholds are ABSENT rather than null, derived from
+ * `makeSlot` so it cannot drift from the shared fixture.
+ *
+ * `ComboSlot` declares both `number | null`, so this state is a type error a
+ * caller cannot reach by accident since `#196`, which is why the cast is here
+ * and not in the fixture: the cast is the thing under test. Every `ComboSlot`
+ * fixture in this package was in this state before `#196`, and `isSlotThrottled`
+ * compared `=== null`, so an absent property missed every guard and fell through
+ * to `return true` (SB23-2386).
+ */
+function makeSlotWithAbsentThresholds(
+	overrides: Partial<ThrottleThresholds> = {},
+): ThrottleThresholds {
+	const {
+		max_utilization_percent: _absentUtilization,
+		min_reset_remaining_ms: _absentReset,
+		...withoutThresholds
+	} = makeSlot();
+	return { ...withoutThresholds, ...overrides } as ThrottleThresholds;
+}
+
 function makeCombo(slots: ComboSlot[]): ComboWithSlots {
 	return {
 		id: "combo-1",
@@ -283,6 +311,74 @@ describe("isSlotThrottled — the rule itself", () => {
 		expect(
 			isSlotThrottled(slot, { utilization: 99, resetMs: NOW - HOUR }, NOW),
 		).toBe(false);
+	});
+
+	// SB23-2386. An unset threshold reaches the rule as `undefined` rather than
+	// `null` whenever the slot did not come through `toComboSlot`, and every
+	// comparison in the rule was `=== null`. These four cases pin that an absent
+	// threshold and a null one decide identically, in BOTH directions: the first
+	// dies to a rule that always fires, the rest die to one that never does.
+	describe("an absent threshold is read as unset, exactly as null is", () => {
+		it("is inert when both thresholds are absent rather than null", () => {
+			// The pre-fix reading: absent missed `=== null` on both clauses and on
+			// both operands of the nothing-configured guard, so the rule fell
+			// through to `return true` and skipped a slot carrying no rule at all.
+			expect(
+				isSlotThrottled(
+					makeSlotWithAbsentThresholds(),
+					{ utilization: 100, resetMs: NOW + 4 * HOUR },
+					NOW,
+				),
+			).toBe(false);
+		});
+
+		it("is inert when both thresholds are absent and there is no telemetry", () => {
+			expect(isSlotThrottled(makeSlotWithAbsentThresholds(), null, NOW)).toBe(
+				false,
+			);
+		});
+
+		it("fires a utilization-only rule whose reset threshold is absent", () => {
+			const slot = makeSlotWithAbsentThresholds({
+				max_utilization_percent: 50,
+			});
+			// The reset is five minutes away, which would defeat a reset clause.
+			// The reset threshold is absent, so no reset clause is configured and
+			// the distance is not considered: the half-configured semantics
+			// `#112` settled must survive an absent operand, not just a null one.
+			expect(
+				isSlotThrottled(
+					slot,
+					{ utilization: 99, resetMs: NOW + 5 * 60_000 },
+					NOW,
+				),
+			).toBe(true);
+			expect(
+				isSlotThrottled(
+					slot,
+					{ utilization: 49, resetMs: NOW + 4 * HOUR },
+					NOW,
+				),
+			).toBe(false);
+		});
+
+		it("fires a reset-only rule whose utilization threshold is absent", () => {
+			const slot = makeSlotWithAbsentThresholds({
+				min_reset_remaining_ms: HOUR,
+			});
+			// Utilization of 1% would defeat any sane utilization clause; none is
+			// configured, so only the reset distance decides.
+			expect(
+				isSlotThrottled(slot, { utilization: 1, resetMs: NOW + 4 * HOUR }, NOW),
+			).toBe(true);
+			expect(
+				isSlotThrottled(
+					slot,
+					{ utilization: 99, resetMs: NOW + 5 * 60_000 },
+					NOW,
+				),
+			).toBe(false);
+		});
 	});
 });
 
