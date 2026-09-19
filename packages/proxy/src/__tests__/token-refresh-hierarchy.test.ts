@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
 import {
@@ -7,12 +6,30 @@ import {
 } from "@better-ccflare/database";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import type { ProxyContext } from "../proxy";
+import type { PublicSurface } from "./public-surface";
 
 // Test database path
 const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-token-refresh-hierarchy.db`;
 
+type SchedulerProbe = PublicSurface<AutoRefreshScheduler> & {
+	shouldRefreshAccount(
+		account: {
+			id: string;
+			name: string;
+			provider: string;
+			refresh_token: string;
+			access_token: string | null;
+			expires_at: number | null;
+			rate_limit_reset: number | null;
+			custom_endpoint: string | null;
+			paused: number;
+			pause_reason: string | null;
+		},
+		now: number,
+	): boolean;
+};
+
 describe("Auto-Refresh Token Hierarchy", () => {
-	let db: Database;
 	let dbOps: DatabaseOperations;
 	let scheduler: AutoRefreshScheduler;
 	let mockProxyContext: ProxyContext;
@@ -30,7 +47,6 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		// Initialize test database
 		DatabaseFactory.initialize(TEST_DB_PATH);
 		dbOps = DatabaseFactory.getInstance();
-		db = dbOps.getDatabase();
 
 		// Create mock proxy context
 		mockProxyContext = {
@@ -41,7 +57,10 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		} as ProxyContext;
 
 		// Initialize scheduler
-		scheduler = new AutoRefreshScheduler(db, mockProxyContext);
+		// `getAdapter()` returns the `BunSqlAdapter` the constructor declares.
+		// `getDatabase()` returns the raw `bun:sqlite` handle and is marked
+		// deprecated for exactly this reason, so passing it needed an assertion.
+		scheduler = new AutoRefreshScheduler(dbOps.getAdapter(), mockProxyContext);
 	});
 
 	afterAll(() => {
@@ -71,6 +90,8 @@ describe("Auto-Refresh Token Hierarchy", () => {
 				expires_at: oneHourFromNow,
 				rate_limit_reset: oneHourAgo, // More than 24h old (stale)
 				custom_endpoint: null,
+				paused: 0,
+				pause_reason: null,
 			};
 
 			const accountCurrent = {
@@ -82,14 +103,16 @@ describe("Auto-Refresh Token Hierarchy", () => {
 				expires_at: oneHourFromNow,
 				rate_limit_reset: oneHourFromNow, // Future time
 				custom_endpoint: null,
+				paused: 0,
+				pause_reason: null,
 			};
 
 			// Access private method for testing
 			const shouldRefreshStale = (
-				scheduler as { shouldRefreshAccount: unknown }
+				scheduler as unknown as SchedulerProbe
 			).shouldRefreshAccount(accountStale, now);
 			const shouldRefreshCurrent = (
-				scheduler as { shouldRefreshAccount: unknown }
+				scheduler as unknown as SchedulerProbe
 			).shouldRefreshAccount(accountCurrent, now);
 
 			expect(shouldRefreshStale).toBe(true); // Should refresh (stale reset time)
@@ -109,11 +132,13 @@ describe("Auto-Refresh Token Hierarchy", () => {
 				expires_at: oneHourFromNow,
 				rate_limit_reset: oneHourFromNow,
 				custom_endpoint: null,
+				paused: 0,
+				pause_reason: null,
 			};
 
 			// Access private method for testing
 			const shouldRefreshFirstTime = (
-				scheduler as { shouldRefreshAccount: unknown }
+				scheduler as unknown as SchedulerProbe
 			).shouldRefreshAccount(accountFirstTime, now);
 
 			expect(shouldRefreshFirstTime).toBe(true); // Should refresh (first time)

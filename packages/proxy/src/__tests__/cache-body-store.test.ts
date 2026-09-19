@@ -1,9 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cacheBodyStore } from "../cache-body-store";
+import { type CachedRequestEntry, cacheBodyStore } from "../cache-body-store";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * `expect(entry).not.toBeNull()` asserts but does not narrow, so every later
+ * read of the entry stays `CachedRequestEntry | null` and the `?.` that follows
+ * hands `undefined` to `Object.keys` and `Buffer.from`. This throws on the same
+ * condition and narrows, so the reads below need no optional chaining.
+ */
+function requireCachedRequest(accountId: string): CachedRequestEntry {
+	const entry = cacheBodyStore.getLastCachedRequest(accountId);
+	if (!entry) {
+		throw new Error(`no cached request was recorded for account ${accountId}`);
+	}
+	return entry;
+}
 
 function makeHeaders(entries: Record<string, string> = {}): Headers {
 	return new Headers(entries);
@@ -286,9 +300,8 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-all-strip", 10);
 
-			const entry = cacheBodyStore.getLastCachedRequest("account-a");
-			expect(entry).not.toBeNull();
-			expect(Object.keys(entry?.headers)).toHaveLength(0);
+			const entry = requireCachedRequest("account-a");
+			expect(Object.keys(entry.headers)).toHaveLength(0);
 		});
 	});
 
@@ -382,8 +395,7 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-known", 3);
 
-			const entry = cacheBodyStore.getLastCachedRequest("account-known");
-			expect(entry).not.toBeNull();
+			const entry = requireCachedRequest("account-known");
 			expect(entry?.path).toBe("/v1/messages");
 			expect(Buffer.from(entry?.body).toString()).toBe(
 				'{"model":"claude-opus","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
@@ -783,11 +795,8 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-multi-b", 20);
 
-			const entryA = cacheBodyStore.getLastCachedRequest("account-alpha");
-			const entryB = cacheBodyStore.getLastCachedRequest("account-beta");
-
-			expect(entryA).not.toBeNull();
-			expect(entryB).not.toBeNull();
+			const entryA = requireCachedRequest("account-alpha");
+			const entryB = requireCachedRequest("account-beta");
 
 			expect(Buffer.from(entryA?.body).toString()).toBe(
 				'{"model":"claude-a","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
@@ -825,8 +834,7 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-second", 8);
 
-			const entry = cacheBodyStore.getLastCachedRequest("account-replace");
-			expect(entry).not.toBeNull();
+			const entry = requireCachedRequest("account-replace");
 			expect(Buffer.from(entry?.body).toString()).toBe(
 				'{"model":"claude-second","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
@@ -865,16 +873,12 @@ describe("CacheBodyStore", () => {
 			cacheBodyStore.onSummary("req-x", 7);
 
 			expect(
-				Buffer.from(
-					cacheBodyStore.getLastCachedRequest("account-x")?.body,
-				).toString(),
+				Buffer.from(requireCachedRequest("account-x").body).toString(),
 			).toBe(
 				'{"model":"x","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
 			expect(
-				Buffer.from(
-					cacheBodyStore.getLastCachedRequest("account-y")?.body,
-				).toString(),
+				Buffer.from(requireCachedRequest("account-y").body).toString(),
 			).toBe(
 				'{"model":"y","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);

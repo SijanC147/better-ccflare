@@ -217,6 +217,9 @@ describe("Agent Interceptor - X-Anthropic-Agent-Id Header", () => {
 			expect(result.originalModel).toBe("claude-3-5-sonnet-20241022");
 			expect(result.appliedModel).toBe("claude-opus-model");
 			expect(result.modifiedBody).not.toBe(buffer);
+			if (!result.modifiedBody) {
+				throw new Error("the interceptor reported a rewrite with no body");
+			}
 			const modified = JSON.parse(
 				new TextDecoder().decode(result.modifiedBody),
 			);

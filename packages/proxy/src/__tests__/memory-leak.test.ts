@@ -61,17 +61,21 @@ describe("memory leak regression", () => {
 				method: "POST",
 				path: "/v1/messages",
 				timestamp: Date.now(),
+				// Annotated because `freeRequestState` below resets these three to
+				// `null` and `{}`. Inferred from the literal they would be the exact
+				// string and the exact header keys, which is narrower than the
+				// `StartMessage` fields this stands in for and rejects the reset.
 				requestHeaders: {
 					authorization: "Bearer sk-ant-...",
 					"content-type": "application/json",
 					"x-custom-header": "value",
-				},
-				requestBody: "x".repeat(256 * 1024), // 256KB base64 string
+				} as Record<string, string>,
+				requestBody: "x".repeat(256 * 1024) as string | null, // 256KB base64 string
 				responseStatus: 200,
 				responseHeaders: {
 					"content-type": "application/json",
 					"x-ratelimit-remaining": "100",
-				},
+				} as Record<string, string>,
 				isStream: true,
 				providerName: "anthropic",
 				agentUsed: null,

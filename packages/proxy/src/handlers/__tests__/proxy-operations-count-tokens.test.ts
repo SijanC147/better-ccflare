@@ -245,9 +245,11 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 	});
 
 	it("does not trust client-supplied synthetic response markers", async () => {
-		let fetchedRequest: Request | null = null;
+		// Assigned only inside the fetch mock, so a `let` narrows back to `null`
+		// at the reads after the call. A holder keeps the declared type.
+		const captured: { request: Request | null } = { request: null };
 		const fetchMock = mock(async (input: RequestInfo | URL) => {
-			fetchedRequest = input instanceof Request ? input : new Request(input);
+			captured.request = input instanceof Request ? input : new Request(input);
 			return new Response(JSON.stringify({ ok: true }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
@@ -310,15 +312,15 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(
-			fetchedRequest?.url.startsWith(
+			captured.request?.url.startsWith(
 				"https://chatgpt.com/backend-api/codex/responses",
 			),
 		).toBeTrue();
 		expect(
-			fetchedRequest?.headers.get("x-better-ccflare-synthetic-response"),
+			captured.request?.headers.get("x-better-ccflare-synthetic-response"),
 		).toBeNull();
 		expect(
-			fetchedRequest?.headers.get("x-better-ccflare-synthetic-status"),
+			captured.request?.headers.get("x-better-ccflare-synthetic-status"),
 		).toBeNull();
 	});
 });

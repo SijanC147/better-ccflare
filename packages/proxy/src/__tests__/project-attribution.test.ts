@@ -700,11 +700,14 @@ describe("extractSystemPromptFromBase64", () => {
 			}),
 		).toString("base64");
 
-		let result: string | null = null;
+		// A `let` assigned only inside the callback is narrowed back to its `null`
+		// initialiser at the read below, because TypeScript cannot know the
+		// callback ran. A holder object keeps the declared type.
+		const captured: { result: string | null } = { result: null };
 		expect(() => {
-			result = extractSystemPromptFromBase64(requestBodyBase64);
+			captured.result = extractSystemPromptFromBase64(requestBodyBase64);
 		}).not.toThrow();
-		expect(result).toContain("/home/u/projects/acme/x.ts");
+		expect(captured.result).toContain("/home/u/projects/acme/x.ts");
 	});
 });
 

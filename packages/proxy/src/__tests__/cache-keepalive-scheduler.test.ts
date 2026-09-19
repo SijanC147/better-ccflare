@@ -347,11 +347,13 @@ describe("CacheKeepaliveScheduler", () => {
 		});
 
 		it("unrelated config key change is ignored", () => {
-			let listener: ConfigChangeListener | null = null;
+			const captured: { listener: ConfigChangeListener | null } = {
+				listener: null,
+			};
 			const config = {
 				getCacheKeepaliveTtlMinutes: () => 5,
 				on: (_event: string, cb: ConfigChangeListener) => {
-					listener = cb;
+					captured.listener = cb;
 				},
 				off: () => {},
 			} as unknown as Config;
@@ -362,7 +364,7 @@ describe("CacheKeepaliveScheduler", () => {
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
 
 			// Fire a change for a different key.
-			listener?.({ key: "some_other_key", newValue: 99 });
+			captured.listener?.({ key: "some_other_key", newValue: 99 });
 
 			expect(mockUnregister).not.toHaveBeenCalled();
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);

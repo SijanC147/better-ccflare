@@ -22,9 +22,16 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 		);
 	}
 
-	getOAuthConfig(
-		mode: "console" | "claude-oauth" = "console",
-	): OAuthProviderConfig {
+	/**
+	 * `mode` is `string` rather than the two literals this method branches on,
+	 * because that is what the `OAuthProvider` interface declares and what real
+	 * callers pass: `packages/oauth-flow/src/index.ts` hands over an account's
+	 * stored mode, which can be a legacy value such as `"max"`. Any value other
+	 * than `"console"` selects the claude.ai base URL, which is the behaviour
+	 * `handlers/__tests__/oauth-features.test.ts` pins for `"max"`. The narrower
+	 * literal union contradicted both the interface and that caller.
+	 */
+	getOAuthConfig(mode: string = "console"): OAuthProviderConfig {
 		const baseUrl =
 			mode === "console"
 				? "https://console.anthropic.com"

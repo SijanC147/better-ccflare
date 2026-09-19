@@ -108,9 +108,16 @@ function makeStartMessage(
 	requestId: string,
 	overrides: Partial<StartMessage> = {},
 ): StartMessage {
-	return {
+	// `Partial<StartMessage>` gives every property a `| undefined` member, so
+	// spreading it over a complete literal widens required fields such as
+	// `projectId: string | null` and the result stops satisfying
+	// `StartMessage`. `Object.assign` states the same merge with the standard
+	// library's own typing, `StartMessage & Partial<StartMessage>`, so the
+	// base is checked as a whole message and no assertion is needed.
+	const base: StartMessage = {
 		type: "start",
 		messageId: `message-${requestId}`,
+		requestId,
 		accountId: null,
 		method: "POST",
 		path: "/v1/messages",
@@ -118,6 +125,8 @@ function makeStartMessage(
 		requestHeaders: {},
 		requestBody: null,
 		project: null,
+		projectId: null,
+		worktreePath: null,
 		responseStatus: 200,
 		responseHeaders: { "content-type": "text/event-stream" },
 		isStream: true,
@@ -133,9 +142,8 @@ function makeStartMessage(
 		apiKeyName: null,
 		retryAttempt: 0,
 		failoverAttempts: 0,
-		...overrides,
-		requestId,
 	};
+	return Object.assign(base, overrides, { requestId });
 }
 
 function createHarness(storePayloads = false): TestHarness {

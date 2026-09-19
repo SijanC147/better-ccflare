@@ -515,6 +515,10 @@ describe("forwardToClient usage-collector protocol", () => {
 			requestHeaders: {},
 			requestBody: null,
 			project: null,
+			projectId: null,
+			worktreePath: null,
+			originalModel: null,
+			appliedModel: null,
 			responseStatus: 200,
 			responseHeaders: {},
 			isStream: false,
@@ -530,7 +534,14 @@ describe("forwardToClient usage-collector protocol", () => {
 			failoverAttempts: 0,
 		};
 
-		expect(() => collector.handleStart(legacyStartMessage)).not.toThrow();
+		// `handleStart` on this mock collector takes `Record<string, unknown>`.
+		// An interface has no index signature, so TypeScript rejects the
+		// assignment even though every property is a known key. Spreading into
+		// a fresh object literal gives the same values with an inferred type
+		// the parameter accepts, and asserts nothing.
+		expect(() =>
+			collector.handleStart({ ...legacyStartMessage }),
+		).not.toThrow();
 		expect(starts[0].projectAttributionSource).toBeUndefined();
 		expect(starts[0].agentAttributionSource).toBeUndefined();
 	});
