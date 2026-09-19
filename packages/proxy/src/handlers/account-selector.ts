@@ -96,6 +96,16 @@ function usageSnapshot(account: Account): AccountUsageSnapshot | null {
  * evidence of staleness, so it blocks only the reset clause: a utilization-only
  * rule still fires for a provider that reports no reset timestamp.
  *
+ * Both thresholds are normalised with `?? null` before anything reads them, the
+ * same idiom `resetMs` uses below and the same one `toComboSlot` applies at the
+ * row boundary. `ComboSlot` declares them `number | null`, so a database row
+ * cannot deliver `undefined`, but every comparison here is `=== null` and an
+ * absent property would miss all of them and fall through to the `return true`
+ * at the end: a slot with NO rule configured would be skipped as though it were
+ * throttled, which is the exact failure `#112` corrected from the other side.
+ * All 32 `ComboSlot` fixtures were in that state until `#196`'s type gate, and
+ * that gate is now the only thing keeping a new one out of it (SB23-2386).
+ *
  * Exported for tests.
  */
 export function isSlotThrottled(
@@ -103,8 +113,8 @@ export function isSlotThrottled(
 	usage: AccountUsageSnapshot | null,
 	now: number,
 ): boolean {
-	const maxUtilization = slot.max_utilization_percent;
-	const minResetRemaining = slot.min_reset_remaining_ms;
+	const maxUtilization = slot.max_utilization_percent ?? null;
+	const minResetRemaining = slot.min_reset_remaining_ms ?? null;
 
 	// Nothing configured: the rule does not exist for this slot.
 	if (maxUtilization === null && minResetRemaining === null) return false;
