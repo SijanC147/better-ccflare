@@ -62,7 +62,15 @@ export function chmodForConfig(path: string, mode: number): void {
 export function __setChmodForTest(
 	fn: ((path: string, mode: number) => void) | null,
 ): void {
-	if (process.env.NODE_ENV !== "test") {
+	// Only the INSTALL is gated. Restoring moves the reference back to the real
+	// chmodSync, which is the safe direction, and refusing it was a defect rather
+	// than extra strictness: a test whose body changes NODE_ENV and whose finally
+	// then calls this would have the restore throw, leaving the stub installed
+	// for the rest of the shared process. Measured blast radius of a leaked stub
+	// is 11 tests across four files in this package, so the failure is loud, but
+	// it is loud in files that have nothing to do with whatever left it there.
+	// Raised as Finding 2 by PR #200's independent security reviewer.
+	if (fn !== null && process.env.NODE_ENV !== "test") {
 		throw new Error(
 			"__setChmodForTest is available only while NODE_ENV=test. " +
 				"Swapping the chmod this package calls outside a test run would " +

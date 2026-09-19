@@ -408,9 +408,12 @@ describe("the chmod seam's NODE_ENV gate", () => {
 				// that had grown a sentence telling the operator to set NODE_ENV,
 				// which is the opposite of what this guard is for.
 				expect(() => __setChmodForTest(() => {})).toThrow(GATE_REFUSAL);
-				// Restoring is refused too, so a production caller cannot reach the
-				// reference in either direction.
-				expect(() => __setChmodForTest(null)).toThrow(GATE_REFUSAL);
+				// Restoring is ALLOWED whatever NODE_ENV says, and that asymmetry is
+				// deliberate. It puts the real chmodSync back, so it cannot disarm
+				// anything, and refusing it would strand a stub in the shared process
+				// whenever a test changed NODE_ENV between the install and the
+				// finally that restores.
+				expect(() => __setChmodForTest(null)).not.toThrow();
 			}
 		} finally {
 			if (saved === undefined) delete process.env.NODE_ENV;
