@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
-	chmodSync,
 	closeSync,
 	existsSync,
 	fchmodSync,
@@ -35,6 +34,7 @@ import {
 } from "@better-ccflare/core";
 import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
+import { chmodForConfig } from "./chmod-seam";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
 import {
@@ -69,17 +69,17 @@ const CONFIG_DIR_MODE = 0o700;
  * on different filesystems still hears about both; the set is bounded by the
  * number of distinct config paths, which is one or two.
  *
- * Exported for tests, and that is the only reason. readRegularFile() branches on
- * it to decide whether a writable config is reported at ERROR or WARN, and no
- * unprivileged fixture on macOS or Linux can reach the WARN side: a FAT volume
- * attached through DiskArbitration presents its files 0700, which has no group
- * or other write bit and so never meets the predicate, and mounting one with a
- * writable mask needs root (`mount_msdos -m 777` fails with "msdos filesystem is
- * not available" unprivileged, measured 2026-09-19). A test therefore marks the
- * path here and constructs a Config, which exercises the real call site rather
- * than a copy of its logic.
+ * Private. It was exported for tests until SB23-2365, and that export was the
+ * problem rather than the fix: readRegularFile() branches on this Set to decide
+ * whether a writable config is reported at ERROR or WARN, so a test that
+ * pre-seeded the Set selected the branch WITHOUT running the chmod, re-stat and
+ * compare the branch depends on. A mutation deleting the chmodAndVerify() call
+ * at the report site therefore survived the whole config suite, 187 pass and 0
+ * fail at head 5ba29b23. Tests now swap the chmod itself, through
+ * __setChmodForTest() in ./chmod-seam, which makes the compare run for real on a
+ * real 0666 file and fills this Set the way a bind mount would.
  */
-export const unenforceableModes = new Set<string>();
+const unenforceableModes = new Set<string>();
 
 /**
  * Config paths already reported as writable by other local users, so the warning
@@ -181,7 +181,7 @@ const refusalsEmitted = new Set<string>();
  * files.
  */
 function chmodAndVerify(path: string, mode: number, what: string): void {
-	chmodSync(path, mode);
+	chmodForConfig(path, mode);
 	if (process.platform === "win32") {
 		log.info(`Restricted ${what} permissions to ${modeText(mode)}`);
 		return;
