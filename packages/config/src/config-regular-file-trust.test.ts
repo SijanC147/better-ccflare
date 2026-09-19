@@ -12,7 +12,21 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { logBus } from "@better-ccflare/logger";
+import type { LogEvent } from "@better-ccflare/types";
 import { Config } from "./index";
+
+function captureLogs(fn: () => void): LogEvent[] {
+	const captured: LogEvent[] = [];
+	const handler = (event: LogEvent) => captured.push(event);
+	logBus.on("log", handler);
+	try {
+		fn();
+	} finally {
+		logBus.off("log", handler);
+	}
+	return captured;
+}
 
 /**
  * A regular file already at the config path is trusted only when it is ours and
@@ -142,6 +156,39 @@ describe("a regular file at the config path", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(other, { recursive: true, force: true });
+		}
+	});
+
+	it("is diagnosed as a directory, not as a hardlink, when it is one", () => {
+		// A directory has nlink >= 2 and is owned by us, so it reached the hardlink
+		// branch and was told it was "a regular file with 2 names", advising the
+		// operator to delete it. One holding subdirectories read "with 17 names".
+		// readRegularFile() already has the message that is true, so the fix is for
+		// trustedRegularPath() to say nothing about a non-regular entry.
+		//
+		// Found by PR #172's review, and it slipped because nothing pinned this
+		// message. That is what this test is for.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-dir-"));
+		try {
+			const configPath = join(dir, "config.json");
+			mkdirSync(configPath);
+			// Raise the link count the way a real directory tree would, so a
+			// regression cannot pass by reporting a plausible-looking "2 names".
+			mkdirSync(join(configPath, "sub"));
+			expect(lstatSync(configPath).nlink).toBeGreaterThanOrEqual(3);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				expect(config.get("lb_strategy")).toBeUndefined();
+			});
+			const messages = logs.map((event) => event.msg).join("\n");
+
+			expect(messages).toContain("is not a regular file");
+			// The wrong diagnosis, in either of its shapes.
+			expect(messages).not.toContain("names");
+			expect(messages).not.toContain("hardlink");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

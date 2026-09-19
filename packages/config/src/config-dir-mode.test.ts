@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+	chmodSync,
+	linkSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Config } from "./index";
@@ -146,6 +154,41 @@ describe("config directory permissions", () => {
 				expect(mode(custom)).toBe(0o755);
 			} finally {
 				rmSync(custom, { recursive: true, force: true });
+			}
+		});
+	});
+
+	it("hardens the directory even when the config file itself is refused", () => {
+		// The refusal branch used to return before restrictConfigDir(), so a
+		// refused config left the directory at whatever it was. Measured by
+		// PR #172's review at 0755, where a normal config took the same directory
+		// to 0700. The directory is the sharper half: it holds better-ccflare.db
+		// and the plaintext tokens in its accounts table, and it is no less ours
+		// because the config file beside it cannot be trusted.
+		//
+		// A hardlink is the refusal used here because it is the cheapest one to
+		// build that a real operator could hit: it needs no second user account,
+		// unlike a foreign-owned file, and no stubbing of process.getuid.
+		withXdgHome((platformDir) => {
+			const other = mkdtempSync(join(tmpdir(), "better-ccflare-dirref-"));
+			try {
+				mkdirSync(platformDir, { recursive: true });
+				chmodSync(platformDir, 0o755);
+				expect(mode(platformDir)).toBe(0o755);
+
+				const victim = join(other, "elsewhere.json");
+				writeFileSync(victim, JSON.stringify({ lb_strategy: "session" }));
+				const configPath = join(platformDir, "better-ccflare.json");
+				linkSync(victim, configPath);
+
+				const config = new Config(configPath);
+
+				// Refused, so nothing was adopted.
+				expect(config.get("lb_strategy")).toBeUndefined();
+				// And hardened anyway, which is what this test exists for.
+				expect(mode(platformDir)).toBe(0o700);
+			} finally {
+				rmSync(other, { recursive: true, force: true });
 			}
 		});
 	});

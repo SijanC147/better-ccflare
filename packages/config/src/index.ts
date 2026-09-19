@@ -440,6 +440,16 @@ export class Config extends EventEmitter {
 			if (trusted === null) {
 				// writeTarget() has already said why, at error level.
 				this.data = {};
+				// Harden the directory anyway. Everything else in this branch is
+				// about the file we refused to read, but the directory holds the
+				// database and its plaintext credentials, and it is no less ours
+				// because the config beside it is untrustworthy. Before this, a
+				// refusal skipped the chmod and left the directory at whatever it
+				// was: measured at 0755 with the config a hardlink, where a normal
+				// config took it to 0700. Found by PR #172's review. The call gates
+				// on the path being the default config directory and warns rather
+				// than throwing, so it is safe on a refusal path.
+				this.restrictConfigDir();
 				return;
 			}
 			// readRegularFile() returns null for anything that is not a regular
@@ -826,6 +836,17 @@ export class Config extends EventEmitter {
 		// synthesised, so this check cannot mean anything. Same rung and the same
 		// reasoning as the win32 branch in writeTarget() below.
 		if (process.platform === "win32") return this.configPath;
+		// Anything that is not a regular file is not this method's to diagnose, and
+		// saying nothing here is what keeps the accurate message. A directory has
+		// nlink >= 2, so it used to reach the hardlink branch below and be told it
+		// was "a regular file with 2 names", advising the operator to delete it; a
+		// directory holding subdirectories read "with 17 names". readRegularFile()
+		// already refuses a non-regular path with the message that is true of it,
+		// and restrictConfigFile() has its own isFile() guard, so handing the path
+		// back is exactly the behaviour that shipped before this check existed.
+		// Found by PR #172's review, which also noted why it slipped: no test pins
+		// the message for a directory at the config path.
+		if (!own.isFile()) return this.configPath;
 		const uid = process.getuid?.();
 		// An unreadable uid is treated as ours, matching entryIsTrusted(). Refusing
 		// instead would make every regular config file on such a platform
