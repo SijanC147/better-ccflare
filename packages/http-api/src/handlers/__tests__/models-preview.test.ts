@@ -37,7 +37,7 @@ describe("POST /api/models/preview", () => {
 			new Response(JSON.stringify(LIVE_BODY), {
 				status: 200,
 				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+			})) as unknown as typeof globalThis.fetch;
 
 		const handler = createModelsPreviewHandler();
 		const response = await handler(
@@ -95,7 +95,7 @@ describe("POST /api/models/preview", () => {
 		globalThis.fetch = (async () =>
 			new Response("unauthorized", {
 				status: 401,
-			})) as typeof globalThis.fetch;
+			})) as unknown as typeof globalThis.fetch;
 
 		const handler = createModelsPreviewHandler();
 		const response = await handler(
@@ -114,7 +114,7 @@ describe("POST /api/models/preview", () => {
 		const secretApiKey = "sk-another-secret-value";
 		globalThis.fetch = (async () => {
 			throw new Error("fetch failed: network error");
-		}) as typeof globalThis.fetch;
+		}) as unknown as typeof globalThis.fetch;
 
 		const handler = createModelsPreviewHandler();
 		const response = await handler(

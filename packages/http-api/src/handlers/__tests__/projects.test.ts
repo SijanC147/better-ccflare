@@ -37,7 +37,9 @@ function makeDbOps(
 	return {
 		listProjects: async () => [],
 		getProject: async (_id: string) => null,
-		createProject: async (fields) =>
+		createProject: async (
+			fields: Parameters<DatabaseOperations["createProject"]>[0],
+		) =>
 			makeProject({
 				canonical_path: fields.canonicalPath,
 				display_name: fields.displayName,

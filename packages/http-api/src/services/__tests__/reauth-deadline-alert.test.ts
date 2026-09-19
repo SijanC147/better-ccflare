@@ -51,6 +51,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		refresh_token_issued_at: null,
 		last_manual_reauth_at: null,
 		consecutive_rate_limits: 0,
+		request_transformer: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -188,7 +190,12 @@ describe("AlertService reauth-deadline sweep (handleReauthDeadlines)", () => {
 	 * the loop body in `handleReauthDeadlines` keeps the sweep going for
 	 * every other account.
 	 */
-	class PerAccountFailureAdapter implements BunSqlAdapterType {
+	// See auth-failure-alert.test.ts: `implements` on the BunSqlAdapter class
+	// demands its private members and is unsatisfiable by a fake, and the
+	// injection site below already casts through `unknown`.
+	class PerAccountFailureAdapter
+		implements Pick<BunSqlAdapterType, "isSQLite" | "get" | "query" | "run">
+	{
 		readonly isSQLite = true;
 		readonly persistedAlertIds: string[] = [];
 

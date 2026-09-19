@@ -81,6 +81,18 @@ function createMockContext(
 		dbOps: {
 			getAdapter: () => mockDb,
 		} as unknown as APIContext["dbOps"],
+		// The handlers under test do not read alerts. The methods reject rather
+		// than resolving empty, so a handler that starts using this fails loudly
+		// instead of silently seeing no alerts.
+		alertService: {
+			listAlerts: () => Promise.reject(new Error("alertService not stubbed")),
+			getUnacknowledgedCount: () =>
+				Promise.reject(new Error("alertService not stubbed")),
+			acknowledgeAlert: () =>
+				Promise.reject(new Error("alertService not stubbed")),
+			acknowledgeAll: () =>
+				Promise.reject(new Error("alertService not stubbed")),
+		},
 	};
 }
 
@@ -237,6 +249,18 @@ describe("cache insights handler (mock adapter)", () => {
 					},
 				}),
 			} as unknown as APIContext["dbOps"],
+			// The handlers under test do not read alerts. The methods reject rather
+			// than resolving empty, so a handler that starts using this fails loudly
+			// instead of silently seeing no alerts.
+			alertService: {
+				listAlerts: () => Promise.reject(new Error("alertService not stubbed")),
+				getUnacknowledgedCount: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAlert: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAll: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+			},
 		};
 		const response = await createCacheInsightsHandler(context)(
 			new URLSearchParams(),
@@ -345,6 +369,18 @@ describe("cache insights handler (SQLite integration)", () => {
 			dbOps: {
 				getAdapter: () => adapter,
 			} as unknown as APIContext["dbOps"],
+			// The handlers under test do not read alerts. The methods reject rather
+			// than resolving empty, so a handler that starts using this fails loudly
+			// instead of silently seeing no alerts.
+			alertService: {
+				listAlerts: () => Promise.reject(new Error("alertService not stubbed")),
+				getUnacknowledgedCount: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAlert: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+				acknowledgeAll: () =>
+					Promise.reject(new Error("alertService not stubbed")),
+			},
 		};
 	});
 

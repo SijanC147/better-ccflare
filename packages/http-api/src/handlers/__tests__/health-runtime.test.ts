@@ -42,7 +42,23 @@ describe("health runtime payload", () => {
 		const handler = createHealthHandler(
 			db,
 			config,
-			() => ({ healthy: true, failureCount: 0, recentDrops: 0, queuedJobs: 2 }),
+			// AsyncWriterHealthFn has twelve members and the handler passes the
+			// whole object into the response, so a four-field stub was never the
+			// shape under test.
+			() => ({
+				healthy: true,
+				failureCount: 0,
+				recentDrops: 0,
+				queuedJobs: 2,
+				metadataQueuedJobs: 2,
+				payloadQueuedJobs: 0,
+				payloadBytesPending: 0,
+				oldestMetadataAgeMs: 0,
+				oldestPayloadAgeMs: 0,
+				metadataDropped: 0,
+				payloadDropped: 0,
+				payloadDroppedBytes: 0,
+			}),
 			() => ({
 				state: "healthy",
 			}),
@@ -62,6 +78,14 @@ describe("health runtime payload", () => {
 			failureCount: 0,
 			recentDrops: 0,
 			queuedJobs: 2,
+			metadataQueuedJobs: 2,
+			payloadQueuedJobs: 0,
+			payloadBytesPending: 0,
+			oldestMetadataAgeMs: 0,
+			oldestPayloadAgeMs: 0,
+			metadataDropped: 0,
+			payloadDropped: 0,
+			payloadDroppedBytes: 0,
 		});
 		expect(body.runtime?.usageWorker).toEqual({
 			state: "healthy",
@@ -525,14 +549,14 @@ describe("?detail=1 parameter", () => {
 			rate_limited_reason: null,
 			rate_limited_at: null,
 		});
-		expect(body.accounts_detail[1]).toEqual({
+		expect(body.accounts_detail?.[1]).toEqual({
 			name: "acc2",
 			status: "paused",
 			rate_limited_until: null,
 			rate_limited_reason: null,
 			rate_limited_at: null,
 		});
-		expect(body.accounts_detail[2]).toEqual({
+		expect(body.accounts_detail?.[2]).toEqual({
 			name: "acc3",
 			status: "rate_limited",
 			rate_limited_until: expect.any(Number),

@@ -789,6 +789,11 @@ describe("createAnthropicReauthCallbackHandler", () => {
 describe("OAuth session persistence must be awaited (Codex P2)", () => {
 	const TEST_DB_PATH_2 = "/tmp/test-oauth-session-persist.db";
 	let realDbOps: DatabaseOperations;
+	// The reauth handler requires a Config; mirrors the stub the
+	// createAnthropicReauthInitHandler describe block above uses.
+	const stubConfig = {
+		getRuntime: () => ({ clientId: "test-client-id" }),
+	} as unknown as import("@better-ccflare/config").Config;
 
 	beforeAll(() => {
 		try {
@@ -854,18 +859,21 @@ describe("OAuth session persistence must be awaited (Codex P2)", () => {
 			undefined,
 			10,
 		);
-		const account = {
-			id: globalThis.crypto.randomUUID(),
-			name: "reauth-persist-acct",
-			provider: "anthropic",
-			refresh_token: "seed-refresh",
-			access_token: "seed-access",
-			expires_at: Date.now() + 3600_000,
-		};
-		realDbOps.createAccount?.(account as never);
+		// `DatabaseOperations` has no account-creation method, so the seed this
+		// block used to attempt (`realDbOps.createAccount?.(...)`) short-circuited
+		// on an undefined property and inserted nothing. It is removed rather
+		// than left as a no-op that reads like a working fixture.
+		//
+		// The consequence is that this case only ever reaches the handler's
+		// pre-checks and never the failing session insert it is named for. The
+		// invariant it does prove, that no success response is returned when the
+		// session row could not be persisted, holds on both paths, so the test is
+		// kept. Seeding an account for real is SB23-2372.
+		const account = { id: globalThis.crypto.randomUUID() };
 
 		const handler = createAnthropicReauthInitHandler(
 			withFailingSessionInsert(realDbOps),
+			stubConfig,
 		);
 		const req = new Request(
 			"http://localhost/api/oauth/anthropic/reauth/init",

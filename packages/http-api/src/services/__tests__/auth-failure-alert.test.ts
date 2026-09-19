@@ -64,10 +64,16 @@ describe("AlertService auth_failure events", () => {
 	});
 
 	it("persists, emits, and delivers one critical webhook per cooldown bucket", async () => {
+		// The cast belongs on the assignment, not on the const: widening
+		// `fetchMock` itself to `typeof fetch` erases the `Mock` type that
+		// `fetchMock.mock.calls` below reads.
+		// Declare the parameters the service actually passes, so `mock.calls`
+		// carries them and the webhook body can be read without a cast.
 		const fetchMock = mock(
-			async () => new Response(null, { status: 204 }),
-		) as unknown as typeof fetch;
-		globalThis.fetch = fetchMock;
+			async (_url: string, _init?: RequestInit) =>
+				new Response(null, { status: 204 }),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
 		const emitted: unknown[] = [];
 		alertListener = (event) => emitted.push(event);
 		alertEvents.on("event", alertListener);
@@ -89,8 +95,8 @@ describe("AlertService auth_failure events", () => {
 		expect(alerts[0]?.account).toBe("Backup account");
 		expect(emitted).toHaveLength(1);
 
-		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-		const webhook = JSON.parse(String(init.body));
+		const [, init] = fetchMock.mock.calls[0] ?? [];
+		const webhook = JSON.parse(String(init?.body));
 		expect(webhook.alert.type).toBe("auth_failure");
 
 		authFailureEvents.emit("event", event);
@@ -107,7 +113,15 @@ describe("AlertService auth_failure events", () => {
  * dialect (isSQLite === false) so we can assert the dialect-aware conflict
  * clause without a live PG server.
  */
-class RecordingPgAdapter implements BunSqlAdapterType {
+/**
+ * `BunSqlAdapter` is a class, so `implements` on it demands its private members
+ * too and can never be satisfied by a fake. Each injection site below already
+ * casts through `unknown`, so the clause checked nothing. `Pick` keeps a real
+ * check on the four public members the service actually calls.
+ */
+class RecordingPgAdapter
+	implements Pick<BunSqlAdapterType, "isSQLite" | "get" | "query" | "run">
+{
 	readonly isSQLite = false;
 	readonly runStatements: string[] = [];
 
@@ -218,7 +232,9 @@ describe("AlertService persistAndEmit (issue #326)", () => {
  * the aggregate-threshold query (e.g. the tokens-per-hour SUM query,
  * issue #451, "PG query timeout after 8000ms").
  */
-class TimingOutPgAdapter implements BunSqlAdapterType {
+class TimingOutPgAdapter
+	implements Pick<BunSqlAdapterType, "isSQLite" | "get" | "query" | "run">
+{
 	readonly isSQLite = false;
 
 	async get<T>(_sql: string, _params?: unknown[]): Promise<T | null> {

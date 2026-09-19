@@ -4,6 +4,7 @@ import {
 	checkAllAccountsHealth,
 	getAccountsNeedingReauth,
 } from "@better-ccflare/proxy";
+import type { Account } from "@better-ccflare/types";
 import {
 	createAccountTokenHealthHandler,
 	createReauthNeededHandler,
@@ -11,7 +12,7 @@ import {
 } from "../token-health";
 
 // Mock database operations for testing
-const mockAccounts = [
+const mockAccounts: Account[] = [
 	{
 		id: "1",
 		name: "test-account-1",
@@ -42,6 +43,14 @@ const mockAccounts = [
 		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 	},
 	{
 		id: "2",
@@ -73,6 +82,14 @@ const mockAccounts = [
 		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 	},
 	{
 		id: "3",
@@ -104,6 +121,14 @@ const mockAccounts = [
 		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 	},
 ];
 
@@ -331,6 +356,14 @@ describe("Error Handling", () => {
 				model_fallbacks: null,
 				billing_type: null,
 				pause_reason: null,
+				rate_limited_reason: null,
+				rate_limited_at: null,
+				requires_reauth: false,
+				peak_hours_pause_enabled: false,
+				request_transformer: null,
+				last_manual_reauth_at: null,
+				consecutive_rate_limits: 0,
+				renewal_day: null,
 			},
 		];
 

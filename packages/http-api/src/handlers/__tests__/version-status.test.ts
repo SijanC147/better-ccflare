@@ -8,6 +8,10 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { AuthService } from "../../services/auth-service";
+import type {
+	ForkStatus,
+	UpstreamStatus,
+} from "../../services/version-status-service";
 import { VersionStatusService } from "../../services/version-status-service";
 import { createVersionCheckHandler } from "../version";
 import {
@@ -19,6 +23,44 @@ import {
 	MANUAL_UPDATE_COMMAND,
 	redactSecrets,
 } from "../version-status";
+
+/**
+ * The shape `createVersionStatusHandler` serialises, narrowed to what these
+ * tests read. It was previously asserted as `Record<string, never>`, which
+ * types every property as `never`, so `body.local`, `body.fork`,
+ * `body.capabilities` and `body.remote` were all `never` and every property
+ * read off them was an error nothing ran.
+ *
+ * `fork` and `upstream` are nullable because the handler emits
+ * `result.snapshot?.fork ?? null`. The read sites below use `?.`, which keeps
+ * the assertions strict: a null snapshot yields `undefined`, and `toBe(true)`
+ * fails on `undefined`.
+ */
+interface VersionStatusBody {
+	local: {
+		version: string;
+		commit: string;
+		commitShort: string | null;
+		commitUrl: string | null;
+		versionUrl: string;
+		mergedUpstreamSha: string;
+		mergedUpstreamShaUrl: string | null;
+	};
+	fork: ForkStatus | null;
+	upstream: UpstreamStatus | null;
+	capabilities: {
+		selfUpdate: boolean;
+		selfUpdateBlockedReason: string | null;
+		dispatch: boolean;
+		manualUpdateCommand: string;
+	};
+	remote: {
+		available: boolean;
+		stale: boolean;
+		error: string | null;
+		checkedAt: number | null;
+	};
+}
 
 const BREW_EXEC =
 	"/opt/homebrew/Cellar/better-ccflare/3.9.0/bin/better-ccflare";
@@ -136,7 +178,7 @@ describe("GET /api/version/status", () => {
 			new URL("http://localhost/api/version/status"),
 		);
 		expect(response.status).toBe(200);
-		const body = (await response.json()) as Record<string, never>;
+		const body = (await response.json()) as VersionStatusBody;
 
 		// Local identity must survive a total GitHub outage: the widget has to
 		// render something rather than break the sidebar.
@@ -168,9 +210,9 @@ describe("GET /api/version/status", () => {
 		});
 		const body = (await (
 			await handler(new URL("http://localhost/api/version/status"))
-		).json()) as Record<string, never>;
+		).json()) as VersionStatusBody;
 
-		expect(body.fork.updateAvailable).toBe(true);
+		expect(body.fork?.updateAvailable).toBe(true);
 		expect(body.capabilities.selfUpdate).toBe(false);
 		expect(body.capabilities.selfUpdateBlockedReason).toBe(
 			"not a Homebrew installation",
@@ -190,7 +232,7 @@ describe("GET /api/version/status", () => {
 		});
 		const body = (await (
 			await handler(new URL("http://localhost/api/version/status"))
-		).json()) as Record<string, never>;
+		).json()) as VersionStatusBody;
 		expect(body.capabilities.selfUpdate).toBe(true);
 		expect(body.capabilities.dispatch).toBe(false);
 	});
