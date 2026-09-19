@@ -204,11 +204,21 @@ describe("SQL dialect hazards (static, always runs)", () => {
 	});
 
 	it("no SQL line comment contains a `?`", () => {
-		// convertPlaceholders() only skips single-quoted string literals. A `?`
-		// inside a `--` comment is renumbered like a real placeholder and
-		// silently shifts every following $N by one. Matched on the raw line:
-		// an SQL comment lives inside a template literal, not a TS comment.
-		const hits = offendingLines(sources, /^\s*--\s[^\n]*\?/, { raw: true });
+		// convertPlaceholders() skips a `--` comment, so a `?` inside one is no
+		// longer renumbered. This gate stays because a comment holding a `?` is
+		// still a trap for anyone reading the SQL, and because it fails at
+		// `bun test` with no server, where the live harness needs DATABASE_URL.
+		//
+		// Matched on the raw line: an SQL comment lives inside a template
+		// literal, not a TS comment, and stripNonSql() deletes `??` and `?.`,
+		// which this rule should still see.
+		//
+		// NOT anchored to the start of the line. `^\s*--` is blind to a comment
+		// that trails real SQL on its line, which is the same hazard the sibling
+		// apostrophe rule below carried before #160 widened it. Proven by
+		// mutation on 2026-09-19: appending a `?` to the trailing comment at
+		// migrations.ts:1942 survives `^\s*--` and is killed by the form below.
+		const hits = offendingLines(sources, /--\s[^\n]*\?/, { raw: true });
 		expect(hits).toEqual([]);
 	});
 
@@ -232,8 +242,8 @@ describe("SQL dialect hazards (static, always runs)", () => {
 		// SQL, and because it fails at `bun test` with no server, where the
 		// live harness needs DATABASE_URL.
 		//
-		// Unlike the sibling `?` rule this is NOT anchored to the start of the
-		// line. Line-start anchoring is blind to a trailing comment, and when
+		// Like the sibling `?` rule above this is NOT anchored to the start of
+		// the line. Line-start anchoring is blind to a trailing comment, and when
 		// this rule was first run with `^\s*--` it reported 3 sites while the
 		// unanchored form reported 6: migrations.ts:1942, :1945 and :1947 all
 		// trail real SQL on their line, and :1947 is followed by a `?` two

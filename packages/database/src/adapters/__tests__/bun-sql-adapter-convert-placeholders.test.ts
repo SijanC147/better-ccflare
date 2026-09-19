@@ -126,4 +126,51 @@ describe("convertPlaceholders", () => {
 			"SELECT a - b FROM t WHERE c = $1",
 		);
 	});
+
+	it("does not let an apostrophe in a block comment open a string literal", () => {
+		// The `--` form of this is the defect PR #160 fixed and four live
+		// PostgreSQL cases 500'd on. A block comment reproduces it exactly:
+		// without the skip, the apostrophe leaves the scanner believing a
+		// literal is open and the following `?` reaches PostgreSQL verbatim.
+		const sql = "SELECT x /* AVG's NULL-skipping */ FROM t WHERE a = ?";
+		expect(convertPlaceholders(sql)).toBe(
+			"SELECT x /* AVG's NULL-skipping */ FROM t WHERE a = $1",
+		);
+	});
+
+	it("does not renumber a `?` inside a block comment", () => {
+		// The other direction: an unskipped `?` in the comment consumes $1 and
+		// shifts every real placeholder after it by one.
+		const sql = "SELECT x /* why ? */ FROM t WHERE a = ? AND b = ?";
+		expect(convertPlaceholders(sql)).toBe(
+			"SELECT x /* why ? */ FROM t WHERE a = $1 AND b = $2",
+		);
+	});
+
+	it("does not treat `/*` inside a string literal as a block comment", () => {
+		// Same ordering requirement as the `'--'` case above: the string-literal
+		// branch runs first, so this stays data. If the block-comment branch ran
+		// first it would swallow to the next `*/` or to the end of the statement
+		// and the following placeholder would never convert.
+		const sql = "SELECT '/*' AS marker FROM t WHERE a = ?";
+		expect(convertPlaceholders(sql)).toBe(
+			"SELECT '/*' AS marker FROM t WHERE a = $1",
+		);
+	});
+
+	it("copies an unterminated block comment through to the end", () => {
+		// No `*/`, so everything after it is comment. A `?` inside must not be
+		// renumbered, and the function must terminate rather than scan past the
+		// end of the string.
+		const sql = "SELECT x FROM t WHERE a = ? /* unterminated, author's ?";
+		expect(convertPlaceholders(sql)).toBe(
+			"SELECT x FROM t WHERE a = $1 /* unterminated, author's ?",
+		);
+	});
+
+	it("leaves a division and a standalone slash alone", () => {
+		expect(convertPlaceholders("SELECT a / b FROM t WHERE c = ?")).toBe(
+			"SELECT a / b FROM t WHERE c = $1",
+		);
+	});
 });
