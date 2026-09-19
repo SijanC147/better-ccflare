@@ -10,7 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
 import type { LogEvent } from "@better-ccflare/types";
-import { Config, unenforceableModes } from "./index";
+import { __setChmodForTest, chmodForConfig } from "./chmod-seam";
+import { Config } from "./index";
 
 /**
  * SB23-2350. A config another local user can write is reported and loaded
@@ -25,8 +26,15 @@ import { Config, unenforceableModes } from "./index";
  * OpenObserve each time.
  *
  * The distinction is measured, not assumed: chmodAndVerify() already chmods,
- * re-stats and compares, and records the path in unenforceableModes when the
+ * re-stats and compares, and records the path in a module-private Set when the
  * mode did not move. These tests pin that the level follows that measurement.
+ *
+ * How the no-op filesystem is modelled changed in SB23-2365. It used to be a
+ * pre-seeded export of that Set, which selected the branch without ever running
+ * the compare the branch depends on, so a mutation deleting the chmodAndVerify()
+ * call at the report site survived the whole suite. The fixture is now the chmod
+ * itself, swapped through __setChmodForTest() on a real 0666 file, so the
+ * compare runs and reads 0666 the way it would on a bind mount.
  */
 
 const ERROR_MARK = "its contents may not be yours";
@@ -61,8 +69,37 @@ function withFixture(fn: (dir: string) => void): void {
 	}
 }
 
+/**
+ * Model a filesystem with no Unix modes to set: chmod succeeds and changes
+ * nothing. Restored in a `finally` because `bun test` shares one process across
+ * files, and a stub left installed would silently disarm every later chmod in
+ * this package.
+ */
+function withChmodThatDoesNothing(fn: () => void): void {
+	const calls: Array<{ path: string; mode: number }> = [];
+	__setChmodForTest((path, mode) => {
+		calls.push({ path, mode });
+	});
+	try {
+		fn();
+	} finally {
+		__setChmodForTest(null);
+	}
+	// The stub must actually have been reached. Without this the test passes
+	// identically against a source that never calls chmod at all, which is the
+	// mutation this whole change exists to kill.
+	expect(calls.length).toBeGreaterThan(0);
+}
+
 describe("a writable config on a filesystem that cannot enforce modes", () => {
-	it("warns rather than erroring, and says the mode is not evidence", () => {
+	// Skipped on Windows, where chmodAndVerify() returns before the compare
+	// because Node derives st_mode from FILE_ATTRIBUTE_READONLY there and a
+	// re-stat would read 0666 for any writable file. The no-op stub therefore
+	// cannot reach the WARN branch on win32 at all, so a case there would assert
+	// against a branch the platform does not run.
+	it.skipIf(process.platform === "win32")(
+		"warns rather than erroring, and says the mode is not evidence",
+		() => {
 		withFixture((dir) => {
 			const configPath = join(dir, "config.json");
 			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
@@ -73,41 +110,74 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 			chmodSync(configPath, 0o666);
 			expect(statSync(configPath).mode & 0o022).not.toBe(0);
 
-			// Stand in for the filesystem. tmpdir() here is APFS or tmpfs and does
-			// enforce modes, and no unprivileged fixture can produce one that does
-			// not AND presents a group- or world-writable mode: a FAT volume
-			// attached through DiskArbitration gives 0700, and mounting one with a
-			// writable mask needs root. Marking the path exercises the real branch in
-			// readRegularFile() rather than a copy of its logic; the measurement
-			// itself is covered by config-chmod-noop.test.ts on a real FAT volume.
-			unenforceableModes.add(configPath);
-			try {
-				const logs = captureLogs(() => {
+			// Stand in for the filesystem, by swapping the chmod rather than by
+			// pre-seeding the Set that records its result. tmpdir() here is APFS or
+			// tmpfs and does enforce modes, and no unprivileged fixture can produce
+			// one that does not AND presents a group- or world-writable mode: a FAT
+			// volume attached through DiskArbitration gives 0700, and mounting one
+			// with a writable mask needs root.
+			//
+			// This is the whole of SB23-2365. A chmod that succeeds and changes
+			// nothing is exactly what a Docker bind mount from a macOS host does, so
+			// with the file left at a real 0666 the chmod, the re-stat and the
+			// compare in chmodAndVerify() all run for real and the compare reads
+			// 0666. Pre-seeding selected this branch while running none of them.
+			let logs: LogEvent[] = [];
+			withChmodThatDoesNothing(() => {
+				logs = captureLogs(() => {
 					const config = new Config(configPath);
 					// Still loaded. PR #176's decision is unchanged by the level.
 					expect(config.get("lb_strategy")).toBe("session");
 				});
+			});
 
-				const warned = logs.filter(
-					(event) => event.level === "WARN" && event.msg.includes(WARN_MARK),
-				);
-				expect(warned).toHaveLength(1);
-				expect(warned[0].msg).toContain(configPath);
-				// The operator is pointed at the thing that can actually decide it.
-				expect(warned[0].msg).toContain("mount");
+			// The measurement itself, which nothing pinned before this change: the
+			// compare ran, found the mode had not moved, and said so naming both
+			// modes. Whole message with toBe, not a pair of toContain and
+			// not.toContain: a blocklist of two strings cannot catch a sentence
+			// nobody thought to list, and a mutation that ADDED one has survived
+			// that shape in this exact file family.
+			const measured = logs.filter((event) =>
+				event.msg.startsWith("chmod on the config file"),
+			);
+			expect(measured).toHaveLength(1);
+			expect(measured[0].level).toBe("WARN");
+			expect(measured[0].msg).toBe(
+				`chmod on the config file ${configPath} reported success but the mode is still ` +
+					"0666 rather than 0600, so it may be readable " +
+					"by other local users. Filesystems without Unix modes behave this way, " +
+					"including Docker bind mounts from a macOS or Windows host and FAT or " +
+					"exFAT volumes. Move the config onto a filesystem that enforces modes, " +
+					"or mount it so only this user can read it.",
+			);
 
-				// The negative half. Without it a mutation that emits BOTH lines, or
-				// that ignores the Set and keeps erroring, passes on the assertion
-				// above alone.
-				expect(
-					logs.filter((event) => event.msg.includes(ERROR_MARK)),
-				).toHaveLength(0);
-				expect(logs.filter((event) => event.level === "ERROR")).toHaveLength(0);
-			} finally {
-				unenforceableModes.delete(configPath);
-			}
+			const warned = logs.filter(
+				(event) => event.level === "WARN" && event.msg.includes(WARN_MARK),
+			);
+			expect(warned).toHaveLength(1);
+			expect(warned[0].msg).toBe(
+				`The config file ${configPath} reads mode 0666, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${configPath} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
+			);
+
+			// The negative half. Without it a mutation that emits BOTH lines, or
+			// that ignores the measurement and keeps erroring, passes on the
+			// assertions above alone.
+			expect(
+				logs.filter((event) => event.msg.includes(ERROR_MARK)),
+			).toHaveLength(0);
+			expect(logs.filter((event) => event.level === "ERROR")).toHaveLength(0);
+			// The measurement must precede the level it decides. Deleting the
+			// chmodAndVerify() call at the report site leaves the Set empty there,
+			// so the level is chosen as "took" and this file's ERROR-free assertion
+			// above fails. That mutation is the acceptance line for SB23-2365 and it
+			// survived 187 pass before this test swapped its fixture.
+			const order = logs.map((event) => event.msg);
+			expect(
+				order.findIndex((msg) => msg.startsWith("chmod on the config file")),
+			).toBeLessThan(order.findIndex((msg) => msg.includes(WARN_MARK)));
 		});
-	});
+		},
+	);
 
 	it("still errors when the chmod does take", () => {
 		// The other half of the same branch, on the same fixture with the Set left
@@ -118,7 +188,9 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
 			chmodSync(configPath, 0o666);
 			expect(statSync(configPath).mode & 0o022).not.toBe(0);
-			expect(unenforceableModes.has(configPath)).toBe(false);
+			// No stub installed, so the real chmodSync runs and really lands 0600.
+			// This is the half that proves withChmodThatDoesNothing() restores: if a
+			// stub leaked out of the test above, this test reads 0666 and fails.
 
 			const logs = captureLogs(() => {
 				const config = new Config(configPath);
@@ -132,14 +204,12 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 
 			// The chmod must happen AT THE REPORT SITE, before the level is chosen,
 			// not later in loadConfig(). Deleting the chmodAndVerify() call here
-			// while keeping the unenforceableModes read leaves every other test
-			// green: this test's final 0600 assertion is satisfied after the fact by
-			// restrictConfigFile(), and the WARN test seeds the Set by hand so it
-			// never runs the compare at all. The mutant reintroduces ERROR-forever
-			// on a real bind mount, because a fresh process finds the Set empty at
-			// the report site and populated one call too late. Found by this PR's
-			// independent reviewer, which is why the assertion is on ORDER rather
-			// than on the final mode.
+			// leaves this test's final 0600 assertion satisfied after the fact by
+			// restrictConfigFile(), so the order is what catches it. Found by PR
+			// #186's independent reviewer, which is why the assertion is on ORDER
+			// rather than on the final mode. Since SB23-2365 the WARN test above
+			// kills the same mutant from the other side, by running the compare
+			// instead of pre-seeding its result.
 			const order = logs.map((event) => event.msg);
 			const chmodAt = order.findIndex((msg) =>
 				msg.includes("Restricted config file permissions to 0600"),
@@ -154,7 +224,6 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 			// And the window is closed on the way out, which is what makes this one
 			// clearable: the next boot reads 0600 and says nothing.
 			expect(statSync(configPath).mode & 0o777).toBe(0o600);
-			expect(unenforceableModes.has(configPath)).toBe(false);
 
 			// The negative half.
 			expect(
@@ -288,24 +357,98 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 				chmodSync(configPath, mode);
 				expect(statSync(configPath).mode & 0o022).toBe(0);
 
-				// Marked unenforceable on purpose. The level branch must never be
-				// reached at all when the predicate does not hold, so neither line
-				// may appear even on a filesystem that cannot enforce modes.
-				unenforceableModes.add(configPath);
-				try {
-					const logs = captureLogs(() => {
-						new Config(configPath);
-					});
-					expect(
-						logs.filter((event) => event.msg.includes(ERROR_MARK)),
-					).toHaveLength(0);
-					expect(
-						logs.filter((event) => event.msg.includes(WARN_MARK)),
-					).toHaveLength(0);
-				} finally {
-					unenforceableModes.delete(configPath);
-				}
+				// On a filesystem that cannot enforce modes, on purpose. The level
+				// branch must never be reached at all when the predicate does not
+				// hold, so neither line may appear even there. Uses the real chmod
+				// rather than the stub, because withChmodThatDoesNothing() asserts
+				// its stub was reached and restrictConfigFile() early-returns on a
+				// mode that is already 0600, so on the 0600 case there is no chmod to
+				// intercept and the helper would fail on its own precondition.
+				const logs = captureLogs(() => {
+					new Config(configPath);
+				});
+				expect(
+					logs.filter((event) => event.msg.includes(ERROR_MARK)),
+				).toHaveLength(0);
+				expect(
+					logs.filter((event) => event.msg.includes(WARN_MARK)),
+				).toHaveLength(0);
 			});
 		}
 	});
+});
+
+describe("the chmod seam's NODE_ENV gate", () => {
+	const GATE_REFUSAL =
+		"__setChmodForTest is available only while NODE_ENV=test. " +
+		"Swapping the chmod this package calls outside a test run would " +
+		"silently disarm the permission enforcement on the config file, which " +
+		"holds local_control_secret, pg_password and upstream_maintainer_token.";
+
+	it("reads NODE_ENV=test without setting it, and BUN_ENV and BUN_TEST unset", () => {
+		// The marker is measured here rather than taken from a note. A case that
+		// set NODE_ENV itself would pass against a guard keyed on anything at all
+		// and would prove nothing, which is the point #159's own gate test makes
+		// at config-path-refuses-default.test.ts:66.
+		expect(process.env.NODE_ENV).toBe("test");
+		// And the two that look like they would work and do not. A guard keyed on
+		// either would never fire, so this fails the moment that stops being true
+		// and someone reaches for one.
+		expect(process.env.BUN_ENV).toBeUndefined();
+		expect(process.env.BUN_TEST).toBeUndefined();
+	});
+
+	it("refuses to swap the chmod when NODE_ENV is not test", () => {
+		const saved = process.env.NODE_ENV;
+		try {
+			for (const value of ["production", undefined]) {
+				if (value === undefined) delete process.env.NODE_ENV;
+				else process.env.NODE_ENV = value;
+				// Whole message with toBe. A substring pair would accept a refusal
+				// that had grown a sentence telling the operator to set NODE_ENV,
+				// which is the opposite of what this guard is for.
+				expect(() => __setChmodForTest(() => {})).toThrow(GATE_REFUSAL);
+				// Restoring is refused too, so a production caller cannot reach the
+				// reference in either direction.
+				expect(() => __setChmodForTest(null)).toThrow(GATE_REFUSAL);
+			}
+		} finally {
+			if (saved === undefined) delete process.env.NODE_ENV;
+			else process.env.NODE_ENV = saved;
+		}
+		expect(process.env.NODE_ENV).toBe("test");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"restores the real chmod when passed null",
+		() => {
+			// The negative for withChmodThatDoesNothing()'s finally. Without it a
+			// restore that silently did nothing would leave every later chmod in
+			// this package disarmed, across files, and every test that asserts a
+			// mode would read whatever the umask left.
+			withFixture((dir) => {
+				const target = join(dir, "restore.txt");
+				writeFileSync(target, "x");
+				chmodSync(target, 0o666);
+
+				let stubbed = 0;
+				__setChmodForTest(() => {
+					stubbed += 1;
+				});
+				try {
+					chmodForConfig(target, 0o600);
+				} finally {
+					__setChmodForTest(null);
+				}
+				expect(stubbed).toBe(1);
+				// The stub really was a no-op, so the fixture models a filesystem
+				// with no modes to set rather than a chmod that quietly worked.
+				expect(statSync(target).mode & 0o777).toBe(0o666);
+
+				chmodForConfig(target, 0o600);
+				expect(stubbed).toBe(1);
+				expect(statSync(target).mode & 0o777).toBe(0o600);
+			});
+		},
+	);
 });
