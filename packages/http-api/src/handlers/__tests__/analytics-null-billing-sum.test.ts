@@ -158,15 +158,11 @@ describe("GET /api/analytics — a NULL billing_type counts as api", () => {
 		}
 	});
 
-	it("feeds the api burn rate, both its numerator and its divisor (:105, :107, :109)", async () => {
+	it("feeds the api burn rate numerator (:105, :107)", async () => {
 		const now = Date.now();
-		// Inside the 7-day window, so it reaches plan_cost_7d / api_cost_7d,
-		// and it is the ONLY row, so it is also MIN(timestamp) for
-		// first_api_ts. Before the fix both the numerator and the divisor
-		// ignored it and every api burn rate was 0.
 		insertRow({
 			id: "burn-null",
-			timestamp: now - 2 * DAY_MS,
+			timestamp: now - 2.5 * DAY_MS,
 			billingType: null,
 			costUsd: 6,
 		});
@@ -178,5 +174,33 @@ describe("GET /api/analytics — a NULL billing_type counts as api", () => {
 		// The plan side is untouched by this change and has no row.
 		expect(totals.avgDailyPlanCostUsd).toBe(0);
 		expect(totals.avgWeeklyPlanCostUsd).toBe(0);
+	});
+
+	it("feeds first_api_ts, the burn-rate DIVISOR, not only the numerator (:109)", async () => {
+		const now = Date.now();
+		// `> 0` cannot pin :109. effectiveBurnRateDays returns the FULL window
+		// when firstTs is null, so a broken :109 still divides by something and
+		// still yields a positive rate. Only the exact divisor separates them.
+		//
+		// The row sits 2.5 days back, deliberately off a day boundary: the
+		// handler reads its own `nowMs` microseconds after this timestamp is
+		// computed, and `Math.ceil` on an exact 2.0 would tip to 3 on any
+		// drift. At 2.5 the ceiling is 3 whichever side the jitter falls.
+		//
+		//   :109 working -> first_api_ts is the row, divisor ceil(2.5) = 3,
+		//                   avgDaily = 6/3 = 2, avgWeekly = (6/3)*7 = 14.
+		//   :109 broken  -> first_api_ts is NULL, divisor is the whole window,
+		//                   avgDaily = 6/7 = 0.857, avgWeekly = (6/30)*7 = 1.4.
+		insertRow({
+			id: "divisor-null",
+			timestamp: now - 2.5 * DAY_MS,
+			billingType: null,
+			costUsd: 6,
+		});
+
+		const { totals } = await analytics("range=24h");
+
+		expect(totals.avgDailyApiCostUsd).toBeCloseTo(2, 6);
+		expect(totals.avgWeeklyApiCostUsd).toBeCloseTo(14, 6);
 	});
 });
