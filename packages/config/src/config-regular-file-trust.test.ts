@@ -159,6 +159,83 @@ describe("a regular file at the config path", () => {
 		}
 	});
 
+	it("is loaded but reported when other local users can write it", () => {
+		// The file is OURS, so trustedRegularPath() passes it: uid matches, one name.
+		// Nothing else looks at the file's own mode, so before this it was adopted in
+		// silence. Measured by PR #172's review, where local_control_secret came back
+		// reading a value written by somebody else (SB23-2338).
+		//
+		// The decision this pins is that the config is still LOADED. Refusing was
+		// rejected: loadConfig() assigns this.data before restrictConfigFile() runs,
+		// so a refusal that self-heals would find 0600 on the next boot and adopt the
+		// identical bytes, and a refusal that does not self-heal is a permanent outage
+		// on the filesystems where chmod is a no-op, which is where the standing
+		// exposure actually lives. The middle assertion below is the decision.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-mode-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+			// Explicit chmod, never writeFileSync's mode option: under umask 022 a
+			// requested 0o666 lands 0644, which has no group or other WRITE bit, so
+			// the condition under test would not hold and this test would fail
+			// without saying why.
+			chmodSync(configPath, 0o666);
+			expect(statSync(configPath).mode & 0o022).not.toBe(0);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				// Loaded, not refused. This is the decision.
+				expect(config.get("lb_strategy")).toBe("session");
+			});
+
+			const reported = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("its contents may not be yours"),
+			);
+			expect(reported).toHaveLength(1);
+			expect(reported[0].msg).toContain(configPath);
+			// The field that makes this an authentication bypass rather than a
+			// disclosure has to be named, because chmodAndVerify()'s existing warning
+			// already covers readability and an operator who has seen that one will
+			// read this as the same thing.
+			expect(reported[0].msg).toContain("local_control_secret");
+			// And the window is closed on the way out, by the existing chmod.
+			expect(statSync(configPath).mode & 0o777).toBe(0o600);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports a writable config once per path, not once per reader", () => {
+		// getLocalControlSecret() re-reads the file itself, so without the module
+		// Set the same boot emits the line more than once and an operator learns to
+		// scroll past it.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-dedup-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+			chmodSync(configPath, 0o666);
+			expect(statSync(configPath).mode & 0o022).not.toBe(0);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				config.getLocalControlSecret();
+				config.getLocalControlSecret();
+			});
+
+			expect(
+				logs.filter(
+					(event) =>
+						event.level === "ERROR" &&
+						event.msg.includes("its contents may not be yours"),
+				),
+			).toHaveLength(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("is diagnosed as a directory, not as a hardlink, when it is one", () => {
 		// A directory has nlink >= 2 and is owned by us, so it reached the hardlink
 		// branch and was told it was "a regular file with 2 names", advising the

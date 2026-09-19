@@ -72,6 +72,18 @@ const CONFIG_DIR_MODE = 0o700;
 const unenforceableModes = new Set<string>();
 
 /**
+ * Config paths already reported as writable by other local users, so the warning
+ * lands once per process rather than once per reader.
+ *
+ * getLocalControlSecret() re-reads the file on its own, so without this the line
+ * appears more than once per boot. Same technique and same reason as
+ * unenforceableModes above. Deliberately never cleared: on a filesystem that
+ * cannot enforce modes the condition is permanent, and repeating it every boot is
+ * the point, while repeating it three times in one boot is noise.
+ */
+const contentsNotOurs = new Set<string>();
+
+/**
  * chmod a path and then read the mode back, returning whether it actually
  * changed.
  *
@@ -527,6 +539,42 @@ export class Config extends EventEmitter {
 					`The config path ${target} is not a regular file, so it was not read. Point BETTER_CCFLARE_CONFIG_PATH at a file.`,
 				);
 				return null;
+			}
+			// Say so when another local user could have written these bytes, and read
+			// them anyway (SB23-2338).
+			//
+			// Nothing else covers this. trustedRegularPath() reads the file's uid and
+			// link count, entryIsTrusted() reads directories, and neither looks at the
+			// file's own mode, so a config of OURS at 0666 was adopted without comment:
+			// measured by PR #172's review, where local_control_secret came back reading
+			// "WRITTEN-BY-ANOTHER-USER".
+			//
+			// Here rather than in trustedRegularPath() for two reasons. The statSync and
+			// the isFile() test are already done on this line, so no syscall is added.
+			// And this sees the file the symlink chain LANDS on, so a chain ending on a
+			// 0666 file in a shared sticky directory is covered by the same check.
+			//
+			// Warned and not refused, which is the whole decision on this issue, so the
+			// reasoning lives here rather than only in the commit. The issue calls a
+			// mode-enforcing filesystem a one-time window because restrictConfigFile()
+			// then lands 0600. The window is one-time; its effect is not. loadConfig()
+			// assigns this.data from the parse BEFORE that chmod runs, and the next
+			// set() writes this.data straight back out, so an injected
+			// local_control_secret persists in a file that now looks correct. Refusing
+			// and self-healing would be theatre against that, because the next boot
+			// finds 0600 and adopts the identical bytes. Refusing and leaving it is the
+			// permanent outage chmodAndVerify() already declines, and the standing
+			// exposure is exactly where that outage would bite: Docker bind mounts from
+			// a macOS or Windows host, and FAT or exFAT, where chmod is a no-op. So the
+			// operator is told, precisely, and the process keeps running.
+			//
+			// Adopting everything except local_control_secret was considered and is
+			// deferred as new mechanism, not dismissed.
+			if ((info.mode & 0o022) !== 0 && !contentsNotOurs.has(target)) {
+				contentsNotOurs.add(target);
+				log.error(
+					`The config file ${target} is mode ${modeText(info.mode & 0o777)}, so another local user can write it and its contents may not be yours. They have been loaded: a config an attacker controls supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything, along with pg_host and pg_password. Inspect the file, or delete it so a fresh one is created, and move it onto a filesystem that enforces modes if chmod cannot.`,
+				);
 			}
 			return readFileSync(target, "utf8");
 		} catch (error) {
