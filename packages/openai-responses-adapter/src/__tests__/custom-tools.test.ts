@@ -6,11 +6,18 @@ import {
 } from "../custom-tools";
 import { translateRequestToAnthropic } from "../request-translator";
 import { translateAnthropicResponseToResponses } from "../response-translator";
-import type { ResponsesRequest } from "../types";
+import type { ResponseItem, ResponsesRequest } from "../types";
+
+/**
+ * `translateRequestToAnthropic` takes a request whose `input` has already been
+ * normalised from the wire type's `string | ResponseItem[]` to an item array,
+ * so these fixtures declare that narrowed shape rather than `ResponsesRequest`.
+ */
+type TranslatableRequest = ResponsesRequest & { input: ResponseItem[] };
 
 describe("Responses Lite tool declarations", () => {
 	test("extracts additional_tools namespaces and round-trips calls with their identities", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "gpt-6-astra",
 			input: [
 				{

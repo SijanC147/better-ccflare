@@ -73,10 +73,11 @@ describe("CLI notify-server calls send the local-control-secret (#216)", () => {
 
 		capturedRequests = [];
 		originalFetch = globalThis.fetch;
-		globalThis.fetch = (async (
-			input: RequestInfo | URL,
-			init?: RequestInit,
-		) => {
+		// `typeof fetch` in bun-types is a function plus a `preconnect` static, so
+		// a bare arrow function is not structurally one. Carrying the real
+		// `preconnect` across satisfies the type without a cast; nothing in these
+		// tests calls it, and the real one is restored wholesale in afterEach.
+		const mockFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			const headers: Record<string, string> = {};
 			if (init?.headers) {
@@ -90,7 +91,10 @@ describe("CLI notify-server calls send the local-control-secret (#216)", () => {
 			// Simulate "no server running" so the CLI functions complete quickly
 			// without needing a real listening server.
 			throw new Error("connection refused");
-		}) as typeof fetch;
+		};
+		globalThis.fetch = Object.assign(mockFetch, {
+			preconnect: originalFetch.preconnect,
+		});
 	});
 
 	afterEach(() => {

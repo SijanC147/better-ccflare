@@ -75,8 +75,10 @@ describe("AgentRegistry — injected workspace persistence", () => {
 			".better-ccflare",
 			"workspaces.json",
 		);
-		const realFileExistedBefore = fs.existsSync(realHome);
-		const realContentBefore = realFileExistedBefore
+		// Read the content directly rather than through a separate boolean: the
+		// null check below is then the same expression the type checker narrows
+		// on, so `realContentBefore` is `string` inside the branch that uses it.
+		const realContentBefore = fs.existsSync(realHome)
 			? fs.readFileSync(realHome, "utf-8")
 			: null;
 
@@ -85,7 +87,7 @@ describe("AgentRegistry — injected workspace persistence", () => {
 		await registry.registerWorkspace(tmpDir);
 		await registry.clearWorkspaces();
 
-		if (realFileExistedBefore) {
+		if (realContentBefore !== null) {
 			expect(fs.readFileSync(realHome, "utf-8")).toBe(realContentBefore);
 		} else {
 			expect(fs.existsSync(realHome)).toBe(false);

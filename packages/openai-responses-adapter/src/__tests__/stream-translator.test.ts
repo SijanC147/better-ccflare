@@ -617,7 +617,11 @@ describe("translateAnthropicStreamToResponses", () => {
 			headers: { "Content-Type": "text/event-stream" },
 		});
 
-		const translated = translateAnthropicStreamToResponses(upstream, "gpt-5");
+		const translated = translateAnthropicStreamToResponses(
+			upstream,
+			"resp_crlf",
+			"gpt-5",
+		);
 		const got = await collectSseEvents(translated);
 		const types = got.map((e) => e.event);
 
@@ -670,7 +674,11 @@ describe("translateAnthropicStreamToResponses", () => {
 			headers: { "Content-Type": "text/event-stream" },
 		});
 
-		const translated = translateAnthropicStreamToResponses(upstream, "gpt-5");
+		const translated = translateAnthropicStreamToResponses(
+			upstream,
+			"resp_noeof",
+			"gpt-5",
+		);
 		const got = await collectSseEvents(translated);
 		const types = got.map((e) => e.event);
 

@@ -4942,8 +4942,88 @@ describe("parseCodexUsageHeaders", () => {
 
 		expect(parseCodexUsageHeaders(headers)).toEqual({
 			five_hour: { utilization: 12, resets_at: null },
-			seven_day: { utilization: 0, resets_at: null },
+			// Upstream reported no weekly window in these headers, so the slot is
+			// null. It used to be `{ utilization: 0, resets_at: null }`, which is a
+			// measurement this response never contained.
+			seven_day: null,
 		});
+	});
+});
+
+describe("parseCodexUsageHeaders absent windows", () => {
+	/** Both windows reported: neither slot is null. */
+	const bothWindows = () =>
+		new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-secondary-used-percent": "4",
+			"x-codex-secondary-window-minutes": "300",
+			"x-codex-secondary-reset-at": "1774600000",
+		});
+
+	/** The captured Pro shape: a weekly window and nothing else. */
+	const weeklyOnly = () =>
+		new Headers({
+			"x-codex-primary-used-percent": "87",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+	it("reports both windows when upstream reported both", () => {
+		// The positive case. Without it, every assertion below passes against a
+		// parser that returns nothing at all.
+		const usage = parseCodexUsageHeaders(bothWindows());
+
+		expect(usage?.five_hour).toEqual({
+			utilization: 4,
+			resets_at: new Date(1774600000 * 1000).toISOString(),
+		});
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("leaves five_hour null when upstream reported only the weekly window", () => {
+		const usage = parseCodexUsageHeaders(weeklyOnly());
+
+		expect(usage?.five_hour).toBeNull();
+		// Not a zero. A fabricated 0 passes every `!= null` check downstream and
+		// renders as "0% of five hours used" for a window that does not exist.
+		expect(usage?.five_hour).not.toEqual({ utilization: 0, resets_at: null });
+		// The window upstream DID report is untouched by the absent one.
+		expect(usage?.seven_day).toEqual({
+			utilization: 87,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("keeps both keys present so raw-consumer shape guards still match", () => {
+		// `usage-throttling.ts` gates its only Codex-reachable branch on
+		// `"five_hour" in data && "seven_day" in data` and reads the parser's
+		// output straight out of usageCache. Omitting the key instead of nulling it
+		// would drop an exhausted weekly window from throttling entirely.
+		const usage = parseCodexUsageHeaders(weeklyOnly());
+
+		expect(usage).not.toBeNull();
+		expect("five_hour" in (usage as object)).toBe(true);
+		expect("seven_day" in (usage as object)).toBe(true);
+	});
+
+	it("returns null for the whole payload when upstream reported neither window", () => {
+		expect(parseCodexUsageHeaders(new Headers())).toBeNull();
+	});
+
+	it("does not fabricate a window from a non-zero defaultUtilization", () => {
+		// The 429 path passes defaultUtilization: 100. An absent window must stay
+		// absent there too, or a weekly-only 429 would claim the five-hour window
+		// is fully spent.
+		const usage = parseCodexUsageHeaders(weeklyOnly(), {
+			defaultUtilization: 100,
+		});
+
+		expect(usage?.five_hour).toBeNull();
 	});
 });
 
