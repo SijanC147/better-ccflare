@@ -88,7 +88,8 @@ export const unenforceableModes = new Set<string>();
  * getLocalControlSecret() re-reads the file on its own, so without this the line
  * appears more than once per boot. Same technique and same reason as
  * unenforceableModes above. Deliberately never cleared: on a filesystem that
- * cannot enforce modes the condition is permanent, and repeating it every boot is
+ * cannot enforce modes, or where the chmod is refused, the condition is
+ * permanent and repeating it every boot is
  * the point, while repeating it three times in one boot is noise.
  */
 const contentsNotOurs = new Set<string>();
@@ -640,16 +641,32 @@ export class Config extends EventEmitter {
 				// filesystem it early-returns on the 0600 this call just landed, while
 				// on a mode-ignoring one chmodAndVerify() silences its own second
 				// warning through the same Set.
-				let modeEnforced = true;
+				// Three outcomes, not two, and the third is why. A chmod that THREW
+				// leaves the file exactly as writable as it was found, so the
+				// "brought to 0600, does not repeat" sentences the took branch ends
+				// on would both be false, in a security message, in the one case a
+				// test covers. A uchg flag survives a reboot, so that line does
+				// repeat. Found by review before the verdict, on the first draft,
+				// which reported the throw at the took branch's text.
+				let chmodOutcome: "took" | "noop" | "threw" = "took";
 				try {
 					chmodAndVerify(target, CONFIG_FILE_MODE, "config file");
-					modeEnforced = !unenforceableModes.has(target);
+					if (unenforceableModes.has(target)) chmodOutcome = "noop";
 				} catch (error) {
+					chmodOutcome = "threw";
 					log.warn(`Could not restrict config file permissions: ${error}`);
 				}
-				if (modeEnforced) {
+				if (chmodOutcome === "took") {
 					log.error(
 						`The config file ${target} was mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user could write it and its contents may not be yours. It has been brought to 0600, which closes the window but not its effect: the WHOLE config was already loaded, not part of it, and the next write persists whatever was in it. An attacker who wrote this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. Inspect the file, or delete it so a fresh one is created. This line does not repeat on the next boot, because the file is 0600 now.`,
+					);
+				} else if (chmodOutcome === "threw") {
+					// ERROR, and the level is right for the same reason the took
+					// branch's is: a filesystem that REFUSES a chmod is one that
+					// enforces modes, so the mode read above is evidence. What differs
+					// is that nothing was fixed, so the operator has to fix it.
+					log.error(
+						`The config file ${target} is mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user can write it and its contents may not be yours. The chmod to 0600 FAILED, reported just above, so it is still ${modeText(info.mode & 0o777)} and this line repeats on every boot until that is fixed. The WHOLE config has been loaded, not part of it. An attacker who writes this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. A read-only mount and a macOS uchg flag are the usual causes. Inspect the file, clear whatever refuses the chmod, or delete it so a fresh one is created.`,
 					);
 				} else {
 					// The whole point of SB23-2350. chmod reported success and changed

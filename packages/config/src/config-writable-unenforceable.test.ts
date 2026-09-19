@@ -214,8 +214,29 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 								event.level === "ERROR" && event.msg.includes(ERROR_MARK),
 						),
 					).toHaveLength(1);
+					// The ERROR must be the THREW text, not the TOOK text. The took
+					// branch ends on "It has been brought to 0600 ... This line does
+					// not repeat on the next boot", and both halves are false here:
+					// the mode is still 0666, asserted below, and a uchg flag survives
+					// a reboot so the line repeats forever. A security message that
+					// says the window is closed when it is open is worse than no
+					// message. Kills a mutation collapsing threw into took.
+					const errored = logs.filter(
+						(event) =>
+							event.level === "ERROR" && event.msg.includes(ERROR_MARK),
+					);
+					expect(errored).toHaveLength(1);
+					expect(errored[0].msg).toContain("The chmod to 0600 FAILED");
+					expect(errored[0].msg).toContain("repeats on every boot");
+					expect(errored[0].msg).not.toContain("has been brought to 0600");
+					expect(errored[0].msg).not.toContain("does not repeat");
 					// The chmod failure is reported in its own right, at warn, rather
-					// than swallowed.
+					// than swallowed. More than one: restrictConfigFile() re-attempts
+					// the same chmod further down loadConfig() and throws again, which
+					// is pre-existing behaviour for any config whose chmod fails and
+					// is not introduced here. Asserted as a floor rather than a count
+					// so it pins the thing that matters, which is that it is reported
+					// at all.
 					expect(
 						logs.filter((event) =>
 							event.msg.includes("Could not restrict config file permissions"),
