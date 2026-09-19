@@ -4,6 +4,7 @@ import type { Account, ComboWithSlots } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { fetchSlot } from "./fetch-slot";
 
 const originalFetch = globalThis.fetch;
 
@@ -35,6 +36,17 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -71,7 +83,7 @@ function makeContext(
 
 afterEach(() => {
 	usageCache.delete("acc-1");
-	globalThis.fetch = originalFetch;
+	fetchSlot.fetch = originalFetch;
 });
 
 describe("handleProxy model-scoped capacity routing", () => {
@@ -270,6 +282,17 @@ function makeComboAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -283,7 +306,7 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 	const originalFetch = globalThis.fetch;
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		usageCache.clear();
 		delete process.env.CCFLARE_DISABLE_COMBO_SESSION_FALLBACK;
 	});
@@ -299,6 +322,8 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 				model: "claude-sonnet-4-5",
 				priority: 0,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 			{
 				id: "slot-2",
@@ -307,6 +332,8 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 				model: "claude-sonnet-4-5",
 				priority: 1,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 		]);
 
@@ -314,7 +341,7 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 		// duration of the test — this both fails the initial combo attempts AND
 		// (via the reactive negative cache) marks acc-1/acc-2 exhausted for
 		// "sonnet" DURING that same combo loop, before Step 10 ever runs.
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeComboContext([acc1, acc2], combo);
 		const request = new Request("https://proxy.local/v1/messages", {
@@ -358,10 +385,12 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 				model: "claude-sonnet-4-5",
 				priority: 0,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 		]);
 
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeComboContext([acc1, acc2], combo);
 		const getActiveComboForFamily = ctx.dbOps
@@ -410,6 +439,8 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 				model: "claude-sonnet-4-5",
 				priority: 0,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 			{
 				id: "slot-2",
@@ -418,10 +449,12 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 				model: "claude-sonnet-4-5",
 				priority: 1,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 		]);
 
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeComboContext([acc1, acc2], combo);
 		ctx.config.getModelScopedCapacityRouting = () => "off";

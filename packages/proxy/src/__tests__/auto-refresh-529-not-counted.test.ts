@@ -17,6 +17,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,7 +53,7 @@ type SendDummyMessageArg = {
 	pause_reason: string | null;
 };
 
-type TestableScheduler = AutoRefreshScheduler & {
+type TestableScheduler = PublicSurface<AutoRefreshScheduler> & {
 	sendDummyMessage(accountRow: SendDummyMessageArg): Promise<boolean>;
 	consecutiveFailures: Map<string, number>;
 	FAILURE_THRESHOLD: number;
@@ -65,7 +66,7 @@ async function makeScheduler(
 	return new AutoRefreshScheduler(
 		db as never,
 		makeProxyContext() as never,
-	) as TestableScheduler;
+	) as unknown as TestableScheduler;
 }
 
 function makeAccountRow(

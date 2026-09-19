@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import {
 	clearFamilyExhaustionCache,
 	getFamilyExhaustionOrigin,
@@ -45,6 +46,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -150,13 +155,13 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		usageCache.clear();
 		clearFamilyExhaustionCache();
 	});
 
 	it("does NOT bench the account and fails over on out_of_credits 429", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -199,7 +204,7 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	});
 
 	it("returns null without recording an audit row on keepalive out_of_credits 429", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -234,7 +239,7 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	});
 
 	it("persists null/null originalModel/appliedModel (not the equal pair) when requestMeta carries an unmodified pair (P2: isModelRewrite guard)", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -269,7 +274,7 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	});
 
 	it("marks the account's model family exhausted in the negative cache on out_of_credits", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -299,7 +304,7 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	// bind misread as this family) now costs at most 5 minutes instead of
 	// however far out the (possibly unrelated) scoped reset happens to be.
 	it("always uses the fixed 5-minute TTL, even when a longer weekly_scoped reset is present in cached usage telemetry", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const now = Date.now();
 		const account = makeAccount();
@@ -346,7 +351,7 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	// so the eventual model_family_exhausted response uses neutral wording
 	// instead of asserting "weekly capacity exhausted".
 	it("marks the negative-cache entry with 'recent_upstream_rejection' origin, never 'telemetry_confirmed'", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -370,7 +375,7 @@ describe("proxyWithAccount — out_of_credits (issue #261)", () => {
 	});
 
 	it("also marks the negative cache on a keepalive out_of_credits probe", async () => {
-		globalThis.fetch = mock(async () => outOfCreditsResponse());
+		fetchSlot.fetch = mock(async () => outOfCreditsResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();

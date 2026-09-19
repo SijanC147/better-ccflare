@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -39,6 +40,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -144,11 +149,11 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("does NOT bench the account and passes the 400 through to the client unchanged", async () => {
-		globalThis.fetch = mock(async () => extraUsageExhaustedResponse());
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -204,7 +209,7 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 	});
 
 	it("passes requestMeta attribution sources and rewritten models through to saveRequest", async () => {
-		globalThis.fetch = mock(async () => extraUsageExhaustedResponse());
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -248,7 +253,7 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 	});
 
 	it("persists null/null originalModel/appliedModel when requestMeta carries an unmodified pair", async () => {
-		globalThis.fetch = mock(async () => extraUsageExhaustedResponse());
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();

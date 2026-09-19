@@ -6,6 +6,7 @@ import {
 	registerProvider,
 } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -46,6 +47,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -151,12 +154,12 @@ describe("proxy account request transformer ordering", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("applies the account transformer after OpenAI provider conversion", async () => {
 		const outboundBodies: Record<string, unknown>[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 			const request =
 				input instanceof Request ? input : new Request(String(input));
 			outboundBodies.push(await request.json());
@@ -217,7 +220,7 @@ describe("proxy account request transformer ordering", () => {
 		}
 
 		registerProvider(new InspectingOpenAIProvider());
-		globalThis.fetch = mock(async () => streamResponseWithoutModel());
+		fetchSlot.fetch = mock(async () => streamResponseWithoutModel());
 
 		try {
 			await runProxy(makeAccount(), makeRequestBody());
@@ -259,7 +262,7 @@ describe("proxy account request transformer ordering", () => {
 		}
 
 		registerProvider(new InspectingOpenAIProvider());
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 			const request =
 				input instanceof Request ? input : new Request(String(input));
 			const body = (await request.json()) as Record<string, unknown>;
@@ -291,7 +294,7 @@ describe("proxy account request transformer ordering", () => {
 
 	it("applies the account transformer to the model-fallback attempt", async () => {
 		const outboundBodies: Record<string, unknown>[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 			const request =
 				input instanceof Request ? input : new Request(String(input));
 			const body = (await request.json()) as Record<string, unknown>;

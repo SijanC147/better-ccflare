@@ -66,6 +66,7 @@ afterAll(() => {
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat.
 import { CacheKeepaliveScheduler } from "../cache-keepalive-scheduler";
+import { fetchSlot } from "./fetch-slot";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -164,14 +165,14 @@ describe("CacheKeepaliveScheduler", () => {
 		resetMocks();
 		resetStore();
 		// Restore fetch to a safe default so tests that do NOT mock fetch still work.
-		globalThis.fetch = mock(async () => new Response("ok", { status: 200 }));
+		fetchSlot.fetch = mock(async () => new Response("ok", { status: 200 }));
 	});
 
 	afterEach(() => {
 		// Restore the captured native implementation. Assigning undefined does
 		// not make Bun recreate fetch between files in a monolithic `bun test`
 		// process and poisons every later transport suite.
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		resetStore();
 	});
 
@@ -377,7 +378,7 @@ describe("CacheKeepaliveScheduler", () => {
 	describe("sendKeepalives() (triggered via heartbeat callback)", () => {
 		it("with no cached accounts — fetch is NOT called", async () => {
 			const fetchMock = mock(async () => new Response("ok", { status: 200 }));
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
@@ -402,7 +403,7 @@ describe("CacheKeepaliveScheduler", () => {
 					return new Response("", { status: 200 });
 				},
 			);
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const port = 8081;
@@ -449,7 +450,7 @@ describe("CacheKeepaliveScheduler", () => {
 					return new Response("", { status: 200 });
 				},
 			);
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
@@ -475,7 +476,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("with two cached accounts — fetch called twice", async () => {
 			const fetchMock = mock(async () => new Response("", { status: 200 }));
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
@@ -495,7 +496,7 @@ describe("CacheKeepaliveScheduler", () => {
 			const fetchMock = mock(
 				async () => new Response("Rate limited", { status: 429 }),
 			);
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
@@ -514,7 +515,7 @@ describe("CacheKeepaliveScheduler", () => {
 			const fetchMock = mock(async () => {
 				throw new Error("ECONNREFUSED");
 			});
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
@@ -537,7 +538,7 @@ describe("CacheKeepaliveScheduler", () => {
 				capturedUrls.push(url);
 				return new Response("", { status: 200 });
 			});
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			// Set SSL env vars.
 			process.env.SSL_KEY_PATH = "/etc/ssl/key.pem";
@@ -576,7 +577,7 @@ describe("CacheKeepaliveScheduler", () => {
 				capturedUrls.push(url);
 				return new Response("", { status: 200 });
 			});
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(
@@ -596,7 +597,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("skips account when getLastCachedRequest returns null", async () => {
 			const fetchMock = mock(async () => new Response("", { status: 200 }));
-			globalThis.fetch = fetchMock;
+			fetchSlot.fetch = fetchMock;
 
 			const { config } = makeConfig(5);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);

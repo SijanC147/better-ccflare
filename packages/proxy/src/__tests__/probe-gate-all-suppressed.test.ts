@@ -68,6 +68,14 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		cross_region_mode: null,
 		model_fallbacks: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -335,6 +343,8 @@ describe("handleProxy — combo-fallback pool all-suppressed retries ungated (de
 					model: "claude-sonnet-4-5",
 					priority: 0,
 					enabled: true,
+					max_utilization_percent: null,
+					min_reset_remaining_ms: null,
 				},
 			],
 		};

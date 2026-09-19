@@ -25,6 +25,7 @@ import {
 	clearAllPendingRotationsForTests,
 	recordPendingRotation,
 } from "../handlers/pending-rotation-registry";
+import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -76,7 +77,7 @@ async function makeScheduler(
 	return new AutoRefreshScheduler(
 		db as never,
 		proxyContext as never,
-	) as AutoRefreshScheduler & {
+	) as unknown as PublicSurface<AutoRefreshScheduler> & {
 		flagIfDefinitiveAuthFailure(
 			error: unknown,
 			row: {

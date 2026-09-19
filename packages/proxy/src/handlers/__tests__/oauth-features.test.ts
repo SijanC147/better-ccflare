@@ -5,6 +5,7 @@ import {
 	AnthropicOAuthProvider,
 	generatePKCE,
 } from "@better-ccflare/providers";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 
 // Mock database operations for testing
 const _mockDbOps = {
@@ -110,7 +111,7 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			// Mock successful token response
 			const originalFetch = global.fetch;
-			global.fetch = async () =>
+			fetchSlot.fetch = async () =>
 				({
 					ok: true,
 					json: async () => ({
@@ -135,7 +136,7 @@ describe("OAuth Token Health Monitoring Features", () => {
 				expect(error).not.toContain("Cannot read properties of undefined");
 			}
 
-			global.fetch = originalFetch;
+			fetchSlot.fetch = originalFetch;
 		});
 	});
 
@@ -191,7 +192,7 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			// Mock error response
 			const originalFetch = global.fetch;
-			global.fetch = async () =>
+			fetchSlot.fetch = async () =>
 				({
 					ok: false,
 					status: 400,
@@ -213,7 +214,7 @@ describe("OAuth Token Health Monitoring Features", () => {
 				);
 			}
 
-			global.fetch = originalFetch;
+			fetchSlot.fetch = originalFetch;
 		});
 	});
 

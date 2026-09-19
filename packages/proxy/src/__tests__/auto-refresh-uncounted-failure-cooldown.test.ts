@@ -35,6 +35,7 @@ import {
 	resetAutoRefreshPromptPoolForTests,
 } from "../auto-refresh-prompt-pool";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import type { PublicSurface } from "./public-surface";
 
 type AccountRow = {
 	id: string;
@@ -50,7 +51,7 @@ type AccountRow = {
 	pause_reason: string | null;
 };
 
-type TestableScheduler = AutoRefreshScheduler & {
+type TestableScheduler = PublicSurface<AutoRefreshScheduler> & {
 	sendDummyMessage(accountRow: AccountRow): Promise<boolean>;
 	shouldRefreshAccount(account: AccountRow, now: number): boolean;
 	consecutiveFailures: Map<string, number>;
@@ -112,7 +113,7 @@ async function makeScheduler(
 			internalProbeSecret: "secret",
 			dbOps: { recordUsageSnapshot: mock(async () => {}) },
 		} as never,
-	) as TestableScheduler;
+	) as unknown as TestableScheduler;
 }
 
 /** Answer every probe with the given status. */

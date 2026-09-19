@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -39,6 +40,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -125,11 +130,11 @@ describe("proxyWithAccount — 429 failover", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("returns null (failover) when upstream returns 429 and no fallback is configured", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -160,7 +165,7 @@ describe("proxyWithAccount — 429 failover", () => {
 
 	it("retries with fallback model on 429, returns response when fallback succeeds", async () => {
 		const fetchCalls: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 			// Capture request body to verify model was swapped on retry
 			const req = input instanceof Request ? input : new Request(String(input));
 			const bodyText = await req.text().catch(() => "{}");
@@ -230,7 +235,7 @@ describe("proxyWithAccount — 429 failover", () => {
 	});
 
 	it("returns null (failover) when both primary and fallback model return 429", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -264,7 +269,7 @@ describe("proxyWithAccount — 429 failover", () => {
 
 	it("cycles through 3-model array: first two 429, third succeeds", async () => {
 		const fetchCalls: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 			const req = input instanceof Request ? input : new Request(String(input));
 			const bodyText = await req.text().catch(() => "{}");
 			const body = JSON.parse(bodyText);
@@ -335,7 +340,7 @@ describe("proxyWithAccount — 429 failover", () => {
 	});
 
 	it("returns null when all models in the array are exhausted", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -391,11 +396,11 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("calls markAccountRateLimited with reason='model_fallback_429' on no-fallback 429", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -437,7 +442,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 
 	it("calls markAccountRateLimited with reason='all_models_exhausted_429' when all models fail", async () => {
 		// All fetch calls return 429 — primary + every fallback model
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -490,11 +495,11 @@ describe("proxyWithAccount — attribution source pass-through to saveRequest (P
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("passes requestMeta.projectAttributionSource/agentAttributionSource through to saveRequest at positions 18/19 on the model_fallback_429 failover path", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -538,7 +543,7 @@ describe("proxyWithAccount — attribution source pass-through to saveRequest (P
 	});
 
 	it("passes null attribution sources through to saveRequest when requestMeta omits them", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -593,11 +598,11 @@ describe("proxyWithAccount — originalModel/appliedModel gated by isModelRewrit
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("persists null/null (not the equal pair) on the model_fallback_429 path when requestMeta carries an unmodified originalModel/appliedModel pair", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -639,7 +644,7 @@ describe("proxyWithAccount — originalModel/appliedModel gated by isModelRewrit
 	});
 
 	it("still persists a genuine originalModel/appliedModel rewrite pair on the all_models_exhausted_429 path", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -694,11 +699,11 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("sets account.rate_limited_until on model_fallback_429 path", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -738,7 +743,7 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 	});
 
 	it("sets account.rate_limited_until on all_models_exhausted_429 path", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					error: {
@@ -828,11 +833,11 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("returns null (failover) when upstream returns 529 and provider parseRateLimit says isRateLimited:true", async () => {
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(
 					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
@@ -878,7 +883,7 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 
 	it("returns upstream 529 on the final account attempt instead of pool exhaustion", async () => {
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(
 					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
@@ -976,7 +981,7 @@ describe("proxyWithAccount — 529 in-place retry", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
@@ -999,7 +1004,7 @@ describe("proxyWithAccount — 529 in-place retry", () => {
 
 	it("retries in-place on 529 no-reset and makes exactly 2 fetch calls before succeeding", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			if (callCount === 1) {
 				return new Response(overloadBody, {
@@ -1046,7 +1051,7 @@ describe("proxyWithAccount — 529 in-place retry", () => {
 	});
 
 	it("falls through to cooldown/failover when all retries are exhausted", async () => {
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(overloadBody, {
 					status: 529,
@@ -1078,7 +1083,7 @@ describe("proxyWithAccount — 529 in-place retry", () => {
 
 	it("skips in-place retry when CCFLARE_OVERLOAD_RETRY_ENABLED=false", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return new Response(overloadBody, {
 				status: 529,
@@ -1110,7 +1115,7 @@ describe("proxyWithAccount — 529 in-place retry", () => {
 
 	it("skips in-place retry for synthetic keepalive requests", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return new Response(overloadBody, {
 				status: 529,
@@ -1158,11 +1163,11 @@ describe("proxyWithAccount — 401 failover", () => {
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 	});
 
 	it("returns null (failover) when upstream returns 401", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{ error: { type: "authentication_error", message: "Invalid API key" } },
 				401,
@@ -1186,7 +1191,7 @@ describe("proxyWithAccount — 401 failover", () => {
 	});
 
 	it("does not failover on successful 200 response", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			jsonResponse(
 				{
 					id: "msg_1",

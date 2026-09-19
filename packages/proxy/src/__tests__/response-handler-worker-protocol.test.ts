@@ -5,6 +5,17 @@ import * as modelCatalogModule from "../model-catalog";
 import { forwardToClient } from "../response-handler";
 import * as usageCollectorModule from "../usage-collector";
 
+/**
+ * `ResponseHandlerOptions.requestBody` is `ArrayBuffer | null`, and production
+ * supplies `RequestBodyContext.getBuffer()` (`proxy.ts:360`). These fixtures
+ * passed the `Uint8Array` that `TextEncoder.encode` returns, a shape no caller
+ * produces; the tests passed because both carry `byteLength` and neither is
+ * read as an `ArrayBuffer` on the path they exercise.
+ */
+function encodeRequestBody(json: string): ArrayBuffer {
+	return new TextEncoder().encode(json).buffer;
+}
+
 describe("forwardToClient usage-collector protocol", () => {
 	async function waitFor(
 		predicate: () => boolean,
@@ -83,7 +94,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode(
+				requestBody: encodeRequestBody(
 					JSON.stringify({ model: "claude-opus-4-6", messages: [] }),
 				),
 				response: new Response(upstream, {
@@ -122,7 +133,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode("{}"),
+				requestBody: encodeRequestBody("{}"),
 				response: new Response(JSON.stringify({ ok: true }), {
 					status: 200,
 					headers: { "content-type": "application/json" },
@@ -152,7 +163,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode(
+				requestBody: encodeRequestBody(
 					JSON.stringify({ system: "test", messages: [] }),
 				),
 				project: "main-thread-project",
@@ -184,7 +195,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode(requestBody),
+				requestBody: encodeRequestBody(requestBody),
 				project: null,
 				response: new Response(JSON.stringify({ ok: true }), {
 					status: 200,
@@ -216,7 +227,7 @@ describe("forwardToClient usage-collector protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(JSON.stringify({ ok: true }), {
 						status: 200,
 						headers: { "content-type": "application/json" },
@@ -270,7 +281,7 @@ describe("forwardToClient usage-collector protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(body, {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -322,7 +333,7 @@ describe("forwardToClient usage-collector protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(responseBody, {
 						status: 200,
 						headers: { "content-type": "application/json" },
@@ -359,7 +370,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode("{}"),
+				requestBody: encodeRequestBody("{}"),
 				project: "acme-project",
 				projectAttributionSource: "header_project",
 				response: new Response(JSON.stringify({ ok: true }), {
@@ -398,7 +409,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode("{}"),
+				requestBody: encodeRequestBody("{}"),
 				project: "acme-project",
 				projectAttributionSource: "path_project",
 				response: new Response(body, {
@@ -432,7 +443,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode("{}"),
+				requestBody: encodeRequestBody("{}"),
 				response: new Response(JSON.stringify({ ok: true }), {
 					status: 200,
 					headers: { "content-type": "application/json" },
@@ -466,7 +477,7 @@ describe("forwardToClient usage-collector protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(JSON.stringify({ ok: true }), {
 						status: 200,
 						headers: { "content-type": "application/json" },
@@ -567,6 +578,10 @@ describe("forwardToClient passive model-catalog capture", () => {
 			pause_reason: null,
 			refresh_token_issued_at: null,
 			consecutive_rate_limits: 0,
+			requires_reauth: false,
+			request_transformer: null,
+			last_manual_reauth_at: null,
+			renewal_day: null,
 			...overrides,
 		};
 	}

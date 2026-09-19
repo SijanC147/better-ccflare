@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { fetchSlot } from "./fetch-slot";
+import type { PublicSurface } from "./public-surface";
 
 const originalFetch = global.fetch;
 
 afterEach(() => {
-	global.fetch = originalFetch;
+	fetchSlot.fetch = originalFetch;
 });
 
 describe("AutoRefreshScheduler 401 probe handling", () => {
@@ -16,7 +18,7 @@ describe("AutoRefreshScheduler 401 probe handling", () => {
 			}),
 			query: mock(async () => []),
 		};
-		global.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () => new Response("Unauthorized", { status: 401 }),
 		);
 
@@ -27,7 +29,7 @@ describe("AutoRefreshScheduler 401 probe handling", () => {
 				runtime: { port: 8080, clientId: "test-client" },
 				refreshInFlight: new Map(),
 			} as never,
-		) as AutoRefreshScheduler & {
+		) as unknown as PublicSurface<AutoRefreshScheduler> & {
 			sendDummyMessage(account: {
 				id: string;
 				name: string;
