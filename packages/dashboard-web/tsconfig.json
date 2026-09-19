@@ -23,9 +23,11 @@
 		// `dist/`, which is why a bare package-level run reported TS2307 in
 		// packages/proxy, which `packages/types/src/context.ts` used to pull in
 		// through the type graph even though no dashboard-web source file
-		// imports it. That import is gone as of SB23-2306, so proxy and
-		// providers no longer enter this program; `types` still reaches
-		// `database` and `config`, which is why the map is still needed.
+		// imports it. That import is gone as of SB23-2306. Measured with
+		// `--explainFiles`: proxy went 47 files to 0, providers 74 to 0, and
+		// `@better-ccflare/agents` 4 to 0, so the TS2307 that first motivated
+		// restating this map can no longer occur. The map is still required by
+		// the replacement rule in the first sentence, and by `@/*`.
 		// Measured: adding these leaves `bun run build:dashboard` output
 		// byte-identical at 19,293,156 bytes across 23 files.
 		"paths": {
