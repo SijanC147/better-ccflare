@@ -39,7 +39,7 @@ describe("handleResponsesRequest", () => {
 	});
 
 	test("Test 2: non-streaming path → calls handleProxy with /v1/messages, returns translated response", async () => {
-		let capturedUrl: URL | null = null;
+		let capturedUrl: URL | undefined;
 
 		const mockHandleProxy: HandleProxyFn = async (_req, url) => {
 			capturedUrl = url;
@@ -140,7 +140,7 @@ describe("handleResponsesRequest", () => {
 
 	test("preserves native continuation/cache controls and normalizes gateway identity headers", async () => {
 		let forwardedBody: Record<string, unknown> | null = null;
-		let forwardedHeaders: Headers | null = null;
+		let forwardedHeaders: Headers | undefined;
 		let forwardedOptions: { trustedNativeResponses?: boolean } | undefined;
 		const mockHandleProxy: HandleProxyFn = async (
 			req2,
