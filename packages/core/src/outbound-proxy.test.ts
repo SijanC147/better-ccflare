@@ -4,17 +4,16 @@ import {
 	uninstallOutboundProxy,
 } from "@better-ccflare/core";
 
-interface FakeProxy {
-	server: ReturnType<typeof Bun.listen>;
-	port: number;
-	requestLines: string[];
-}
-
 interface FetchInitWithProxy extends RequestInit {
 	proxy?: string;
 }
 
-function startFakeProxy(): FakeProxy {
+// `ReturnType<typeof Bun.listen>` resolves to the last overload, which is
+// `UnixSocketListener`, so the old `FakeProxy` interface annotated `server` with
+// a type this function never returns. Bun.listen is called here with a
+// hostname and port, so it returns a `TCPSocketListener`. Letting the return
+// type infer gives the real one; the only member used is `.stop(true)`.
+function startFakeProxy() {
 	const requestLines: string[] = [];
 	const server = Bun.listen({
 		hostname: "127.0.0.1",

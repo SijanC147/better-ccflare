@@ -11,6 +11,16 @@ import {
 	type TokenBreakdown,
 } from "./pricing";
 
+// `typeof global.fetch` in bun-types is a function plus a `preconnect` static,
+// so a `Mock` is not structurally one and `as typeof global.fetch` is a cast
+// TypeScript refuses rather than a fix. Attaching the real `preconnect` makes
+// the mock structurally `typeof fetch` with no cast at all. Nothing in this file
+// calls preconnect, and every test restores the real fetch afterwards.
+const realFetch = global.fetch;
+function asFetch<T extends (...args: never[]) => unknown>(impl: T) {
+	return Object.assign(impl, { preconnect: realFetch.preconnect });
+}
+
 // Mock logger for testing
 const mockLogger = {
 	warn: vi.fn(),
@@ -59,7 +69,7 @@ describe("models.dev pricing", () => {
 				json: async () => ({ object: "list", data: [] }),
 			} as Response);
 		});
-		global.fetch = fetchMock as typeof global.fetch;
+		global.fetch = asFetch(fetchMock);
 
 		const estimates = [
 			estimateCostUSD("claude-sonnet-4-20250514", { outputTokens: 1 }),
@@ -97,7 +107,7 @@ describe("models.dev pricing", () => {
 				return Promise.reject(new DOMException("aborted", "AbortError"));
 			},
 		);
-		global.fetch = fetchMock as typeof global.fetch;
+		global.fetch = asFetch(fetchMock);
 
 		const cost = await estimateCostUSD("claude-sonnet-4-20250514", {
 			outputTokens: 1_000_000,
@@ -163,10 +173,12 @@ describe("NanoGPT Pricing", () => {
 			],
 		};
 
-		global.fetch = vi.fn().mockResolvedValue({
-			ok: true,
-			json: async () => mockResponse,
-		} as Response);
+		global.fetch = asFetch(
+			vi.fn().mockResolvedValue({
+				ok: true,
+				json: async () => mockResponse,
+			} as Response),
+		);
 
 		const result = await fetchNanoGPTPricingData(mockLogger);
 
@@ -189,7 +201,9 @@ describe("NanoGPT Pricing", () => {
 	});
 
 	it("should handle fetch errors gracefully", async () => {
-		global.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+		global.fetch = asFetch(
+			vi.fn().mockRejectedValue(new Error("Network error")),
+		);
 
 		const result = await fetchNanoGPTPricingData(mockLogger);
 
@@ -217,10 +231,12 @@ describe("NanoGPT Pricing", () => {
 			],
 		};
 
-		global.fetch = vi.fn().mockResolvedValue({
-			ok: true,
-			json: async () => mockResponse,
-		} as Response);
+		global.fetch = asFetch(
+			vi.fn().mockResolvedValue({
+				ok: true,
+				json: async () => mockResponse,
+			} as Response),
+		);
 
 		// First call should fetch
 		const result1 = await getCachedNanoGPTPricing(mockLogger);
@@ -252,28 +268,30 @@ describe("NanoGPT Pricing", () => {
 
 		const originalFetch = global.fetch;
 		const fetchMock = vi.fn();
-		global.fetch = fetchMock
-			.mockResolvedValueOnce({
-				// First call
-				ok: true,
-				json: async () => mockResponse,
-			} as Response)
-			.mockResolvedValueOnce({
-				// Second call after cache reset (simulating expiration)
-				ok: true,
-				json: async () => ({
-					...mockResponse,
-					data: [
-						{
-							...mockResponse.data[0],
-							pricing: {
-								...mockResponse.data[0].pricing,
-								prompt: 4.0, // Different price to verify it was refreshed
+		global.fetch = asFetch(
+			fetchMock
+				.mockResolvedValueOnce({
+					// First call
+					ok: true,
+					json: async () => mockResponse,
+				} as Response)
+				.mockResolvedValueOnce({
+					// Second call after cache reset (simulating expiration)
+					ok: true,
+					json: async () => ({
+						...mockResponse,
+						data: [
+							{
+								...mockResponse.data[0],
+								pricing: {
+									...mockResponse.data[0].pricing,
+									prompt: 4.0, // Different price to verify it was refreshed
+								},
 							},
-						},
-					],
-				}),
-			} as Response);
+						],
+					}),
+				} as Response),
+		);
 
 		// First call should fetch
 		await getCachedNanoGPTPricing(mockLogger);
@@ -310,10 +328,12 @@ describe("NanoGPT Pricing", () => {
 
 		// Mock the global fetch function
 		const originalFetch = global.fetch;
-		global.fetch = vi.fn().mockResolvedValue({
-			ok: true,
-			json: async () => mockResponse,
-		} as Response);
+		global.fetch = asFetch(
+			vi.fn().mockResolvedValue({
+				ok: true,
+				json: async () => mockResponse,
+			} as Response),
+		);
 
 		await initializeNanoGPTPricingRefresh(mockLogger);
 
@@ -341,10 +361,12 @@ describe("NanoGPT Pricing", () => {
 			],
 		};
 
-		global.fetch = vi.fn().mockResolvedValue({
-			ok: true,
-			json: async () => mockResponse,
-		} as Response);
+		global.fetch = asFetch(
+			vi.fn().mockResolvedValue({
+				ok: true,
+				json: async () => mockResponse,
+			} as Response),
+		);
 
 		// First, ensure the cache is populated
 		await getCachedNanoGPTPricing(mockLogger);
@@ -433,7 +455,7 @@ describe("getModelRates", () => {
 		process.env.CF_PRICING_OFFLINE = "1";
 		originalFetch = global.fetch;
 		// Block the NanoGPT fetch so only bundled pricing is used
-		global.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+		global.fetch = asFetch(vi.fn().mockRejectedValue(new Error("offline")));
 	});
 
 	afterEach(() => {
@@ -478,24 +500,26 @@ describe("getModelRates", () => {
 	it("should return null and warn when the catalogue has malformed cost data", async () => {
 		// Inject a malformed model via the NanoGPT merge path: pricing values
 		// flow straight into cost.input/cost.output without validation.
-		global.fetch = vi.fn().mockResolvedValue({
-			ok: true,
-			json: async () => ({
-				object: "list",
-				data: [
-					{
-						id: "malformed-cost-model",
-						name: "Malformed Cost Model",
-						pricing: {
-							prompt: "not-a-number",
-							completion: Number.NaN,
-							currency: "USD",
-							unit: "per_million_tokens",
+		global.fetch = asFetch(
+			vi.fn().mockResolvedValue({
+				ok: true,
+				json: async () => ({
+					object: "list",
+					data: [
+						{
+							id: "malformed-cost-model",
+							name: "Malformed Cost Model",
+							pricing: {
+								prompt: "not-a-number",
+								completion: Number.NaN,
+								currency: "USD",
+								unit: "per_million_tokens",
+							},
 						},
-					},
-				],
-			}),
-		} as unknown as Response);
+					],
+				}),
+			} as unknown as Response),
+		);
 
 		const warnLogger = { warn: vi.fn(), debug: vi.fn() };
 		setPricingLogger(warnLogger);

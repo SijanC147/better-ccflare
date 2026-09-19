@@ -8,6 +8,57 @@ import {
 } from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
 
+// Every fixture below differs only in `name` and `model_mappings`. Spelling the
+// whole Account out once keeps the declared type honest: the literal is checked
+// against Account directly, so a field added to the interface fails here rather
+// than being filled with `undefined` at runtime. `Object.assign` is used rather
+// than a spread because spreading a `Partial<Account>` over a complete object
+// widens every overridable property to include `undefined`, which would make the
+// declared `: Account` return type a lie. Same fix as packages/load-balancer in
+// PR #180.
+function makeAccount(overrides: Partial<Account> = {}): Account {
+	const base: Account = {
+		id: "test",
+		name: "test-account",
+		provider: "openai-compatible",
+		api_key: "test-key",
+		refresh_token: "",
+		access_token: "",
+		expires_at: null,
+		request_count: 0,
+		total_requests: 0,
+		last_used: null,
+		created_at: Date.now(),
+		rate_limited_until: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		session_start: null,
+		session_request_count: 0,
+		paused: false,
+		requires_reauth: false,
+		rate_limit_reset: null,
+		rate_limit_status: null,
+		rate_limit_remaining: null,
+		priority: 10,
+		auto_fallback_enabled: false,
+		auto_refresh_enabled: false,
+		auto_pause_on_overage_enabled: false,
+		peak_hours_pause_enabled: false,
+		custom_endpoint: null,
+		model_mappings: null,
+		request_transformer: null,
+		cross_region_mode: null,
+		model_fallbacks: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
+	};
+	return Object.assign(base, overrides);
+}
+
 describe("Model Mapping", () => {
 	test("parseModelMappings handles valid JSON", () => {
 		const mappings = JSON.stringify({
@@ -35,25 +86,14 @@ describe("Model Mapping", () => {
 	});
 
 	test("mapModelName uses direct pattern matching", () => {
-		const mockAccount: Account = {
-			id: "test",
+		const mockAccount = makeAccount({
 			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
 			model_mappings: JSON.stringify({
 				sonnet: "gpt-4",
 				opus: "gpt-4-turbo",
 				haiku: "gpt-3.5-turbo",
 			}),
-			custom_endpoint: null,
-		};
+		});
 
 		// Test direct pattern matching with realistic mappings
 		const result1 = mapModelName("claude-sonnet-4-5-20250929", mockAccount); // Current
@@ -81,21 +121,10 @@ describe("Model Mapping", () => {
 		const openrouterMappings =
 			'{"opus":"z-ai/glm-4.5-air:free","sonnet":"z-ai/glm-4.5-air:free","haiku":"z-ai/glm-4.5-air:free"}';
 
-		const mockAccount: Account = {
-			id: "test",
+		const mockAccount = makeAccount({
 			name: "openrouter-test",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
 			model_mappings: openrouterMappings,
-			custom_endpoint: null,
-		};
+		});
 
 		// Test real client model names
 		const sonnetRequest = "claude-sonnet-4-5-20250929";
@@ -120,21 +149,10 @@ describe("Model Mapping", () => {
 	});
 
 	test("mapModelName passes through original model when no mappings configured", () => {
-		const mockAccount: Account = {
-			id: "test",
+		const mockAccount = makeAccount({
 			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
 			model_mappings: null, // No custom mappings
-			custom_endpoint: null,
-		};
+		});
 
 		// Should return the original model name unchanged
 		const result1 = mapModelName("claude-sonnet-4-5-20250929", mockAccount);
@@ -147,25 +165,14 @@ describe("Model Mapping", () => {
 	});
 
 	test("mapModelName handles case insensitive pattern matching correctly", () => {
-		const mockAccount: Account = {
-			id: "test",
+		const mockAccount = makeAccount({
 			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
 			model_mappings: JSON.stringify({
 				sonnet: "lowercase-gpt-4",
 				opus: "lowercase-gpt-4-turbo",
 				haiku: "lowercase-gpt-3.5",
 			}),
-			custom_endpoint: null,
-		};
+		});
 
 		// Should match using case-insensitive pattern matching
 		const sonnetResult = mapModelName(
@@ -184,23 +191,12 @@ describe("Model Mapping", () => {
 	test("mapModelName passes through unmapped model when only sonnet is configured (regression: no implicit sonnet catch-all)", () => {
 		// Regression test: previously, if an account had a sonnet mapping but no haiku mapping,
 		// requesting a haiku model would silently remap it to the sonnet target.
-		const mockAccount: Account = {
-			id: "test",
+		const mockAccount = makeAccount({
 			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
 			model_mappings: JSON.stringify({
 				sonnet: "claude-sonnet-4-6", // Only sonnet is mapped; haiku is NOT
 			}),
-			custom_endpoint: null,
-		};
+		});
 
 		// Sonnet should be mapped
 		expect(mapModelName("claude-sonnet-4-5", mockAccount)).toBe(
@@ -271,23 +267,12 @@ describe("Model Validation Utilities", () => {
 	});
 
 	test("mapModelName maps fable family via family mapping", () => {
-		const mockAccount: Account = {
-			id: "test",
+		const mockAccount = makeAccount({
 			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
 			model_mappings: JSON.stringify({
 				fable: "my-fable-model",
 			}),
-			custom_endpoint: null,
-		} as Account;
+		});
 
 		expect(mapModelName("claude-fable-5", mockAccount)).toBe("my-fable-model");
 		// Unmapped families pass through unchanged
