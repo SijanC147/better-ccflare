@@ -112,6 +112,35 @@ type RefusedTrust = "directory" | "sticky-entry";
 type EntryTrust = "trusted" | RefusedTrust;
 
 /**
+ * Refusal diagnoses already emitted, so each distinct one lands once per
+ * process rather than once per reader (SB23-2357).
+ *
+ * Three readers re-run the trust check on one boot: loadConfig(),
+ * readLocalControlSecretFromDisk(), and the saveConfig() that
+ * getLocalControlSecret() performs after generating a replacement secret. Each
+ * printed the same multi-sentence paragraph, while the writable-config warning
+ * beside it deduplicated through contentsNotOurs. The asymmetry was the issue;
+ * this is the side it was settled on, because the condition is one fact about
+ * one path and repeating the explanation three times is what trains an operator
+ * to scroll past it.
+ *
+ * What is NOT deduplicated, deliberately: saveConfig()'s "Config not saved"
+ * line. That one reports an OPERATION, and each refused save is a separate lost
+ * write, so suppressing the second would hide a settings change that did not
+ * persist. The split is diagnosis once, outcome every time.
+ *
+ * Keyed on the message rather than on the path, so a hop that starts failing
+ * for a different reason mid-process still says so. Bounded by the number of
+ * distinct refusal texts, which is the number of distinct (path, hop, reason)
+ * triples a process can produce.
+ *
+ * Never cleared, matching unenforceableModes and contentsNotOurs: the condition
+ * is a fact about the filesystem, so it persists for the process's lifetime and
+ * repeating it on the next boot is the point.
+ */
+const refusalsEmitted = new Set<string>();
+
+/**
  * chmod a path and then read the mode back, returning whether it actually
  * changed.
  *
@@ -923,7 +952,7 @@ export class Config extends EventEmitter {
 			// per directory examined: the predicate itself stays silent.
 			const trust = this.entryIsTrusted(current);
 			if (trust !== "trusted") {
-				log.error(this.refusalMessage(current, trust));
+				this.refuse(this.refusalMessage(current, trust));
 				return null;
 			}
 			let info: ReturnType<typeof lstatSync>;
@@ -943,7 +972,7 @@ export class Config extends EventEmitter {
 				// it and destroy a link the operator manages: the same destructive
 				// behaviour PR #57 removed from the cycle case. Nothing is disclosed
 				// by refusing, since the trust check has already passed.
-				log.error(
+				this.refuse(
 					`The config path ${this.configPath} passes through the symlink ${current}, which could not be read (${error}); refusing to read or write it`,
 				);
 				return null;
@@ -955,7 +984,7 @@ export class Config extends EventEmitter {
 		// relocated to the cycle case. A cycle has no valid target. The bound
 		// refuses nothing the kernel would have resolved: Linux gives up at 40
 		// nested links and macOS at 32.
-		log.error(
+		this.refuse(
 			`The config path ${this.configPath} has more than 40 symlink hops, which is a cycle; refusing to read or write it`,
 		);
 		return null;
@@ -1058,13 +1087,13 @@ export class Config extends EventEmitter {
 		// unreadable, which trades a narrow exposure for a total outage.
 		const ownedByUs = uid === undefined || own.uid === uid || own.uid === 0;
 		if (!ownedByUs) {
-			log.error(
+			this.refuse(
 				`Refusing the config path ${this.configPath}: it is a regular file owned by uid ${own.uid}, not by us (uid ${uid}), so another local user chose its contents. A config they control sets local_control_secret, which is an authentication bypass on the local control endpoint, along with pg_host and pg_password. The process starts on defaults instead, and local_control_secret is regenerated on every restart, which presents as clients intermittently failing to authenticate. If this is a container with the config bind-mounted from the host, the file carries its host owner and the image's chown does not apply to a bind mount: run chown -R ${uid}:${uid} on the mounted directories on the host, not just on the file, or use a named volume. See docs/deployment.md. Otherwise move the config somewhere only you can write, or remove that file so a fresh one is created.`,
 			);
 			return null;
 		}
 		if (own.nlink !== 1) {
-			log.error(
+			this.refuse(
 				`Refusing the config path ${this.configPath}: it is a regular file with ${own.nlink} names, so it is a hardlink to a file elsewhere and its contents were not written as our config. A uid of ours does not prove we created the entry, because a hardlink carries the owner of the file it points at. Remove that name so a fresh config is created.`,
 			);
 			return null;
@@ -1221,6 +1250,16 @@ export class Config extends EventEmitter {
 	 * saveConfig(), so an unconditional "the process starts on defaults" would be
 	 * false on every save refusal after boot.
 	 */
+	/**
+	 * Emit a refusal diagnosis at most once per process (SB23-2357). See
+	 * refusalsEmitted above for what this does not cover.
+	 */
+	private refuse(message: string): void {
+		if (refusalsEmitted.has(message)) return;
+		refusalsEmitted.add(message);
+		log.error(message);
+	}
+
 	private refusalMessage(hop: string, reason: RefusedTrust): string {
 		const uid = process.getuid?.();
 		const fellBack =

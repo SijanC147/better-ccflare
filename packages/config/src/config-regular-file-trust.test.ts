@@ -107,6 +107,14 @@ describe("a regular file at the config path", () => {
 					expect(config.get("local_control_secret")).toBeUndefined();
 					expect(config.get("lb_strategy")).toBeUndefined();
 					expect(config.getLocalControlSecret()).not.toBe("ATTACKER-CHOSEN");
+
+					// A SECOND refused save, and it is the whole point of the
+					// per-operation assertion below. With one save, "Config not saved
+					// appeared once" is true whether that line deduplicates or not, so
+					// the mutation that routes it through refuse() survives: measured,
+					// 7 pass 0 fail. Two refused saves are what separates the two
+					// behaviours.
+					config.set("lb_strategy", "round-robin");
 				});
 			});
 			// Refused, not replaced: replaceUntrustedLink() only ever acts on a
@@ -125,28 +133,36 @@ describe("a regular file at the config path", () => {
 				(event) =>
 					event.level === "ERROR" && event.msg.includes("not by us (uid "),
 			);
-			// Three, measured, and traced by stack rather than reasoned, because an
-			// earlier version of this comment got the three wrong. They are
+			// ONE, since SB23-2357. Three readers still refuse, and they are
 			// loadConfig(), readLocalControlSecretFromDisk(), and saveConfig() by
 			// way of the set() that getLocalControlSecret() performs after
-			// generating a replacement secret. The SAVE is the one easy to miss.
+			// generating a replacement secret; the SAVE is the one easy to miss.
+			// They now share one diagnosis, because the writable-config warning
+			// beside this one already deduplicated through a module Set and the
+			// asymmetry was the issue.
 			//
 			// Note what does NOT contribute: the two config.get() calls above
 			// produce zero refusals, because get() reads this.data and never
 			// re-checks the path. So "every reader re-runs the trust check" is
 			// false; three specific operations do.
 			//
-			// Unlike the writable-config warning added in PR #176, this refusal is
-			// not deduplicated per path, and that asymmetry is recorded as a
-			// follow-up rather than fixed here: three separate refused operations
-			// arguably should each say so.
-			//
-			// Asserting the exact count rather than "at least one" is deliberate,
-			// and the brittleness is the point: making getLocalControlSecret() skip
-			// a set() it knows will be refused is a plausible cleanup that would
-			// drop this to 2, and it should fail here rather than pass quietly.
-			// Found by PR #182's review, which corrected this comment.
-			expect(refusals).toHaveLength(3);
+			// toBe(1) and not toBeLessThanOrEqual(1), because this one assertion
+			// has to kill BOTH mutations. Removing the Set check makes it 3;
+			// making refuse() return unconditionally makes it 0. A bound in either
+			// direction alone survives one of them. The path is a fresh mkdtemp
+			// and refusalsEmitted is keyed on the message, so nothing this test
+			// pre-seeds can make it pass.
+			expect(refusals).toHaveLength(1);
+			// And the outcome is still reported per operation. This is the half
+			// that must NOT be deduplicated: each refused save is a separate lost
+			// write. Deduplicating it too would pass the assertion above while
+			// hiding a settings change that never persisted.
+			const notSaved = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("Config not saved: the configured path cannot"),
+			);
+			expect(notSaved).toHaveLength(2);
 			// Both uids, so the operator can act without reproducing anything.
 			expect(refusals[0].msg).toContain(`owned by uid ${strangerFileUid}`);
 			expect(refusals[0].msg).toContain("bind-mounted from the host");
