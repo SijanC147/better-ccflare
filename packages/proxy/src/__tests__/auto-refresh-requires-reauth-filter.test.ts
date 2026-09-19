@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
+import { ensureSchema, runMigrations } from "@better-ccflare/database";
 
 describe("AutoRefreshScheduler requires_reauth eligibility", () => {
 	it("excludes accounts that require manual authentication from probes", async () => {
@@ -31,31 +32,16 @@ describe("AutoRefreshScheduler requires_reauth eligibility", () => {
 
 		const db = new Database(":memory:");
 		try {
-			db.run(`
-				CREATE TABLE accounts (
-					id TEXT PRIMARY KEY,
-					name TEXT,
-					provider TEXT,
-					refresh_token TEXT,
-					access_token TEXT,
-					expires_at INTEGER,
-					rate_limit_reset INTEGER,
-					custom_endpoint TEXT,
-					paused INTEGER,
-					auto_pause_on_overage_enabled INTEGER,
-					pause_reason TEXT,
-					auto_refresh_enabled INTEGER,
-					rate_limited_until INTEGER,
-					requires_reauth INTEGER DEFAULT 0
-				)
-			`);
+			ensureSchema(db);
+			runMigrations(db);
 			db.run(`
 				INSERT INTO accounts
 					(id, name, provider, refresh_token, access_token, paused,
-					 auto_pause_on_overage_enabled, auto_refresh_enabled, requires_reauth)
+					 auto_pause_on_overage_enabled, auto_refresh_enabled, requires_reauth,
+					 created_at)
 				VALUES
-					('healthy', 'healthy', 'anthropic', 'rt', 'at', 0, 0, 1, 0),
-					('dead-auth', 'dead-auth', 'anthropic', 'rt', 'at', 0, 0, 1, 1)
+					('healthy', 'healthy', 'anthropic', 'rt', 'at', 0, 0, 1, 0, 1),
+					('dead-auth', 'dead-auth', 'anthropic', 'rt', 'at', 0, 0, 1, 1, 1)
 			`);
 
 			const rows = db
