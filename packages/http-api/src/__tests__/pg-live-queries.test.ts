@@ -1408,13 +1408,20 @@ describe.skipIf(!livePgAvailable)(
 					["agent-b", "agent-c"],
 					"claude-opus-4",
 				);
-				// getAllAgentPreferences returns an Array on both dialects, so the
-				// assertion is on its length. Object.keys() was the previous form
-				// and held only on SQLite: the bun SQL driver returns an array
+				// Object.keys() deliberately, rather than toHaveLength(). This
+				// reads 3 on both dialects only because query() copies its PG
+				// result into a plain Array: the bun SQL driver returns an array
 				// carrying four extra enumerable own properties (count, command,
-				// lastInsertRowid, affectedRows), so Object.keys() read 7 for the
-				// same 3 rows on PostgreSQL.
-				expect(await dbOps.getAllAgentPreferences()).toHaveLength(3);
+				// lastInsertRowid, affectedRows), which made this read 7 for the
+				// same 3 rows on PostgreSQL. A length assertion cannot see that,
+				// and this call reaches query() through
+				// AgentPreferenceRepository.getAllPreferences(), so this is the
+				// live proof of the normalisation. The CI-side gate that needs no
+				// cluster is
+				// `packages/database/src/adapters/__tests__/bun-sql-adapter-array-shape.test.ts`.
+				expect(Object.keys(await dbOps.getAllAgentPreferences())).toHaveLength(
+					3,
+				);
 				expect(await dbOps.deleteAgentPreference("agent-a")).toBe(true);
 			});
 		});

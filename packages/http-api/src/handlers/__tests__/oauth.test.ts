@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import {
 	DatabaseFactory,
@@ -17,6 +19,27 @@ import {
 
 // Test database path
 const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-oauth-handler.db`;
+
+// The handler constructs `new Config()` with no path at oauth.ts:878 and :971.
+// Under NODE_ENV=test, which `bun test` sets, `resolveConfigPath` refuses to
+// fall through to the operator's real config unless a redirect is set
+// (SB23-2277, PR #159), and the refusal surfaces here as an HTTP 500. This
+// file passed only while some other test file in the same process happened to
+// set XDG_CONFIG_HOME first, so the result depended on file order: the release
+// profile's run ordered them differently and five cases failed on a green
+// commit. Redirect explicitly rather than inheriting one.
+const TEST_CONFIG_HOME = mkdtempSync(join(tmpdir(), "ccflare-oauth-test-"));
+const PRIOR_XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME;
+process.env.XDG_CONFIG_HOME = TEST_CONFIG_HOME;
+
+afterAll(() => {
+	if (PRIOR_XDG_CONFIG_HOME === undefined) {
+		delete process.env.XDG_CONFIG_HOME;
+	} else {
+		process.env.XDG_CONFIG_HOME = PRIOR_XDG_CONFIG_HOME;
+	}
+	rmSync(TEST_CONFIG_HOME, { recursive: true, force: true });
+});
 
 // Spy used to assert clearAccountRefreshCache is invoked on successful reauth.
 // mock.module must be called at top-level (before imports resolve). The mock

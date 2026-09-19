@@ -306,7 +306,26 @@ export class BunSqlAdapter {
 				sqlStr,
 			),
 		);
-		return result as unknown as R[];
+		// Copy into a plain Array. Bun's SQL driver returns an array carrying
+		// four extra enumerable own properties (count, command, lastInsertRowid,
+		// affectedRows), so `Object.keys()` read 7 for 3 rows on PostgreSQL and 3
+		// on SQLite, and a spread or `Object.entries()` over the result leaked
+		// them. Nothing reads those four off a query() result today (measured
+		// 2026-09-19 across packages, apps and scripts), so this is dialect
+		// parity rather than a live bug fix, and it is the shape the `R[]`
+		// return type already promises.
+		//
+		// Array.from rather than deleting the four by name. The name list is not
+		// drift-proof if the driver adds a fifth, and, measured against
+		// PostgreSQL 18.6 on 2026-09-19, the driver's result is a `SQLResultArray`
+		// whose prototype is NOT Array.prototype, so deleting the four would
+		// leave a subclass instance where SQLite hands back a plain Array and
+		// would not deliver the parity this exists for.
+		//
+		// It is O(n) and every PG read pays it. Measured on Bun: 0.063us at 10
+		// rows, 0.661us at 1,000, 535us at 100,000, against a 100k-row round
+		// trip costing tens of milliseconds.
+		return Array.from(result as unknown as Iterable<R>);
 	}
 
 	/**
@@ -374,7 +393,15 @@ export class BunSqlAdapter {
 			PG_CLIENT_QUERY_TIMEOUT_MS,
 			sqlStr,
 		);
-		// Bun.SQL returns an array-like with a `count` property for DML statements
+		// Bun.SQL returns an array-like with a `count` property for DML statements.
+		//
+		// This calls sql.unsafe() directly and must keep doing so: query() now
+		// copies its PG result into a plain Array, which drops exactly this
+		// property. Routing this method through query() would make `count`
+		// undefined, the `?? 0` would report every DML statement as affecting
+		// zero rows, and the retention cleanup loops that compare the deleted
+		// count against getCleanupBatchSize() to detect the last batch would
+		// stop after one batch on every PostgreSQL install, silently.
 		return (result as unknown as { count: number }).count ?? 0;
 	}
 
