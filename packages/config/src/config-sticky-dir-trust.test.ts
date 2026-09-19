@@ -13,8 +13,22 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { logBus } from "@better-ccflare/logger";
 import { stickyFixture } from "@better-ccflare/security/testing";
+import type { LogEvent } from "@better-ccflare/types";
 import { Config } from "./index";
+
+function captureLogs(fn: () => void): LogEvent[] {
+	const captured: LogEvent[] = [];
+	const handler = (event: LogEvent) => captured.push(event);
+	logBus.on("log", handler);
+	try {
+		fn();
+	} finally {
+		logBus.off("log", handler);
+	}
+	return captured;
+}
 
 /**
  * A sticky directory is trusted when the entry at the config path is ours
@@ -93,6 +107,112 @@ describe("a config symlink in a sticky directory", () => {
 		} finally {
 			fx.cleanup();
 			rmSync(target, { recursive: true, force: true });
+		}
+	});
+
+	it("names the missing entry, not the directory, when the landing name is absent", () => {
+		// SB23-2318. The message used to say the directory was owned by another
+		// user or writable by others and to tell the operator to move the config.
+		// In a sticky directory that is the case the rule from SB23-2267 exists to
+		// ALLOW, so the sentence was false about the directory and the instruction
+		// did not fix the condition: moving the file does not create an entry at
+		// the name the walk checks.
+		//
+		// Asserted on the text, not the level. A test in this family pinned the
+		// level and the file mode and never read the message, so it stayed green
+		// while the message contradicted the mode asserted two lines above it.
+		const fx = stickyFixture("sticky-msg");
+		const home = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-msghome-"));
+		try {
+			const landing = fx.entry("absent.json");
+			const link = join(home, "config.json");
+			symlinkSync(landing, link);
+			expect(existsSync(landing)).toBe(false);
+
+			const logs = captureLogs(() => {
+				new Config(link);
+			});
+			const refusals = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("Refusing the config path"),
+			);
+			expect(refusals).toHaveLength(1);
+			const msg = refusals[0].msg;
+
+			// What the code actually read: lstat of the entry, for existence, its
+			// link count and its uid. Stated as a disjunction because those three
+			// share one catch and this branch does not know which one it hit.
+			expect(msg).toContain("sits in a sticky directory");
+			expect(msg).toContain("has exactly one hard link");
+			expect(msg).toContain(
+				"Moving the config to another name in the same shared directory does not satisfy this.",
+			);
+			// And the consequence the operator otherwise reads as an intermittent
+			// auth bug.
+			expect(msg).toContain("regenerates local_control_secret");
+
+			// The neighbouring branch's instruction must NOT appear. This is the
+			// whole defect: that sentence was what shipped here.
+			expect(msg).not.toContain(
+				"Move the config somewhere only you can write, or replace the link with a regular file.",
+			);
+			expect(msg).not.toContain("owned by another user, or writable by other");
+		} finally {
+			fx.cleanup();
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("names the directory when the directory is the untrusted part", () => {
+		// The other half of the same split, so neither message can drift into the
+		// other's case without a failure here. A world-writable directory WITHOUT
+		// the sticky bit is the `directory` reason: nothing restricts who may
+		// replace the link, so the entry's ownership is not what is wrong.
+		const shared = mkdtempSync(join(tmpdir(), "better-ccflare-nonsticky-"));
+		const home = mkdtempSync(join(tmpdir(), "better-ccflare-nonsticky-home-"));
+		try {
+			chmodSync(shared, 0o777);
+			// The premise, measured rather than assumed: writable by others and not
+			// sticky. Bun's chmodSync drops S_ISVTX on Linux (SB23-2319), which is
+			// why this direction is the one that is reliable on both platforms.
+			const dirMode = statSync(shared).mode;
+			expect(dirMode & 0o022).not.toBe(0);
+			expect(dirMode & 0o1000).toBe(0);
+
+			const landing = join(shared, "landed.json");
+			writeFileSync(landing, JSON.stringify({ lb_strategy: "session" }), {
+				mode: 0o600,
+			});
+			const link = join(home, "config.json");
+			symlinkSync(landing, link);
+
+			const logs = captureLogs(() => {
+				new Config(link);
+			});
+			const refusals = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.includes("Refusing the config path"),
+			);
+			expect(refusals.length).toBeGreaterThan(0);
+			const msg = refusals[0].msg;
+
+			expect(msg).toContain("owned by another user, or writable by other");
+			expect(msg).toContain(
+				"Move the config somewhere only you can write, or replace the link with a regular file.",
+			);
+			expect(msg).toContain("regenerates local_control_secret");
+
+			// And not the sticky branch's text, whose instruction would be wrong
+			// here: creating the entry changes nothing when anyone may replace it.
+			expect(msg).not.toContain("sits in a sticky directory");
+			expect(msg).not.toContain(
+				"Moving the config to another name in the same shared directory does not satisfy this.",
+			);
+		} finally {
+			rmSync(shared, { recursive: true, force: true });
+			rmSync(home, { recursive: true, force: true });
 		}
 	});
 
