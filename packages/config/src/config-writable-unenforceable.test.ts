@@ -129,6 +129,25 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 				(event) => event.level === "ERROR" && event.msg.includes(ERROR_MARK),
 			);
 			expect(reported).toHaveLength(1);
+
+			// The chmod must happen AT THE REPORT SITE, before the level is chosen,
+			// not later in loadConfig(). Deleting the chmodAndVerify() call here
+			// while keeping the unenforceableModes read leaves every other test
+			// green: this test's final 0600 assertion is satisfied after the fact by
+			// restrictConfigFile(), and the WARN test seeds the Set by hand so it
+			// never runs the compare at all. The mutant reintroduces ERROR-forever
+			// on a real bind mount, because a fresh process finds the Set empty at
+			// the report site and populated one call too late. Found by this PR's
+			// independent reviewer, which is why the assertion is on ORDER rather
+			// than on the final mode.
+			const order = logs.map((event) => event.msg);
+			const chmodAt = order.findIndex((msg) =>
+				msg.includes("Restricted config file permissions to 0600"),
+			);
+			const errorAt = order.findIndex((msg) => msg.includes(ERROR_MARK));
+			expect(chmodAt).toBeGreaterThanOrEqual(0);
+			expect(errorAt).toBeGreaterThanOrEqual(0);
+			expect(chmodAt).toBeLessThan(errorAt);
 			// The field that makes this an authentication bypass rather than a
 			// disclosure is still named.
 			expect(reported[0].msg).toContain("local_control_secret");
