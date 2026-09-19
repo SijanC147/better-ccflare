@@ -168,9 +168,16 @@ describe("updateAccountMetadata — parseUsage clone lifecycle", () => {
 		// parseUsage never touched the body here, so the drain in the finally
 		// must have consumed it — a subsequent read reports done.
 		const cloneBody = calls.parseUsageArg?.body;
+		// The catch below absorbs "the stream was already closed", which is a
+		// pass. A null body would reach it too, as `cloneBody?.getReader()` is
+		// then undefined and `.read()` throws a TypeError, so the assertion
+		// would hold with nothing ever read. Separate the two here.
+		if (!cloneBody) {
+			throw new Error("the clone handed to the processor carried no body");
+		}
 		let observedDone = false;
 		try {
-			const reader = cloneBody?.getReader();
+			const reader = cloneBody.getReader();
 			const { done } = await reader.read();
 			reader.releaseLock();
 			observedDone = done;

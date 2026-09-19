@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
-import { fetchSlot } from "../../__tests__/fetch-slot";
+import { type FetchImpl, fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -126,10 +126,14 @@ function ok200() {
 
 async function run(
 	provider: object,
-	fetchImpl: typeof globalThis.fetch,
+	// The call signature alone, matching `fetchSlot`. `typeof globalThis.fetch`
+	// carries Bun's `preconnect`, which no test double implements and which
+	// nothing on this path calls. Narrowing here also retires the `as never`
+	// this assignment previously needed.
+	fetchImpl: FetchImpl,
 ): Promise<void> {
 	const originalFetch = globalThis.fetch;
-	fetchSlot.fetch = fetchImpl as never;
+	fetchSlot.fetch = fetchImpl;
 	const bodyBuffer = makeRequestBody();
 	const req = new Request("https://proxy.local/v1/messages", {
 		method: "POST",

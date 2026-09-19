@@ -218,12 +218,11 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 		await agentRegistry.registerWorkspace(tmpDir);
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":guard-agent"));
-		expect(agent).toBeDefined();
+		if (!agent) {
+			throw new Error(`no registered agent has an id ending :guard-agent`);
+		}
 
-		await dbOps.setAgentPreference(
-			agent?.id ?? "guard-agent",
-			"claude-opus-model",
-		);
+		await dbOps.setAgentPreference(agent.id, "claude-opus-model");
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -234,7 +233,7 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 		const result = await interceptAndModifyRequest(buffer, dbOps, undefined, {
 			getModelCatalog: async () => liveCatalog(["claude-3-5-sonnet-20241022"]),
 		});
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe("claude-3-5-sonnet-20241022");
 		expect(result.modifiedBody).toBe(buffer);
 	});
@@ -248,12 +247,13 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 		await agentRegistry.registerWorkspace(tmpDir);
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":guard-agent-fallback"));
-		expect(agent).toBeDefined();
+		if (!agent) {
+			throw new Error(
+				`no registered agent has an id ending :guard-agent-fallback`,
+			);
+		}
 
-		await dbOps.setAgentPreference(
-			agent?.id ?? "guard-agent-fallback",
-			"claude-opus-model",
-		);
+		await dbOps.setAgentPreference(agent.id, "claude-opus-model");
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -324,12 +324,11 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 		await agentRegistry.registerWorkspace(tmpDir);
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":force-agent"));
-		expect(agent).toBeDefined();
+		if (!agent) {
+			throw new Error(`no registered agent has an id ending :force-agent`);
+		}
 
-		await dbOps.setAgentPreference(
-			agent?.id ?? "force-agent",
-			"claude-opus-model",
-		);
+		await dbOps.setAgentPreference(agent.id, "claude-opus-model");
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -342,7 +341,7 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 				liveCatalog(["claude-3-5-sonnet-20241022", "claude-opus-model"]),
 			forceAccountModel: true,
 		});
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe("claude-3-5-sonnet-20241022");
 		expect(result.modifiedBody).toBe(buffer);
 	});
@@ -356,7 +355,11 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 		await agentRegistry.registerWorkspace(tmpDir);
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":force-frontmatter-agent"));
-		expect(agent).toBeDefined();
+		if (!agent) {
+			throw new Error(
+				`no registered agent has an id ending :force-frontmatter-agent`,
+			);
+		}
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -370,7 +373,7 @@ describe("interceptAndModifyRequest - rewrite guard integration", () => {
 			frontmatterModelFallback: true,
 			forceAccountModel: true,
 		});
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe("claude-3-5-sonnet-20241022");
 		expect(result.modifiedBody).toBe(buffer);
 	});

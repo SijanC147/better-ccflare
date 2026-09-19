@@ -1,6 +1,7 @@
 import { describe, expect, it, mock, spyOn } from "bun:test";
 import { ANTHROPIC_MESSAGE_STOP_FRAME } from "../anthropic-terminal-recovery";
 import type { ProxyContext } from "../handlers";
+import type { UsageCollector } from "../usage-collector";
 
 // The source worktree intentionally excludes generated database worker bundles.
 // ResponseHandler only reaches DatabaseOperations/AsyncDbWriter construction
@@ -22,6 +23,15 @@ const { forwardToClient } = await import("../response-handler");
 const encoder = new TextEncoder();
 const terminalDelta =
 	'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}\n\n';
+
+/**
+ * `requestBody` on the proxy context is an `ArrayBuffer`. `bytes` yields a
+ * `Uint8Array`, which is the right shape for the stream chunks below but not
+ * for that field. Same helper as the sibling response-handler suites.
+ */
+function encodeRequestBody(json: string): ArrayBuffer {
+	return new TextEncoder().encode(json).buffer;
+}
 
 function bytes(text: string): Uint8Array {
 	return encoder.encode(text);
@@ -74,7 +84,7 @@ async function forwardClosedStream({
 			path,
 			account: null,
 			requestHeaders,
-			requestBody: bytes("{}"),
+			requestBody: encodeRequestBody("{}"),
 			response: new Response(immediateStream(bytes(terminalDelta)), {
 				status,
 				headers: { "content-type": contentType },
@@ -118,9 +128,7 @@ describe("forwardToClient Anthropic terminal recovery integration", () => {
 		const collectorSpy = spyOn(
 			usageCollectorModule,
 			"getUsageCollector",
-		).mockReturnValue(
-			collector as unknown as usageCollectorModule.UsageCollector,
-		);
+		).mockReturnValue(collector as unknown as UsageCollector);
 
 		try {
 			const requestId = "normal-recovered-request";
@@ -133,7 +141,7 @@ describe("forwardToClient Anthropic terminal recovery integration", () => {
 					requestHeaders: new Headers({
 						"anthropic-version": "2023-06-01",
 					}),
-					requestBody: bytes("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(immediateStream(bytes(terminalDelta)), {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -253,9 +261,7 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 		const collectorSpy = spyOn(
 			usageCollectorModule,
 			"getUsageCollector",
-		).mockReturnValue(
-			collector as unknown as usageCollectorModule.UsageCollector,
-		);
+		).mockReturnValue(collector as unknown as UsageCollector);
 
 		try {
 			const requestId = "truncated-request";
@@ -268,7 +274,7 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 					requestHeaders: new Headers({
 						"anthropic-version": "2023-06-01",
 					}),
-					requestBody: bytes("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(makeContentOnlyStream(), {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -318,9 +324,7 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 		const collectorSpy = spyOn(
 			usageCollectorModule,
 			"getUsageCollector",
-		).mockReturnValue(
-			collector as unknown as usageCollectorModule.UsageCollector,
-		);
+		).mockReturnValue(collector as unknown as UsageCollector);
 
 		try {
 			const requestId = "truncated-anthropic-compatible";
@@ -333,7 +337,7 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 					// Notably NO anthropic-version header — the gate no longer
 					// requires it.
 					requestHeaders: new Headers({}),
-					requestBody: bytes("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(makeContentOnlyStream(), {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -399,9 +403,7 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 		const collectorSpy = spyOn(
 			usageCollectorModule,
 			"getUsageCollector",
-		).mockReturnValue(
-			collector as unknown as usageCollectorModule.UsageCollector,
-		);
+		).mockReturnValue(collector as unknown as UsageCollector);
 
 		try {
 			const requestId = "client-cancelled-request";
@@ -419,7 +421,7 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 					requestHeaders: new Headers({
 						"anthropic-version": "2023-06-01",
 					}),
-					requestBody: bytes("{}"),
+					requestBody: encodeRequestBody("{}"),
 					response: new Response(source, {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -437,6 +439,9 @@ describe("forwardToClient SSE terminal-state propagation", () => {
 			// already closed, so cancelling it surfaces "Invalid state" —
 			// irrelevant to the recording semantics we're testing).
 			const reader = response.body?.getReader();
+			if (!reader) {
+				throw new Error("the recorded response carried no body to cancel");
+			}
 			await reader.cancel("client disconnect").catch(() => undefined);
 			await new Promise((resolve) => setTimeout(resolve, 0));
 

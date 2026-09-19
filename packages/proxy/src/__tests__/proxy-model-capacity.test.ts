@@ -418,8 +418,12 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 	});
 
 	it("can disable Step-10 SessionStrategy fallback after combo slots fail", async () => {
-		const handleStart = mock(() => {});
-		const handleEnd = mock(() => Promise.resolve());
+		// Typed parameters: `mock(() => {})` has a `[]` calls tuple, so
+		// `handleStart.mock.calls[0]?.[0]` is an index into a zero-length tuple.
+		const handleStart = mock((_msg: Record<string, unknown>) => {});
+		const handleEnd = mock((_msg: Record<string, unknown>) =>
+			Promise.resolve(),
+		);
 		const collectorSpy = spyOn(
 			usageCollectorModule,
 			"tryGetUsageCollector",

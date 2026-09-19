@@ -18,6 +18,16 @@
  * call. `unknown` is needed only because `typeof globalThis` declares many
  * other members this type does not.
  */
+/**
+ * The call signature alone. Exported for helpers that take a fetch double as a
+ * parameter rather than assigning one: `fetchSlot` types an assignment target,
+ * so it cannot reach a parameter position.
+ */
+export type FetchImpl = (
+	input: RequestInfo | URL,
+	init?: RequestInit,
+) => Promise<Response>;
+
 export const fetchSlot = globalThis as unknown as {
-	fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+	fetch: FetchImpl;
 };

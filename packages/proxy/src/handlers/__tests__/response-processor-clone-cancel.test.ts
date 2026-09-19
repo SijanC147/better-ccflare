@@ -186,13 +186,20 @@ describe("updateAccountMetadata — extractUsageInfo clone lifecycle", () => {
 		// body is no longer readable on the clone's stream — a subsequent
 		// getReader() must surface an error or read done immediately.
 		const cloneBody = calls.extractUsageInfoArg?.body;
+		// The catch below absorbs "the stream was already closed", which is a
+		// pass. A null body would reach it too, as `cloneBody?.getReader()` is
+		// then undefined and `.read()` throws a TypeError, so the assertion
+		// would hold with nothing ever read. Separate the two here.
+		if (!cloneBody) {
+			throw new Error("the clone handed to the processor carried no body");
+		}
 		// On Bun, after body.cancel() the stream should report done on first
 		// read with no value. We assert via getReader — that throws if the
 		// stream is closed, which is itself proof of cancellation. Fall back
 		// to read() returning done if getReader succeeds.
 		let observed = false;
 		try {
-			const reader = cloneBody?.getReader();
+			const reader = cloneBody.getReader();
 			const { done } = await reader.read();
 			reader.releaseLock();
 			observed = done;

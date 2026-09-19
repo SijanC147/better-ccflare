@@ -151,10 +151,12 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		await registerAndFind();
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":agent-a"));
-		expect(agent).toBeDefined();
-		expect(agent?.model).toBeNull();
+		if (!agent) {
+			throw new Error(`no registered agent has an id ending :agent-a`);
+		}
+		expect(agent.model).toBeNull();
 
-		await dbOps.setAgentPreference(agent?.id ?? "agent-a", "claude-opus-model");
+		await dbOps.setAgentPreference(agent.id, "claude-opus-model");
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -164,7 +166,7 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		const result = await interceptAndModifyRequest(buffer, dbOps, undefined, {
 			getModelCatalog: async () => nonVetoingCatalog(),
 		});
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe("claude-opus-model");
 		expect(result.originalModel).toBe("claude-3-5-sonnet-20241022");
 	});
@@ -191,8 +193,10 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		await registerAndFind();
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":agent-b"));
-		expect(agent).toBeDefined();
-		expect(agent?.model).toBe(LATEST_SONNET_MODEL);
+		if (!agent) {
+			throw new Error(`no registered agent has an id ending :agent-b`);
+		}
+		expect(agent.model).toBe(LATEST_SONNET_MODEL);
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -201,7 +205,7 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		);
 		// No frontmatterModelFallback option passed => defaults to off.
 		const result = await interceptAndModifyRequest(buffer, dbOps);
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe("claude-3-5-sonnet-20241022");
 		expect(result.modifiedBody).toBe(buffer);
 	});
@@ -215,7 +219,9 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		await registerAndFind();
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":agent-c"));
-		expect(agent).toBeDefined();
+		if (!agent) {
+			throw new Error(`no registered agent has an id ending :agent-c`);
+		}
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -226,7 +232,7 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 			frontmatterModelFallback: true,
 			getModelCatalog: async () => nonVetoingCatalog(),
 		});
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe(LATEST_SONNET_MODEL);
 		expect(result.modifiedBody).not.toBe(buffer);
 	});
@@ -240,8 +246,10 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		await registerAndFind();
 		const agents = await agentRegistry.getAgents();
 		const agent = agents.find((a) => a.id.endsWith(":agent-d"));
-		expect(agent).toBeDefined();
-		expect(agent?.model).toBeNull();
+		if (!agent) {
+			throw new Error(`no registered agent has an id ending :agent-d`);
+		}
+		expect(agent.model).toBeNull();
 
 		const buffer = toArrayBuffer(
 			createMockRequestBody({
@@ -251,7 +259,7 @@ describe("Agent Interceptor - precedence (DB preference vs. frontmatter fallback
 		const result = await interceptAndModifyRequest(buffer, dbOps, undefined, {
 			frontmatterModelFallback: true,
 		});
-		expect(result.agentUsed).toBe(agent?.id);
+		expect(result.agentUsed).toBe(agent.id);
 		expect(result.appliedModel).toBe("claude-3-5-sonnet-20241022");
 		expect(result.modifiedBody).toBe(buffer);
 	});
