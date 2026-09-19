@@ -175,7 +175,7 @@ export function createAnalyticsModelsHandler(context: APIContext) {
 					SUM(COALESCE(r.output_tokens, 0)) AS output_tokens,
 					SUM(COALESCE(r.total_tokens, 0)) AS total_tokens,
 					SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) AS plan_cost_usd,
-					SUM(CASE WHEN r.billing_type != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) AS api_cost_usd,
+					SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) AS api_cost_usd,
 					SUM(COALESCE(r.cost_usd, 0)) AS total_cost_usd,
 					-- Denominator named on purpose. A failed request stores 0
 					-- tokens rather than NULL, so COUNT(*) here would report a
