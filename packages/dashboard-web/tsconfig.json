@@ -21,9 +21,11 @@
 		// resolves for packages whose `main` is `./src/index.ts` and fails for
 		// `@better-ccflare/agents`, whose manifest points at an unbuilt
 		// `dist/`, which is why a bare package-level run reported TS2307 in
-		// packages/proxy. `packages/types/src/context.ts` imports
-		// `@better-ccflare/proxy`, so proxy enters this program through the
-		// type graph even though no dashboard-web source file imports it.
+		// packages/proxy, which `packages/types/src/context.ts` used to pull in
+		// through the type graph even though no dashboard-web source file
+		// imports it. That import is gone as of SB23-2306, so proxy and
+		// providers no longer enter this program; `types` still reaches
+		// `database` and `config`, which is why the map is still needed.
 		// Measured: adding these leaves `bun run build:dashboard` output
 		// byte-identical at 19,293,156 bytes across 23 files.
 		"paths": {
