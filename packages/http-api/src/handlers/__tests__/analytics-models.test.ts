@@ -174,20 +174,23 @@ describe("GET /api/analytics/models — plan-billed models survive", () => {
 });
 
 describe("GET /api/analytics/models — a NULL billing_type", () => {
-	it("counts the cost in the total and in neither bucket, so plan + api != total", async () => {
-		// Not an oversight, and asserted here so it cannot change silently.
-		// `billing_type = 'plan'` and `billing_type != 'plan'` are BOTH false
-		// against NULL in SQL three-valued logic, so a NULL-billed request
-		// lands in neither CASE branch while SUM(COALESCE(cost_usd, 0)) still
-		// counts it. `analytics-account-costs.test.ts` documents the same
-		// behaviour for the per-account rows, so the two endpoints agree.
+	it("counts the cost as api, so plan + api equals the total", async () => {
+		// `billing_type = 'plan'` and a bare `billing_type != 'plan'` are BOTH
+		// false against NULL in SQL three-valued logic, so before SB23-2297 a
+		// NULL-billed request landed in neither CASE branch while
+		// SUM(COALESCE(cost_usd, 0)) still counted it, and plan + api fell
+		// short of the total by exactly the NULL-billed spend.
 		//
-		// A reader summing planCostUsd + apiCostUsd across models and
-		// comparing against totalCostUsd will find a shortfall exactly equal
-		// to the NULL-billed spend. That is the intended reading.
-		// Written with raw SQL on purpose: insertRequest coerces a null
-		// billingType to "api" (`row.billingType ?? "api"`), so the helper
-		// cannot express the case this test is about.
+		// The query now reads COALESCE(billing_type, 'api'), matching the
+		// column's own schema default and stats.repository.ts, so the two
+		// buckets sum to the total for every row.
+		//
+		// Written with raw SQL on purpose: the local insertRequest helper
+		// above defaults billingType to "api", so it cannot express the case
+		// this test is about. The production insertRequest does NOT coerce;
+		// it writes `data.billingType || null`, so a NULL is reachable in
+		// ordinary traffic. Every NULL row on the live host is a 429 that
+		// failed before response headers arrived.
 		db.run(
 			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model, cost_usd, billing_type)
 			 VALUES ('null-billing', ?, 'POST', '/v1/messages', 200, 1, 'unknown-billing', 7, NULL)`,
@@ -197,10 +200,10 @@ describe("GET /api/analytics/models — a NULL billing_type", () => {
 		const [row] = await rowsFor("range=24h");
 
 		expect(row.planCostUsd).toBe(0);
-		expect(row.apiCostUsd).toBe(0);
+		expect(row.apiCostUsd).toBe(7);
 		expect(row.totalCostUsd).toBe(7);
-		expect((row.planCostUsd as number) + (row.apiCostUsd as number)).not.toBe(
-			row.totalCostUsd,
+		expect((row.planCostUsd as number) + (row.apiCostUsd as number)).toBe(
+			row.totalCostUsd as number,
 		);
 	});
 });

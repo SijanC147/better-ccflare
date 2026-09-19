@@ -1,9 +1,13 @@
+// `@better-ccflare/types` must not import `@better-ccflare/proxy`, in this file
+// or any other. Every consumer of `types` pulls this module into its type graph,
+// including `packages/dashboard-web`, so one `import type` from proxy puts proxy,
+// providers and their transitive sources into the browser typecheck program.
+// Mirror the shape locally instead, as `CircuitHealth` in `./stats` does.
 import type { Config } from "@better-ccflare/config";
 import type {
 	BunSqlAdapter,
 	DatabaseOperations,
 } from "@better-ccflare/database";
-import type { CircuitBreaker } from "@better-ccflare/proxy";
 import type { Account } from "./account";
 import type { AlertEvent } from "./alerts";
 import type { RequestMeta } from "./api";
@@ -50,13 +54,6 @@ export interface APIContext {
 	getIntegrityStatus?: () => IntegrityStatus;
 	getRetentionStatus?: () => RetentionStatus;
 	getStrategy?: () => LoadBalancingStrategy | null;
-	/**
-	 * Live circuit breaker exposed by the proxy path. Optional so older
-	 * entrypoints that don't wire the breaker can still construct an
-	 * APIRouter; the capacity-state handler takes its own copy from this
-	 * field when present.
-	 */
-	circuitBreaker?: CircuitBreaker;
 	/**
 	 * Live Anthropic model catalog access, injected by the server entrypoint
 	 * (avoids a direct http-api -> proxy type dependency here). Absent when

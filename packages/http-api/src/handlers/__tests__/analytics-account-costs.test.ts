@@ -87,11 +87,14 @@ describe("analytics account costs", () => {
 		});
 	});
 
-	it("maps null billing_type: planCostUsd and apiCostUsd are 0, totalCostUsd includes cost", async () => {
-		// SQLite NULL comparisons: `billing_type = 'plan'` and `billing_type != 'plan'`
-		// both evaluate to false when billing_type IS NULL, so CASE WHEN conditions
-		// produce 0 for plan and api buckets. SUM(COALESCE(cost_usd, 0)) still captures
-		// the cost in total_cost_usd. This test documents that expected NULL behaviour.
+	it("maps a row whose buckets do not sum to its total without inventing a value", async () => {
+		// This test drives the MAPPING layer through a stub, never SQL: the
+		// numbers below are handed to the handler, not computed by it. So it
+		// says nothing about how a NULL billing_type is bucketed. Since
+		// SB23-2297 the SQL reads COALESCE(billing_type, 'api'), so real rows
+		// always sum; a stub row that does not sum is a lower-layer fault, and
+		// what is pinned here is that the mapper passes all three through
+		// unchanged rather than deriving one from the others.
 		const context = createContext([
 			{
 				data_type: "account_performance",
