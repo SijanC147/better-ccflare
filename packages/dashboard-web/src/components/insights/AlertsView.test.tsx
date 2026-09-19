@@ -132,26 +132,26 @@ describe("AlertsList", () => {
 		expect(html.match(/Acknowledge group/g)?.length).toBe(1);
 	});
 
-	// The click itself is not asserted here. renderToStaticMarkup cannot
-	// dispatch events and this package has no DOM renderer, so a test that
-	// mounted the list and then checked a callback it never triggered would
-	// assert nothing while reading as though it did.
+	// The click itself is not asserted here, and does not need to be.
+	// renderToStaticMarkup cannot dispatch events, so what this file pins is
+	// markup and nothing else.
 	//
 	// An earlier version of this comment claimed the ids the button sends were
 	// pinned in packages/types/src/alerts.test.ts. That was false: those tests
 	// pinned what a group CONTAINS, never what the button DOES with it, and a
 	// reviewer's mutation sending only members[0].id survived every test here.
-	// The expression now lives in groupMemberIds, which that file does pin.
-	// That fix is partial and measured as partial. Extracting the expression
-	// pins what groupMemberIds RETURNS, and a mutation truncating it now dies.
-	// A mutation replacing the call with `[group.members[0].id]` at this button
-	// still SURVIVES all 41 tests, because nothing here observes which
-	// expression the handler receives. The same gap, one level up.
+	// Extracting the expression into groupMemberIds closed half of that, since
+	// a mutation truncating the function itself now dies in that file, and left
+	// the other half open: a mutation replacing the CALL with
+	// `[group.members[0].id]` still survived, because nothing observed which
+	// expression the handler received.
 	//
-	// So the wiring is untested: that this button calls the handler at all,
-	// that it passes groupMemberIds(group) rather than a truncation, that it
-	// passes group.key, and the fan-out in useAcknowledgeAlerts. Closing any of
-	// them needs a DOM renderer in this package, which nothing here has.
+	// That half is closed now. AlertsView.dom.test.tsx mounts this list in a
+	// real DOM, clicks the button and asserts the whole argument pair, and the
+	// three mutations named above die there. See packages/dashboard-web/src/
+	// test/dom.ts for the renderer and why it is opt-in per file rather than a
+	// preload. Still uncovered: the fan-out in useAcknowledgeAlerts, which
+	// needs a query client rather than a renderer, tracked separately.
 
 	test("disables only the pending group's button", () => {
 		const alerts = [
