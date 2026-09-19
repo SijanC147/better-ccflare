@@ -24,12 +24,23 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 
 	/**
 	 * `mode` is `string` rather than the two literals this method branches on,
-	 * because that is what the `OAuthProvider` interface declares and what real
-	 * callers pass: `packages/oauth-flow/src/index.ts` hands over an account's
-	 * stored mode, which can be a legacy value such as `"max"`. Any value other
-	 * than `"console"` selects the claude.ai base URL, which is the behaviour
-	 * `handlers/__tests__/oauth-features.test.ts` pins for `"max"`. The narrower
-	 * literal union contradicted both the interface and that caller.
+	 * because that is what the `OAuthProvider` interface declares
+	 * (`packages/providers/src/types.ts:163`) and what `OAuthProviderConfig.mode`
+	 * receives (`:159`).
+	 *
+	 * Every typed caller is narrower than that, so none of them is the reason:
+	 * `BeginOptions.mode` and `OAuthSession.mode` are both
+	 * `"console" | "claude-oauth"`. The reason is the storage underneath them.
+	 * `oauth_sessions.mode` is an unconstrained `TEXT NOT NULL`
+	 * (`packages/database/src/migrations.ts:240`) and the repository reads it
+	 * into that narrow type without checking, so a row written by an older build
+	 * and holding a legacy value such as `"max"` reaches this method at runtime
+	 * while every signature between here and the database says it cannot.
+	 *
+	 * Any value other than `"console"` selects the claude.ai base URL, which is
+	 * the behaviour `handlers/__tests__/oauth-features.test.ts:224` pins for
+	 * `"max"`. Do not re-narrow this parameter to match `BeginOptions`: the
+	 * callers would all still compile and the legacy row would still arrive.
 	 */
 	getOAuthConfig(mode: string = "console"): OAuthProviderConfig {
 		const baseUrl =
