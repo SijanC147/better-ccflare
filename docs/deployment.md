@@ -379,24 +379,48 @@ the host, it is owned by your host user, and the server refuses to read it:
 
 ```
 Refusing the config path /config/better-ccflare.json: it is a regular file owned by uid 501,
-not by us, so another local user chose its contents.
+not by us (uid 999), so another local user chose its contents.
 ```
 
-That refusal is deliberate. From inside the container a config owned by a different uid is a
+**That message names both uids, which is the number you need.** `useradd -r` does not assign a
+predictable uid: measured on `debian:bookworm-slim`, `useradd -r better-ccflare` yields **999**,
+not the 1000 most people guess. Read the uid out of the log rather than guessing it, or pin it in
+the Dockerfile with `useradd -r -u 999`.
+
+The refusal is deliberate. From inside the container, a config owned by a different uid is a
 config another user controls, and such a config supplies `local_control_secret`, which
 authenticates its author against the local control endpoint, along with `pg_host` and
-`pg_password`. The server starts on defaults instead, and `local_control_secret` is regenerated
-on every restart, which presents as clients intermittently failing to authenticate.
+`pg_password`. The server starts on defaults instead and regenerates `local_control_secret`,
+which means an external client works until the next restart and then fails, while the CLI, being
+a separate process with its own ephemeral secret, fails on every call.
 
-Two ways to avoid it:
+**The fix is to chown both mounted directories on the host**, before starting:
 
-- **Let the server create the file.** Bind-mount an empty directory owned by the container's
-  uid and gid and start the server; it writes the config itself at 0600.
-- **Or chown what you seed.** Find the uid and gid the image assigns to `better-ccflare`, then
-  `sudo chown -R <uid>:<gid> ./config ./data` on the host before starting.
+```sh
+sudo chown -R 999:999 ./config ./data
+```
 
-A Docker **named volume** rather than a host bind mount avoids this entirely, because the image's
-`chown` applies to it on first use.
+`-R`, and both paths, for a measured reason. Chowning only the file leaves the **directory**
+host-owned, and the server then loads and saves but cannot write atomically: every save logs
+`Could not replace the config file atomically: EACCES` and falls back to an in-place write.
+Chowning both is silent and clean.
+
+Bind-mounting an **empty** directory and letting the server create the config works too, but only
+if that directory is already owned by the container's uid. An empty directory owned by your host
+user fails the same way: measured, the config is never created and each save logs
+`Failed to save config file: EACCES`. The new refusal message does not appear, because there is
+no file to refuse.
+
+A Docker **named volume** rather than a host bind mount avoids all of this, because the image's
+`chown` applies to it on first use. (That and the shadowing above are Docker's documented
+behaviour rather than something measured here.)
+
+**Do not `chown` the config to root as a workaround.** It appears to fix the refusal and is worse
+than the refusal. At 0644 root-owned the config loads, but `restrictConfigFile` then takes
+`EPERM` on its `chmod`, which is only a warning, so the file stays **0644 for the container's
+lifetime** while holding `pg_password`, `local_control_secret` and `upstream_maintainer_token`.
+At 0600 root-owned the server cannot open it at all and reports `Failed to read config file:
+EACCES`, with none of the guidance above. Saves never persist in either case.
 
 Note that `chmod` is frequently a no-op on bind mounts from a macOS or Windows host, so the
 server may also report that it could not bring the config to 0600. The config holds
