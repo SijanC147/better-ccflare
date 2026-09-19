@@ -298,7 +298,11 @@ describe("config file permissions", () => {
 		const victim = mkdtempSync(join(tmpdir(), "better-ccflare-victim-"));
 		try {
 			mkdirSync(shared);
-			chmodSync(shared, 0o1777);
+			// 0777 and not 1777, deliberately. Without the sticky bit nobody is
+			// stopped from unlinking our link and planting theirs, so this stays the
+			// refusal case. Sticky plus a link of ours is trusted now (SB23-2267)
+			// and would make this fixture pass through as trusted instead.
+			chmodSync(shared, 0o777);
 			const unrelated = join(victim, "some-binary");
 			writeFileSync(unrelated, "#!/bin/sh\n");
 			chmodSync(unrelated, 0o755);
@@ -357,7 +361,9 @@ describe("config file permissions", () => {
 		const attacker = join(tmpdir(), `better-ccflare-att-${process.pid}.json`);
 		try {
 			mkdirSync(shared);
-			chmodSync(shared, 0o1777);
+			// 0777, not 1777: see the write case above. A sticky directory plus a
+			// link of ours is trusted, and the link here is the test process's own.
+			chmodSync(shared, 0o777);
 			writeFileSync(
 				attacker,
 				JSON.stringify({ local_control_secret: "ATTACKER-CHOSEN" }),
@@ -480,6 +486,9 @@ describe("config file permissions", () => {
 		const shared = join(tmpdir(), `better-ccflare-land-${process.pid}`);
 		try {
 			mkdirSync(shared);
+			// 1777 and it stays 1777. The landing path does not exist, and the
+			// sticky exception requires an entry of ours to already be there, so this
+			// is the fixture that kills a rule treating an absent entry as ours.
 			chmodSync(shared, 0o1777);
 			const landing = join(shared, "landed.json");
 			const link = join(home, "config.json");
@@ -529,7 +538,10 @@ describe("config file permissions", () => {
 		const shared = join(tmpdir(), `better-ccflare-mid-${process.pid}`);
 		try {
 			mkdirSync(shared);
-			chmodSync(shared, 0o1777);
+			// 0777, not 1777: the intermediate link is created by the test process,
+			// so under the sticky exception it would be ours and trusted, and this
+			// fixture would stop exercising the per-hop refusal.
+			chmodSync(shared, 0o777);
 			const victim = join(priv, "authorized_keys");
 			writeFileSync(victim, "ssh-ed25519 AAAA-REAL-KEY user@host\n");
 			const mid = join(shared, "mid.json");

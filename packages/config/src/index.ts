@@ -729,7 +729,7 @@ export class Config extends EventEmitter {
 		for (let hop = 0; hop < 40; hop++) {
 			// One message per refusal, naming the hop that failed, rather than one
 			// per directory examined: the predicate itself stays silent.
-			if (!this.directoryIsTrusted(dirname(current))) {
+			if (!this.entryIsTrusted(current)) {
 				log.error(
 					`Refusing the config path ${this.configPath}: ${current} sits in a directory owned by another user or writable by other local users, so it cannot be trusted with secrets. Move the config somewhere only you can write, or replace the link with a regular file.`,
 				);
@@ -801,8 +801,15 @@ export class Config extends EventEmitter {
 	}
 
 	/**
-	 * A directory is trusted when it is ours (or root's, so a root-owned /etc
-	 * stays legitimate) and not writable by group or other.
+	 * A path is trusted when its containing directory is ours (or root's, so a
+	 * root-owned /etc stays legitimate) and either that directory is not writable
+	 * by group or other, or it is sticky and an entry of ours already exists at
+	 * this exact path.
+	 *
+	 * Takes the entry rather than its directory, and derives the directory here.
+	 * Both callers previously passed dirname() of the path they cared about, and
+	 * the sticky exception needs that path: a signature taking a directory cannot
+	 * express the check, and one taking an entry cannot omit it.
 	 *
 	 * Ownership as well as mode, because statSync follows links: the mode alone is
 	 * the mode of whatever the component points at, so an attacker who can write a
@@ -810,15 +817,54 @@ export class Config extends EventEmitter {
 	 * directory of their own and the mode test passes on their behalf. Measured
 	 * with /tmp/ccflare/config.json, the dirname mode read 700 and the link was
 	 * followed.
+	 *
+	 * The sticky exception exists because os.tmpdir() is one of the validator's
+	 * allowed base paths and on Linux that is /tmp at 1777, where the old rule
+	 * refused a legitimate config outright: not only its writes, but its reads,
+	 * so the process ran on defaults (SB23-2267). In a sticky directory only the
+	 * entry's owner, the directory's owner and root may unlink or rename an entry,
+	 * and only root may chown a symlink, so an entry whose uid is ours was created
+	 * by us and cannot have been substituted by another local user. The obvious
+	 * objection does not hold: an attacker who plants a link before ours exists
+	 * owns that link, and the uid comparison rejects it.
+	 *
+	 * Argued from POSIX, not measured against a second local account, which this
+	 * host does not have. The same rung as the ownership check in
+	 * replaceUntrustedLink(), which shipped on the same argument in PR #145. What
+	 * the tests do reach is the comparison itself, through a root-owned sticky
+	 * directory (/tmp is uid 0 and 1777 on both macOS and Linux) so that a stubbed
+	 * uid is refused by this line rather than by the ownership test above it.
 	 */
-	private directoryIsTrusted(dir: string): boolean {
+	private entryIsTrusted(entry: string): boolean {
+		let info: ReturnType<typeof statSync>;
 		try {
-			const info = statSync(dir);
-			const uid = process.getuid?.();
-			const ownedByUs = uid === undefined || info.uid === uid || info.uid === 0;
-			return ownedByUs && (info.mode & 0o022) === 0;
+			info = statSync(dirname(entry));
 		} catch {
 			// Silent: the walk reports one message naming the hop that failed.
+			return false;
+		}
+		const uid = process.getuid?.();
+		const ownedByUs = uid === undefined || info.uid === uid || info.uid === 0;
+		if (!ownedByUs) return false;
+		if ((info.mode & 0o022) === 0) return true;
+		// Sticky, so removal and renaming are restricted to the entry's owner, the
+		// directory's owner and root (S_ISVTX, 0o1000).
+		if ((info.mode & 0o1000) === 0) return false;
+		// Ownership cannot be established without a uid to compare, so refuse.
+		// Unreachable from the walk, which returns early on win32, but the sticky
+		// exception is the one branch where an unknown uid would widen trust
+		// rather than narrow it, so it does not rely on the caller.
+		if (uid === undefined) return false;
+		try {
+			// lstat, not stat: the entry's own ownership is the claim, and a link
+			// here would substitute the uid of whatever it points at, which is the
+			// attacker's choice.
+			return lstatSync(entry).uid === uid;
+		} catch {
+			// Nothing there. A sticky directory says who may remove an entry, never
+			// who may create one, so an absent entry is the attacker's to plant and
+			// there is no ownership to test. Refuse; the non-sticky rule above is
+			// what a create in a shared directory still has to satisfy.
 			return false;
 		}
 	}
@@ -967,7 +1013,8 @@ export class Config extends EventEmitter {
 		// A link that belongs to us was created by us, because only root may chown
 		// a symlink, so it is the operator's own arrangement and destroying it is
 		// not this branch's business. That matters more than it looks:
-		// directoryIsTrusted() rejects any group or other writable directory, and
+		// entryIsTrusted() rejects any group or other writable directory that is not
+		// sticky, and
 		// on a distribution with umask 002 and per-user private groups mkdir
 		// ~/.config produces 0775 owned by the user and the user's own group. That
 		// directory is effectively private and is rejected anyway, and a dotfiles
@@ -989,7 +1036,7 @@ export class Config extends EventEmitter {
 		// refusing is the safe direction.
 		const uid = process.getuid?.();
 		if (uid === undefined || link.uid === uid) return false;
-		if (this.directoryIsTrusted(dirname(this.configPath))) return false;
+		if (this.entryIsTrusted(this.configPath)) return false;
 		if (!this.saveByRename(this.configPath, content, false)) {
 			log.error(
 				`Config not saved: ${this.configPath} is an untrusted symlink and it could not be replaced`,
