@@ -1398,9 +1398,13 @@ describe.skipIf(!livePgAvailable)(
 					["agent-b", "agent-c"],
 					"claude-opus-4",
 				);
-				expect(Object.keys(await dbOps.getAllAgentPreferences())).toHaveLength(
-					3,
-				);
+				// getAllAgentPreferences returns an Array on both dialects, so the
+				// assertion is on its length. Object.keys() was the previous form
+				// and held only on SQLite: the bun SQL driver returns an array
+				// carrying four extra enumerable own properties (count, command,
+				// lastInsertRowid, affectedRows), so Object.keys() read 7 for the
+				// same 3 rows on PostgreSQL.
+				expect(await dbOps.getAllAgentPreferences()).toHaveLength(3);
 				expect(await dbOps.deleteAgentPreference("agent-a")).toBe(true);
 			});
 		});
@@ -1445,8 +1449,24 @@ describe.skipIf(!livePgAvailable)(
 					rateLimitedUntil: now + HOUR,
 				});
 
+				// clearExpiredRateLimits returns ClearedRateLimit[], never a count.
+				// The previous form asserted toBe(1) against that array, so it
+				// could never pass on either dialect once the live harness ran.
+				// .map() also strips the four extra enumerable own properties the
+				// bun SQL driver hangs off its result arrays, which toEqual would
+				// otherwise compare.
 				const cleared = await dbOps.clearExpiredRateLimits(now);
-				expect(cleared).toBe(1);
+				expect(cleared.map((row) => row.id)).toEqual(["acct-expired"]);
+
+				// The UPDATE arm is the reason this test exists: its PG branch
+				// reads `count` where the SQLite branch reads `changes`. Assert
+				// the write actually landed, not just that the SELECT found the row.
+				const expired = await adapter.get<{
+					rate_limited_until: number | null;
+				}>("SELECT rate_limited_until FROM accounts WHERE id = ?", [
+					"acct-expired",
+				]);
+				expect(expired?.rate_limited_until).toBeNull();
 
 				const still = await adapter.get<{ rate_limited_until: number | null }>(
 					"SELECT rate_limited_until FROM accounts WHERE id = ?",
