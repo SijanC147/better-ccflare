@@ -23,10 +23,16 @@
  *   Bun documents a registrator for, so wiring it costs one import rather than
  *   a hand-written global shim.
  *
- * Usage: `import { mount, click } from "../../test/dom";` in a test file. Every
- * existing test keeps its `renderToStaticMarkup` shape and is untouched, so
- * this is opt-in per file rather than a preload, and no existing test file was
- * edited to land it.
+ * Usage: `import { mount, click } from "../../test/dom";` in a test file. This
+ * is opt-in per file rather than a preload, so every existing test keeps its
+ * `renderToStaticMarkup` shape and no existing test's assertions changed.
+ *
+ * One existing file was edited and it is worth naming, because "nothing was
+ * touched" would be the easier sentence and would be false:
+ * `AlertsView.test.tsx` carried a long comment explaining that the click path
+ * could not be tested here. Its assertions are unchanged; only that comment
+ * moved, since leaving it would have sent the next reader looking for a gap
+ * that had been closed.
  *
  * Import order inside a test file does not matter, which is worth stating
  * because it looks as though it should. ES module imports are hoisted, so
