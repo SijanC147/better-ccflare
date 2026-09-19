@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
+	existsSync,
 	linkSync,
 	lstatSync,
 	mkdtempSync,
@@ -55,19 +57,67 @@ import { Config } from "./index";
  */
 
 /**
- * A sticky directory inside an allowed base path, owned by this process.
+ * A sticky directory inside an allowed base path, with entry names scoped to this
+ * run and a cleanup that only removes what it made.
  *
- * Explicit chmod, never mkdtemp's mode: mkdtemp gives 0700, which is trusted by
- * the ordinary rule, so every assertion below would pass against reverted
- * source. Asserted after the chmod for the same reason.
+ * Two routes, because no single one works on both platforms, and that is measured
+ * rather than assumed. The first version of this helper did `mkdtemp` then
+ * `chmodSync(dir, 0o1777)` and asserted the sticky bit, which passed on macOS and
+ * failed all three tests on Linux CI at the assertion. Probed on both:
+ *
+ *   macOS   chmodSync(dir, 0o1777) -> 1777
+ *   Linux   chmodSync(dir, 0o1777) -> 0777, S_ISVTX silently dropped
+ *
+ * It is Bun, not the kernel or the filesystem. In the same container, coreutils
+ * `chmod 1777` yields `drwxrwxrwt` while `chmodSync` yields 0777, for an octal
+ * literal, the same value in decimal, and the string "1777" alike, and as root, so
+ * privilege is not the cause either. Reading it back is fine: `statSync("/tmp")`
+ * reports 1777 on Linux, which is why the feature itself works there and only this
+ * fixture did not. Tracked as SB23-2319.
+ *
+ * So: try to make one, and if the sticky bit did not take, use the base directory
+ * itself, which Linux supplies already sticky and root-owned as /tmp. macOS cannot
+ * take that route, because there os.tmpdir() is a private /var/folders directory at
+ * 0700. Whichever route ran, both properties are asserted at the end, so there is
+ * no platform on which these tests pass without a sticky directory.
+ *
+ * The cleanup contract is the reason this returns an object rather than a path. On
+ * the Linux route the directory IS os.tmpdir(), so a test doing
+ * `rmSync(dir, { recursive: true })` in its finally would delete the whole of /tmp.
+ * Entries are therefore handed out by `entry()`, removed individually, and the
+ * recursive removal is applied only to a directory this helper created.
  */
-function stickyDir(label: string): string {
-	const dir = mkdtempSync(join(tmpdir(), `better-ccflare-${label}-`));
-	chmodSync(dir, 0o1777);
+function stickyFixture(label: string): {
+	dir: string;
+	entry: (name: string) => string;
+	cleanup: () => void;
+} {
+	const token = `better-ccflare-${label}-${process.pid}-${randomUUID().slice(0, 8)}`;
+	const made = mkdtempSync(join(tmpdir(), `${token}-dir-`));
+	chmodSync(made, 0o1777);
+	const createdByUs = (statSync(made).mode & 0o1000) !== 0;
+	if (!createdByUs) rmSync(made, { recursive: true, force: true });
+	const dir = createdByUs ? made : tmpdir();
+
 	const info = statSync(dir);
 	expect(info.mode & 0o1000).not.toBe(0);
 	expect(info.mode & 0o022).not.toBe(0);
-	return dir;
+
+	const entries: string[] = [];
+	return {
+		dir,
+		entry(name: string): string {
+			const path = join(dir, `${token}-${name}`);
+			entries.push(path);
+			return path;
+		},
+		cleanup(): void {
+			// Individually, and lstat-based, so a symlink is unlinked rather than
+			// followed. Never recursive on a directory we did not create.
+			for (const path of entries) rmSync(path, { force: true });
+			if (createdByUs) rmSync(made, { recursive: true, force: true });
+		},
+	};
 }
 
 describe("a config symlink in a sticky directory", () => {
@@ -76,10 +126,10 @@ describe("a config symlink in a sticky directory", () => {
 		// directory nobody else could have put it there or replaced it. Before
 		// this rule the whole config was refused: the read returned nothing and
 		// the process ran on defaults with a fresh local_control_secret.
-		const shared = stickyDir("sticky-ours");
+		const fx = stickyFixture("sticky-ours");
 		const target = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-tgt-"));
 		try {
-			const link = join(shared, "config.json");
+			const link = fx.entry("config.json");
 			const real = join(target, "config.json");
 			writeFileSync(real, JSON.stringify({ lb_strategy: "session" }), {
 				mode: 0o600,
@@ -98,7 +148,7 @@ describe("a config symlink in a sticky directory", () => {
 			expect(lstatSync(link).isSymbolicLink()).toBe(true);
 			expect(statSync(real).mode & 0o777).toBe(0o600);
 		} finally {
-			rmSync(shared, { recursive: true, force: true });
+			fx.cleanup();
 			rmSync(target, { recursive: true, force: true });
 		}
 	});
@@ -108,20 +158,23 @@ describe("a config symlink in a sticky directory", () => {
 		// could be compared, and the sticky bit does not stop another user
 		// creating one. A rule that read an absent entry as ours would write the
 		// secrets to a name an attacker can claim first.
-		const shared = stickyDir("sticky-land");
+		const fx = stickyFixture("sticky-land");
 		const home = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-home-"));
 		try {
-			const landing = join(shared, "landed.json");
+			const landing = fx.entry("landed.json");
 			const link = join(home, "config.json");
 			symlinkSync(landing, link);
-			expect(dirname(landing)).toBe(shared);
+			expect(dirname(landing)).toBe(fx.dir);
+			// The name must be absent, which is the whole premise. A leftover from an
+			// earlier run would make this pass for the wrong reason.
+			expect(existsSync(landing)).toBe(false);
 
 			const config = new Config(link);
 			config.set("pg_password", "hunter2");
 
 			expect(() => statSync(landing)).toThrow();
 		} finally {
-			rmSync(shared, { recursive: true, force: true });
+			fx.cleanup();
 			rmSync(home, { recursive: true, force: true });
 		}
 	});
@@ -141,7 +194,7 @@ describe("a config symlink in a sticky directory", () => {
 		// linkSync stands in for the plant: this process owns the victim, so the
 		// entry reads as ours exactly as an attacker's hardlink to a file of ours
 		// would, and nlink is what tells them apart.
-		const shared = stickyDir("sticky-hardlink");
+		const fx = stickyFixture("sticky-hardlink");
 		const other = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-oth-"));
 		const home = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-hhome-"));
 		try {
@@ -153,7 +206,7 @@ describe("a config symlink in a sticky directory", () => {
 				}),
 			);
 			chmodSync(victim, 0o755);
-			const landing = join(shared, "landed.json");
+			const landing = fx.entry("landed.json");
 			linkSync(victim, landing);
 			// The plant reads as ours, which is the whole point: only nlink separates
 			// it from a config file we made.
@@ -172,7 +225,7 @@ describe("a config symlink in a sticky directory", () => {
 			expect(statSync(victim).mode & 0o777).toBe(0o755);
 			expect(readFileSync(victim, "utf8")).not.toContain("hunter2");
 		} finally {
-			rmSync(shared, { recursive: true, force: true });
+			fx.cleanup();
 			rmSync(other, { recursive: true, force: true });
 			rmSync(home, { recursive: true, force: true });
 		}
