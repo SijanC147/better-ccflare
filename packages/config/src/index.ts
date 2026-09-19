@@ -823,10 +823,15 @@ export class Config extends EventEmitter {
 	 * refused a legitimate config outright: not only its writes, but its reads,
 	 * so the process ran on defaults (SB23-2267). In a sticky directory only the
 	 * entry's owner, the directory's owner and root may unlink or rename an entry,
-	 * and only root may chown a symlink, so an entry whose uid is ours was created
-	 * by us and cannot have been substituted by another local user. The obvious
-	 * objection does not hold: an attacker who plants a link before ours exists
-	 * owns that link, and the uid comparison rejects it.
+	 * and only root may chown a symlink, so another local user cannot substitute a
+	 * single-named entry of ours. The obvious objection does not hold: an attacker
+	 * who plants a link before ours exists owns that link, and the uid comparison
+	 * rejects it.
+	 *
+	 * "Single-named" is load-bearing and was missing from the first version of this
+	 * check. A uid of ours does not by itself mean we created the entry, because a
+	 * hardlink carries the inode's owner to a new name; the nlink conjunct below is
+	 * what makes the sentence above true. Found by review, measured, not argued.
 	 *
 	 * Argued from POSIX, not measured against a second local account, which this
 	 * host does not have. The same rung as the ownership check in
@@ -859,7 +864,27 @@ export class Config extends EventEmitter {
 			// lstat, not stat: the entry's own ownership is the claim, and a link
 			// here would substitute the uid of whatever it points at, which is the
 			// attacker's choice.
-			return lstatSync(entry).uid === uid;
+			const own = lstatSync(entry);
+			// A uid of ours does NOT mean we created this entry, and the first
+			// version of this check said it did. A hardlink carries the inode's
+			// owner to a new name, so another local user can manufacture an entry
+			// that lstats as ours: measured on macOS, which has no
+			// fs.protected_hardlinks, `ln /etc/hosts ./hosts-hl` as an ordinary user
+			// succeeds and the new entry lstats as uid 0. Pointed at a regular file
+			// of ours it is worse than it sounds, because the trust decision gates
+			// the READ as well: the file's contents are adopted as config, which is
+			// a local_control_secret injection, and restrictConfigFile() then
+			// chmods it to 0600 through the link.
+			//
+			// nlink, not a symlink test. Every entry we would legitimately trust
+			// here has exactly one name: a symlink of ours, or a regular config
+			// file. A planted hardlink has two, and the planter cannot get it back
+			// to one, because the name they would have to remove is ours and lives
+			// outside this directory. On Linux the same conjunct also covers a
+			// hardlink to one of our symlinks, which is what an attacker gets on a
+			// host running fs.protected_hardlinks=0.
+			if (own.nlink !== 1) return false;
+			return own.uid === uid;
 		} catch {
 			// Nothing there. A sticky directory says who may remove an entry, never
 			// who may create one, so an absent entry is the attacker's to plant and

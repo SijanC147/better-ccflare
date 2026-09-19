@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	chmodSync,
+	linkSync,
 	lstatSync,
 	mkdtempSync,
 	readFileSync,
@@ -29,22 +30,28 @@ import { Config } from "./index";
  * argument at the same rung as the ownership check PR #145 shipped. Disclosed
  * rather than counted.
  *
- * One mutation survives here and is disclosed rather than buried: deleting the
- * `lstatSync(entry).uid === uid` comparison and returning true. Killing it needs
- * a sticky directory that passes the directory-ownership test while an entry
- * inside it reads as another user's, and neither half is reachable from a test on
- * this host. A test-created sticky directory is owned by the test process, so
- * stubbing `process.getuid` to a stranger, the technique
- * config-untrusted-link-replace.test.ts uses, is refused by the
- * directory-ownership test one line earlier and never evaluates the comparison.
- * The one root-owned sticky directory, /tmp, cannot be used either: Config's
- * constructor calls validatePathOrThrow with hardcoded options, and on macOS
- * os.tmpdir() is a private /var/folders path, so /tmp is rejected as outside the
- * allowed base directories before any trust check runs. Measured, not argued:
- * `Path outside allowed directories in config file: /tmp/...`. On Linux
- * os.tmpdir() IS /tmp, so the fixture exists there and not here, and a test that
- * passes only in CI is one this lane cannot verify. Filed as the follow-up that
- * SB23-2267's "second account first" precondition was really asking for.
+ * One mutation still survives: deleting the `uid === uid` comparison while keeping
+ * the nlink conjunct. Killing it needs a sticky directory that passes the
+ * directory-ownership test while an entry inside it reads as another user's, and a
+ * test-created sticky directory is owned by the test process, so stubbing
+ * `process.getuid` to a stranger is refused one line earlier by the
+ * directory-ownership test and never reaches the comparison.
+ *
+ * An earlier version of this header said that was the end of it, because the one
+ * root-owned sticky directory, /tmp, is rejected by validatePathOrThrow. Review
+ * falsified that: the validator builds its default allowed base paths from
+ * `tmpdir()` (packages/security/src/path-validator.ts:267-276), so TMPDIR pointed
+ * at /private/tmp, which is uid 0 and mode 1777, makes a root-owned sticky
+ * directory an allowed base and the stub then reaches the comparison. Measured
+ * here, and it is still not shippable: `cachedDefaultAllowedPaths` is memoised on
+ * first use and the only exported reset, `clearValidationCache()`, clears the
+ * results cache and not that one. So the fixture works when its file runs first
+ * and fails inside the full suite, measured as `Path outside allowed directories
+ * in config file: /private/tmp/...` with the allowed list still naming
+ * /var/folders. Giving the validator an exported way to reset it is a change to a
+ * security module and is SB23-2316, not this commit.
+ *
+ * The nlink conjunct is separately covered, by the hardlink test below.
  */
 
 /**
@@ -115,6 +122,58 @@ describe("a config symlink in a sticky directory", () => {
 			expect(() => statSync(landing)).toThrow();
 		} finally {
 			rmSync(shared, { recursive: true, force: true });
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("is refused when the entry is a hardlink, whatever uid it reports", () => {
+		// A uid of ours does not mean we created the entry. A hardlink carries the
+		// inode's owner to a new name, so another local user can manufacture an
+		// entry that lstats as ours. Measured on macOS, which has no
+		// fs.protected_hardlinks: `ln /etc/hosts ./hosts-hl` as an ordinary user
+		// succeeds and the new entry lstats as uid 0.
+		//
+		// The damage is not only a write. The trust decision gates the READ, so the
+		// victim file's contents are adopted as config, and an attacker who can
+		// influence any file of ours chooses local_control_secret. restrictConfigFile()
+		// then chmods the victim to 0600 through the link.
+		//
+		// linkSync stands in for the plant: this process owns the victim, so the
+		// entry reads as ours exactly as an attacker's hardlink to a file of ours
+		// would, and nlink is what tells them apart.
+		const shared = stickyDir("sticky-hardlink");
+		const other = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-oth-"));
+		const home = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-hhome-"));
+		try {
+			const victim = join(other, "some-script.sh");
+			writeFileSync(
+				victim,
+				JSON.stringify({
+					local_control_secret: "CONTENT-OF-AN-UNRELATED-FILE",
+				}),
+			);
+			chmodSync(victim, 0o755);
+			const landing = join(shared, "landed.json");
+			linkSync(victim, landing);
+			// The plant reads as ours, which is the whole point: only nlink separates
+			// it from a config file we made.
+			expect(lstatSync(landing).uid).toBe(process.getuid?.() ?? -1);
+			expect(lstatSync(landing).nlink).toBe(2);
+
+			const link = join(home, "config.json");
+			symlinkSync(landing, link);
+
+			const config = new Config(link);
+			config.set("pg_password", "hunter2");
+
+			// Not adopted as config.
+			expect(config.get("local_control_secret")).toBeUndefined();
+			// Not chmodded through the link, and not written through it.
+			expect(statSync(victim).mode & 0o777).toBe(0o755);
+			expect(readFileSync(victim, "utf8")).not.toContain("hunter2");
+		} finally {
+			rmSync(shared, { recursive: true, force: true });
+			rmSync(other, { recursive: true, force: true });
 			rmSync(home, { recursive: true, force: true });
 		}
 	});
