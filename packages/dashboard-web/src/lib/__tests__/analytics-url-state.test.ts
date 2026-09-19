@@ -34,6 +34,7 @@ describe("encodeAnalyticsState", () => {
 				accounts: ["a", "b"],
 				models: ["m1"],
 				apiKeys: ["k1"],
+				projects: [],
 				status: "error",
 			},
 		});

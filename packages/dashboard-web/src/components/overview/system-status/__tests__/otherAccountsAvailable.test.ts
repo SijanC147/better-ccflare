@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { otherAccountsAvailable } from "../otherAccountsAvailable";
 
-type Account = Parameters<typeof otherAccountsAvailable>[0][number];
+// The parameter is nullable, so index it through NonNullable: indexing the
+// union directly is TS2537, no matching index signature for type 'number'.
+type Account = NonNullable<
+	Parameters<typeof otherAccountsAvailable>[0]
+>[number];
 
 const baseAccount: Account = {
 	id: "acc-1",
