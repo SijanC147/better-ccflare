@@ -4,9 +4,41 @@ import type { SQL } from "bun";
 /**
  * Convert SQLite-style `?` and `?N` placeholders to PostgreSQL-style `$N` placeholders.
  * Handles both `?` (sequential) and `?1`, `?2` (positional) styles.
- * Skips placeholders inside single-quoted string literals.
+ *
+ * Two regions are copied through untouched:
+ *
+ *   1. Single-quoted string literals, so a `?` a caller meant as data is not
+ *      renumbered. Escaped quotes (`''`) fall out of the toggle naturally: the
+ *      first closes the literal and the second reopens it.
+ *   2. `--` line comments, up to and including the end of the line.
+ *   3. `/* *\/` block comments, up to and including the closing marker.
+ *
+ * Case 2 is not cosmetic. Before it existed, one apostrophe in a comment left
+ * the scanner believing a string literal was open, so every `?` after it stayed
+ * a literal `?` in the statement handed to PostgreSQL. Measured 2026-09-18
+ * against PostgreSQL 18 on a comment reading
+ * `-- The one column with no DEFAULT 0, so AVG's NULL-skipping`: four live
+ * cases returned HTTP 500 with `syntax error at or near "AND"`, which names
+ * neither the apostrophe nor the `?`. A `?` inside a comment was renumbered the
+ * other way round, shifting every following `$N` by one. Both shapes are also
+ * gated statically in
+ * `packages/http-api/src/__tests__/pg-live-queries.test.ts`; this parser is
+ * what removes them rather than reporting them.
+ *
+ * SQLite never sees the converted form, so no SQLite test can observe any of
+ * this. Exported for that reason: the unit tests in
+ * `__tests__/bun-sql-adapter-convert-placeholders.test.ts` call it directly.
+ *
+ * Block comments are skipped for the same reason as line comments: an
+ * apostrophe or a `?` inside one reproduces both defects exactly. No statement
+ * in this repo uses a block comment today, so this is closing the class rather
+ * than fixing a live site. It is deliberately NOT mirrored by a static gate:
+ * measured 2026-09-19, a `/*`-plus-apostrophe regex over the same 96 scanned
+ * files reports 9 hits and every one is an ordinary TypeScript JSDoc line. A
+ * static gate cannot tell a doc comment from SQL; this parser only ever sees
+ * SQL, so it can.
  */
-function convertPlaceholders(sql: string): string {
+export function convertPlaceholders(sql: string): string {
 	let result = "";
 	let paramIndex = 0;
 	let inString = false;
@@ -23,6 +55,33 @@ function convertPlaceholders(sql: string): string {
 
 		if (inString) {
 			result += ch;
+			continue;
+		}
+
+		// Copy a `--` line comment through verbatim. This runs only outside a
+		// string literal, so a legitimate `'--'` operand is unaffected: the
+		// inString branch above has already consumed it.
+		if (ch === "-" && sql[i + 1] === "-") {
+			const nl = sql.indexOf("\n", i);
+			const end = nl === -1 ? sql.length : nl;
+			result += sql.slice(i, end);
+			i = end - 1;
+			continue;
+		}
+
+		// Copy a `/* */` block comment through verbatim. Like the `--` branch
+		// this runs only outside a string literal, so a `'/*'` operand is
+		// unaffected: the inString branch above has already consumed it.
+		//
+		// Nesting is not tracked. PostgreSQL nests block comments, so a nested
+		// one closes early here and leaves a stray `*/` in the statement. That
+		// fails loudly at Parse time rather than misnumbering a placeholder,
+		// which is the failure mode this function exists to prevent.
+		if (ch === "/" && sql[i + 1] === "*") {
+			const close = sql.indexOf("*/", i + 2);
+			const end = close === -1 ? sql.length : close + 2;
+			result += sql.slice(i, end);
+			i = end - 1;
 			continue;
 		}
 
