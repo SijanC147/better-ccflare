@@ -1,9 +1,55 @@
+import path from "node:path";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, NotFound } from "@better-ccflare/errors";
 import type { WorktreeRuleKind } from "@better-ccflare/types";
 import { errorResponse } from "../utils/http-error";
 
 const VALID_KINDS: WorktreeRuleKind[] = ["glob", "regex", "directory"];
+
+/**
+ * Validate a trimmed pattern against its kind. Returns the operator-facing
+ * message when the pattern is unusable, or null when it is fine.
+ *
+ * `directory` patterns must be absolute (SB23-2359). The resolver compiles a
+ * directory pattern through `path.resolve`, so a relative one completes
+ * against the proxy process's own working directory: the rule would then match
+ * whatever the operator's server happened to be started in, which nothing logs
+ * and no client can see. That is the same failure SB23-2355 removed on the
+ * request hint in #183.
+ *
+ * The rejection lives here rather than in the resolver's `compileRule` on
+ * purpose. `compileRule` skips a rule it cannot compile, with no log line and
+ * no error, so guarding there would turn a relative pattern into a rule that
+ * silently does not exist, which is worse than one that resolves oddly. Here
+ * the operator is told at the moment they ask for it.
+ *
+ * `~` is deliberately not expanded, for the reason the resolver gives: the
+ * proxy's home directory is not the operator's mental model of one, and
+ * expanding it would turn a refusal into a confident wrong answer.
+ */
+function validatePattern(
+	kind: WorktreeRuleKind,
+	trimmedPattern: string,
+): string | null {
+	if (kind === "regex") {
+		try {
+			new RegExp(trimmedPattern);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return `Invalid regex pattern: ${msg}`;
+		}
+		return null;
+	}
+
+	if (kind === "directory") {
+		if (!path.isAbsolute(trimmedPattern)) {
+			return `pattern must be an absolute path for a directory rule (received ${JSON.stringify(trimmedPattern)}); a relative pattern would resolve against the server's working directory`;
+		}
+		return null;
+	}
+
+	return null;
+}
 
 // ── GET /api/worktree-rules ────────────────────────────────────────────────
 
@@ -63,14 +109,12 @@ export function createWorktreeRuleCreateHandler(dbOps: DatabaseOperations) {
 
 			const trimmedPattern = pattern.trim();
 
-			// Validate regex compiles
-			if (kind === "regex") {
-				try {
-					new RegExp(trimmedPattern);
-				} catch (e) {
-					const msg = e instanceof Error ? e.message : String(e);
-					return errorResponse(BadRequest(`Invalid regex pattern: ${msg}`));
-				}
+			const patternError = validatePattern(
+				kind as WorktreeRuleKind,
+				trimmedPattern,
+			);
+			if (patternError !== null) {
+				return errorResponse(BadRequest(patternError));
 			}
 
 			const rule = await dbOps.createWorktreeRule({
@@ -137,17 +181,21 @@ export function createWorktreeRuleUpdateHandler(dbOps: DatabaseOperations) {
 						BadRequest("pattern must be a non-empty string"),
 					);
 				}
-				const trimmedPattern = pattern.trim();
+				fields.pattern = pattern.trim();
+			}
+
+			// Validate whenever either half of the (kind, pattern) pair moves, not
+			// only when a new pattern arrives. Changing kind alone re-interprets
+			// the pattern already on the row, so a PATCH of kind to "directory" or
+			// "regex" with no pattern would otherwise store a rule whose pattern
+			// was never checked against the kind now reading it.
+			if (kind !== undefined || pattern !== undefined) {
 				const resolvedKind = fields.kind ?? rule.kind;
-				if (resolvedKind === "regex") {
-					try {
-						new RegExp(trimmedPattern);
-					} catch (e) {
-						const msg = e instanceof Error ? e.message : String(e);
-						return errorResponse(BadRequest(`Invalid regex pattern: ${msg}`));
-					}
+				const resolvedPattern = fields.pattern ?? rule.pattern;
+				const patternError = validatePattern(resolvedKind, resolvedPattern);
+				if (patternError !== null) {
+					return errorResponse(BadRequest(patternError));
 				}
-				fields.pattern = trimmedPattern;
 			}
 
 			if (parent_project_id !== undefined) {
@@ -254,6 +302,19 @@ export function createWorktreeRuleTestHandler() {
 			}
 
 			const trimmedPattern = pattern.trim();
+
+			// Refuse a non-absolute directory pattern here too, so the tester
+			// cannot return a verdict for a pattern the create handler would
+			// reject. Scoped to `directory` on purpose: a pattern that fails to
+			// COMPILE is already reported per sample path below, which is the
+			// affordance the dashboard's tester renders, and this guard must not
+			// take that away from the regex and glob kinds.
+			if (kind === "directory") {
+				const patternError = validatePattern("directory", trimmedPattern);
+				if (patternError !== null) {
+					return errorResponse(BadRequest(patternError));
+				}
+			}
 
 			// Try to compile the matcher once; propagate error to every path if it fails
 			let compilationError: string | null = null;
