@@ -905,6 +905,19 @@ export class Config extends EventEmitter {
 	 * with two names. Measured during PR #169's review. Without nlink, that entry
 	 * is accepted as root-owned.
 	 *
+	 * Measured on Linux in a container, 2026-09-19, which SB23-2339 was filed to
+	 * settle because it was argued and not run (process uid, file uid, outcome):
+	 * 1001/1001 loads, 1001/501 refuses, 0/501 refuses. The middle case is the
+	 * documented compose layout in docs/deployment.md, which bind-mounts ./config
+	 * from the host, so a file the host operator seeds carries the host uid and the
+	 * image's chown does not reach it. Kept refusing rather than relaxed: from
+	 * inside the container that really is a config another uid controls, which is
+	 * the exposure this method exists for, so the remedy is documentation and a
+	 * message that names the case. The third case, a root process against a
+	 * service-account-owned config, is contemplated for writes at saveByRename and
+	 * already given up for links in replaceUntrustedLink, and whether refusing the
+	 * READ there is right is open as its own issue rather than settled here.
+	 *
 	 * Cost, disclosed: a config an operator deliberately hardlinked is refused,
 	 * even in a directory only they can write. The sticky branch in entryIsTrusted()
 	 * already made that trade, for the same reason and at the same rung.
@@ -937,7 +950,7 @@ export class Config extends EventEmitter {
 		const ownedByUs = uid === undefined || own.uid === uid || own.uid === 0;
 		if (!ownedByUs) {
 			log.error(
-				`Refusing the config path ${this.configPath}: it is a regular file owned by uid ${own.uid}, not by us, so another local user chose its contents. A config they control sets local_control_secret, which is an authentication bypass on the local control endpoint, along with pg_host and pg_password. Move the config somewhere only you can write, or remove that file so a fresh one is created.`,
+				`Refusing the config path ${this.configPath}: it is a regular file owned by uid ${own.uid}, not by us (uid ${uid}), so another local user chose its contents. A config they control sets local_control_secret, which is an authentication bypass on the local control endpoint, along with pg_host and pg_password. The process starts on defaults instead, and local_control_secret is regenerated on every restart, which presents as clients intermittently failing to authenticate. If this is a container with the config bind-mounted from the host, the file carries its host owner and the image's chown does not apply to a bind mount: chown it to uid ${uid} on the host, bind-mount an empty directory and let the server create the file, or use a named volume. See docs/deployment.md. Otherwise move the config somewhere only you can write, or remove that file so a fresh one is created.`,
 			);
 			return null;
 		}
