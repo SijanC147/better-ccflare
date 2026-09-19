@@ -232,9 +232,19 @@ export interface AnalyticsModelRow {
 	totalTokens: number;
 	/** Cost on requests with `billing_type = 'plan'`. Plan-billed requests usually record 0. */
 	planCostUsd: number;
-	/** Cost on requests whose `billing_type` is neither NULL nor `'plan'`. */
+	/**
+	 * Cost on requests whose `billing_type` is not `'plan'`. A NULL counts
+	 * here: the queries read `COALESCE(billing_type, 'api')`, matching the
+	 * column's schema default.
+	 *
+	 * A NULL arises because `UsageCollector` is not the only writer. The
+	 * terminal-error paths in `proxy-operations.ts` call `dbOps.saveRequest`
+	 * directly and pass no billing type, so the rows they write are NULL.
+	 * On the live host every NULL row is one of those: a 429 carrying no
+	 * cost and no tokens.
+	 */
 	apiCostUsd: number;
-	/** Every request's cost, including rows with a NULL `billing_type` that fall in neither bucket above. */
+	/** Every request's cost. `planCostUsd + apiCostUsd` equals this. */
 	totalCostUsd: number;
 	/**
 	 * Mean `total_tokens` of a **successful** request. Null when the model has
