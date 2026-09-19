@@ -207,6 +207,42 @@ describe("a regular file at the config path", () => {
 		}
 	});
 
+	it("is reported when only the GROUP can write it, not just other", () => {
+		// Kills a mask narrowed from 0o022 to 0o002. The case above uses 0666, which
+		// has both the group and the other write bit, so it survives that narrowing
+		// and says nothing about which bits are checked. Found by mutation, not by
+		// reading: the narrowed mask passed the whole file.
+		//
+		// A group-writable config is the realistic shape of the two. A shared group
+		// is how an operator gives a service account access, and 0660 is what a
+		// umask of 007 produces, so this is the mode a real install arrives at
+		// without anybody choosing it.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-regular-grp-"));
+		try {
+			const configPath = join(dir, "config.json");
+			writeFileSync(configPath, JSON.stringify({ lb_strategy: "session" }));
+			chmodSync(configPath, 0o660);
+			// The point of this fixture: group write set, other write clear.
+			expect(statSync(configPath).mode & 0o020).not.toBe(0);
+			expect(statSync(configPath).mode & 0o002).toBe(0);
+
+			const logs = captureLogs(() => {
+				const config = new Config(configPath);
+				expect(config.get("lb_strategy")).toBe("session");
+			});
+
+			expect(
+				logs.filter(
+					(event) =>
+						event.level === "ERROR" &&
+						event.msg.includes("its contents may not be yours"),
+				),
+			).toHaveLength(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("reports a writable config once per path, not once per reader", () => {
 		// getLocalControlSecret() re-reads the file itself, so without the module
 		// Set the same boot emits the line more than once and an operator learns to
@@ -220,7 +256,20 @@ describe("a regular file at the config path", () => {
 
 			const logs = captureLogs(() => {
 				const config = new Config(configPath);
+				// Put the mode back before the next reader. Without this the test
+				// proves nothing and a mutation deleting the dedupe survives it,
+				// which is how this fixture was found: restrictConfigFile() lands
+				// 0600 during construction, so on a mode-enforcing filesystem no
+				// later read can meet the condition again and the Set is never
+				// consulted twice.
+				//
+				// Restoring it models the case the Set exists for, a filesystem
+				// where chmod is a no-op so every read sees a writable file. Docker
+				// bind mounts from a macOS or Windows host, and FAT or exFAT, which
+				// this host cannot mount for a test.
+				chmodSync(configPath, 0o666);
 				config.getLocalControlSecret();
+				chmodSync(configPath, 0o666);
 				config.getLocalControlSecret();
 			});
 
