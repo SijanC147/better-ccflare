@@ -285,9 +285,13 @@ export class ResolverSnapshot {
 	/**
 	 * Resolve a raw path string to a project/worktree attribution.
 	 *
+	 * The input is an ABSOLUTE filesystem path by contract. A blank or
+	 * non-absolute value returns all-nulls and is never interpreted: see the
+	 * guard below for why.
+	 *
 	 * Algorithm:
-	 *  1. Normalize path (resolve, strip trailing slash, case-fold if needed).
-	 *     Return all-nulls for falsy/blank input.
+	 *  1. Reject blank and non-absolute input with all-nulls.
+	 *     Normalize the rest (resolve, strip trailing slash, case-fold if needed).
 	 *  2. Walk compiled rules (priority DESC). First match wins.
 	 *     → projectId = rule.parentProjectId ?? longestPrefix(normalized).id ?? null
 	 *     → worktreePath = normalized
@@ -303,7 +307,32 @@ export class ResolverSnapshot {
 			matchedProjectPath: null,
 		};
 
-		const normalized = normalizePath(raw, this.caseSensitive);
+		// A non-absolute hint is rejected rather than resolved (SB23-2355).
+		//
+		// normalizePath ends in path.resolve, which completes a relative value
+		// against `process.cwd()`. That is the proxy's own working directory,
+		// which no client can see and nothing logs, so the attribution a request
+		// received became a function of where the operator started the server.
+		// Measured 2026-09-19 against a copy of the live database with 787
+		// project rows: "~/Code/tab-genius" resolved to null under the Homebrew
+		// service's cwd of "/", and to da27e8303a860a36 under a cwd inside a
+		// worktree that had a projects row. Non-null, plausible, and wrong.
+		//
+		// That is the same failure isCatchAllPath exists to prevent, by a
+		// different door: a null announces that attribution did not happen,
+		// while a uniform id looks like a real answer. It is worse in one
+		// respect, because the id is whatever directory the server sits in
+		// rather than a recognisable catch-all.
+		//
+		// `~` is deliberately NOT expanded here. The proxy's home directory is
+		// not the client's, so expanding it would turn a null into a confident
+		// wrong answer, which is the defect this guard removes. The 19 configs
+		// on the maintainer's host that send a tilde (SB23-2268) are repaired
+		// client-side, by sending a real absolute cwd.
+		const trimmed = raw?.trim();
+		if (!trimmed || !path.isAbsolute(trimmed)) return nullResult;
+
+		const normalized = normalizePath(trimmed, this.caseSensitive);
 		if (normalized === null) return nullResult;
 
 		// Step 2 — worktree rules (priority DESC)
