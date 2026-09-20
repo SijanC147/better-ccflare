@@ -15,7 +15,7 @@ be **copied into the worktree and verified non-empty before spawning**.
 
 ## Standing rules, all of them load-bearing, several learned tonight
 
-- **`main` is protected and is at `fe2ca2d9`.** Open a PR from your branch; BTCF-000 merges. Never push to `refs/heads/main`.
+- **`main` is protected.** Open a PR from your branch; BTCF-000 merges. Never push to `refs/heads/main`. The sha main sits at belongs in your task brief, not here: a sha written into a standing file is stale within hours and was already wrong by 25 merges when this line was read on 2026-09-20.
 - **Never contact upstream.** No pushes, PRs, issues or comments to `tombii/better-ccflare` or any third party, whatever you find. Record it locally and stop.
 - **Never `git add -A`, and never `git reset --soft refs/heads/main`.** This bit a lane **twice in twenty minutes** tonight. The reset moves a ref and leaves your working tree alone, so a stale copy of a file that moved on main is staged as a clean, conflict-free **revert of a merged PR**, with green CI and nothing to notice. One lane reverted `#142` that way under a `feat(logger)` title, then nearly reverted all of `#143`. **Name your paths on every `git add`**: a named path cannot stage a file you never edited. If you must squash, use `git reset --soft $(git merge-base refs/heads/main HEAD)`.
 - **Name `origin/main`, never `refs/heads/main`, from inside a worktree.** `main` is checked out in the main checkout, so no worktree can fast-forward its own `refs/heads/main` and yours is stale from the moment you start. A lane measuring its diff against the stale ref read **39 logic lines across four files** where the truth against `origin/main` was **21 across three**. That applies to the reviewer-threshold command and to every merge simulation.
@@ -68,7 +68,11 @@ You run both; the orchestrator runs neither.
 
 - **Scribe.** Spawn a background sub-agent that keeps Linear current from your PR and commit state: worklog comments at real checkpoints, status moves, issue bodies accurate. You write no Linear prose yourself.
 - **Reviewer.** Measure your diff by non-test non-comment added lines:
-  `git diff refs/heads/main...HEAD -- ':!*test*' | grep -E '^\+' | grep -vE '^\+\+\+|^\+\s*(\*|//|/\*)' | grep -vE '^\+\s*$' | wc -l`
+  ```sh
+  git diff origin/main...HEAD -- ':!*.test.*' ':!*__tests__/*' | grep -E '^\+' | grep -vE '^\+\+\+|^\+\s*(\*|//|/\*)' | grep -vE '^\+\s*$' | wc -l
+  ```
+  Both halves of that command were wrong here until 2026-09-20 and both undercounted. `:!*test*` is a substring exclusion over the whole path, so it also drops `testing/`, `testbed/`, `latest/` and `attestation.ts`: it read **2** logic lines against a real **57** on `#185`. And `refs/heads/main` is stale in every linked worktree, which read **39** lines against a real **21**. Undercounting waves work through, so compare the filtered `git diff --stat` against the unfiltered one and look at which files the pathspec kept.
+  A change in the **config-permission family** earns a reviewer whatever the count says: that family produced reachable defects at 16, 21 and 7 logic lines.
   Above roughly 60, spawn one independent reviewer in its own worktree (security-reviewer for credential, file-mode or protocol code), fix what it finds, **run it once**. `#57` spent fourteen rounds and six of its seven defects were written during the review. **The reviewer must state the head its verdict covers**, and if you push after it starts, tell it the delta rather than re-running it.
 - **Every defect worth finding tonight was found by a mechanism, never by care.** The full suite found what a focused suite structurally could not reach; mutation found three surviving branches including one a fix had just created; two reviewers independently found a type lie neither author had seen. Budget for the mechanism, not for attentiveness.
 
