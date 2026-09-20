@@ -1,8 +1,22 @@
 {
 	"extends": "../../tsconfig.json",
-	"compilerOptions": {
-		"rootDir": "./src",
-		"outDir": "./dist"
-	},
-	"include": ["src/**/*"]
+	"include": ["src/**/*"],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's `**/__tests__`, `**/*.test.ts` and
+	// `**/*.test.tsx` entries and brings this package's test files into the
+	// program. Same mechanism as packages/http-common (SB23-2353). This package
+	// declared no `exclude` at all before SB23-2387, so its program was a strict
+	// subset of the repo-wide `tsc --noEmit` run and could never report anything
+	// that run did not. Wired into the root `typecheck` script; without that
+	// script entry the gate never runs.
+	//
+	// `rootDir: "./src"` and `outDir: "./dist"` were removed here (SB23-2387).
+	// They raised 91 TS6059 errors, one per source file reached through the
+	// `@better-ccflare/*` path map, because every one of those files lives
+	// outside this package's `src`. Removing the pair emits nothing
+	// differently: the root config sets `noEmit: true` and this file inherits
+	// it, this package's own `typecheck` script passes `--noEmit`, no `dist/`
+	// exists for any package, and the shipped binary is built by
+	// `bun build --compile` from `apps/cli/src/main.ts` rather than by `tsc`.
+	"exclude": ["node_modules", "dist"]
 }
