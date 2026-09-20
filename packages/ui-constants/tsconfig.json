@@ -1,9 +1,21 @@
 {
 	"extends": "../../tsconfig.json",
-	"compilerOptions": {
-		"outDir": "./dist",
-		"rootDir": "./src"
-	},
 	"include": ["src/**/*"],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's `**/__tests__`, `**/*.test.ts` and
+	// `**/*.test.tsx` entries and brings this package's test files into the
+	// program. Same mechanism as packages/http-common (SB23-2353). Wired into
+	// the root `typecheck` script; without that script entry the gate never
+	// runs, which is the state this package was in until SB23-2387.
+	//
+	// `rootDir: "./src"` and `outDir: "./dist"` were removed here (SB23-2387).
+	// Unlike its two siblings this package measured 0 errors with the pair
+	// still set, because its single source file imports nothing from another
+	// package, so no file outside its own `src` ever entered the program. The
+	// pair was dead rather than harmful here and is removed for consistency.
+	// Removing it emits nothing differently: the root config sets
+	// `noEmit: true` and this file inherits it, this package's own `typecheck`
+	// script passes `--noEmit`, no `dist/` exists for any package, and the
+	// shipped binary is built by `bun build --compile` rather than by `tsc`.
 	"exclude": ["node_modules", "dist"]
 }
