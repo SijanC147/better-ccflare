@@ -227,6 +227,39 @@ function isUntrustedField(key: string): boolean {
  * on an undefined uid (`writeTarget()` on win32, `replaceUntrustedLink()`
  * explicitly), so a branch for it would be untestable code rather than a fix.
  */
+/**
+ * What a reader of the config file does when it cannot turn the bytes into
+ * config data (SB23-2469, F1 from this PR's review).
+ *
+ * "refuse-saves" belongs to the reader whose result BECOMES `this.data`. Its
+ * failure means the instance is running on an empty config, so writing that
+ * config back would replace the file with it.
+ *
+ * "report-only" belongs to readLocalControlSecretFromDisk(), which reads one
+ * field and discards the rest. It runs on an instance whose load ALREADY
+ * SUCCEEDED and whose `this.data` is complete, so its failure says nothing about
+ * whether a save would lose anything, and it already has a correct answer for
+ * failure: return undefined and let the caller generate a fresh secret.
+ *
+ * A parameter rather than a flag set inside readConfigData(), which is where the
+ * first draft put it and was wrong. That draft's docstring argued "there are two
+ * readers and a flag set by one is a flag the other can miss", which assumes the
+ * two readers fail under the same condition. They do not. Measured on that
+ * draft: a valid 0600 config, an instance that loaded it cleanly with
+ * pg_password live in memory, the file transiently unparseable for the duration
+ * of one getLocalControlSecret() call, then valid again. Every later set() from
+ * that instance was refused for the life of the process, the file kept
+ * lb_strategy "session" while memory held "round-robin", and the refusal printed
+ * "this process is running on defaults" while pg_password sat in this.data. A
+ * long-lived server that silently never persists another setting.
+ *
+ * Reachable without an attacker: an operator hand-editing the config, which is a
+ * documented workflow, or the zero-byte window of the in-place writeFileSync
+ * fallback that the CLI-versus-server race readLocalControlSecretFromDisk()
+ * exists for.
+ */
+type ReadFailureHandling = "refuse-saves" | "report-only";
+
 type RefusedTrust = "directory" | "sticky-entry";
 type EntryTrust = "trusted" | RefusedTrust;
 
@@ -311,6 +344,59 @@ function chmodAndVerify(path: string, mode: number, what: string): void {
 /** `0o600` for a log line, so a mode is never printed as the decimal 384. */
 function modeText(mode: number): string {
 	return `0${mode.toString(8).padStart(3, "0")}`;
+}
+
+/**
+ * Name what a config file parsed to when it was not an object, for the refusal
+ * that follows (SB23-2469).
+ *
+ * `typeof null` is "object", which is the whole reason the caller tests for null
+ * separately, so this would print "an object" for the one shape most likely to
+ * be there: a file holding the four bytes `null`.
+ *
+ * Arrays are named as arrays rather than as objects for the same reason. An
+ * operator told "it is an object" about `[1,2]` has been told the file is fine.
+ *
+ * No value is printed, only its shape. A config file is where pg_password,
+ * local_control_secret and upstream_maintainer_token live, and a string at the
+ * top level of a malformed one is as likely to be a secret as anything else.
+ */
+/**
+ * Say that a config file did not parse, WITHOUT quoting the parser's message
+ * (SB23-2469, F2 from this PR's review).
+ *
+ * JSC names the offending token for one malformed shape out of five measured,
+ * and for a config file that token is as likely as not to be a credential:
+ *
+ *   {"pg_password": SUPERSECRETVALUE}
+ *   SyntaxError: JSON Parse error: Unexpected identifier "SUPERSECRETVALUE"
+ *
+ * That line is ERROR, which is at or above the default INFO floor of the
+ * OpenObserve exporter, so on a host shipping logs it puts the plaintext value
+ * in better_ccflare_logs. It fires twice per boot on the reachable path, once
+ * from loadConfig() and once from readLocalControlSecretFromDisk(). The other
+ * four shapes measured (trailing comma, unterminated string, missing comma,
+ * single-quoted value) name no token and would have been safe, which is exactly
+ * why interpolating the message looked fine.
+ *
+ * Pre-existing on `origin/main`, which had the bare `Failed to ${what}:
+ * ${error}`. Fixed here rather than deferred because this PR rewrote that line
+ * and because describeJsonShape() one function below already states the rule
+ * this broke: print the shape, never the value.
+ *
+ * The position is lost with the message, and that is the accepted cost. An
+ * operator who needs it can run any JSON validator over the file, which the
+ * message tells them to do, and no validator ships their config to a log
+ * collector.
+ */
+function describeParseError(error: unknown): string {
+	return error instanceof Error ? error.name : "a parse error";
+}
+
+function describeJsonShape(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array";
+	return `a ${typeof value}`;
 }
 
 /**
@@ -630,6 +716,60 @@ export class Config extends EventEmitter {
 	/** The resolved path the stripped fields came from, named in the refusal. */
 	private strippedFrom: string | undefined;
 
+	/**
+	 * The resolved path whose contents this instance could not turn into config
+	 * data, so saveConfig() can refuse rather than replace a file it never read
+	 * (SB23-2469).
+	 *
+	 * Same shape as strippedFrom above and the same reason: this.data does not
+	 * match the file, and saveConfig() serialises this.data wholesale. What
+	 * differs is the trigger. The strip needs another local user able to write
+	 * the config; this needs one trailing comma, in a file at 0600 that nobody
+	 * else can touch, and hand-editing this file is a documented workflow.
+	 *
+	 * Measured at eaa5859a on the issue's own five-key fixture, mode 0600, whose
+	 * only defect is a trailing comma: after one construction plus
+	 * getLocalControlSecret(), the file read exactly
+	 * `{ "local_control_secret": "<uuid>" }`. lb_strategy, pg_enabled, pg_host,
+	 * pg_password and openobserve_token were gone, and nothing in the log said a
+	 * file had been replaced. getLocalControlSecret() is what reaches it on the
+	 * first boot: it finds no secret in the empty data, generates one, and calls
+	 * set().
+	 *
+	 * PER-INSTANCE, and that is the deliberate difference from
+	 * writableAtFirstRead, which is module-scoped and keyed by path. That memo
+	 * exists because the FIRST instance changes what a later one measures:
+	 * readConfigData() brings a writable file to 0600 at its own report site, so
+	 * a second Config stats a clean file and strips nothing. Nothing on this
+	 * path writes the config file. restrictConfigFile() chmods it,
+	 * restrictConfigDir() chmods the directory, sweepStaleTempFiles() removes
+	 * temp siblings, and none of them touch the bytes. So a second Config
+	 * re-reads the same bytes, fails the same parse, and records this for
+	 * itself, which the two-instance test measures rather than assumes.
+	 *
+	 * That covers two of the three outcomes and not the third, which is stated
+	 * rather than glossed (F4 from this PR's review). For the READ failure,
+	 * instance 1 does change what instance 2 measures: restrictConfigFile()
+	 * brings a 0000 file to 0600 during instance 1's load, so instance 2 reads
+	 * it successfully and records nothing. The direction is benign, because
+	 * instance 2 genuinely read the file and its this.data is complete, so its
+	 * save is lossless; no ordering was found that replaces the file with an
+	 * incomplete config. But the sentence above describes the parse and
+	 * non-object outcomes, not that one.
+	 *
+	 * A module-scoped version was considered and is worse here, in the direction
+	 * that matters. Its neighbours are never cleared, because the conditions they
+	 * hold are facts about a filesystem that a new process re-measures. This one
+	 * is a fact about BYTES, which an operator fixes with an editor. Never
+	 * clearing it means an instance built afterwards, whose own load succeeded
+	 * and whose data is complete, refuses to save and prints a refusal naming a
+	 * condition that is no longer true.
+	 *
+	 * A string rather than a boolean so the refusal can name the file, which may
+	 * be a symlink target rather than the configured path.
+	 */
+	private unparseableFrom: string | undefined;
+
 	constructor(configPath?: string) {
 		super();
 		const rawPath = configPath ?? resolveConfigPath();
@@ -697,7 +837,8 @@ export class Config extends EventEmitter {
 			// readConfigData() reads, parses AND strips credential or endpoint fields
 			// when other local users can write the file, so there is no way to reach
 			// parsed config data without the filter having run (SB23-2351).
-			this.data = this.readConfigData(trusted, "parse config file") ?? {};
+			this.data =
+				this.readConfigData(trusted, "parse config file", "refuse-saves") ?? {};
 			// An upgrade from a version that wrote 0644 may never write a setting
 			// again, because getLocalControlSecret() returns early once the secret
 			// exists, so the file would stay world-readable indefinitely if the
@@ -749,7 +890,11 @@ export class Config extends EventEmitter {
 	 * failure. This is the same isFile() guard restrictConfigFile() applies
 	 * before chmod, applied to the read.
 	 */
-	private readConfigData(target: string, what: string): ConfigData | null {
+	private readConfigData(
+		target: string,
+		what: string,
+		onFailure: ReadFailureHandling,
+	): ConfigData | null {
 		try {
 			const info = statSync(target);
 			if (!info.isFile()) {
@@ -758,7 +903,37 @@ export class Config extends EventEmitter {
 				);
 				return null;
 			}
-			const content = readFileSync(target, "utf8");
+			// Its own try, separate from the outer one, because the two failures it
+			// separates need opposite handling and folding them together left a
+			// reachable hole (SB23-2469, found by this PR's own mutation (g)).
+			//
+			// statSync above has just said this is a regular file that exists, so a
+			// read that fails here is a file WITH CONTENTS this process could not
+			// see, and replacing it destroys them. Reachable without an attacker: a
+			// config at mode 0000, owned by us, stats fine and throws EACCES on the
+			// read. Measured as uid 501 against a 0000 file: stat succeeds,
+			// open() raises errno 13.
+			//
+			// The outer catch is the other case and deliberately does NOT set the
+			// flag. It covers statSync, including a file that vanished between the
+			// caller's existsSync and that stat, where nothing was read and there
+			// are no contents a save could destroy. Refusing there would turn a
+			// transient race into a process that never persists anything again.
+			//
+			// One flag with one meaning would have collapsed these, which is
+			// mem:a-boolean-cannot-hold-three-outcomes: absent file, unreadable
+			// file and unparseable file are three outcomes, and only the last two
+			// refuse.
+			let content: string;
+			try {
+				content = readFileSync(target, "utf8");
+			} catch (error) {
+				if (onFailure === "refuse-saves") this.unparseableFrom = target;
+				log.error(
+					`Failed to read the config file: ${target} exists and is a regular file but could not be read: ${error}. Its contents are left exactly as they are and no setting is written back to it, because writing this process's config over a file it could not read would delete whatever is in it. This process runs on defaults until it is fixed: local_control_secret is regenerated and never persisted, which presents as local control clients failing to authenticate after a restart. Check the file's permissions, or move it aside so a fresh one is created, then restart.`,
+				);
+				return null;
+			}
 			// Say so when another local user could have written these bytes. Read first
 			// and report after, deliberately (SB23-2338).
 			//
@@ -910,15 +1085,85 @@ export class Config extends EventEmitter {
 					);
 				}
 			}
-			let parsed: ConfigData;
+			let parsed: unknown;
 			try {
-				parsed = JSON.parse(content) as ConfigData;
+				parsed = JSON.parse(content);
 			} catch (error) {
-				log.error(`Failed to ${what}: ${error}`);
+				// Record WHICH file could not be turned into config data, so
+				// saveConfig() refuses instead of replacing it (SB23-2469). Without
+				// this the caller's `?? {}` produces an empty config and the first
+				// set() writes that empty config over the operator's file, which
+				// getLocalControlSecret() reaches on the very first boot.
+				//
+				// Set here and not at the caller, for the same reason
+				// stripUntrustedFields() records its own names here rather than
+				// returning a flag: there are two readers of this method
+				// (loadConfig() and readLocalControlSecretFromDisk()) and a flag set
+				// by one of them is a flag the other can miss.
+				if (onFailure === "refuse-saves") this.unparseableFrom = target;
+				log.error(
+					`Failed to ${what}: ${target} is not valid JSON (${describeParseError(error)}). Its contents are left exactly as they are and no setting is written back to it, because writing this process's config over a file it could not understand would delete whatever is in it. This process runs on defaults until it is fixed: local_control_secret is regenerated and never persisted, which presents as local control clients failing to authenticate after a restart. Fix the syntax in ${target}, or move it aside so a fresh one is created, then restart.`,
+				);
 				return null;
 			}
-			return this.stripUntrustedFields(parsed, target, writableByOthers);
+			// JSON.parse SUCCEEDS on null, true, 7, "str" and [1,2], so the catch
+			// above never sees them and the cast to ConfigData was the only thing
+			// calling them an object (SB23-2469).
+			//
+			// `null` is the one that matters and it is not a curiosity: a file
+			// containing the four bytes `null` parses, returns null from this
+			// method, and the caller's `?? {}` cannot tell that apart from a parse
+			// failure, so it produces the identical empty config and the identical
+			// wholesale overwrite, reached with no syntax error anywhere. The
+			// others are worse in a different direction: `true` becomes this.data,
+			// and the next set() assigns a property to a boolean, which throws a
+			// TypeError in strict mode rather than saving.
+			//
+			// Arrays are excluded deliberately. An array IS an object and would
+			// pass a bare typeof test, and JSON.stringify of one drops every named
+			// property a set() adds, so a config that is an array loses each write
+			// silently rather than noisily.
+			//
+			// Second site of this shape in this repository: mem:a-successful-parse-
+			// can-yield-null, where a literal `null` body threw out of
+			// processResponse() and walked the whole account pool.
+			if (
+				parsed === null ||
+				typeof parsed !== "object" ||
+				Array.isArray(parsed)
+			) {
+				if (onFailure === "refuse-saves") this.unparseableFrom = target;
+				log.error(
+					`Failed to ${what}: ${target} holds valid JSON that is not an object, it is ${describeJsonShape(parsed)}. A config file must be a JSON object such as {"lb_strategy":"session"}. Its contents are left exactly as they are and no setting is written back to it, because writing this process's config over it would delete whatever is in it. This process runs on defaults until it is fixed: local_control_secret is regenerated and never persisted, which presents as local control clients failing to authenticate after a restart. Fix the file, or move it aside so a fresh one is created, then restart.`,
+				);
+				return null;
+			}
+			return this.stripUntrustedFields(
+				parsed as ConfigData,
+				target,
+				writableByOthers,
+			);
 		} catch (error) {
+			// Deliberately does NOT set unparseableFrom, and after the read got its
+			// own try above, this catch covers only the statSync.
+			//
+			// A stat that throws is a path nothing was read from: the file vanished
+			// between the caller's existsSync and here, or its directory stopped
+			// being traversable. There are no contents a save could destroy, and
+			// refusing every later save on a transient race would leave a process
+			// that never persists anything again.
+			//
+			// Not reachable from either caller in practice, and that is stated
+			// rather than guessed at: both gate on existsSync(), and loadConfig()
+			// additionally passes a target writeTarget() has already lstat-walked,
+			// so a dangling or untrusted path is refused before this method runs.
+			// It is left unflagged because a branch nothing can reach is the wrong
+			// place to put a refusal that would be permanent if it ever did.
+			//
+			// The non-regular-file guard earlier in this method is the same case and
+			// likewise does not set it: writeTarget() and restrictConfigFile()
+			// already refuse to write through a FIFO or a directory, so nothing
+			// reaches a save that would replace one.
 			log.error(`Failed to read config file: ${error}`);
 			return null;
 		}
@@ -1593,6 +1838,35 @@ export class Config extends EventEmitter {
 			);
 			return;
 		}
+		// Refuse rather than replace a file this process could not read
+		// (SB23-2469). Same reason as the strip refusal above and a different
+		// trigger: that one needs another local user able to write the config,
+		// this one needs a trailing comma.
+		//
+		// ABOVE writeTarget() and above `content`, and that placement is
+		// load-bearing rather than tidy. writeTarget() returning null falls
+		// through to replaceUntrustedLink(content), which WRITES. A check below
+		// that line refuses the two ordinary write paths and leaves the third
+		// open, which is worse than no check at all, because the case it would
+		// miss is the one where the config path is already attacker-influenced.
+		// Mutation (c) on this PR moves it there.
+		//
+		// Not deduplicated, matching the refusal above it and saveConfig()'s other
+		// outcome lines. The diagnosis landed once, in readConfigData(); each
+		// refused save is a separate setting that did not persist, and suppressing
+		// the second would hide one. That is this file's standing split, diagnosis
+		// once and outcome every time (SB23-2379, SB23-2357).
+		//
+		// Returns rather than throws, for the reason the strip refusal gives:
+		// get(key, defaultValue) calls set() on every miss, so a throw here would
+		// turn every getter carrying a default into a crash, in a request handler
+		// as readily as at boot.
+		if (this.unparseableFrom !== undefined) {
+			log.error(
+				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Fix the file, or move it aside so a fresh one is created, then restart.`,
+			);
+			return;
+		}
 		const content = JSON.stringify(this.data, null, 2);
 		const target = this.writeTarget();
 		if (target === null) {
@@ -2158,9 +2432,13 @@ export class Config extends EventEmitter {
 		// local_control_secret is stripped from a writable config, so this returns
 		// undefined and the caller generates a fresh one: the same path a refused read
 		// already takes, which is why the filter costs nothing here.
+		// "report-only": this instance's load already succeeded, so a failure here
+		// is not evidence that saving would lose anything, and refusing on it
+		// poisons a healthy instance permanently (F1).
 		const parsed = this.readConfigData(
 			trusted,
 			"re-read config file for local_control_secret",
+			"report-only",
 		);
 		if (parsed === null) return undefined;
 		const value = parsed.local_control_secret;
