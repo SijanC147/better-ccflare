@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { MinimaxProvider } from "../provider";
 
 describe("MinimaxProvider", () => {
@@ -8,7 +9,7 @@ describe("MinimaxProvider", () => {
 
 	beforeEach(() => {
 		provider = new MinimaxProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-minimax-account",
 			provider: "minimax",
@@ -31,7 +32,7 @@ describe("MinimaxProvider", () => {
 			priority: 0,
 			auto_fallback_enabled: false,
 			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {

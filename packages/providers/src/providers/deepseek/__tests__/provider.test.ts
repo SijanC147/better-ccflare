@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { DeepseekProvider } from "../provider";
 
 describe("DeepseekProvider", () => {
@@ -8,7 +9,7 @@ describe("DeepseekProvider", () => {
 
 	beforeEach(() => {
 		provider = new DeepseekProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-deepseek-account",
 			provider: "deepseek",
@@ -31,7 +32,7 @@ describe("DeepseekProvider", () => {
 			priority: 0,
 			auto_fallback_enabled: false,
 			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {

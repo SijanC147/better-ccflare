@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../../base";
+import { makeAccount } from "../../../testing/account-fixture";
 import {
 	type AnthropicCompatibleConfig,
 	AnthropicCompatibleProvider,
@@ -53,10 +53,10 @@ describe("AnthropicCompatibleProvider", () => {
 		test("should handle API key authentication", async () => {
 			const provider = new AnthropicCompatibleProvider();
 
-			const mockAccount: Partial<Account> = {
+			const mockAccount = makeAccount({
 				name: "test-account",
 				refresh_token: "test-api-key",
-			};
+			});
 
 			const result = await provider.refreshToken(mockAccount, "test-client");
 
@@ -67,10 +67,10 @@ describe("AnthropicCompatibleProvider", () => {
 		test("should throw error when no API key available", async () => {
 			const provider = new AnthropicCompatibleProvider();
 
-			const mockAccount: Partial<Account> = {
+			const mockAccount = makeAccount({
 				name: "test-account",
 				refresh_token: "",
-			};
+			});
 
 			await expect(
 				provider.refreshToken(mockAccount, "test-client"),

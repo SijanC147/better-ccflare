@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { setForceAccountModel } from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount as baseAccount } from "../testing/account-fixture";
 import { getModelName } from "./model-mapping";
 
 // getModelName is a sibling of core's mapModelName, reached only by the
@@ -10,7 +11,7 @@ import { getModelName } from "./model-mapping";
 // Vertex account reports that their model still gets rewritten.
 
 function makeAccount(): Account {
-	return {
+	return baseAccount({
 		id: "acc-1",
 		name: "vertex-account",
 		provider: "vertex-ai",
@@ -37,7 +38,7 @@ function makeAccount(): Account {
 		model_mappings: JSON.stringify({ opus: "gemini-2.5-pro" }),
 		cross_region_mode: null,
 		model_fallbacks: null,
-	};
+	});
 }
 
 afterEach(() => {
