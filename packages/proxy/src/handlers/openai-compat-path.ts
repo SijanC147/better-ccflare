@@ -11,7 +11,17 @@ import type { Account } from "@better-ccflare/types";
  * work: on 2026-09-21 seven distinct Claude OAuth accounts answered 429 to
  * this path on all 28 attempts across four fan-outs, while the same seven
  * accounts served 950 `/v1/messages` requests in the same window with zero
- * 429s. A rate limit cannot be path-selective like that.
+ * 429s.
+ *
+ * What that excludes is **account-level** rate limiting: a 429 selective by
+ * path, identical across seven independent accounts, and persistent across
+ * four fan-outs eighteen minutes apart is not an account running out of
+ * quota. It does NOT exclude rate limiting as such — a per-endpoint quota is
+ * ordinary, and a subscription credential carrying zero quota on an
+ * API-key-oriented compatibility endpoint would produce the same table. Either
+ * way the credential or its plan is what the endpoint refuses, and either way
+ * this guard is the right response. The mechanism itself stays **unproven**
+ * because the 429 body was never captured (payload storage is off).
  *
  * The 429 matters beyond the failed request, which is why this guard exists
  * rather than a doc note: `isModelUnavailableError` returns true for any 429

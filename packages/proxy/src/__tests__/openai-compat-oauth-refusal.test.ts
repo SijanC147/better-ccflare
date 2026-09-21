@@ -20,8 +20,11 @@ import * as usageCollectorModule from "../usage-collector";
  * Measured on the live host 2026-09-21: four fan-outs over eighteen minutes,
  * seven OAuth accounts each, **28 of 28 answered 429 and none ever answered
  * 200**, while the same seven accounts served **950 `/v1/messages` requests
- * with zero 429s** in the same window. A rate limit cannot be path-selective,
- * so the credential is what the endpoint refuses.
+ * with zero 429s** in the same window. That excludes **account-level** rate
+ * limiting, not rate limiting as such: a per-endpoint quota of zero on a
+ * subscription credential would produce the same table. Either way the
+ * credential is what the endpoint refuses. The mechanism is unproven — the
+ * 429 body was never captured.
  *
  * These tests drive `handleProxy` rather than the response builder, because
  * `mem:covering-the-function-is-not-covering-the-call` has fired twice in this
