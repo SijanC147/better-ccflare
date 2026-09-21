@@ -464,10 +464,18 @@ describe("check-boolean-widening", () => {
 		//
 		// The always-truthy call has to be the LEFT operand, and the negated one has to be
 		// the negation's own operand, or the second route lands on a `boolean` and the
-		// duplicate is invisible whether the dedupe is there or not. The parenthesised
-		// line is the case that needs `check` to unwrap parentheses as well: without that
-		// the two routes key on different nodes, the set never matches, and the line is
-		// reported twice while the other two are reported once.
+		// duplicate is invisible whether the dedupe is there or not.
+		//
+		// Line 8 is the one that needs `check` to strip parentheses as well as `descend`,
+		// and it was found by a mutation rather than by design: removing `unwrapParens`
+		// from `check` and leaving it in `descend` SURVIVED the first three lines. It has
+		// to be a parenthesised LEFT OPERAND of a logical operator, because that is the
+		// only position where the second route hands `check` a node `descend` never saw.
+		// `descend` strips the parentheses itself before every call it makes, so
+		// `if (!(f()))` converges on the same node either way. Without the strip inside
+		// `check` the two routes key on the `ParenthesizedExpression` and on the
+		// `CallExpression`, the set never matches, and the site is reported twice at two
+		// different columns.
 		const dir = makeFixture(
 			[
 				'type EntryTrust = "trusted" | "directory";',
@@ -477,19 +485,47 @@ describe("check-boolean-widening", () => {
 				"\tif (entryIsTrusted(p) && isSymlink(p)) return true;",
 				"\tif (!entryIsTrusted(p)) return true;",
 				"\tif (!(entryIsTrusted(p))) return true;",
+				"\tif ((entryIsTrusted(p)) && isSymlink(p)) return true;",
 				"\treturn false;",
-			"}",
+				"}",
 			].join("\n"),
 		);
 		const { exitCode, stdout, stderr } = runGate(dir);
 		expect(exitCode).toBe(1);
-		expect(stdout).toContain("3 offences");
+		expect(stdout).toContain("4 offences");
 		// One line of output per site. `toContain` cannot see a duplicate, and the offence
 		// count alone cannot say WHICH site doubled, so count the occurrences of each.
 		const occurrences = (needle: string) => stderr.split(needle).length - 1;
 		expect(occurrences("subject.ts:5:6")).toBe(1);
 		expect(occurrences("subject.ts:6:7")).toBe(1);
 		expect(occurrences("subject.ts:7:8")).toBe(1);
+		expect(occurrences("subject.ts:8:7")).toBe(1);
+		// The column the parenthesised duplicate lands on, and no other site in this
+		// fixture reports there. Without the strip inside `check` this reads 1.
+		expect(occurrences("subject.ts:8:6")).toBe(0);
+	});
+
+	test("descends a ternary test that is itself a logical tree", () => {
+		// The ternary root separately from the `if` root, and it needs its own fixture
+		// rather than a line in the one above. A mutation reverting ONLY the ternary root
+		// from `descend` to `check` SURVIVED every other case here, because the ternary
+		// they all use has a bare call as its test, where `check` and `descend` agree.
+		// The mutation is observable only when the test is a logical tree.
+		const dir = makeFixture(
+			[
+				'type EntryTrust = "trusted" | "directory";',
+				"declare function entryIsTrusted(p: string): EntryTrust;",
+				"declare function isSymlink(p: string): boolean;",
+				"export function guard(p: string): number {",
+				"\treturn isSymlink(p) && entryIsTrusted(p) ? 1 : 0;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:5:25");
+		expect(stderr).toContain("this && condition is always true");
 	});
 
 	test("does not descend `??`, the comma operator, or a ternary's branches", () => {
