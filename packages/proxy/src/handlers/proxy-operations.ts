@@ -654,8 +654,19 @@ async function checkZai1305(
 		return response;
 	}
 
+	// Whether this call will actually re-issue anything. Computed BEFORE the
+	// message, because with a spent shared budget the loop body never runs and
+	// an unconditional "retrying" promises a retry that is not coming. The
+	// budget arrives spent when an earlier model cycle on this same request
+	// already paid for one, which is reachable today.
+	const retryCfg = getOverloadRetryConfig(retrySettings);
+	const willRetry =
+		retryCfg.enabled && retryCfg.maxAttempts > 1 && budget.remaining > 0;
+
 	log.warn(
-		`Account ${account.name}: detected 1305 overloaded in SSE stream, retrying`,
+		willRetry
+			? `Account ${account.name}: detected 1305 overloaded in SSE stream, retrying`
+			: `Account ${account.name}: detected 1305 overloaded in SSE stream, no in-place retry budget left for this request`,
 	);
 
 	// The 1305 detection above only consumed a clone; drain the original
@@ -663,8 +674,9 @@ async function checkZai1305(
 	// buffer is released instead of leaking (issue #382/#437).
 	cancelDiscardedResponseBody(response);
 
-	// Retry with backoff (same config as 529 retry)
-	const retryCfg = getOverloadRetryConfig(retrySettings);
+	// Retry with backoff (same config as 529 retry). retryCfg is resolved above,
+	// beside the message that depends on it.
+	let reissuesMade = 0;
 	if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
 		// `budget.remaining > 0` is the shared per-account bound, see
 		// InPlaceRetryBudget. This loop is the first of the three to run on a
@@ -687,6 +699,7 @@ async function checkZai1305(
 			// throws unwinds past any post-call decrement, and the fetch it
 			// spent has already been made.
 			budget.remaining--;
+			reissuesMade++;
 			const retryRaw = await makeProxyRequest(requestClone.clone());
 			const retryHeaders = new Headers(retryRaw.headers);
 			retryHeaders.set(
@@ -715,8 +728,17 @@ async function checkZai1305(
 		}
 	}
 
+	// Same three-way split as the 529 loop below, and for the same reason: an
+	// operator cannot tell a spent shared budget from a genuinely exhausted
+	// 1305 loop, and the two want different responses. A spent budget says
+	// another loop consumed this request's allowance; an exhausted loop says
+	// the upstream is overloaded. This is the only place the synthetic 429
+	// conversion is announced, so it is the line an operator follows when a
+	// request falls to model fallback.
 	log.warn(
-		`Account ${account.name}: all 1305 retries exhausted, converting to 429 for model fallback`,
+		reissuesMade >= retryCfg.maxAttempts - 1
+			? `Account ${account.name}: all ${retryCfg.maxAttempts - 1} 1305 retries exhausted, converting to 429 for model fallback`
+			: `Account ${account.name}: in-place retry budget for this request spent after ${reissuesMade} 1305 retries, converting to 429 for model fallback`,
 	);
 
 	// Convert to synthetic 429 so isModelUnavailableError triggers model cycling
@@ -2295,6 +2317,12 @@ export async function proxyWithAccount(
 					// InPlaceRetryBudget. A 1305 loop that already ran on this
 					// request has spent from the same budget, which is what stops
 					// the two composing into a product.
+					// `reissuesMade` counts what THIS loop did. The budget cannot
+					// carry that: it is `maxAttempts - 1`, exactly the number of
+					// iterations the attempt counter permits, so on the ordinary path
+					// both bounds reach zero on the same iteration and `remaining`
+					// cannot say which one stopped the loop.
+					let reissuesMade = 0;
 					for (
 						let attempt = 1;
 						attempt < retryCfg.maxAttempts && inPlaceRetryBudget.remaining > 0;
@@ -2321,6 +2349,7 @@ export async function proxyWithAccount(
 						// unwinds past any post-call decrement, and the fetches it
 						// spent have already been made.
 						inPlaceRetryBudget.remaining--;
+						reissuesMade++;
 						const retryResponse = await reissueRequestInPlace();
 						response = retryResponse;
 						retriedInPlace = true;
@@ -2351,16 +2380,30 @@ export async function proxyWithAccount(
 						}
 					}
 					if (response.status === 529) {
-						// Say which limit stopped the loop. The shared budget and
-						// this loop's own attempt count are different reasons and
-						// an operator reading "all N retries exhausted" after the
-						// budget cut it short at one would go looking for N
-						// re-issues that were never made.
-						log.warn(
-							inPlaceRetryBudget.remaining > 0
-								? `Account ${account.name}: all ${retryCfg.maxAttempts - 1} in-place 529 retries exhausted, applying cooldown and failing over`
-								: `Account ${account.name}: in-place retry budget for this request exhausted on 529, applying cooldown and failing over`,
-						);
+						// Exactly three ways to arrive here still holding a 529, and
+						// each gets a message that is true of it. An earlier version
+						// chose between two of them on `inPlaceRetryBudget.remaining >
+						// 0` and was wrong in BOTH reachable exits: on the ordinary
+						// path the budget and the attempt bound reach zero together, so
+						// it named the shared budget as the constraint when no other
+						// loop had touched it; and on the reset-hint break it reported
+						// all retries exhausted after one. Order matters, because the
+						// first two conditions are simultaneously true on the ordinary
+						// path and "I spent my own allowance" is the honest reading.
+						const maxReissues = retryCfg.maxAttempts - 1;
+						if (reissuesMade >= maxReissues) {
+							log.warn(
+								`Account ${account.name}: all ${maxReissues} in-place 529 retries exhausted, applying cooldown and failing over`,
+							);
+						} else if (inPlaceRetryBudget.remaining === 0) {
+							log.warn(
+								`Account ${account.name}: in-place retry budget for this request spent after ${reissuesMade} 529 retries, applying cooldown and failing over`,
+							);
+						} else {
+							log.warn(
+								`Account ${account.name}: stopped retrying 529 after ${reissuesMade} retries on an upstream reset hint, applying cooldown and failing over`,
+							);
+						}
 					}
 				}
 			}

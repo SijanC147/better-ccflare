@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { RETRY_DEFAULTS, type RetrySettings } from "@better-ccflare/core";
+import { logBus } from "@better-ccflare/logger";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
@@ -144,6 +145,13 @@ function makeProxyContext(): ProxyContext {
 			prepareHeaders: () => new Headers(),
 			transformRequestBody: null,
 			processResponse: async (r: Response) => r,
+			// NOT the provider this fixture actually exercises. proxy-operations
+			// resolves `getProvider(account.provider) || ctx.provider` (:1013),
+			// so for a real provider name such as "anthropic" or "zai" the
+			// registry wins and everything here is a fallback that never runs.
+			// A test that needs provider behaviour has to drive the REAL
+			// provider through headers it reads, which is what the reset-hint
+			// case below does.
 			parseRateLimit: () => ({
 				isRateLimited: false,
 				resetTime: undefined,
@@ -243,6 +251,31 @@ function installScriptedFetch(script: ScriptStep[]): {
 		return step();
 	});
 	return { fetches: () => fetches, responses: () => responses };
+}
+
+/**
+ * Captures WARN messages off `logBus` for the duration of one call.
+ *
+ * The three 529 exit messages and the two 1305 messages are each asserted
+ * whole with `toBe` rather than by substring. A pair of `toContain` and
+ * `not.toContain` is an allowlist of what must be present with no statement
+ * about what must be absent, and this project has already shipped a message
+ * that contradicted the mode its own test asserted two lines below, because a
+ * mutation that ADDED a sentence passed every substring check. The whole
+ * string is the only assertion that makes a wrong message fail.
+ */
+function captureWarnings(): { lines: () => string[]; stop: () => void } {
+	const lines: string[] = [];
+	const listener = (event: { level: string; msg: string }) => {
+		if (event.level === "WARN") lines.push(event.msg);
+	};
+	logBus.on("log", listener);
+	return {
+		lines: () => lines,
+		stop: () => {
+			logBus.off("log", listener);
+		},
+	};
 }
 
 /** One original attempt or one re-issue, preceded by its two transport retries. */
@@ -423,8 +456,17 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		// cycling costs upstream fetches on the same account, which is the
 		// thing being bounded.
 		//
-		// Two models and a 1305 on both. Before the shared budget this cost 6
-		// fetches, because each model's 1305 loop had its own two re-issues.
+		// Two models and a 1305 on every answer. Before the shared budget this
+		// cost 6 fetches, because each model's 1305 loop had its own two
+		// re-issues.
+		//
+		// The script carries SIX steps although the bounded path uses four.
+		// That is deliberate and is the one place in this file where an
+		// exactly-sized script would be worse: sized to four, a mutant that
+		// removes the budget guard is caught by the exhaustion throw on its
+		// fifth call and reports 5, a floor. With the slack it runs to
+		// completion and reports its true cost, 6, which is the number that
+		// says what the guard is actually worth.
 		const script: ScriptStep[] = [
 			// Model 1, original attempt: 1305.
 			zai1305Response,
@@ -435,6 +477,9 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 			zai1305Response,
 			// Model 2's attempt: 1305 again. The budget is spent, so its 1305
 			// loop re-issues nothing and converts straight to a synthetic 429.
+			zai1305Response,
+			// Slack, reached only by a mutant that ignores the budget.
+			zai1305Response,
 			zai1305Response,
 		];
 		const counters = installScriptedFetch(script);
@@ -449,6 +494,133 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		await runProxy(account, makeProxyContext());
 
 		expect(counters.fetches()).toBe(4);
+	});
+
+	it("names the right constraint on each of the three 529 exits", async () => {
+		// The message these assert used to be chosen on
+		// `inPlaceRetryBudget.remaining > 0`, which is wrong in BOTH reachable
+		// exits: the budget is `retry_attempts - 1`, exactly the number of
+		// iterations the attempt counter permits, so on the ordinary path the
+		// two bounds reach zero together and the budget looks like the
+		// constraint when no other loop touched it. Found by the independent
+		// reviewer on PR #234. Nothing asserted any of these messages, which
+		// is why it survived.
+		const cases: Array<{
+			name: string;
+			script: ScriptStep[];
+			account: Account;
+			expected: string;
+		}> = [
+			{
+				// Exit 1: this loop spent its own allowance.
+				name: "own allowance",
+				script: [
+					() => jsonResponse(529, overloadedBody),
+					() => jsonResponse(529, overloadedBody),
+					() => jsonResponse(529, overloadedBody),
+				],
+				account: makeAccount({ name: "acc-own" }),
+				expected:
+					"Account acc-own: all 2 in-place 529 retries exhausted, applying cooldown and failing over",
+			},
+			{
+				// Exit 2: the shared budget was already spent by the 1305 loop,
+				// so this loop re-issued nothing.
+				name: "shared budget",
+				script: [
+					zai1305Response,
+					zai1305Response,
+					() => jsonResponse(529, overloadedBody),
+				],
+				account: makeAccount({ provider: "zai", name: "acc-shared" }),
+				expected:
+					"Account acc-shared: in-place retry budget for this request spent after 0 529 retries, applying cooldown and failing over",
+			},
+			{
+				// Exit 3: an upstream reset hint on the first retry stops the
+				// loop with budget left and only one re-issue made. The old
+				// message called this "all 2 retries exhausted".
+				name: "reset hint",
+				script: [
+					() => jsonResponse(529, overloadedBody),
+					() =>
+						new Response(overloadedBody, {
+							status: 529,
+							headers: {
+								"content-type": "application/json",
+								// Read by the REAL anthropic provider, not by the
+								// fixture's parseRateLimit, which never runs here.
+								"anthropic-ratelimit-unified-reset": String(
+									Math.floor(Date.now() / 1000) + 60,
+								),
+							},
+						}),
+				],
+				account: makeAccount({ name: "acc-hint" }),
+				expected:
+					"Account acc-hint: stopped retrying 529 after 1 retries on an upstream reset hint, applying cooldown and failing over",
+			},
+		];
+
+		for (const c of cases) {
+			const counters = installScriptedFetch(c.script);
+			const warnings = captureWarnings();
+			try {
+				await runProxy(c.account, makeProxyContext());
+			} finally {
+				warnings.stop();
+			}
+			const matched = warnings
+				.lines()
+				.filter((l) => l.includes("applying cooldown and failing over"));
+			expect(matched).toEqual([c.expected]);
+			expect(counters.fetches()).toBe(c.script.length);
+		}
+	});
+
+	it("does not claim 1305 retries it never made", async () => {
+		// `detected 1305 ... retrying` promised a retry that a spent budget
+		// never makes, and `all 1305 retries exhausted` reported exhaustion of
+		// retries never attempted. Both found by the independent reviewer on
+		// PR #234. The second is the only place the synthetic 429 conversion is
+		// announced, so it is the line an operator follows when a request falls
+		// to model fallback.
+		const script: ScriptStep[] = [
+			zai1305Response,
+			zai1305Response,
+			zai1305Response,
+			zai1305Response,
+			zai1305Response,
+			zai1305Response,
+		];
+		installScriptedFetch(script);
+		const warnings = captureWarnings();
+		const account = makeAccount({
+			provider: "zai",
+			name: "zai-msg",
+			model_mappings: JSON.stringify({
+				"claude-sonnet-4-5": ["glm-5.2", "glm-4.7"],
+			}),
+		});
+		try {
+			await runProxy(account, makeProxyContext());
+		} finally {
+			warnings.stop();
+		}
+
+		// The account is NOT named with "1305" in it: an earlier version was,
+		// and the filter then also matched "All models exhausted on account
+		// acc-1305" and a cooldown line carrying the same name. A filter is
+		// only as good as the population it selects.
+		const lines = warnings.lines().filter((l) => l.includes("1305"));
+		// Model 1 has the budget and says so; model 2 does not and says that
+		// instead. Asserted whole and in order.
+		expect(lines).toEqual([
+			"Account zai-msg: detected 1305 overloaded in SSE stream, retrying",
+			"Account zai-msg: all 2 1305 retries exhausted, converting to 429 for model fallback",
+			"Account zai-msg: detected 1305 overloaded in SSE stream, no in-place retry budget left for this request",
+			"Account zai-msg: in-place retry budget for this request spent after 0 1305 retries, converting to 429 for model fallback",
+		]);
 	});
 
 	it.each([
