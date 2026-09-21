@@ -255,6 +255,11 @@ describe("check-boolean-widening", () => {
 		expect(result.stderr.toString()).toContain("could not read");
 	});
 
+	// 120s, not the 5000ms default. This case runs the gate over the whole program,
+	// 517 files and 13515 boolean contexts, which is 2.3s on an unloaded darwin laptop
+	// and timed out at 5001ms on CI at cc8f39cc. The bound is a timeout, not a
+	// performance assertion: `SB23-2266` is two wall-clock assertions in this repo that
+	// fail on unmodified main under concurrent load, and this must not become a third.
 	test("the repository itself is clean, and the run says how much it read", () => {
 		const result = Bun.spawnSync(["bun", "run", gate], { cwd: repoRoot });
 		const stdout = result.stdout.toString();
@@ -262,5 +267,5 @@ describe("check-boolean-widening", () => {
 		const files = /(\d+) files scanned/.exec(stdout);
 		expect(Number(files?.[1])).toBeGreaterThan(100);
 		expect(stdout).toContain("0 offences");
-	});
+	}, 120_000);
 });
