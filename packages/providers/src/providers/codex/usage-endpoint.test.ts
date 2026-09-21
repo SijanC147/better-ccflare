@@ -237,6 +237,68 @@ describe("fetchCodexUsageData", () => {
 		expect(result.data?.seven_day?.utilization).toBe(43);
 	});
 
+	it("attaches the credit balance this response reported", async () => {
+		// SB23-2289. The poller replaces the cache entry wholesale, so before
+		// this it erased a balance the traffic path had written and a
+		// credit-aware admission rule would have flipped the account once per
+		// poll. Reading the headers of this same response keeps the balance
+		// fresh by construction rather than carried forward.
+		const fetchMock = mock(
+			async () =>
+				new Response(JSON.stringify(payload()), {
+					status: 200,
+					headers: {
+						"x-codex-credits-has-credits": "true",
+						"x-codex-credits-unlimited": "false",
+						"x-codex-credits-balance": "9.99",
+					},
+				}),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageData("tok-1", { now: () => NOW_MS });
+
+		expect(result.data?.credits).toEqual({
+			has_credits: true,
+			unlimited: false,
+			balance: "9.99",
+		});
+		// The windows are untouched by the attachment.
+		expect(result.data?.five_hour?.utilization).toBe(12);
+	});
+
+	it("omits the credits KEY when the response sent no credit headers", async () => {
+		// Whether this endpoint sends x-codex-credits-* is unverified against a
+		// live response. Being wrong about it must cost nothing: absent credits
+		// is the fail-closed path and leaves admission exactly as it was.
+		const fetchMock = mock(
+			async () => new Response(JSON.stringify(payload()), { status: 200 }),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageData("tok-1", { now: () => NOW_MS });
+
+		expect(result.data && "credits" in result.data).toBe(false);
+	});
+
+	it("does not mint a credits-only payload when there are no windows", async () => {
+		// Credits alone are not usage data, matching parseCodexUsageHeaders and
+		// the SB23-2257 test that already pins it. A windowless object here
+		// would be a payload the snapshot helper has no opinion about anyway.
+		const fetchMock = mock(
+			async () =>
+				new Response(JSON.stringify({ rate_limit: {} }), {
+					status: 200,
+					headers: { "x-codex-credits-has-credits": "true" },
+				}),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await fetchCodexUsageData("tok-1", { now: () => NOW_MS });
+
+		expect(result.data).toBeNull();
+	});
+
 	it("omits the ChatGPT-Account-Id header when no id is known", async () => {
 		const fetchMock = mock(
 			async (_input: RequestInfo | URL, init?: RequestInit) => {

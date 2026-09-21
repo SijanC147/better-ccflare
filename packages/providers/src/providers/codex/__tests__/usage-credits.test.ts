@@ -188,9 +188,29 @@ describe("parseCodexUsageHeaders — credits", () => {
 	});
 });
 
-describe("credits do not move admission", () => {
-	// The acceptance line for SB23-2257: displaying a balance must not bench or
-	// unbench anything. Same reasoning that keeps extra_usage out of admission.
+describe("credits move admission, and ranking is deliberately left alone", () => {
+	// This block used to be called "credits do not move admission" and encoded
+	// the SB23-2257 decision that a displayed balance changes no routing. Sean
+	// reversed the admission half on 2026-09-21 in SB23-2289: those credits are
+	// paid for and upstream would keep serving on them, so benching idles a
+	// usable account at the moment every other window is full.
+	//
+	// TWO assertions below were rewritten, and they are named here rather than
+	// edited quietly, because they are the record of the old decision:
+	//
+	//   - "leaves getRepresentativeUtilizationForProvider unchanged" now asserts
+	//     the two DIFFER, and that the credit-bearing payload reads as the
+	//     five-hour window instead of the spent weekly one.
+	//   - "leaves isUsageExhausted unchanged" now asserts the credit-bearing
+	//     account is admitted where the credit-free one is benched. Its old
+	//     `expect(verdict(withCredits)).toBe(true)` line is exactly the ruling's
+	//     verdict inverted.
+	//
+	// The ranking assertion below is NOT rewritten. It is load-bearing for the
+	// new behaviour rather than left over from the old one: SB23-2289 ruled on
+	// admission alone and named `extra_usage` as the precedent, so a spent
+	// weekly window still counts when sorting among admitted accounts and an
+	// account burning paid credits is the later pick.
 	const withoutCredits = parseCodexUsageHeaders(
 		new Headers(exhaustedWindows()),
 	);
@@ -203,15 +223,16 @@ describe("credits do not move admission", () => {
 		}),
 	);
 
-	it("leaves getRepresentativeUtilizationForProvider unchanged", () => {
-		const withoutValue = getRepresentativeUtilizationForProvider(
-			withoutCredits,
-			"codex",
-		);
+	it("drops the credit-covered weekly window from the admission utilization", () => {
+		// exhaustedWindows() is weekly 100 over five-hour 0, so the admission
+		// number falling to the five-hour reading is the whole change: the
+		// account is judged on the window it can still serve from.
+		expect(
+			getRepresentativeUtilizationForProvider(withoutCredits, "codex"),
+		).toBe(100);
 		expect(getRepresentativeUtilizationForProvider(withCredits, "codex")).toBe(
-			withoutValue,
+			0,
 		);
-		expect(withoutValue).toBe(100);
 	});
 
 	it("leaves the ranking utilization unchanged too", () => {
@@ -222,7 +243,15 @@ describe("credits do not move admission", () => {
 		);
 	});
 
-	it("leaves isUsageExhausted unchanged", () => {
+	it("still ranks the credit-burning account as the fuller one", () => {
+		// The negative half of the assertion above. "Unchanged" alone is also
+		// satisfied if BOTH readings broke together, so pin the value: an
+		// account serving off credits has genuinely less headroom than one
+		// inside its plan quota and must not sort as though it were empty.
+		expect(getRankingUtilizationForProvider(withCredits, "codex")).toBe(100);
+	});
+
+	it("admits the credit-bearing account and benches the credit-free one", () => {
 		const now = Date.now();
 		const verdict = (usage: typeof withCredits) =>
 			isUsageExhausted(
@@ -233,8 +262,7 @@ describe("credits do not move admission", () => {
 				now,
 			);
 
-		expect(verdict(withCredits)).toBe(verdict(withoutCredits));
-		// And it is still exhausted: unlimited credits must not unbench it here.
-		expect(verdict(withCredits)).toBe(true);
+		expect(verdict(withoutCredits)).toBe(true);
+		expect(verdict(withCredits)).toBe(false);
 	});
 });

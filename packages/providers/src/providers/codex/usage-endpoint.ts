@@ -1,6 +1,7 @@
 import { Logger } from "@better-ccflare/logger";
 import type { UsageData, UsageWindow } from "../../usage-fetcher";
 import { CODEX_USER_AGENT } from "./provider";
+import { parseCodexCreditsHeaders } from "./usage";
 
 const log = new Logger("CodexUsageEndpoint");
 
@@ -151,6 +152,41 @@ export function parseCodexUsagePayload(
 	return usage.five_hour || usage.seven_day ? usage : null;
 }
 
+/**
+ * Attach the credit balance this response reported, if it reported one.
+ *
+ * `parseCodexUsagePayload` above reads the JSON body only, so before this the
+ * poller produced a payload with no `credits` key at all, and `install`
+ * replaces the cache entry wholesale — erasing a balance the traffic path had
+ * written moments earlier (SB23-2289).
+ *
+ * Reading the headers of this same response keeps the balance fresh by
+ * construction: it is measured at the same moment as the windows beside it,
+ * rather than carried forward from an earlier reading. `carryCodexCredits` is
+ * the fallback for when this returns nothing, not a substitute for it.
+ *
+ * **Unverified against a live response**: `parseCodexCreditsHeaders` is the
+ * same parser the traffic path uses, and every credit reading in this tree
+ * today comes off a traffic response rather than off `wham/usage`, so whether
+ * this endpoint sends `x-codex-credits-*` at all is not something the code can
+ * answer. Being wrong about it costs nothing: the parser returns null, the key
+ * stays absent, and admission benches exactly as it did before.
+ *
+ * Credits alone never make a payload, matching `parseCodexUsageHeaders`: a null
+ * `data` stays null rather than becoming a windowless credits-only object,
+ * which `getRepresentativeUsageSnapshotForProvider` would have no opinion about
+ * anyway and which SB23-2257 already pinned a test against.
+ */
+function attachCreditsFromHeaders(
+	data: UsageData | null,
+	headers: Headers,
+): UsageData | null {
+	if (data === null) return null;
+	const credits = parseCodexCreditsHeaders(headers);
+	if (credits === null) return data;
+	return { ...data, credits };
+}
+
 export function readCodexPlanType(body: unknown): string | null {
 	if (typeof body !== "object" || body === null) return null;
 	const planType = (body as CodexUsagePayload).plan_type;
@@ -250,7 +286,7 @@ export async function fetchCodexUsageData(
 			);
 		}
 		return {
-			data,
+			data: attachCreditsFromHeaders(data, response.headers),
 			retryAfterMs: null,
 			status: response.status,
 			planType: readCodexPlanType(body),
