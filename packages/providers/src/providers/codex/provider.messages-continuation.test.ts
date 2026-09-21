@@ -83,6 +83,10 @@ async function request(
 	expect(result.headers.has("x-better-ccflare-authenticated-caller")).toBe(
 		false,
 	);
+	// `input` carries the Responses-API item shape. The fields below are the
+	// ones this file asserts on; they were missing, so a `toEqual` naming
+	// `role`, `type` or `text` was an excess-property error against the
+	// declaration rather than a disagreement with the wire format.
 	return (await result.json()) as {
 		model: string;
 		instructions?: string;
@@ -90,7 +94,12 @@ async function request(
 		previous_response_id?: string;
 		input: Array<{
 			type?: string;
-			content: Array<{ prompt_cache_breakpoint?: unknown }>;
+			role?: string;
+			content: Array<{
+				prompt_cache_breakpoint?: unknown;
+				type?: string;
+				text?: string;
+			}>;
 		}>;
 	};
 }
@@ -357,7 +366,10 @@ describe("Messages fallback cache and continuation", () => {
 	test("cancellation cannot promote even a buffered completion candidate", async () => {
 		const provider = new CodexProvider();
 		await request(provider, "cancel");
-		let source: ReadableStreamDefaultController<Uint8Array>;
+		// Declared without an initializer and with `undefined` in the union:
+		// `= null` would pin the flow type at `null`, because TypeScript
+		// cannot see the assignment made inside `start` below (TS#9998).
+		let source: ReadableStreamDefaultController<Uint8Array> | undefined;
 		const upstream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				source = controller;
@@ -384,6 +396,13 @@ describe("Messages fallback cache and continuation", () => {
 		const reader = response.body.getReader();
 		await reader.read();
 		await reader.cancel();
+		// `start` runs synchronously inside the `ReadableStream` constructor
+		// per the Streams spec, so this has been assigned since line 364. The
+		// throw states that assumption: a `?.` here would skip both the
+		// enqueue and the close below and leave the case asserting that a
+		// completion event it never sent failed to promote a checkpoint.
+		if (!source)
+			throw new Error("upstream stream start() did not assign a controller");
 		source.enqueue(
 			new TextEncoder().encode(
 				event("response.completed", {

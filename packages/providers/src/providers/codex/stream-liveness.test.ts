@@ -3,6 +3,7 @@ import {
 	CODEX_STREAM_HEARTBEAT_INTERVAL_MS,
 	CODEX_STREAM_RAW_SILENCE_TIMEOUT_MS,
 	CodexStreamLiveness,
+	type CodexStreamReader,
 } from "./stream-liveness";
 
 function makeSilentReader() {
@@ -155,11 +156,21 @@ describe("CodexStreamLiveness", () => {
 	});
 
 	it("waits for the retained read to settle before teardown can release its lock", async () => {
-		type ReaderResult = Awaited<
-			ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
-		>;
-		let settleRead: ((result: ReaderResult) => void) | null = null;
-		const reader = {
+		// bun-types and lib.dom both declare `ReadableStreamDefaultReader`, so
+		// `CodexStreamReader["read"]` is an overload pair and this `read` has
+		// to satisfy both return types. Neither is assignable to the other:
+		// on a done result lib.dom types `value` as `T | undefined` and bun
+		// types it as `undefined`. Spelling the two cases out satisfies both,
+		// where naming either library's alias satisfies only itself.
+		// `ReturnType` picks only the last overload, so deriving the type
+		// that way sees one of the pair and misses the other.
+		type ReaderResult =
+			| { done: false; value: Uint8Array }
+			| { done: true; value: undefined };
+		// `= null` would pin the flow type at `null`, because the assignment
+		// happens inside the executor below (TS#9998).
+		let settleRead: ((result: ReaderResult) => void) | undefined;
+		const reader: CodexStreamReader = {
 			read: () =>
 				new Promise<ReaderResult>((resolve) => {
 					settleRead = resolve;
@@ -181,7 +192,12 @@ describe("CodexStreamLiveness", () => {
 		await Bun.sleep(5);
 		expect(cleanupFinished).toBeFalse();
 
-		settleRead?.({ done: true, value: undefined });
+		// Not `settleRead?.(...)`: a stub that never captured its resolver
+		// would leave `cleanup` pending forever, so the case would die on the
+		// per-test timeout instead of saying what was missing, and the
+		// `toBeTrue` below would never run.
+		if (!settleRead) throw new Error("reader.read() captured no resolver");
+		settleRead({ done: true, value: undefined });
 		await cleanup;
 		expect(cleanupFinished).toBeTrue();
 	});

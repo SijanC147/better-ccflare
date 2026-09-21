@@ -5,6 +5,7 @@ import {
 	clearDerivedProviderModelDefaults,
 	setDerivedProviderModelDefaults,
 } from "../../provider-model-defaults";
+import { makeAccount as baseAccount } from "../../testing/account-fixture";
 import { fetchCodexUsageOnDemand } from "./on-demand-fetch";
 import {
 	CODEX_CACHE_KEY_MODE_ENV,
@@ -17,42 +18,22 @@ import {
 } from "./provider";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
-const codexAccount = (overrides: Partial<Account> = {}): Account => ({
-	id: "codex-1",
-	name: "codex-test",
-	provider: "codex",
-	api_key: null,
-	refresh_token: "refresh-token",
-	access_token: "access-token",
-	expires_at: Date.now() + 60_000,
-	request_count: 0,
-	total_requests: 0,
-	last_used: null,
-	created_at: Date.now(),
-	rate_limited_until: null,
-	rate_limited_reason: null,
-	rate_limited_at: null,
-	session_start: null,
-	session_request_count: 0,
-	paused: false,
-	rate_limit_reset: null,
-	rate_limit_status: null,
-	rate_limit_remaining: null,
-	priority: 50,
-	auto_fallback_enabled: true,
-	auto_refresh_enabled: true,
-	auto_pause_on_overage_enabled: false,
-	peak_hours_pause_enabled: false,
-	custom_endpoint: null,
-	model_mappings: null,
-	cross_region_mode: null,
-	model_fallbacks: null,
-	billing_type: null,
-	pause_reason: null,
-	refresh_token_issued_at: null,
-	consecutive_rate_limits: 0,
-	...overrides,
-});
+// Only the fields whose values this file's assertions depend on are named
+// here; every other field comes from the shared fixture, so the next field
+// added to `Account` fails one file rather than reopening this one.
+const codexAccount = (overrides: Partial<Account> = {}): Account =>
+	baseAccount({
+		id: "codex-1",
+		name: "codex-test",
+		provider: "codex",
+		refresh_token: "refresh-token",
+		access_token: "access-token",
+		expires_at: Date.now() + 60_000,
+		priority: 50,
+		auto_fallback_enabled: true,
+		auto_refresh_enabled: true,
+		...overrides,
+	});
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
 const eventLine = (name: string, data: unknown) => [
@@ -136,7 +117,14 @@ describe("CodexProvider stream liveness", () => {
 			streamRawSilenceTimeoutMs: 200,
 			streamDrainDeadlineMs: 300,
 		});
-		let upstreamController: ReadableStreamDefaultController<Uint8Array>;
+		// Declared without an initializer and with `undefined` in the union:
+		// `= null` would narrow the flow type to `null` for the rest of the
+		// body, because TypeScript cannot see the assignment made inside the
+		// `start` callback below (TS#9998), and the guard at the use site
+		// would then narrow that to `never`.
+		let upstreamController:
+			| ReadableStreamDefaultController<Uint8Array>
+			| undefined;
 		// After response.completed, cancelUpstreamOnce no longer calls
 		// reader.cancel() — it drains the reader via reader.read() instead
 		// (issue #382: Bun's reader.cancel() is a documented RSS-leaking
@@ -187,6 +175,12 @@ describe("CodexProvider stream liveness", () => {
 			'event: ping\ndata: {"type":"ping"}\n\n',
 		);
 
+		// `start` runs synchronously inside the `ReadableStream` constructor
+		// per the Streams spec, so this has been assigned since line 150.
+		// The throw states that assumption instead of letting a `?.` skip the
+		// enqueue and leave the assertions below asserting nothing.
+		if (!upstreamController)
+			throw new Error("upstream stream start() did not assign a controller");
 		upstreamController.enqueue(
 			new TextEncoder().encode(
 				sseBody(
@@ -3677,11 +3671,20 @@ describe("CodexProvider native Responses preservation", () => {
 				input: base,
 			});
 			const response = await provider.processResponse(
+				// `eventLine` returns the event's lines; it must go through
+				// `sseBody` to become a stream. Passing the array straight to
+				// `Response` stringified it by concatenation with no separator
+				// at all ("event: response.completeddata: {...}"), which is a
+				// single unterminated line that the SSE parser cannot read, so
+				// this case asserted "no checkpoint advanced" against a body
+				// that carried no event rather than against the conflict guard.
 				new Response(
-					eventLine(eventName, {
-						type: dataType,
-						response: { id: "resp_conflict", status, output: [] },
-					}),
+					sseBody(
+						eventLine(eventName, {
+							type: dataType,
+							response: { id: "resp_conflict", status, output: [] },
+						}),
+					),
 					{
 						status: 200,
 						headers: {
@@ -5221,9 +5224,13 @@ describe("fetchCodexUsageOnDemand", () => {
 	});
 
 	it("aborts a pending refresh on timeout and clears the timer", async () => {
-		let timeoutCallback: (() => void) | null = null;
+		// See the note on `upstreamController` above: both of these are
+		// assigned only inside stubs invoked indirectly through `globalThis`,
+		// so an `= null` initializer pinned the flow type at `null` and made
+		// the non-null branch of `?.` collapse to `never`.
+		let timeoutCallback: (() => void) | undefined;
 		let clearTimeoutCalls = 0;
-		let observedSignal: AbortSignal | null = null;
+		let observedSignal: AbortSignal | null | undefined;
 		globalThis.setTimeout = ((callback: () => void) => {
 			timeoutCallback = callback;
 			return 1 as unknown as ReturnType<typeof setTimeout>;
@@ -5244,11 +5251,17 @@ describe("fetchCodexUsageOnDemand", () => {
 
 		const refresh = fetchCodexUsageOnDemand("test-token");
 		await Promise.resolve();
-		expect(timeoutCallback).not.toBeNull();
-		timeoutCallback?.();
+		// `timeoutCallback?.()` here would be a silent skip: a stub that never
+		// captured a callback would leave `refresh` pending forever and the
+		// case would die on bun's per-test timeout rather than on a named
+		// assertion. Throw instead, so the failure says what went wrong.
+		if (!timeoutCallback)
+			throw new Error("setTimeout stub captured no callback");
+		timeoutCallback();
 
 		await expect(refresh).rejects.toThrow("Aborted");
-		expect(observedSignal?.aborted).toBe(true);
+		if (!observedSignal) throw new Error("fetch stub observed no AbortSignal");
+		expect(observedSignal.aborted).toBe(true);
 		expect(clearTimeoutCalls).toBe(1);
 	});
 
@@ -5284,7 +5297,12 @@ describe("fetchCodexUsageOnDemand", () => {
 		expect(result.response.headers.get("x-codex-primary-reset-at")).toBe(
 			"1775000000",
 		);
-		expect(result.data?.five_hour.utilization).toBe(42);
+		// `five_hour` is optional on `UsageData`, so `result.data?.five_hour`
+		// alone leaves a property read that throws a TypeError rather than
+		// failing an assertion. Name the missing window instead.
+		if (!result.data?.five_hour)
+			throw new Error("expected a five_hour usage window");
+		expect(result.data.five_hour.utilization).toBe(42);
 	});
 
 	it("returns null data when no Codex usage headers are present", async () => {
@@ -5322,8 +5340,10 @@ describe("fetchCodexUsageOnDemand", () => {
 		);
 
 		expect(result.response.status).toBe(429);
-		expect(result.data?.five_hour.utilization).toBe(100);
-		expect(result.data?.five_hour.resets_at).toBe(
+		if (!result.data?.five_hour)
+			throw new Error("expected a five_hour usage window");
+		expect(result.data.five_hour.utilization).toBe(100);
+		expect(result.data.five_hour.resets_at).toBe(
 			new Date(1775000000 * 1000).toISOString(),
 		);
 		expect(result.response.headers.get("x-codex-primary-reset-at")).toBe(
