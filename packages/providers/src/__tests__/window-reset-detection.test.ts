@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import { makeZaiUsage } from "../testing/zai-usage-fixture";
 import type { AnyUsageData, UsageData } from "../usage-fetcher";
 import {
 	extractWeeklyResetTime,
@@ -7,14 +8,12 @@ import {
 	usageCache,
 } from "../usage-fetcher";
 import type { XaiUsageData } from "../xai-usage-fetcher";
-import type { ZaiUsageData } from "../zai-usage-fetcher";
 
 // ── extractWindowResetTime ────────────────────────────────────────────────────
 
 describe("extractWindowResetTime", () => {
 	it("returns tokens_limit.resetAt for zai provider", () => {
-		const data: ZaiUsageData = {
-			time_limit: null,
+		const data = makeZaiUsage({
 			tokens_limit: {
 				used: 10,
 				remaining: 90,
@@ -22,12 +21,12 @@ describe("extractWindowResetTime", () => {
 				resetAt: 9999000,
 				type: "tokens_limit",
 			},
-		};
+		});
 		expect(extractWindowResetTime(data, "zai")).toBe(9999000);
 	});
 
 	it("returns null for zai provider when tokens_limit is null", () => {
-		const data: ZaiUsageData = { time_limit: null, tokens_limit: null };
+		const data = makeZaiUsage({ tokens_limit: null });
 		expect(extractWindowResetTime(data, "zai")).toBeNull();
 	});
 
@@ -175,8 +174,7 @@ describe("usageCache window-reset callback", () => {
 		const accountId = "zai-window-reset-test";
 		const callback = mock(() => {});
 
-		const oldData: ZaiUsageData = {
-			time_limit: null,
+		const oldData = makeZaiUsage({
 			tokens_limit: {
 				used: 80,
 				remaining: 20,
@@ -184,9 +182,8 @@ describe("usageCache window-reset callback", () => {
 				resetAt: 1000000,
 				type: "tokens_limit",
 			},
-		};
-		const newData: ZaiUsageData = {
-			time_limit: null,
+		});
+		const newData = makeZaiUsage({
 			tokens_limit: {
 				used: 2,
 				remaining: 98,
@@ -194,7 +191,7 @@ describe("usageCache window-reset callback", () => {
 				resetAt: 2000000,
 				type: "tokens_limit",
 			},
-		};
+		});
 
 		// Seed the cache with old data, then simulate a poll delivering new data
 		usageCache.set(accountId, oldData);
@@ -210,8 +207,7 @@ describe("usageCache window-reset callback", () => {
 		const accountId = "zai-no-reset-test";
 		const callback = mock(() => {});
 
-		const data: ZaiUsageData = {
-			time_limit: null,
+		const data = makeZaiUsage({
 			tokens_limit: {
 				used: 50,
 				remaining: 50,
@@ -219,7 +215,7 @@ describe("usageCache window-reset callback", () => {
 				resetAt: 1000000,
 				type: "tokens_limit",
 			},
-		};
+		});
 
 		usageCache.set(accountId, data);
 		usageCache.notifyWindowReset(accountId, data, "zai", callback);
@@ -233,8 +229,7 @@ describe("usageCache window-reset callback", () => {
 		const accountId = "zai-first-poll-test";
 		const callback = mock(() => {});
 
-		const data: ZaiUsageData = {
-			time_limit: null,
+		const data = makeZaiUsage({
 			tokens_limit: {
 				used: 5,
 				remaining: 95,
@@ -242,7 +237,7 @@ describe("usageCache window-reset callback", () => {
 				resetAt: 3000000,
 				type: "tokens_limit",
 			},
-		};
+		});
 
 		// No prior set() — first time seeing this account
 		usageCache.notifyWindowReset(accountId, data, "zai", callback);
@@ -263,8 +258,7 @@ describe("usageCache window-reset callback", () => {
 		const callback = mock(() => {});
 
 		const base = 1_700_000_000_000;
-		const oldData: ZaiUsageData = {
-			time_limit: null,
+		const oldData = makeZaiUsage({
 			tokens_limit: {
 				used: 60,
 				remaining: 40,
@@ -272,9 +266,8 @@ describe("usageCache window-reset callback", () => {
 				resetAt: base,
 				type: "tokens_limit",
 			},
-		};
-		const newData: ZaiUsageData = {
-			time_limit: null,
+		});
+		const newData = makeZaiUsage({
 			tokens_limit: {
 				used: 61,
 				remaining: 39,
@@ -282,7 +275,7 @@ describe("usageCache window-reset callback", () => {
 				resetAt: base + 332,
 				type: "tokens_limit",
 			},
-		};
+		});
 
 		usageCache.set(accountId, oldData);
 		usageCache.notifyWindowReset(accountId, newData, "zai", callback);
@@ -297,8 +290,7 @@ describe("usageCache window-reset callback", () => {
 		const callback = mock(() => {});
 
 		const base = 1_700_000_000_000;
-		const oldData: ZaiUsageData = {
-			time_limit: null,
+		const oldData = makeZaiUsage({
 			tokens_limit: {
 				used: 60,
 				remaining: 40,
@@ -306,9 +298,8 @@ describe("usageCache window-reset callback", () => {
 				resetAt: base,
 				type: "tokens_limit",
 			},
-		};
-		const newData: ZaiUsageData = {
-			time_limit: null,
+		});
+		const newData = makeZaiUsage({
 			tokens_limit: {
 				used: 62,
 				remaining: 38,
@@ -316,7 +307,7 @@ describe("usageCache window-reset callback", () => {
 				resetAt: base + 59_000,
 				type: "tokens_limit",
 			},
-		};
+		});
 
 		usageCache.set(accountId, oldData);
 		usageCache.notifyWindowReset(accountId, newData, "zai", callback);
@@ -331,8 +322,7 @@ describe("usageCache window-reset callback", () => {
 		const callback = mock(() => {});
 
 		const base = 1_700_000_000_000;
-		const oldData: ZaiUsageData = {
-			time_limit: null,
+		const oldData = makeZaiUsage({
 			tokens_limit: {
 				used: 95,
 				remaining: 5,
@@ -340,9 +330,8 @@ describe("usageCache window-reset callback", () => {
 				resetAt: base,
 				type: "tokens_limit",
 			},
-		};
-		const newData: ZaiUsageData = {
-			time_limit: null,
+		});
+		const newData = makeZaiUsage({
 			tokens_limit: {
 				used: 1,
 				remaining: 99,
@@ -350,7 +339,7 @@ describe("usageCache window-reset callback", () => {
 				resetAt: base + 5 * 60 * 60 * 1000,
 				type: "tokens_limit",
 			},
-		};
+		});
 
 		usageCache.set(accountId, oldData);
 		usageCache.notifyWindowReset(accountId, newData, "zai", callback);

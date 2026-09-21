@@ -260,7 +260,7 @@ describe("ollama-transformer", () => {
 			expect(result.type).toBe("message");
 			expect(result.role).toBe("assistant");
 			expect(result.content).toHaveLength(1);
-			expect(result.content?.[0]).toEqual({
+			expect((result.content as unknown[] | undefined)?.[0]).toEqual({
 				type: "text",
 				text: "Hello world",
 			});

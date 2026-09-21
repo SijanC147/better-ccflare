@@ -1,10 +1,23 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
 import { makeAccount as baseAccount } from "../../../testing/account-fixture";
+import type { AnthropicCompatibleConfig } from "../../base-anthropic-compatible";
 import { OllamaCloudProvider } from "../ollama-cloud-provider";
 
+/**
+ * Widens `config` to public so this file can read it directly.
+ *
+ * `config` is protected on `BaseAnthropicCompatibleProvider` and the assertion
+ * below reached past that. `declare` redeclares the visibility only: it emits
+ * no field, so the constructor's assignment in the base class is the one that
+ * runs and the instance behaves identically to `OllamaCloudProvider`.
+ */
+class TestOllamaCloudProvider extends OllamaCloudProvider {
+	public declare config: AnthropicCompatibleConfig;
+}
+
 describe("OllamaCloudProvider", () => {
-	const provider = new OllamaCloudProvider();
+	const provider = new TestOllamaCloudProvider();
 
 	const makeAccount = (model_mappings: string | null = null): Account =>
 		baseAccount({

@@ -23,7 +23,7 @@ describe("readRequestJson", () => {
 	it("returns the parsed body and leaves the original request unconsumed", async () => {
 		const request = makeRequest();
 
-		expect(await readRequestJson(request)).toEqual(body);
+		expect(await readRequestJson<typeof body>(request)).toEqual(body);
 		expect(request.bodyUsed).toBe(false);
 		expect(await request.json()).toEqual(body);
 	});
