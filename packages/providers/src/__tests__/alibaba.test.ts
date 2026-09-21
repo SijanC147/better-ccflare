@@ -2,23 +2,40 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import type { OpenAIRequest } from "@better-ccflare/openai-formats";
 import type { Account } from "@better-ccflare/types";
 import { OpenAICompatibleProvider } from "../providers/openai/provider";
+import { makeAccount } from "../testing/account-fixture";
+
+/**
+ * Widens `beforeConvert` to public so this file can drive it directly.
+ *
+ * `beforeConvert` is protected on `OpenAICompatibleProvider` and the five call
+ * sites below reached past that. Declaring the widening here keeps the reach
+ * explicit and local to the tests that need it, and leaves the production
+ * visibility alone. `super` is called unchanged, so the behaviour under test is
+ * the base class's own.
+ */
+class TestOpenAICompatibleProvider extends OpenAICompatibleProvider {
+	public override beforeConvert(
+		body: Record<string, unknown>,
+		account?: Account,
+	): Account | undefined {
+		return super.beforeConvert(body, account);
+	}
+}
 
 describe("OpenAICompatibleProvider Alibaba Features", () => {
-	let provider: OpenAICompatibleProvider;
+	let provider: TestOpenAICompatibleProvider;
 	let mockAccount: Account;
 
 	beforeEach(() => {
-		provider = new OpenAICompatibleProvider();
-		mockAccount = {
+		provider = new TestOpenAICompatibleProvider();
+		mockAccount = makeAccount({
 			name: "test-dashscope",
 			provider: "openai-compatible",
 			custom_endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 			refresh_token: "test-api-key",
 			priority: 1,
-			status: "active",
 			created_at: Date.now(),
-			updated_at: Date.now(),
-		} as Account;
+		});
 	});
 
 	describe("Alibaba caching injection", () => {
