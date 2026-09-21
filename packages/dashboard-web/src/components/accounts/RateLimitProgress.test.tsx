@@ -591,6 +591,37 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain(">100%<");
 	});
 
+	it("renders the weekly row for a weekly-only Codex payload with no five_hour key at all", () => {
+		// The Codex parser omits a window the headers did not report, so a Pro
+		// account's payload has no five_hour key. The shape guard used to require
+		// both keys, which left this account with no quota bar (PR #231 review,
+		// finding 1). Distinct from the case above, where the key is present and
+		// null.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso="2026-08-20T18:30:13.000Z"
+				// Nulled so the Anthropic-style branch is the only path that can
+				// render the row: the generic fallback draws the same row from these
+				// two props, and a mutation restoring the two-key guard survived
+				// while they were set.
+				usageUtilization={null}
+				usageWindow={null}
+				usageData={{
+					seven_day: {
+						utilization: 100,
+						resets_at: "2026-08-20T18:30:13.000Z",
+					},
+				}}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (Weekly)");
+		expect(html).toContain(">100%<");
+	});
+
 	it("still warns about throttling on a window whose row was suppressed", () => {
 		// Removing the 5-hour bar must not remove the notice that requests are
 		// actually being delayed.

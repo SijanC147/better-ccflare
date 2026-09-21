@@ -476,8 +476,12 @@ export function createAccountsListHandler(
 					(account.provider === "anthropic" || account.provider === "codex") &&
 					usageData
 				) {
+					// Either window, not both: the Codex parser omits a window the
+					// headers did not report, and a Pro account reports only the
+					// weekly one. Requiring both left usageUtilization null for it.
 					const isAnthropicStyleData =
-						("five_hour" in usageData && "seven_day" in usageData) ||
+						"five_hour" in usageData ||
+						"seven_day" in usageData ||
 						Array.isArray((usageData as { limits?: unknown }).limits);
 					if (isAnthropicStyleData) {
 						try {

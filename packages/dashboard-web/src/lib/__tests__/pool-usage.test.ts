@@ -127,6 +127,28 @@ describe("shape detectors", () => {
 		).toBe(true);
 	});
 
+	it("isAnthropicStyleShape accepts a lone window and still excludes alibaba", () => {
+		// The Codex parser omits a window the headers did not report, and a Pro
+		// account reports only the weekly one (PR #231 review, finding 1).
+		expect(
+			isAnthropicStyleShape({
+				seven_day: { utilization: 87, resets_at: "2026-09-28T00:00:00.000Z" },
+			} as never),
+		).toBe(true);
+		expect(
+			isAnthropicStyleShape({
+				five_hour: { utilization: 12, resets_at: null },
+			} as never),
+		).toBe(true);
+		// A lone five_hour beside alibaba's weekly is still alibaba, not anthropic.
+		expect(
+			isAnthropicStyleShape({
+				five_hour: { percentUsed: 0, resetAt: 0 },
+				weekly: { percentUsed: 0, resetAt: 0 },
+			} as never),
+		).toBe(false);
+	});
+
 	it("isAnthropicStyleShape excludes alibaba/zai/nanogpt", () => {
 		expect(
 			isAnthropicStyleShape({
@@ -185,6 +207,38 @@ describe("computePoolUsage", () => {
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.average).toBe(25);
 		expect(seven.worst).toEqual({ name: "codex-b", pct: 30 });
+	});
+
+	it("a weekly-only Codex account is counted in the weekly pool, not excluded", () => {
+		// What a user notices: the account's number moves the average. Before the
+		// guard accepted a lone key this account landed in `excluded` and the
+		// average was the other account's alone (PR #231 review, finding 1).
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "anthro-a",
+				provider: "anthropic",
+				usageData: {
+					five_hour: { utilization: 40, resets_at: null },
+					seven_day: { utilization: 20, resets_at: null },
+				} as never,
+			}),
+			mkAccount({
+				name: "codex-pro",
+				provider: "codex",
+				usageData: {
+					seven_day: { utilization: 80, resets_at: null },
+				} as never,
+			}),
+		];
+
+		const seven = computePoolUsage(accounts, "seven_day", NOW);
+		expect(seven.average).toBe(50);
+		expect(seven.worst).toEqual({ name: "codex-pro", pct: 80 });
+		expect(seven.contributing.map((a) => a.name)).toEqual([
+			"anthro-a",
+			"codex-pro",
+		]);
+		expect(seven.excluded).toEqual([]);
 	});
 
 	it("Alibaba contributes to both pools via percentUsed", () => {

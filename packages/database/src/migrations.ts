@@ -127,7 +127,11 @@ export function ensureSchema(db: Database): void {
 			requires_reauth INTEGER DEFAULT 0,
 			last_manual_reauth_at INTEGER,
 			renewal_day INTEGER,
-			request_transformer TEXT
+			request_transformer TEXT,
+			usage_pause_five_hour_threshold INTEGER,
+			usage_pause_weekly_threshold INTEGER,
+			usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0,
+			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0
 		)
 	`);
 

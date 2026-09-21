@@ -365,7 +365,11 @@ export function RateLimitProgress({
 		usageData != null &&
 		// Legacy flat windows OR the new generic limits[] array. Never NanoGPT's
 		// object-shaped `limits` — disambiguated with Array.isArray.
-		(("five_hour" in usageData && "seven_day" in usageData) ||
+		// Either window, not both: the Codex parser omits a window the headers
+		// did not report, and a Pro account reports only the weekly one. The
+		// provider-specific shapes are excluded by the guards below.
+		("five_hour" in usageData ||
+			"seven_day" in usageData ||
 			Array.isArray((usageData as { limits?: unknown }).limits)) &&
 		!isAlibabaData &&
 		!isMinimaxData &&

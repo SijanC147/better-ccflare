@@ -106,9 +106,12 @@ export interface UsageData {
 	// Core windows — present on legacy payloads but ABSENT on limits[]-only
 	// payloads (Anthropic is migrating the flat windows into the generic limits[]).
 	// `null` is an explicit "upstream did not report this window", distinct from
-	// a reported zero. Every reader tests `!= null` or truthiness, so null reads
-	// as absent, while the key stays present for the `"five_hour" in data` shape
-	// guards that route raw parser output (usage-throttling.ts:137).
+	// a reported zero, and a window may also be ABSENT: the Codex parser omits a
+	// window the headers did not report. Every reader tests `!= null` or
+	// truthiness, so both spellings read as absent, and every shape guard that
+	// routes raw parser output accepts either key alone (usage-throttling.ts,
+	// pool-usage.ts, RateLimitProgress.tsx, handlers/accounts.ts). Do not write
+	// a new `"five_hour" in data && "seven_day" in data` guard.
 	five_hour?: UsageWindow | null;
 	seven_day?: UsageWindow | null;
 	seven_day_oauth_apps?: UsageWindow;
