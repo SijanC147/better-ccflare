@@ -9,6 +9,7 @@
  * parameter array are correct — no real DB required.
  */
 import { describe, expect, it, mock } from "bun:test";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 type QueryCall = { sql: string; params: unknown[] };
 
@@ -24,18 +25,11 @@ function makeDb(queryResult: unknown[] = []) {
 	};
 }
 
-function makeProxyContext() {
-	return {
-		runtime: { port: 8080, clientId: "test-client" },
-		refreshInFlight: new Map(),
-	};
-}
-
 async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
-		makeProxyContext() as never,
+		makeProxyContext(),
 	) as InstanceType<typeof AutoRefreshScheduler> & {
 		checkAndRefresh(): Promise<void>;
 	};

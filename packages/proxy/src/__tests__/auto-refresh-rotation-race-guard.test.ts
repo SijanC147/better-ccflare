@@ -25,6 +25,8 @@ import {
 	clearAllPendingRotationsForTests,
 	recordPendingRotation,
 } from "../handlers/pending-rotation-registry";
+import type { ProxyContext } from "../handlers/proxy-types";
+import { makeProxyContext as makeBaseProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -50,33 +52,35 @@ function makeDb() {
  * - `false` — the row's refresh token had already changed; not flagged.
  * - an `Error` — the write rejects (DB unavailable).
  */
-function makeProxyContext(flagOutcome: boolean | Error = true) {
+function makeProxyContext(
+	flagOutcome: boolean | Error = true,
+): ProxyContext & { flagCalls: Array<[string, string]> } {
 	const flagCalls: Array<[string, string]> = [];
-	return {
-		runtime: { port: 8080, clientId: "test-client" },
-		refreshInFlight: new Map(),
-		dbOps: {
-			flagRequiresReauthIfTokenMatches: mock(
-				async (accountId: string, expectedRefreshToken: string) => {
-					flagCalls.push([accountId, expectedRefreshToken]);
-					if (flagOutcome instanceof Error) throw flagOutcome;
-					return flagOutcome;
-				},
-			),
-		},
-		flagCalls,
-	};
+	return Object.assign(
+		makeBaseProxyContext({
+			dbOps: {
+				flagRequiresReauthIfTokenMatches: mock(
+					async (accountId: string, expectedRefreshToken: string) => {
+						flagCalls.push([accountId, expectedRefreshToken]);
+						if (flagOutcome instanceof Error) throw flagOutcome;
+						return flagOutcome;
+					},
+				),
+			},
+		}),
+		{ flagCalls },
+	);
 }
 
 /** Instantiate the scheduler without starting the interval. */
 async function makeScheduler(
 	db: ReturnType<typeof makeDb>,
-	proxyContext: ReturnType<typeof makeProxyContext>,
+	proxyContext: ProxyContext,
 ) {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
-		proxyContext as never,
+		proxyContext,
 	) as unknown as PublicSurface<AutoRefreshScheduler> & {
 		flagIfDefinitiveAuthFailure(
 			error: unknown,
