@@ -112,8 +112,13 @@ describe("createRequestsSummaryHandler — stream terminal state mapping", () =>
 		const body = await fetchRows();
 		const row = body.find((r) => r.id === "req-no-state");
 
-		expect(row).toBeDefined();
-		expect(row?.streamTerminalState).toBeUndefined();
+		// A throw, not `expect(row).toBeDefined()`: that narrows nothing, so
+		// `expect(row?.streamTerminalState).toBeUndefined()` passes whether the FIELD is
+		// absent, which is the subject, or the ROW is, which is a broken fixture. Measured:
+		// with the lookup above made to find nothing and the assertion deleted, this file
+		// still read 5 pass / 0 fail.
+		if (!row) throw new Error("no row was returned for req-no-state");
+		expect(row.streamTerminalState).toBeUndefined();
 	});
 
 	it('reports a state the build does not know as "unknown", not as absent', async () => {
@@ -158,9 +163,11 @@ describe("createRequestsSummaryHandler — stream terminal state mapping", () =>
 		const body = await fetchRows();
 		const row = body.find((r) => r.id === "req-bad-attribution");
 
-		expect(row).toBeDefined();
-		expect(row?.projectAttributionSource).toBeUndefined();
-		expect(row?.agentAttributionSource).toBeUndefined();
+		// Same shape as above: both assertions pass on a missing row, so without the throw
+		// this case cannot tell "the attribution was rejected" from "nothing came back".
+		if (!row) throw new Error("no row was returned for req-bad-attribution");
+		expect(row.projectAttributionSource).toBeUndefined();
+		expect(row.agentAttributionSource).toBeUndefined();
 	});
 
 	it("keeps a cancelled stream distinguishable from a clean 200", async () => {

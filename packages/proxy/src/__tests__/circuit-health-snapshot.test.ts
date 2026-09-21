@@ -48,10 +48,14 @@ describe("CircuitBreaker.healthSnapshot — reports open state, never hides it",
 
 		const snap = breaker.healthSnapshot();
 		const entry = snap.accounts.find((a) => a.accountId === "acct-a");
-		expect(entry).toBeDefined();
-		expect(entry?.state).toBe("open");
-		expect(entry?.failureCount).toBe(2);
-		expect(entry?.cooldownEndsAt).not.toBeNull();
+		// A throw, not `expect(entry).toBeDefined()`: that narrows nothing, so
+		// `expect(entry?.cooldownEndsAt).not.toBeNull()` below would pass on a missing
+		// entry, `undefined` not being null. The two `toBe` lines happen to catch it
+		// today, but that is a sibling assertion doing this one's job.
+		if (!entry) throw new Error("healthSnapshot reported no entry for acct-a");
+		expect(entry.state).toBe("open");
+		expect(entry.failureCount).toBe(2);
+		expect(entry.cooldownEndsAt).not.toBeNull();
 	});
 
 	test("the provider rollup counts open and closed separately", () => {

@@ -1519,9 +1519,13 @@ describe("sanitizeProjectForDisplay", () => {
 	test("clamps to PROJECT_DISPLAY_MAX_CHARS and appends an ellipsis", () => {
 		const long = "x".repeat(PROJECT_DISPLAY_MAX_CHARS + 50);
 		const out = sanitizeProjectForDisplay(long);
-		expect(out).not.toBeNull();
-		expect(out?.length).toBe(PROJECT_DISPLAY_MAX_CHARS);
-		expect(out?.endsWith("…")).toBe(true);
+		// A throw, not `expect(out).not.toBeNull()`: that narrows nothing, so `out?.endsWith`
+		// would short-circuit to undefined and `expect(undefined).toBe(true)` is the only
+		// thing keeping this test honest.
+		if (!out)
+			throw new Error("sanitizeProjectForDisplay returned nothing to clamp");
+		expect(out.length).toBe(PROJECT_DISPLAY_MAX_CHARS);
+		expect(out.endsWith("…")).toBe(true);
 	});
 
 	test("passes a normal project name through unchanged", () => {

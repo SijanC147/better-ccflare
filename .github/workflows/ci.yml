@@ -73,6 +73,29 @@ jobs:
         if: steps.changes.outputs.relevant != 'false'
         run: bun run check:boolean-widening
 
+      # SB23-2460. `expect(x).not.toBeNull()` is a runtime assertion that narrows
+      # nothing for TypeScript, so `x?.()` on the next line typechecks, and if the
+      # guard is ever moved the call is skipped and the test still passes. A test
+      # that silently skips its own subject is worse than a missing test, because
+      # it is counted as coverage. Nothing else here can see it: typecheck cannot,
+      # since `x?.()` is valid by construction; no test fails, since the skip is
+      # the passing path; and mutation testing does not reach it unless someone
+      # mutates the guard.
+      #
+      # Scoped to the shapes where short-circuiting skips a CALL rather than
+      # yielding `undefined` for an `expect` to reject. That measured 5 sites,
+      # fixed in the same PR, against 275 guarded optional READS across 60 files
+      # which are surveyed and deliberately not gated. So this fails the build
+      # rather than warning. `--survey` re-derives the wider population; the
+      # script's header carries both numbers and the boundary.
+      #
+      # A step inside this job for the same reason as the two around it: both job
+      # names are required checks in ruleset `hextap/main` and a new job would
+      # need a ruleset change.
+      - name: Check for optional chains that silently skip a guarded call
+        if: steps.changes.outputs.relevant != 'false'
+        run: bun run check:optional-chain-silent-skip
+
       # SB23-1918. `bun run lint` cannot be this gate: it is
       # `biome check --write --unsafe`, which mutates the tree and can exit 0
       # having rewritten files, so it reports nothing. This is the read-only

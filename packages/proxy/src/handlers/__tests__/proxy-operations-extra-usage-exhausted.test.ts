@@ -172,9 +172,14 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 		);
 
 		// Response is passed through to the client, not swallowed/nulled for failover.
-		expect(result).not.toBeNull();
-		expect(result?.status).toBe(400);
-		const responseBody = await result?.json();
+		// A throw rather than `expect(result).not.toBeNull()`: that assertion narrows
+		// nothing, so `await result?.json()` below would silently resolve to undefined
+		// and `expect(responseBody).toEqual(...)` would be comparing against a body
+		// nobody read.
+		if (!result)
+			throw new Error("extra-usage exhaustion returned no response to forward");
+		expect(result.status).toBe(400);
+		const responseBody = await result.json();
 		expect(responseBody).toEqual({
 			type: "error",
 			error: {

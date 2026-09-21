@@ -1155,12 +1155,14 @@ describe("CodexProvider.processResponse", () => {
 			.split("\n")
 			.find((line) => line.includes('"type":"message_delta"'));
 
-		expect(messageDeltaLine).not.toBeUndefined();
+		// A throw rather than `expect(messageDeltaLine).not.toBeUndefined()`, which narrows
+		// nothing: `messageDeltaLine?.startsWith(...)` would short-circuit to undefined and
+		// the `as string` two lines down existed only to paper over the same gap.
+		if (messageDeltaLine === undefined)
+			throw new Error("transformed body carried no message_delta line");
 		const dataPrefix = "data: ";
-		expect(messageDeltaLine?.startsWith(dataPrefix)).toBeTrue();
-		const payload = JSON.parse(
-			(messageDeltaLine as string).slice(dataPrefix.length),
-		);
+		expect(messageDeltaLine.startsWith(dataPrefix)).toBeTrue();
+		const payload = JSON.parse(messageDeltaLine.slice(dataPrefix.length));
 		expect(payload.usage.input_tokens).toBe(5);
 		expect(payload.usage.output_tokens).toBe(2);
 		expect(payload.usage.cache_read_input_tokens).toBe(0);
@@ -3897,9 +3899,14 @@ describe("CodexProvider native Responses preservation", () => {
 			null,
 		);
 		const reader = response.body?.getReader();
-		expect(reader).toBeDefined();
-		await reader?.read();
-		await reader?.cancel("client disconnected");
+		// A throw rather than `expect(reader).toBeDefined()`, which narrows nothing. The
+		// cancel below is the whole subject of this test, and `reader?.cancel(...)` would
+		// skip it silently, leaving the assertion on the next line to pass for the wrong
+		// reason: nothing was ever registered to clear.
+		if (!reader)
+			throw new Error("streamed response exposed no reader to cancel");
+		await reader.read();
+		await reader.cancel("client disconnected");
 		expect(retained.pendingContinuationByRequest.has(requestId)).toBe(false);
 
 		const next = await transformContinuationTurn(provider, {
