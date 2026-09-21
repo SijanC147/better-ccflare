@@ -484,23 +484,6 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		expect(carried.creditsObservedAt).toBeNull();
 	});
 
-	it("falls back to the entry timestamp when the stamp is absent", () => {
-		// Every writer except the poller takes its credits off the same response
-		// as the windows beside them, so an unstamped entry's credits are exactly
-		// as old as the entry. An entry older than the bound with no stamp must
-		// therefore expire, not read as age zero.
-		const stale = carryCodexCredits(
-			pollPayload(),
-			{
-				data: weeklyExhausted(CREDITS),
-				timestamp: NOW,
-				creditsObservedAt: NOW,
-			},
-			NOW + CODEX_CREDITS_MAX_AGE_MS + 1,
-		);
-		expect(stale.data.credits).toBeUndefined();
-	});
-
 	it("does not mutate the payload it was handed", () => {
 		const next = pollPayload();
 		carryCodexCredits(

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { isUsageExhausted } from "@better-ccflare/core";
 import { supportsUsageTracking } from "@better-ccflare/types";
-import { CODEX_CREDITS_MAX_AGE_MS } from "../providers/codex/credits";
+import {
+	CODEX_CREDITS_MAX_AGE_MS,
+	CODEX_CREDITS_NOT_OBSERVED,
+} from "../providers/codex/credits";
 import { CODEX_USAGE_ENDPOINT } from "../providers/codex/usage-endpoint";
 import {
 	getRepresentativeUtilizationForProvider,
@@ -240,6 +243,95 @@ describe("usageCache polling for codex", () => {
 				Date.now(),
 			),
 		).toBe(false);
+	});
+
+	it("does not touch an xAI payload, whose only field is named credits", async () => {
+		// MUST-FIX 1 of PR #236's second review, and the sharpest lesson in the
+		// whole change. The strip in get() used to fire on the FIELD NAME, and
+		// XaiUsageData is `{ credits: XaiUsageWindow }` — `credits` is its only
+		// field. An xAI entry, stamped NOT_OBSERVED because no Codex balance was
+		// ever dated into it, therefore came back as `{}`, breaking xAI ranking,
+		// throttling, the health counter and the dashboard card.
+		//
+		// Same collision as #219 from the other direction: there a key-presence
+		// check made every Codex card render "Grok credits". The field name is
+		// shared between two providers; only the stamp says whose balance it is.
+		// See mem:detect-the-provider-not-the-key.
+		const xai = {
+			credits: { utilization: 42, resets_at: "2030-01-01T00:00:00.000Z" },
+		} as unknown as UsageData;
+		usageCache.set(ACCOUNT_ID, xai, CODEX_CREDITS_NOT_OBSERVED);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+
+		expect(cached).toEqual(xai);
+		// The assertion that actually bites: the payload must still carry its
+		// one field. `toEqual` against `{}` would pass a lot of broken shapes.
+		expect(
+			(cached as unknown as { credits?: { utilization?: number } } | null)
+				?.credits?.utilization,
+		).toBe(42);
+	});
+
+	it("expires a carried balance on the credits' own clock across real polls", async () => {
+		// MUST-FIX 2 of the second review: the test named for the first review's
+		// must-fix 2 did NOT cover the call site it named. Mutating the stamp
+		// argument to `Date.now()` left all of this file green, because in that
+		// test the carry had already refused and so the stamp never mattered.
+		//
+		// To reach it the carry must SUCCEED on one poll and then be refused on
+		// a later one, which needs the clock to cross the bound between two real
+		// polls. Hence the seam: Date.now is controlled here rather than the
+		// bound being made injectable, so the code under test is the shipped
+		// code.
+		const realNow = Date.now;
+		try {
+			let clock = realNow.call(Date);
+			Date.now = () => clock;
+
+			globalThis.fetch = mock(async () =>
+				okResponse(payload()),
+			) as unknown as typeof fetch;
+
+			const credits = { has_credits: true, unlimited: false, balance: "9.99" };
+			usageCache.set(
+				ACCOUNT_ID,
+				{
+					five_hour: { utilization: 5, resets_at: null },
+					seven_day: { utilization: 100, resets_at: null },
+					credits,
+				} as UsageData,
+				clock,
+			);
+
+			usageCache.startPolling(
+				ACCOUNT_ID,
+				async () => TOKEN,
+				"codex",
+				ONE_HOUR_MS,
+			);
+
+			// Poll inside the bound: the balance is carried and, crucially, keeps
+			// its ORIGINAL stamp rather than being re-dated to this poll.
+			clock += 6 * 60 * 1000;
+			await usageCache.refreshNow(ACCOUNT_ID);
+			expect((usageCache.get(ACCOUNT_ID) as UsageData | null)?.credits).toEqual(
+				credits,
+			);
+
+			// Second poll, 12 minutes after the balance was observed but only 6
+			// after the previous poll. With the stamp preserved this is past the
+			// bound and the balance dies. Re-dating it at each poll would keep it
+			// alive here, and forever after.
+			clock += 6 * 60 * 1000;
+			await usageCache.refreshNow(ACCOUNT_ID);
+
+			const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+			expect(cached?.seven_day?.utilization).toBe(43);
+			expect(cached && "credits" in cached).toBe(false);
+		} finally {
+			Date.now = realNow;
+		}
 	});
 
 	it("does not invent credits when none were ever observed", async () => {

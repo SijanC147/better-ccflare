@@ -16,17 +16,25 @@ import type {
 export const CODEX_CREDITS_MAX_AGE_MS = 10 * 60 * 1000;
 
 /**
- * The stamp for a payload that carries no credit balance: every provider other
- * than Codex, and Codex responses upstream said nothing about credits on.
+ * The stamp for an entry where no Codex credit balance was observed: every
+ * provider other than Codex, and Codex responses upstream said nothing about
+ * credits on.
  *
- * The epoch rather than `Date.now()`, so that if such a payload ever did carry
- * a balance it would read as infinitely old and be refused. A stamp has to mean
- * something, and "no balance was observed" is closer to ancient than to fresh.
- * `Date.now()` here would be a writer quietly asserting freshness about a value
- * it never looked at, which is the shape of the defect this constant exists
- * alongside.
+ * `null`, not `0`, and the difference is load-bearing twice over. A stamp has
+ * to be able to say "there is no balance here to date", which is a different
+ * statement from any instant, and `0` cannot make it: the epoch is a real
+ * instant that reads as infinitely old. PR #236's second reviewer found what
+ * that cost. `usageCache.get` withheld a field it judged stale, `XaiUsageData`
+ * is `{ credits: XaiUsageWindow }` whose ONLY field is `credits`, and an xAI
+ * entry stamped `0` therefore came back as `{}` — xAI ranking, throttling, the
+ * health counter and the dashboard card all broken by a Codex feature.
+ *
+ * `null` makes "no Codex balance was dated into this entry" unmistakable, so
+ * the strip can key on THAT rather than on a field name that two providers
+ * happen to share. Being falsy also made `0` a trap for `||`, which is what
+ * mutation MF3 was about.
  */
-export const CODEX_CREDITS_NOT_OBSERVED = 0;
+export const CODEX_CREDITS_NOT_OBSERVED = null;
 
 /**
  * Strict decimal balance parse: `"9.99"` yes, `"1,234.50"` no.
@@ -99,7 +107,7 @@ export interface CodexCreditsAge {
 	 * to say when it observed the balance, and omitting it is a type error
 	 * rather than a silent claim of freshness.
 	 */
-	creditsObservedAt: number;
+	creditsObservedAt: number | null;
 	timestamp: number;
 	data: AnyUsageData;
 }
@@ -130,10 +138,21 @@ export function codexCreditsAreFresh(
  * Remove a credit balance from a payload, returning the same object when there
  * was nothing to remove.
  *
- * Not provider detection: this deletes a named field because it is too old to
- * act on, and a payload from a provider that has no such field is returned
- * untouched by the first line. The provider question is decided by
- * `codexCreditsExcludeWeekly` against `PROVIDER_NAMES.CODEX`.
+ * **Call this only for an entry that actually carries a Codex balance**, which
+ * `usageCache.get` establishes by the entry's `creditsObservedAt` being non-null
+ * rather than by looking at the payload.
+ *
+ * An earlier version of this docstring claimed the field name was safe because
+ * "a payload from a provider that has no such field is returned untouched".
+ * That was **false**, and PR #236's second reviewer measured the cost:
+ * `XaiUsageData` is `{ credits: XaiUsageWindow }`, where `credits` is the ONLY
+ * field, so an xAI payload run through here comes back as `{}` and xAI ranking,
+ * throttling, the health counter and the dashboard card all break. It is the
+ * same collision as `#219`, where `"credits" in usageData` made every Codex card
+ * render "Grok credits", arriving from the opposite direction. See
+ * `mem:detect-the-provider-not-the-key`.
+ *
+ * The field name is shared. Only the stamp says whose balance it is.
  */
 export function stripCodexCredits(data: AnyUsageData): AnyUsageData {
 	if (!data || typeof data !== "object") return data;

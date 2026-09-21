@@ -1020,9 +1020,10 @@ class UsageCache {
 			 * reviewer found both defects that followed: an absent stamp read as
 			 * "as old as the entry", and the entry timestamp is refreshed by the
 			 * very write being dated, so omitting it claimed the balance was brand
-			 * new. Meaningless but harmless on an entry with no `credits`.
+			 * new. `null` means no Codex balance was dated into this entry,
+			 * which is what the read path keys on rather than on a field name.
 			 */
-			creditsObservedAt: number;
+			creditsObservedAt: number | null;
 		}
 	>();
 	/**
@@ -1759,7 +1760,7 @@ class UsageCache {
 		// including ones not written yet, and it allocates only in the rare case
 		// where a stale balance is actually present.
 		if (
-			(cached.data as UsageData | null)?.credits !== undefined &&
+			cached.creditsObservedAt !== null &&
 			!codexCreditsAreFresh(cached.creditsObservedAt, Date.now())
 		) {
 			return stripCodexCredits(cached.data);
@@ -1776,7 +1777,7 @@ class UsageCache {
 	private install(
 		accountId: string,
 		data: AnyUsageData,
-		creditsObservedAt: number,
+		creditsObservedAt: number | null,
 	): void {
 		this.cache.set(accountId, {
 			data,
@@ -1812,7 +1813,7 @@ class UsageCache {
 		 * though it had just arrived is what admitted an exhausted account in PR
 		 * #236's review.
 		 */
-		creditsObservedAt: number = Date.now(),
+		creditsObservedAt: number | null = Date.now(),
 	): void {
 		this.install(accountId, data, creditsObservedAt);
 
