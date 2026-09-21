@@ -73,6 +73,10 @@ const baseAccount: Account = {
 	renewalDay: null,
 	nextRenewalAt: null,
 	daysUntilRenewal: null,
+	usagePauseFiveHourThreshold: null,
+	usagePauseWeeklyThreshold: null,
+	usagePauseFiveHourEnabled: false,
+	usagePauseWeeklyEnabled: false,
 };
 
 function renderAccount(

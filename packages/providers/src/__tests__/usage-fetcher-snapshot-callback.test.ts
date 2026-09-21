@@ -97,7 +97,7 @@ function xaiGrpcWebResponse(
 		frame(0x00, xaiCreditsPayload(percent, resetEpochSeconds)),
 		frame(0x80, "grpc-status: 0\r\n"),
 	);
-	return new Response(body, { status: 200 });
+	return new Response(body as BodyInit, { status: 200 });
 }
 
 // ── shared harness ──────────────────────────────────────────────────────────

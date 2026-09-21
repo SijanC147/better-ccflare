@@ -42,6 +42,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		request_transformer: null,
 		last_manual_reauth_at: null,
 		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }

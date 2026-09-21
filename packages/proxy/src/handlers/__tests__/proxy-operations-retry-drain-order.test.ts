@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -60,6 +61,14 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		last_manual_reauth_at: null,
+		renewal_day: null,
+		request_transformer: null,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -221,17 +230,17 @@ async function runProxy(
 }
 
 describe("in-place retry loops drain the superseded response before re-issuing", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 		process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS = "0";
 		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "0";
 		resetRateLimitProbeGatesForTests();
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
 		resetRateLimitProbeGatesForTests();
@@ -240,7 +249,7 @@ describe("in-place retry loops drain the superseded response before re-issuing",
 	it("drains a 500 body even when the re-issue rejects with a connection reset", async () => {
 		const discarded = observableBody(4);
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			if (callCount === 1) {
 				return new Response(discarded.stream, {
@@ -268,7 +277,7 @@ describe("in-place retry loops drain the superseded response before re-issuing",
 	it("drains a 529 body even when the re-issue rejects with a connection reset", async () => {
 		const discarded = observableBody(4);
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			if (callCount === 1) {
 				return new Response(discarded.stream, {

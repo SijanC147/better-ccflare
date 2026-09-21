@@ -26,6 +26,7 @@ import { logBus } from "@better-ccflare/logger";
 import { usageCache } from "@better-ccflare/providers";
 import type { LogEvent } from "@better-ccflare/types";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ type AccountRow = {
 	pause_reason: string | null;
 };
 
-type TestableScheduler = AutoRefreshScheduler & {
+type TestableScheduler = PublicSurface<AutoRefreshScheduler> & {
 	shouldRefreshAccount(account: AccountRow, now: number): boolean;
 	usageExhaustedAnnouncedFor: Map<string, number>;
 	lastFailureProbeAt: Map<string, number>;
@@ -77,7 +78,7 @@ async function makeScheduler(
 			refreshInFlight: new Map(),
 			internalProbeSecret: "secret",
 		} as never,
-	) as TestableScheduler;
+	) as unknown as TestableScheduler;
 }
 
 function makeAccountRow(overrides: Partial<AccountRow> = {}): AccountRow {
@@ -122,7 +123,9 @@ function exhaustedWeekly(now: number) {
 }
 
 /** Collect the INFO lines the scheduler puts on the log bus during `fn`. */
-async function infoLines(fn: () => void | Promise<void>): Promise<string[]> {
+// `unknown` rather than `void`: the callers pass `shouldRefreshAccount`,
+// which resolves to a boolean this helper discards.
+async function infoLines(fn: () => unknown): Promise<string[]> {
 	const lines: string[] = [];
 	const listener = (event: LogEvent) => {
 		if (event.level === "INFO") lines.push(event.msg);

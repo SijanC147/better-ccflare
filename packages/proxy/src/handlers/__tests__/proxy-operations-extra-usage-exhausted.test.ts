@@ -44,6 +44,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		request_transformer: null,
 		last_manual_reauth_at: null,
 		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -142,10 +146,10 @@ function extraUsageExhaustedResponse(): Response {
 }
 
 describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 	});
 
 	afterEach(() => {
@@ -295,7 +299,7 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 	});
 
 	it("threads gateway hint headers through to saveRequest when present on the request", async () => {
-		globalThis.fetch = mock(async () => extraUsageExhaustedResponse());
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();
@@ -338,7 +342,7 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 	});
 
 	it("persists null gateway hint fields when the request carries none of the headers", async () => {
-		globalThis.fetch = mock(async () => extraUsageExhaustedResponse());
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
 
 		const ctx = makeProxyContextWithAsyncExec();
 		const account = makeAccount();

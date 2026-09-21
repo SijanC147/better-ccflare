@@ -95,6 +95,12 @@ describe("UsageCollector - gateway hint headers in the live summary", () => {
 			apiKeyName: null,
 			retryAttempt: 0,
 			failoverAttempts: 0,
+			// Fork fields on the start message: path attribution and the model
+			// rewrite pair, none of which this test exercises.
+			projectId: null,
+			worktreePath: null,
+			originalModel: null,
+			appliedModel: null,
 		};
 	}
 
@@ -140,10 +146,7 @@ describe("UsageCollector - gateway hint headers in the live summary", () => {
 	});
 
 	test("a request with none of the headers is processed normally: fields stay undefined, nothing errors", async () => {
-		const summary = await runRequestAndGetSummary(
-			"gateway-hint-absent",
-			{},
-		);
+		const summary = await runRequestAndGetSummary("gateway-hint-absent", {});
 
 		expect(summary.gatewayHintRequestClass).toBeUndefined();
 		expect(summary.gatewayHintAgentType).toBeUndefined();

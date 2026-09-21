@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { clearFamilyExhaustionCache } from "../model-capacity";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -57,6 +58,14 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		last_manual_reauth_at: null,
+		renewal_day: null,
+		request_transformer: null,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -295,7 +304,7 @@ const markCalls = (ctx: ProxyContext) =>
  */
 async function runSequence(responses: Array<() => Response>) {
 	let callCount = 0;
-	globalThis.fetch = mock(async () => {
+	fetchSlot.fetch = mock(async () => {
 		const factory = responses[Math.min(callCount, responses.length - 1)];
 		callCount++;
 		return factory();
@@ -314,10 +323,10 @@ async function runSequence(responses: Array<() => Response>) {
 }
 
 describe("proxyWithAccount — a retried response is classified like a first response", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 		// Zero-delay backoff so tests don't sleep.
 		process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS = "0";
 		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "0";
@@ -330,7 +339,7 @@ describe("proxyWithAccount — a retried response is classified like a first res
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
@@ -465,7 +474,7 @@ describe("proxyWithAccount — a retried response is classified like a first res
 
 	it("threads gateway hint headers through the org_permission_denied audit save site", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return callCount === 1
 				? serverErrorResponse(500)

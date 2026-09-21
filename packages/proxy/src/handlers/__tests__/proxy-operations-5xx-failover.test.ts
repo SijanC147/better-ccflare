@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import * as responseHandlerModule from "../../response-handler";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -49,6 +50,14 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		last_manual_reauth_at: null,
+		renewal_day: null,
+		request_transformer: null,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -229,10 +238,10 @@ const saveCalls = (ctx: ProxyContext) =>
 		.calls as unknown as unknown[][];
 
 describe("proxyWithAccount — transient upstream 5xx retry and failover", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 		// Zero-delay backoff so tests don't sleep.
 		process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS = "0";
 		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "0";
@@ -244,7 +253,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		restoreForwardToClient();
 		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
@@ -257,7 +266,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("retries a 500 in place and forwards the succeeding response without benching", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			if (callCount === 1) return serverErrorResponse(500);
 			return new Response(successBody, {
@@ -286,7 +295,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		500, 502, 503, 504,
 	])("benches the account with upstream_5xx_server_error and fails over when the retry budget is exhausted (status %i)", async (status) => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(status);
 		});
@@ -322,7 +331,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		// it the 36-60s the request spent on the broken account vanishes from
 		// history, and the row the *next* account writes shows only
 		// failover_attempts=1 with no trace of what it failed over from.
-		globalThis.fetch = mock(async () => serverErrorResponse(500));
+		fetchSlot.fetch = mock(async () => serverErrorResponse(500));
 
 		const ctx = makeProxyContext();
 		const account = makeAccount();
@@ -353,7 +362,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 	});
 
 	it("records no audit row for a synthetic probe's 5xx", async () => {
-		globalThis.fetch = mock(async () => serverErrorResponse(500));
+		fetchSlot.fetch = mock(async () => serverErrorResponse(500));
 
 		const ctx = makeProxyContext();
 		const account = makeAccount();
@@ -368,7 +377,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 	});
 
 	it("honours a short Retry-After instead of the full cooldown", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			serverErrorResponse(503, { "retry-after": "5" }),
 		);
 
@@ -393,7 +402,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 	});
 
 	it("caps an hour-long Retry-After at the server-error cooldown", async () => {
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			serverErrorResponse(503, { "retry-after": "3600" }),
 		);
 
@@ -422,7 +431,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("skips the retry when the response says x-should-retry: false", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(500, { "x-should-retry": "false" });
 		});
@@ -448,7 +457,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		// budget of 3 the second 500 would otherwise buy a third pointless call.
 		process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = "3";
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return callCount === 1
 				? serverErrorResponse(500)
@@ -473,7 +482,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("honours an HTTP-date Retry-After, capped at the server-error cooldown", async () => {
 		const until = new Date(Date.now() + 30_000).toUTCString();
-		globalThis.fetch = mock(async () =>
+		fetchSlot.fetch = mock(async () =>
 			serverErrorResponse(503, { "retry-after": until }),
 		);
 
@@ -502,7 +511,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		// with a server-error reason would blame the wrong thing and hide the
 		// reauth signal.
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return callCount === 1
 				? serverErrorResponse(500)
@@ -538,7 +547,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		// CCFLARE_SERVER_ERROR_RETRY_ENABLED and must survive it.
 		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED = "false";
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(502);
 		});
@@ -562,7 +571,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("forwards the 5xx untouched when CCFLARE_SERVER_ERROR_RETRY_ENABLED=false", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(500);
 		});
@@ -586,7 +595,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("forwards the upstream 5xx to the client on the last candidate account", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(500);
 		});
@@ -642,7 +651,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		// provider is expected to derive from it.
 		const resetSeconds = Math.floor((Date.now() + 3_600_000) / 1000);
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(500, {
 				"anthropic-ratelimit-unified-status": "rate_limited",
@@ -721,7 +730,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("retries a streaming request's 500 the same way as a non-streaming one", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			if (callCount === 1) return serverErrorResponse(500);
 			return new Response("event: message_start\ndata: {}\n\n", {
@@ -747,7 +756,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 
 	it("leaves synthetic internal probes on the pre-existing pass-through path", async () => {
 		let callCount = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			callCount++;
 			return serverErrorResponse(500);
 		});

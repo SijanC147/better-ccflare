@@ -829,6 +829,7 @@ describe("alertGroupKey pins the alert id contract", () => {
 			model: "sonnet",
 			project: null,
 			agentUsed: null,
+			gatewayHintAgentType: null,
 			windowStartMs: 1_700_000_000_000 - 60_000,
 			windowEndMs: 1_700_000_000_000,
 			requests: 99,

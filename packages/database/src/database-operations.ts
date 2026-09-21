@@ -23,9 +23,9 @@ import type {
 	ProjectAttributionSource,
 	RateLimitReason,
 	StrategyStore,
+	VacuumStatus,
 	WorktreeRule,
 	WorktreeRuleKind,
-	VacuumStatus,
 } from "@better-ccflare/types";
 import {
 	BunSqlAdapter,

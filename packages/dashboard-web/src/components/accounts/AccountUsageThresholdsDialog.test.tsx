@@ -45,6 +45,9 @@ const baseAccount: Account = {
 	reauthDeadlineStatus: null,
 	daysUntilReauthRequired: null,
 	hoursUntilReauthRequired: null,
+	renewalDay: null,
+	nextRenewalAt: null,
+	daysUntilRenewal: null,
 };
 
 describe("getThresholdLabels", () => {

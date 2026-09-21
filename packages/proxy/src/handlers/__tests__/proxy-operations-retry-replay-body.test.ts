@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -58,6 +59,14 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		last_manual_reauth_at: null,
+		renewal_day: null,
+		request_transformer: null,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -277,7 +286,7 @@ const invalidThinkingSignature400 = () =>
  */
 function scriptUpstream(responses: Array<() => Response>) {
 	const bodies: string[] = [];
-	globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+	fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 		const req = input instanceof Request ? input : new Request(String(input));
 		bodies.push(await req.text().catch(() => ""));
 		const factory =
@@ -319,10 +328,10 @@ const modelOf = (bodyText: string): string => {
 };
 
 describe("proxyWithAccount — an in-place retry replays the request actually in flight", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 		// Zero-delay backoff so tests don't sleep.
 		process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS = "0";
 		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "0";
@@ -334,7 +343,7 @@ describe("proxyWithAccount — an in-place retry replays the request actually in
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
 		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;

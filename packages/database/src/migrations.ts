@@ -1657,9 +1657,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			db.prepare(
 				"ALTER TABLE requests ADD COLUMN gateway_hint_context_compacted TEXT",
 			).run();
-			log.info(
-				"Added gateway_hint_context_compacted column to requests table",
-			);
+			log.info("Added gateway_hint_context_compacted column to requests table");
 		}
 
 		// Add timestamp column to request_payloads if it doesn't exist
@@ -1732,7 +1730,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
 			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
 			       rate_limited_at, requires_reauth,
-			       consecutive_rate_limits, last_manual_reauth_at, renewal_day
+			       consecutive_rate_limits, last_manual_reauth_at, renewal_day,
+			       usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
+			       usage_pause_five_hour_enabled, usage_pause_weekly_enabled
 			FROM accounts
 		`).run();
 

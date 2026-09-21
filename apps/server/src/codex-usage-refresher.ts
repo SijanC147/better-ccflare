@@ -68,7 +68,11 @@ export interface CodexUsageRefresherDeps {
 	log: Pick<Logger, "debug" | "info" | "warn" | "error">;
 }
 
-function formatPercent(window: { utilization: number } | undefined): string {
+// `null` as well as `undefined`: the fork types an unreported Codex window as
+// `UsageWindow | null`, and both spellings mean "upstream said nothing".
+function formatPercent(
+	window: { utilization: number } | null | undefined,
+): string {
 	return window ? `${window.utilization}%` : "n/a";
 }
 

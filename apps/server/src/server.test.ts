@@ -1273,7 +1273,9 @@ describe("createRefreshBackedTokenProvider", () => {
 		});
 
 		expect(await provider()).toBe("rotated-at");
-		expect(seen).toBe(account);
+		// Control-flow narrowing reads `seen` as its initialiser `null` because the
+		// assignment lives in a callback; the widening restores the declared type.
+		expect(seen as Account | null).toBe(account);
 		expect(account.refresh_token).toBe("rotated-rt");
 		expect(account.expires_at).toBe(99);
 	});

@@ -147,8 +147,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			// See the matching field on `Request`/`RequestRow` in
 			// @better-ccflare/types/request — pure observability metadata, absent
 			// for every client that doesn't opt in.
-			gatewayHintRequestClass:
-				request.gateway_hint_request_class || undefined,
+			gatewayHintRequestClass: request.gateway_hint_request_class || undefined,
 			gatewayHintAgentType: request.gateway_hint_agent_type || undefined,
 			gatewayHintPrevToolDurations:
 				request.gateway_hint_prev_tool_durations || undefined,

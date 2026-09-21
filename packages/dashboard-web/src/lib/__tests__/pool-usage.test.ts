@@ -66,6 +66,10 @@ function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 		renewalDay: null,
 		nextRenewalAt: null,
 		daysUntilRenewal: null,
+		usagePauseFiveHourThreshold: partial.usagePauseFiveHourThreshold ?? null,
+		usagePauseWeeklyThreshold: partial.usagePauseWeeklyThreshold ?? null,
+		usagePauseFiveHourEnabled: partial.usagePauseFiveHourEnabled ?? false,
+		usagePauseWeeklyEnabled: partial.usagePauseWeeklyEnabled ?? false,
 		...partial,
 	};
 }

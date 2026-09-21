@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -56,6 +57,14 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		last_manual_reauth_at: null,
+		renewal_day: null,
+		request_transformer: null,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -164,13 +173,13 @@ const BACKOFF_ENV_VARS = [
 ] as const;
 
 describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 	// A developer may have these exported in their own shell; restore whatever
 	// was there rather than deleting the variables outright.
 	let originalBackoffEnv: Record<string, string | undefined> = {};
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 		originalBackoffEnv = Object.fromEntries(
 			BACKOFF_ENV_VARS.map((name) => [name, process.env[name]]),
 		);
@@ -188,7 +197,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 	});
 
 	afterEach(() => {
-		globalThis.fetch = originalFetch;
+		fetchSlot.fetch = originalFetch;
 		for (const name of BACKOFF_ENV_VARS) {
 			const previous = originalBackoffEnv[name];
 			if (previous === undefined) {
@@ -202,7 +211,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 
 	it("benches until the provider-reported window reset and fails over", async () => {
 		const resetTime = Date.now() + FOUR_DAYS_MS;
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(rateLimitBody, {
 					status: 429,
@@ -230,7 +239,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 
 	it("keeps the 60s default when the provider reports no reset", async () => {
 		const before = Date.now();
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(rateLimitBody, {
 					status: 429,

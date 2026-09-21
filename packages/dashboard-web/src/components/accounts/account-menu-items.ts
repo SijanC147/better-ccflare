@@ -248,7 +248,10 @@ export function accountMenuActions(
 	// Upstream renders this as a Gauge button on the card. The fork keeps every
 	// configuration control in the overflow menu, so it lands here instead, in
 	// the same position upstream gave it: between the endpoint and the mappings.
-	if (supportsUsagePauseThreshold(account.provider) && handlers.usageThresholds) {
+	if (
+		supportsUsagePauseThreshold(account.provider) &&
+		handlers.usageThresholds
+	) {
 		const activeUsageThresholds = [
 			account.usagePauseFiveHourEnabled && account.usagePauseFiveHourThreshold
 				? `${account.usagePauseFiveHourThreshold}% of the 5-hour window`
