@@ -44,10 +44,12 @@ function stubUsageCollector() {
 }
 
 /**
- * An OAuth account by default. The three fields that decide it are
- * `provider`, `refresh_token` and `access_token`, and they must DIFFER — an
- * API key is written into all of `api_key`, `refresh_token` and
- * `access_token` at creation, so equal tokens mean an API-key account.
+ * A Claude OAuth account by default: `provider: "anthropic"`, a refresh token,
+ * and no `api_key`. What makes it OAuth is that `getValidAccessToken`
+ * (token-manager.ts:1009-1021) will hand it a Bearer — either the stored
+ * access token or one minted from the refresh token. `access_token` being
+ * present is convenience here, not part of the test; see the lone-refresh-token
+ * case below, which is equally OAuth.
  */
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -96,16 +98,30 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 	};
 }
 
-/** An Anthropic account that authenticates with an API key, not OAuth. */
+/**
+ * A Claude API-key account, in the shape the product actually creates.
+ *
+ * `provider: "claude-console-api"` with both token fields NULL — see
+ * `cli-commands/src/commands/account.ts:123`, `oauth-flow/src/index.ts:406`,
+ * and `migrations.ts:1833`, which moved every legacy
+ * `provider='anthropic' AND api_key IS NOT NULL` row onto that provider.
+ *
+ * An earlier version of this fixture built `provider: "anthropic"` with the
+ * key copied into `api_key`, `refresh_token` AND `access_token`. **No such row
+ * exists.** That pattern belongs to zai/openai-compatible/minimax/deepseek.
+ * The fictional shape was the only thing keeping a dead clause in the
+ * predicate alive under mutation — a test written from a belief about account
+ * shapes rather than from the code that creates them.
+ */
 function makeApiKeyAccount(overrides: Partial<Account> = {}): Account {
 	return makeAccount({
 		id: "acc-key",
 		name: "api-key-account",
+		provider: "claude-console-api",
 		api_key: "sk-ant-key",
-		// The dashboard's add-account flow copies the key into all three
-		// fields. Equal tokens are the tell, and the guard must read it.
-		refresh_token: "sk-ant-key",
-		access_token: "sk-ant-key",
+		refresh_token: null,
+		access_token: null,
+		expires_at: null,
 		...overrides,
 	});
 }
@@ -299,7 +315,7 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 describe("SB23-2570 — the predicates the guard rests on", () => {
 	it("matches both completion paths the live log recorded and nothing else", () => {
 		expect(isOpenAICompatCompletionPath("/v1/chat/completions")).toBe(true);
-		expect(isOpenAICompatCompletionPath("/chat/completions")).toBe(true);
+		expect(isOpenAICompatCompletionPath("/chat/completions")).toBe(false);
 
 		expect(isOpenAICompatCompletionPath("/v1/messages")).toBe(false);
 		expect(isOpenAICompatCompletionPath("/v1/models")).toBe(false);
@@ -314,7 +330,7 @@ describe("SB23-2570 — the predicates the guard rests on", () => {
 		);
 	});
 
-	it("separates an OAuth account from an API-key account whose tokens are equal", () => {
+	it("separates a Claude OAuth account from a claude-console-api key account", () => {
 		expect(accountCanServeOpenAICompatPath(makeAccount())).toBe(false);
 		expect(accountCanServeOpenAICompatPath(makeApiKeyAccount())).toBe(true);
 	});
@@ -342,14 +358,55 @@ describe("SB23-2570 — the predicates the guard rests on", () => {
 		).toBe(false);
 	});
 
-	it("does not treat a lone refresh token as OAuth", () => {
-		// The naive predicate. An account with only a refresh token is not a
-		// usable OAuth account, and refusing for it would block a path that
-		// might work.
+	it("treats a LONE refresh token as OAuth, because token-manager refreshes it", () => {
+		// This assertion was inverted in review, and the inversion is the
+		// finding. An earlier version asserted `true` here with a comment
+		// claiming "an account with only a refresh token is not a usable OAuth
+		// account". `getValidAccessToken` (token-manager.ts:1009-1021) says
+		// otherwise: no api_key so :1009 does not fire, no access_token so the
+		// reuse branch does not fire, and it falls through to the refresh and
+		// mints a Bearer. That is precisely the account that gets benched.
+		//
+		// The old assertion did not merely miss the case — it FORBADE the
+		// correct predicate, so the suite would have gone red on the fix.
 		expect(
 			accountCanServeOpenAICompatPath(
 				makeAccount({ access_token: null, refresh_token: "r" }),
 			),
+		).toBe(false);
+	});
+
+	it("treats an empty refresh token with a live access token as OAuth", () => {
+		// `oauth-flow/src/index.ts:317` inserts `tokens.refreshToken || ""`, and
+		// `OAuthTokens.refreshToken` is optional, so an empty string is a
+		// reachable value on a genuine OAuth row. A predicate keyed on
+		// `!!refresh_token` calls this account servable and lets it fan out.
+		expect(
+			accountCanServeOpenAICompatPath(
+				makeAccount({ refresh_token: "", access_token: "sk-ant-oat01-live" }),
+			),
+		).toBe(false);
+	});
+
+	it("lets an Anthropic OAuth account with a custom endpoint through", () => {
+		// The CLI prompts for a custom endpoint on exactly this account type
+		// (cli-commands/src/commands/account.ts:1825-1827) and buildUrl sends
+		// every path to it instead of api.anthropic.com. The 28/28 measurement
+		// was taken against api.anthropic.com and says nothing about a gateway
+		// that re-authenticates with its own key. Refusing it would break a
+		// first-class configuration on no evidence.
+		expect(
+			accountCanServeOpenAICompatPath(
+				makeAccount({ custom_endpoint: "https://gateway.internal.example" }),
+			),
 		).toBe(true);
+	});
+
+	it("does not speak for the bare /chat/completions path", () => {
+		// Measured: 2 live requests, both 404 FROM UPSTREAM, zero 429s. The
+		// path does not exist on api.anthropic.com, so nothing benches and no
+		// credential makes it work. Refusing it with a message saying "add an
+		// API-key account" would be wrong advice.
+		expect(isOpenAICompatCompletionPath("/chat/completions")).toBe(false);
 	});
 });

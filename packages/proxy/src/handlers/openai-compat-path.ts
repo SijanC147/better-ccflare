@@ -32,11 +32,18 @@ import type { Account } from "@better-ccflare/types";
  * Tracked as SB23-2570.
  */
 
-/** Paths this proxy forwards verbatim to the OpenAI-compatible upstream layer. */
-const OPENAI_COMPAT_COMPLETION_PATHS = new Set([
-	"/v1/chat/completions",
-	"/chat/completions",
-]);
+/**
+ * The one path this guard speaks for.
+ *
+ * `/chat/completions` without the `/v1` prefix is deliberately NOT here. It
+ * reaches `https://api.anthropic.com/chat/completions`, which is not an
+ * endpoint: the live log records 2 requests on it and both answered **404
+ * from upstream**, not 429. So there is no benching to prevent there (404
+ * does not reach `isModelUnavailableError`), the premise this guard rests on
+ * is false for it, and a message telling the operator to add an API-key
+ * account would be wrong advice — no credential makes that path exist.
+ */
+const OPENAI_COMPAT_COMPLETION_PATHS = new Set(["/v1/chat/completions"]);
 
 /**
  * True for a completion path served by Anthropic's OpenAI compatibility layer
@@ -47,33 +54,72 @@ export function isOpenAICompatCompletionPath(pathname: string): boolean {
 }
 
 /**
- * True for a genuine Claude OAuth account.
+ * True when a request on this account will carry an **OAuth bearer token** to
+ * `api.anthropic.com`.
  *
- * Deliberately the same three-part test as `isEligibleForReauthDeadline`
- * (packages/types/src/account.ts): provider `anthropic`, both tokens present,
- * and the two NOT equal. That last clause is the whole point — the dashboard's
- * "add account" flow writes an API key into `api_key`, `refresh_token` AND
- * `access_token`, so `!!account.refresh_token` alone reports an API-key
- * account as OAuth and would refuse a request this endpoint can actually
- * serve. Do not simplify it to a refresh-token check.
+ * Derived from `getValidAccessToken` (handlers/token-manager.ts), which is the
+ * only function whose branch decides which credential leaves the process. Read
+ * that function, not this comment, if you need to change this.
+ *
+ * It is deliberately NOT the `isEligibleForReauthDeadline` test, which an
+ * earlier version of this file copied. That function answers a different
+ * question (when a manual reauth falls due), and the justification copied with
+ * it — "the add-account flow writes an API key into all three token fields" —
+ * is false for `anthropic`. That pattern belongs to `zai`, `openai-compatible`,
+ * `minimax` and `deepseek` (http-api/src/handlers/accounts.ts), all of which
+ * the provider clause below has already excluded. A Claude API-key account is
+ * inserted as **`claude-console-api`** (cli-commands/src/commands/account.ts:123,
+ * oauth-flow/src/index.ts:406), and migrations.ts:1833 moved every legacy
+ * `provider='anthropic' AND api_key IS NOT NULL` row to it, so no
+ * anthropic-provider row reaches this function carrying an API key by that
+ * route.
+ *
+ * The clauses, in `getValidAccessToken`'s own order:
  */
-function isClaudeOAuthAccount(account: Account): boolean {
-	return (
-		(account.provider ?? "anthropic") === "anthropic" &&
-		!!account.refresh_token &&
-		!!account.access_token &&
-		account.refresh_token !== account.access_token
-	);
+function sendsOAuthBearer(account: Account): boolean {
+	// Not an Anthropic-provider row: `claude-console-api` and the other API-key
+	// providers return their key at token-manager.ts:1002 and never mint a
+	// bearer. They also reach their own upstreams, so this guard must never
+	// speak for them.
+	if ((account.provider ?? "anthropic") !== "anthropic") return false;
+
+	// A custom endpoint means we are not talking to api.anthropic.com at all
+	// (AnthropicProvider.buildUrl:425-440 sends every path to that host, and
+	// validateEndpointUrl accepts any http/https host). The 28/28 measurement
+	// was taken against api.anthropic.com and says nothing about a gateway that
+	// re-authenticates with its own key and may serve this path perfectly well.
+	// The CLI prompts for one on exactly this account type
+	// (cli-commands/src/commands/account.ts:1825-1827), so refusing it would
+	// break a first-class configuration on no evidence.
+	if (account.custom_endpoint) return false;
+
+	// token-manager.ts:1009 — an api_key with no refresh token returns "" and
+	// prepareHeaders sends `x-api-key`, never a bearer.
+	if (!account.refresh_token && account.api_key) return false;
+
+	// Everything else is a bearer. Note this includes an account with a refresh
+	// token and a NULL access_token: token-manager.ts falls through to the
+	// refresh and mints one. A lone refresh token IS OAuth, which is why there
+	// is no `access_token` clause here — an earlier version had one, and it let
+	// exactly that account through to be benched.
+	//
+	// It also includes the row shape written by
+	// cli-commands/src/commands/account.ts:2691-2698, which puts an API key into
+	// BOTH `api_key` and `refresh_token` on an existing anthropic row. Refusing
+	// that is deliberate: that row hands an API key to the OAuth token endpoint
+	// as if it were a refresh token, which cannot succeed, so a 400 naming the
+	// working endpoint beats a seven-account fan-out. It is arguably broken
+	// independently of this guard.
+	return true;
 }
 
 /**
  * True when this account can serve Anthropic's OpenAI-compatible completion
- * path. An API-key Anthropic account can; a Claude OAuth account cannot.
- * Non-Anthropic providers are unaffected — they reach their own upstreams and
- * this guard must never speak for them.
+ * path. An API-key account can; an account that will present an OAuth bearer
+ * to `api.anthropic.com` cannot.
  */
 export function accountCanServeOpenAICompatPath(account: Account): boolean {
-	return !isClaudeOAuthAccount(account);
+	return !sendsOAuthBearer(account);
 }
 
 /** The status this proxy answers for an unsupported OpenAI-compatible path. */
