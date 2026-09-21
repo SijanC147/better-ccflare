@@ -1,13 +1,19 @@
 import { getRateLimitResetStabilityMs, logError } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
+	codexWindowRolledOver,
 	type Provider,
 	parseCodexUsageHeaders,
+	pickCodexRolloverSlot,
+	type UsageData,
 	usageCache,
 } from "@better-ccflare/providers";
 import type { Account, RateLimitReason } from "@better-ccflare/types";
 import { circuitKeyFor, recordSuccess } from "../circuit-breaker";
-import { recordCodexUsageSnapshot } from "../codex-usage-history";
+import {
+	earliestCodexResetMs,
+	recordCodexUsageSnapshot,
+} from "../codex-usage-history";
 import { drainBody } from "./discard-body-cancel";
 import { isInternalProbe, type ProxyContext } from "./proxy-types";
 import {
@@ -107,49 +113,34 @@ export function updateAccountMetadata(
 	// successful response. No need to duplicate that logic here.
 
 	if (account.provider === "codex") {
-		const codexUsage = parseCodexUsageHeaders(response.headers, {
-			defaultUtilization: response.status === 429 ? 100 : 0,
-		});
+		// Only a 429 is a real "exhausted" signal worth filling a missing
+		// percentage with. On every other status an absent
+		// `x-codex-*-used-percent` means UNKNOWN, and minting 0 there painted
+		// an empty bar over a window nobody had measured.
+		const codexUsage = parseCodexUsageHeaders(
+			response.headers,
+			response.status === 429 ? { defaultUtilization: 100 } : {},
+		);
 		if (codexUsage) {
-			const prevUsage = usageCache.get(account.id);
-			// Which window this session is riding. Both sides of the comparison
-			// below must read the same slot: a 5-hour boundary held against a
-			// weekly one would fabricate a rollover. With
-			// CODEX_FIVE_HOUR_WINDOW_ENABLED the slot stays pinned to the 5-hour
-			// window, as it was before OpenAI withdrew that window; otherwise it
-			// follows the shortest window this payload actually reports.
-			const windowSlot: "five_hour" | "seven_day" =
-				ctx.config.getCodexFiveHourWindowEnabled() ||
-				codexUsage.five_hour?.resets_at != null
-					? "five_hour"
-					: "seven_day";
-			const prevResetAt = (
-				prevUsage as {
-					five_hour?: { resets_at: string | null };
-					seven_day?: { resets_at: string | null };
-				} | null
-			)?.[windowSlot]?.resets_at;
+			const prevUsage = usageCache.get(account.id) as UsageData | null;
+			// Which window this session is riding, and whether it actually rolled
+			// over. Both live in @better-ccflare/providers so the usage poller
+			// applies the very same rule: OpenAI's 5-hour deadline slides forward
+			// while an account is idle, so a future-moving reset on its own is not
+			// a rollover. With CODEX_FIVE_HOUR_WINDOW_ENABLED the slot stays
+			// pinned to the 5-hour window, as it was before OpenAI withdrew it.
+			const windowSlot = pickCodexRolloverSlot(
+				codexUsage,
+				ctx.config.getCodexFiveHourWindowEnabled(),
+			);
+			const prevResetAt = prevUsage?.[windowSlot]?.resets_at;
 			const newResetAt = codexUsage[windowSlot]?.resets_at;
-			const prevUtilization = (
-				prevUsage as {
-					five_hour?: { utilization: number };
-					seven_day?: { utilization: number };
-				} | null
-			)?.[windowSlot]?.utilization;
-			const newUtilization = codexUsage[windowSlot]?.utilization;
-			const observedAt = Date.now();
-			const prevResetAtMs =
-				prevResetAt != null ? new Date(prevResetAt).getTime() : Number.NaN;
-			const newResetAtMs =
-				newResetAt != null ? new Date(newResetAt).getTime() : Number.NaN;
-			const windowRolledOver =
-				Number.isFinite(prevResetAtMs) &&
-				Number.isFinite(newResetAtMs) &&
-				prevResetAtMs <= observedAt &&
-				newResetAtMs > prevResetAtMs &&
-				typeof prevUtilization === "number" &&
-				typeof newUtilization === "number" &&
-				newUtilization < prevUtilization;
+			const windowRolledOver = codexWindowRolledOver(
+				prevUsage,
+				codexUsage,
+				Date.now(),
+				windowSlot,
+			);
 
 			usageCache.set(account.id, codexUsage);
 			log.debug(
@@ -170,15 +161,12 @@ export function updateAccountMetadata(
 				).then(() => undefined),
 			);
 
-			// Update rate_limit_reset from usage headers so auto-refresh can track windows
-			const resetTimes = [
-				codexUsage.five_hour?.resets_at,
-				codexUsage.seven_day?.resets_at,
-			]
-				.filter((t): t is string => t != null)
-				.map((t) => new Date(t).getTime());
-			if (resetTimes.length > 0) {
-				const earliestReset = Math.min(...resetTimes);
+			// Update rate_limit_reset from usage headers so auto-refresh and the
+			// load balancer's session expiry track the soonest window.
+			const earliestReset = earliestCodexResetMs(
+				codexUsage as unknown as Record<string, unknown>,
+			);
+			if (earliestReset !== null) {
 				ctx.asyncWriter.enqueue(() =>
 					ctx.dbOps
 						.getAdapter()
@@ -317,6 +305,10 @@ export function updateAccountMetadata(
  * @param account - The account used
  * @param ctx - The proxy context
  * @param requestId - The request ID for usage tracking
+ * @param requestMeta - Request headers/path, used for the internal-probe checks
+ * @param options - `serverErrorBenchApplied` is set by the transient-5xx
+ *   failover in proxy-operations.ts on the terminal candidate account; see the
+ *   guard at the top of the rate-limit branch below.
  * @returns Promise resolving to whether the response is rate-limited
  */
 export async function processProxyResponse(
@@ -325,6 +317,7 @@ export async function processProxyResponse(
 	ctx: ProxyContext,
 	requestId?: string,
 	requestMeta?: { headers?: Headers; path?: string },
+	options?: { serverErrorBenchApplied?: boolean },
 ): Promise<boolean> {
 	let rateLimitInfo = ctx.provider.parseRateLimit(response);
 
@@ -385,6 +378,37 @@ export async function processProxyResponse(
 	const isKeepalive = isInternalProbe(requestMeta?.headers, ctx, "keepalive");
 
 	if (rateLimitInfo.isRateLimited) {
+		// This response has already been classified upstream of us: the
+		// transient-5xx failover in proxy-operations.ts benched the account with
+		// `upstream_5xx_server_error` and, being out of candidate accounts, is
+		// forwarding the real upstream error to the client.
+		//
+		// A provider can still report `isRateLimited` for it. Anthropic's
+		// parseRateLimit keys off `anthropic-ratelimit-unified-status`
+		// regardless of HTTP status (HARD_LIMIT_STATUSES in
+		// providers/anthropic/provider.ts), so a 500 that happens to carry
+		// `rate_limited` used to be re-classified here: the 60s server-error
+		// bench was overwritten by a shorter quota cooldown, the 429 streak
+		// advanced, and returning `true` turned the request into a
+		// pool_exhausted failover instead of forwarding the upstream 500.
+		//
+		// A quota header riding along on a request the upstream failed to serve
+		// is not evidence that the account hit its own quota, and the account
+		// is benched either way — so the server-error classification wins and we
+		// report "not rate-limited" so the caller forwards the upstream
+		// response. Metadata bookkeeping still runs, exactly as it does on the
+		// cooldown path below; the probe lease was already released by
+		// applyRateLimitCooldown when the bench was applied.
+		if (options?.serverErrorBenchApplied) {
+			log.warn(
+				`Account ${account.name}: upstream ${response.status} also carried rate-limit headers (status=${rateLimitInfo.statusHeader ?? "none"}) — keeping the server-error bench and forwarding the upstream response`,
+			);
+			const bypassSession =
+				requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
+			updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+			return false;
+		}
+
 		// Skip cooldown application on synthetic cache-keepalive replays. The
 		// keepalive scheduler fires parallel requests across every cached
 		// account simultaneously; bursts of 4+ concurrent requests can trip
@@ -475,11 +499,20 @@ export async function processProxyResponse(
 			);
 		}
 
-		// (b) Clear rate_limited_until on any successful upstream response. We clear
-		// unconditionally (even if the timestamp is still in the future) because a
-		// successful response proves the account is usable — e.g. after a seat
-		// reassignment that resets usage mid-window before the stored expiry fires.
-		if (account.rate_limited_until) {
+		// (b) Clear rate_limited_until on any non-server-error upstream response.
+		// We clear even if the timestamp is still in the future, because such a
+		// response proves the account is usable — e.g. after a seat reassignment
+		// that resets usage mid-window before the stored expiry fires.
+		//
+		// A 5xx is the one thing that proves nothing: the upstream failed to
+		// serve the request, so it is not evidence the account recovered. Before
+		// this guard, a 500 arriving on a benched account (the transient-5xx
+		// failover in proxy-operations.ts benches, then lets the terminal
+		// response fall through to here) cleared the bench it had just applied,
+		// putting the account straight back into rotation in front of the next
+		// request. 4xx still clears, as before: those did reach the account's own
+		// upstream accounting.
+		if (account.rate_limited_until && response.status < 500) {
 			account.rate_limited_until = null;
 			ctx.asyncWriter.enqueue(async () => {
 				const db = ctx.dbOps.getAdapter();

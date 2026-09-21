@@ -5,8 +5,11 @@ import { join } from "node:path";
 import * as cliCommands from "@better-ccflare/cli-commands";
 import type { Config } from "@better-ccflare/config";
 import {
+	parseUsagePauseThreshold,
 	patterns,
 	sanitizers,
+	supportsUsagePauseThreshold,
+	type UsagePauseSetting,
 	validateAndSanitizeModelMappings,
 	validateNumber,
 	validatePriority,
@@ -66,6 +69,7 @@ import {
 	computeRateLimitStatusDisplay,
 	getRepresentativeUsageResetMs,
 } from "./rate-limit-status";
+import { startUsagePollingForNewAccount } from "./usage-polling-start";
 
 const log = new Logger("AccountsHandler");
 
@@ -89,6 +93,9 @@ const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
 	// 403 permission_error: the account's organization forbids the request. This
 	// one IS written to accounts.rate_limited_reason — the account is benched.
 	"org_permission_denied",
+	// Transient upstream 500/502/503/504 that outlived its in-place retry. Also
+	// written to accounts.rate_limited_reason — the account is benched briefly.
+	"upstream_5xx_server_error",
 ]);
 
 function toRateLimitReason(v: string | null): RateLimitReason | null {
@@ -222,7 +229,9 @@ async function getCachedOrPersistedCodexUsage(
 			const usage = parseCodexUsageHeaders(new Headers(headerEntries), {
 				baseTimeMs: payloadTimestamp,
 				allowRelativeResetAfter: true,
-				defaultUtilization: codexStatus === 429 ? 100 : 0,
+				// A 429 with reset-only headers is a real "exhausted" signal; any
+				// other status must not mint a percentage the upstream never sent.
+				...(codexStatus === 429 ? { defaultUtilization: 100 } : {}),
 			});
 			if (!usage) continue;
 
@@ -321,6 +330,10 @@ export function createAccountsListHandler(
 			auto_refresh_enabled: 0 | 1;
 			auto_pause_on_overage_enabled: 0 | 1;
 			peak_hours_pause_enabled: 0 | 1;
+			usage_pause_five_hour_threshold: number | null;
+			usage_pause_weekly_threshold: number | null;
+			usage_pause_five_hour_enabled: 0 | 1;
+			usage_pause_weekly_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			request_transformer: RequestTransformer | null;
@@ -360,6 +373,10 @@ export function createAccountsListHandler(
 					custom_endpoint,
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
+					usage_pause_five_hour_threshold,
+					usage_pause_weekly_threshold,
+					COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
+					COALESCE(usage_pause_weekly_enabled, 0) as usage_pause_weekly_enabled,
 
 					model_mappings,
 					request_transformer,
@@ -764,6 +781,13 @@ export function createAccountsListHandler(
 					autoPauseOnOverageEnabled:
 						account.auto_pause_on_overage_enabled === 1,
 					peakHoursPauseEnabled: account.peak_hours_pause_enabled === 1,
+					usagePauseFiveHourThreshold:
+						account.usage_pause_five_hour_threshold ?? null,
+					usagePauseWeeklyThreshold:
+						account.usage_pause_weekly_threshold ?? null,
+					usagePauseFiveHourEnabled:
+						account.usage_pause_five_hour_enabled === 1,
+					usagePauseWeeklyEnabled: account.usage_pause_weekly_enabled === 1,
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
 					requestTransformer: account.request_transformer,
@@ -1006,6 +1030,10 @@ export function createAccountAddHandler(
 						customEndpoint || null,
 					],
 				);
+
+				// The server only starts usage polling for accounts that existed
+				// at boot, so a runtime add would never be polled until restart.
+				await startUsagePollingForNewAccount(accountId, name);
 
 				return jsonResponse({
 					success: true,
@@ -1371,6 +1399,8 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 			log.info(
 				`Successfully added z.ai account: ${name} (Priority ${priority})`,
 			);
+
+			await startUsagePollingForNewAccount(accountId, name);
 
 			// Get the created account for response
 			const account = await db.get<{
@@ -3042,6 +3072,119 @@ export function createAccountAutoPauseOnOverageHandler(
 				error instanceof Error
 					? error
 					: new Error("Failed to toggle auto-pause-on-overage"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a handler for the per-account usage-window pause thresholds.
+ *
+ * Body: `{ fiveHour: { enabled, percent }, weekly: { enabled, percent } }`.
+ * `percent` is a whole percentage or null, and `enabled` says whether that
+ * window is in force — the two are separate so switching a window off keeps
+ * its number. Omitting `percent` keeps the value already stored for that
+ * window (the dialog always resends it, but a raw API caller that only wants
+ * to flip `enabled` should not have to look the number up first); sending
+ * `percent: null` explicitly still clears it. Both windows are written
+ * together, so a body that omits one switches it off; that keeps the stored
+ * pair and the form that submits it in step.
+ */
+export function createAccountUsagePauseThresholdsHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{
+				name: string;
+				provider: string | null;
+				usage_pause_five_hour_threshold: number | null;
+				usage_pause_weekly_threshold: number | null;
+			}>(
+				"SELECT name, provider, usage_pause_five_hour_threshold, usage_pause_weekly_threshold FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (!supportsUsagePauseThreshold(account.provider)) {
+				return errorResponse(
+					BadRequest(
+						`Usage pause thresholds are not supported for provider '${account.provider}'`,
+					),
+				);
+			}
+
+			// A window may arrive as the object the dialog sends, or as a bare
+			// percentage/null from a simpler client; a bare percentage means
+			// "switch this window on at N". When `percent` is omitted entirely
+			// (not even sent as null), keep the value already stored for that
+			// window — otherwise disabling a window from the raw API, without
+			// resending its number, would silently erase it. This mirrors the
+			// CLI's `setUsagePauseThresholds` fallback.
+			const readWindow = (
+				raw: unknown,
+				storedPercent: number | null,
+			): UsagePauseSetting => {
+				if (typeof raw === "object" && raw !== null) {
+					const value = raw as { enabled?: unknown; percent?: unknown };
+					const percent =
+						value.percent === undefined
+							? storedPercent
+							: parseUsagePauseThreshold(value.percent);
+					return {
+						enabled: value.enabled === true || value.enabled === 1,
+						percent,
+					};
+				}
+				const percent = parseUsagePauseThreshold(raw);
+				return { enabled: percent !== null, percent };
+			};
+
+			const parsed = (():
+				| { fiveHour: UsagePauseSetting; weekly: UsagePauseSetting }
+				| Response => {
+				try {
+					return {
+						fiveHour: readWindow(
+							body.fiveHour,
+							account.usage_pause_five_hour_threshold,
+						),
+						weekly: readWindow(
+							body.weekly,
+							account.usage_pause_weekly_threshold,
+						),
+					};
+				} catch (err) {
+					return errorResponse(
+						BadRequest(err instanceof Error ? err.message : String(err)),
+					);
+				}
+			})();
+			if (parsed instanceof Response) return parsed;
+			const { fiveHour, weekly } = parsed;
+
+			await dbOps.setUsagePauseThresholds(accountId, fiveHour, weekly);
+
+			return jsonResponse({
+				success: true,
+				message: `Usage pause thresholds updated for account '${account.name}'`,
+				usagePauseFiveHourThreshold: fiveHour.percent,
+				usagePauseFiveHourEnabled: fiveHour.enabled,
+				usagePauseWeeklyThreshold: weekly.percent,
+				usagePauseWeeklyEnabled: weekly.enabled,
+			});
+		} catch (error) {
+			log.error("Account usage pause thresholds error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update usage pause thresholds"),
 			);
 		}
 	};
@@ -4721,14 +4864,19 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 			}
 
 			if (account.provider === "codex") {
+				// Refresh first so the click yields data immediately, then make
+				// sure the background poller is running — an account added after
+				// the server booted has none, and its usage would go stale again
+				// as soon as the cache TTL expired.
 				const outcome = await refreshCodexUsageForAccount(accountId);
+				const pollingRestarted = await restartUsagePollingForAccount(accountId);
 				log.info(
-					`Codex usage refresh requested for account '${account.name}' (success: ${outcome.success})`,
+					`Codex usage refresh requested for account '${account.name}' (success: ${outcome.success}, polling restarted: ${pollingRestarted})`,
 				);
 				return jsonResponse({
 					success: outcome.success,
 					message: outcome.message,
-					pollingRestarted: false,
+					pollingRestarted,
 				});
 			}
 

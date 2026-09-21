@@ -190,39 +190,6 @@ describe("AgentRegistry plugin agent discovery", () => {
 		expect(pluginAgents[0].name).toBe("My Plugin Agent");
 	});
 
-	it("sets pluginName on agent when loading plugin agents", () => {
-		// Test that the plugin agent ID namespacing works correctly
-		// pluginName:agentBaseName format
-		const pluginName = "myplugin";
-		const baseName = "my-agent";
-		const expectedId = `${pluginName}:${baseName}`;
-		expect(expectedId).toBe("myplugin:my-agent");
-	});
-
-	it("seenRealPaths deduplication prevents loading same file twice", () => {
-		const seenRealPaths = new Set<string>();
-		const filePath = path.join(tmpDir, "agent.md");
-		fs.writeFileSync(
-			filePath,
-			"---\nname: test\ndescription: test\n---\n\nPrompt.",
-		);
-
-		// Simulate what safeRealPath does
-		let realPath: string;
-		try {
-			realPath = fs.realpathSync(filePath);
-		} catch {
-			realPath = filePath;
-		}
-
-		// First time: not in set
-		expect(seenRealPaths.has(realPath)).toBe(false);
-		seenRealPaths.add(realPath);
-
-		// Second time: already in set (would be skipped)
-		expect(seenRealPaths.has(realPath)).toBe(true);
-	});
-
 	it("plugin agent is NOT silently skipped when a workspace ID would collide", async () => {
 		// Regression: previously, plugin agents shared the same seenIds set as
 		// workspace agents, so a workspace named "myplugin" with agent "my-agent"
@@ -282,18 +249,5 @@ describe("AgentRegistry plugin agent discovery", () => {
 		await expect(
 			registry.updateAgent("myplugin:ro-agent", { description: "tampered" }),
 		).rejects.toThrow(/plugin-managed/);
-	});
-
-	it("two plugins with same agent basename get distinct namespaced IDs", () => {
-		const pluginA = "plugin-a";
-		const pluginB = "plugin-b";
-		const baseName = "shared-agent";
-
-		const idA = `${pluginA}:${baseName}`;
-		const idB = `${pluginB}:${baseName}`;
-
-		expect(idA).toBe("plugin-a:shared-agent");
-		expect(idB).toBe("plugin-b:shared-agent");
-		expect(idA).not.toBe(idB);
 	});
 });

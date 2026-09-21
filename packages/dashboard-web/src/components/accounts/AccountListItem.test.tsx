@@ -21,6 +21,7 @@ import {
 const allHandlers: AccountMenuHandlers = {
 	renewalDay: true,
 	customEndpoint: true,
+	usageThresholds: true,
 	modelMappings: true,
 	requestTransformer: true,
 	autoPauseOnOverage: true,

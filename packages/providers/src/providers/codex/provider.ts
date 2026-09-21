@@ -35,7 +35,7 @@ import {
 	CodexStreamLiveness,
 	type CodexStreamLivenessOptions,
 } from "./stream-liveness";
-import { normalizeCodexInputUsage } from "./usage";
+import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const log = new Logger("CodexProvider");
 
@@ -102,7 +102,7 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.154.0";
+export const CODEX_VERSION = "0.155.0";
 /** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
 const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
@@ -1965,6 +1965,26 @@ export class CodexProvider extends BaseProvider {
 		});
 	}
 
+	/**
+	 * Reset time for a Codex response.
+	 *
+	 * On a 429 the account is refused because ONE of its usage windows is
+	 * exhausted, and it stays unusable until THAT window resets — which can be
+	 * days out (a spent weekly window) while the other window is empty and
+	 * resets within the hour. So a window the response reports as exhausted
+	 * (`used-percent >= 100`) decides the answer, and when both are exhausted
+	 * the LATER of the two does: the account is routable again only once every
+	 * exhausted window has rolled over.
+	 *
+	 * The `Math.min` over the raw reset headers is only the fallback for a 429
+	 * that reports reset times without any `x-codex-*-used-percent` header
+	 * (legacy or partial headers): with no percentage there is nothing to say
+	 * which window did the refusing, and the sooner reset is the safer guess.
+	 *
+	 * Non-429 responses keep returning the sooner reset unchanged. That value
+	 * feeds `rate_limit_reset` window tracking, where the next window boundary
+	 * is exactly what is wanted.
+	 */
 	parseRateLimit(response: Response): RateLimitInfo {
 		// Parse reset time from Codex usage headers (present on all responses)
 		const parseReset = (v: string | null) =>
@@ -1988,8 +2008,36 @@ export class CodexProvider extends BaseProvider {
 
 		return {
 			isRateLimited: true,
-			resetTime: resetTime ?? Date.now() + 60 * 60 * 1000,
+			resetTime:
+				this.exhaustedWindowResetAt(response) ??
+				resetTime ??
+				Date.now() + 60 * 60 * 1000,
 		};
+	}
+
+	/**
+	 * Latest future reset among the usage windows the response reports as
+	 * exhausted (`used-percent >= 100`), or undefined when the headers name no
+	 * such window — including when they carry no percentage at all, which is
+	 * UNKNOWN rather than 0 (see parseCodexUsageHeaders).
+	 */
+	private exhaustedWindowResetAt(response: Response): number | undefined {
+		const usage = parseCodexUsageHeaders(response.headers, {
+			allowRelativeResetAfter: true,
+		});
+		if (!usage) return undefined;
+
+		const now = Date.now();
+		let latest: number | undefined;
+		for (const window of [usage.five_hour, usage.seven_day]) {
+			if (!window || window.utilization < 100 || !window.resets_at) continue;
+			const resetsAt = Date.parse(window.resets_at);
+			// A reset already in the past says the window has rolled over, so it
+			// cannot be what the upstream is refusing on.
+			if (!Number.isFinite(resetsAt) || resetsAt <= now) continue;
+			latest = latest === undefined ? resetsAt : Math.max(latest, resetsAt);
+		}
+		return latest;
 	}
 
 	supportsOAuth(): boolean {

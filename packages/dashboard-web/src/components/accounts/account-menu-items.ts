@@ -1,3 +1,4 @@
+import { supportsUsagePauseThreshold } from "@better-ccflare/core";
 import type { Account } from "../../api";
 import {
 	providerSupportsAutoFeatures,
@@ -25,6 +26,7 @@ export type AccountMenuActionId =
 	| "priority"
 	| "renewal-day"
 	| "custom-endpoint"
+	| "usage-thresholds"
 	| "model-mappings"
 	| "request-transformer"
 	| "reauth";
@@ -56,6 +58,7 @@ export interface AccountMenuAction {
 export interface AccountMenuHandlers {
 	renewalDay: boolean;
 	customEndpoint: boolean;
+	usageThresholds: boolean;
 	modelMappings: boolean;
 	requestTransformer: boolean;
 	autoPauseOnOverage: boolean;
@@ -71,6 +74,7 @@ export interface AccountMenuCallbacks {
 	onPriorityChange: (account: Account) => void;
 	onRenewalDayChange?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
+	onUsageThresholdsChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
 	onRequestTransformerChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
@@ -93,6 +97,7 @@ export function menuHandlersFrom(
 	return {
 		renewalDay: Boolean(callbacks.onRenewalDayChange),
 		customEndpoint: Boolean(callbacks.onCustomEndpointChange),
+		usageThresholds: Boolean(callbacks.onUsageThresholdsChange),
 		modelMappings: Boolean(callbacks.onModelMappingsChange),
 		requestTransformer: Boolean(callbacks.onRequestTransformerChange),
 		autoPauseOnOverage: Boolean(callbacks.onAutoPauseOnOverageToggle),
@@ -130,6 +135,7 @@ export function bindAccountMenuHandlers(
 			priority: () => callbacks.onPriorityChange(account),
 			"renewal-day": () => callbacks.onRenewalDayChange?.(account),
 			"custom-endpoint": () => callbacks.onCustomEndpointChange?.(account),
+			"usage-thresholds": () => callbacks.onUsageThresholdsChange?.(account),
 			"model-mappings": () => callbacks.onModelMappingsChange?.(account),
 			"request-transformer": () =>
 				callbacks.onRequestTransformerChange?.(account),
@@ -236,6 +242,29 @@ export function accountMenuActions(
 				? `Custom endpoint: ${account.customEndpoint}`
 				: "Set custom endpoint",
 			configured: Boolean(account.customEndpoint),
+		});
+	}
+
+	// Upstream renders this as a Gauge button on the card. The fork keeps every
+	// configuration control in the overflow menu, so it lands here instead, in
+	// the same position upstream gave it: between the endpoint and the mappings.
+	if (supportsUsagePauseThreshold(account.provider) && handlers.usageThresholds) {
+		const activeUsageThresholds = [
+			account.usagePauseFiveHourEnabled && account.usagePauseFiveHourThreshold
+				? `${account.usagePauseFiveHourThreshold}% of the 5-hour window`
+				: null,
+			account.usagePauseWeeklyEnabled && account.usagePauseWeeklyThreshold
+				? `${account.usagePauseWeeklyThreshold}% of the weekly window`
+				: null,
+		].filter((entry): entry is string => entry !== null);
+		actions.push({
+			id: "usage-thresholds",
+			label: "Usage pause thresholds",
+			title:
+				activeUsageThresholds.length > 0
+					? `Pauses at ${activeUsageThresholds.join(", ")}`
+					: "Set usage pause thresholds",
+			configured: activeUsageThresholds.length > 0,
 		});
 	}
 

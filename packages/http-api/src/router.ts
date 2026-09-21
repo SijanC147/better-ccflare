@@ -26,6 +26,7 @@ import {
 	createAccountRequestTransformerUpdateHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
+	createAccountUsagePauseThresholdsHandler,
 	createAlibabaCodingPlanAccountAddHandler,
 	createAnthropicCompatibleAccountAddHandler,
 	createAwsProfilesListHandler,
@@ -205,6 +206,7 @@ export class APIRouter {
 			getUsageWorkerHealth,
 			getIntegrityStatus,
 			getRetentionStatus,
+			getVacuumStatus,
 			getStrategy,
 		} = this.context;
 
@@ -217,6 +219,7 @@ export class APIRouter {
 			getIntegrityStatus,
 			undefined,
 			getRetentionStatus,
+			getVacuumStatus,
 		);
 		const statsHandler = createStatsHandler(dbOps);
 		const statsResetHandler = createStatsResetHandler(dbOps);
@@ -905,6 +908,15 @@ export class APIRouter {
 					createAccountAutoPauseOnOverageHandler(this.context.dbOps);
 				return await this.wrapHandler((req) =>
 					autoPauseOnOverageHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Account usage-window pause thresholds
+			if (path.endsWith("/usage-pause-thresholds") && method === "POST") {
+				const usagePauseThresholdsHandler =
+					createAccountUsagePauseThresholdsHandler(this.context.dbOps);
+				return await this.wrapHandler((req) =>
+					usagePauseThresholdsHandler(req, accountId),
 				)(req, url);
 			}
 

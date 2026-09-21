@@ -66,6 +66,8 @@ interface RateLimitProgressProps {
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
+	pauseThresholdFiveHour?: number | null; // Pause at this percent of the 5-hour window; null = off
+	pauseThresholdWeekly?: number | null; // Pause at this percent of the all-models weekly window; null = off
 }
 
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
@@ -82,6 +84,46 @@ function computeExpectedPct(
 	const durationMs = resetMs - startMs;
 	const elapsed = now - startMs;
 	return Math.min(100, Math.max(0, (elapsed / durationMs) * 100));
+}
+
+/**
+ * The pause threshold that applies to one usage row, or null when that row has
+ * none.
+ *
+ * Only the two windows a threshold can be set on are marked: the 5-hour window
+ * and the all-models weekly window. Per-model weekly caps (`seven_day_opus` and
+ * friends) share the weekly page but not the setting, so marking them would
+ * promise a pause that never comes.
+ */
+/**
+ * The sentence under the threshold tooltip's heading: what the marker means,
+ * and where this window stands against it right now.
+ */
+function thresholdTooltipDetail(
+	windowLabel: string,
+	percentage: number | null | undefined,
+	threshold: number,
+): string {
+	const window = windowLabel.toLowerCase();
+	if (percentage === null || percentage === undefined) {
+		return `This account pauses when ${window} usage reaches ${threshold}%, and resumes when the window resets.`;
+	}
+	const current = Math.round(percentage);
+	if (current >= threshold) {
+		return `${window.charAt(0).toUpperCase()}${window.slice(1)} usage is ${current}% — past the threshold, so this account is paused until the window resets.`;
+	}
+	return `${window.charAt(0).toUpperCase()}${window.slice(1)} usage is ${current}%; this account pauses at ${threshold}% and resumes when the window resets.`;
+}
+
+function thresholdForWindow(
+	window: string | null,
+	fiveHour: number | null,
+	weekly: number | null,
+): number | null {
+	if (!window) return null;
+	if (window === "five_hour") return fiveHour;
+	if (window === "seven_day") return weekly;
+	return null;
 }
 
 function computeWindowThrottleUntil(
@@ -177,6 +219,8 @@ export function RateLimitProgress({
 	provider,
 	className,
 	showWeekly = false,
+	pauseThresholdFiveHour = null,
+	pauseThresholdWeekly = null,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -498,12 +542,30 @@ export function RateLimitProgress({
 				resetTime: resetIso,
 			},
 		);
-		// Codex: drop the 5-hour row entirely. Its percentage is either absent or
-		// borrowed from the time-elapsed fallback, so the bar showed how much of
-		// the window had passed as if it were consumption. The weekly window is
-		// what actually limits a Codex account, and it is the only bar kept here.
+		// Codex: keep the 5-hour row only when the account really reported one —
+		// a numeric percentage AND a reset. OpenAI dropped the 5-hour window on
+		// 2026-07-12 and brought it back for Plus on 2026-08-25; Pro accounts
+		// still report only the weekly window. For them the row must stay hidden
+		// rather than show a fabricated 0% or the elapsed-time fallback, which
+		// is why this reads the payload's own window instead of trusting the
+		// fallback-filled row from collectAnthropicUsageRows.
+		const codexFiveHour = (
+			usageData as {
+				five_hour?: {
+					utilization: number | null;
+					resets_at: string | null;
+				} | null;
+			}
+		).five_hour;
+		const codexHasRealFiveHour =
+			typeof codexFiveHour?.utilization === "number" &&
+			typeof codexFiveHour?.resets_at === "string";
 		usages.push(
-			...(isCodex ? rows.filter((row) => row.window !== "five_hour") : rows),
+			...(isCodex
+				? rows.filter(
+						(row) => row.window !== "five_hour" || codexHasRealFiveHour,
+					)
+				: rows),
 		);
 	} else if (
 		providerShowsWeeklyUsage(provider) &&
@@ -555,10 +617,10 @@ export function RateLimitProgress({
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	// The throttle notice normally rides along inside the throttled window's row.
-	// Codex no longer renders a 5-hour row, and throttling on that window still
-	// delays real requests — so surface any throttled window that has no row of
-	// its own as a standalone line. Without this, dropping the bar would also
-	// silently drop the warning.
+	// Codex renders its 5-hour row only when the account reports one, and
+	// throttling on that window still delays real requests — so surface any
+	// throttled window that has no row of its own as a standalone line. Without
+	// this, hiding the bar would also silently drop the warning.
 	const renderedWindows = new Set(
 		usages
 			.map((usage) => usage.window)
@@ -674,6 +736,11 @@ export function RateLimitProgress({
 							);
 							const isOverPacing =
 								expectedPct !== null && (percentage ?? 0) > expectedPct;
+							const pauseThreshold = thresholdForWindow(
+								usage.window ?? null,
+								pauseThresholdFiveHour,
+								pauseThresholdWeekly,
+							);
 							const isWindowThrottled = usage.window
 								? throttledWindowSet.has(usage.window)
 								: false;
@@ -722,7 +789,7 @@ export function RateLimitProgress({
 									</div>
 									<div className="group relative">
 										<div
-											className="pointer-events-none absolute bottom-full z-10 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md group-hover:block"
+											className="pointer-events-none absolute bottom-full z-10 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md group-hover:block [&:has(~_.threshold-marker:hover)]:!hidden"
 											style={{ left: `clamp(10%, ${expectedPct ?? 50}%, 90%)` }}
 										>
 											<div className="mb-1 font-medium">
@@ -771,6 +838,63 @@ export function RateLimitProgress({
 														"1px 0 2px rgba(0,0,0,0.5), -1px 0 2px rgba(0,0,0,0.5)",
 												}}
 											/>
+										)}
+										{pauseThreshold !== null && (
+											// Sits on top of the bar's own fill as often as beside
+											// it, so it needs contrast against the fill colour AND
+											// against the pale track — and it must not read as the
+											// thin white pacing marker above. A foreground-coloured
+											// post with a flag head and a halo does both, in either
+											// theme.
+											<div
+												className="threshold-marker group/threshold absolute"
+												style={{
+													left: `${pauseThreshold}%`,
+													top: "-7px",
+													zIndex: 11,
+												}}
+											>
+												{/* The post itself is 2px wide, which is nothing to
+												    aim at; this widens what the pointer has to hit
+												    without changing what is drawn. */}
+												<div className="absolute -left-2 -top-1 h-8 w-5" />
+												<div className="pointer-events-none absolute bottom-full z-20 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md group-hover/threshold:block">
+													<div className="mb-1 font-medium">
+														Pause threshold · {pauseThreshold}%
+													</div>
+													<div className="text-muted-foreground">
+														{thresholdTooltipDetail(
+															windowLabel,
+															percentage,
+															pauseThreshold,
+														)}
+													</div>
+												</div>
+												{/* The theme variables hold plain colour literals, so
+												    they are read here directly: this build generates no
+												    `bg-foreground` utility, and using one paints nothing
+												    at all. */}
+												<div
+													className="pointer-events-none"
+													style={{
+														width: "2px",
+														height: "22px",
+														backgroundColor: "var(--foreground, #09090b)",
+														boxShadow: "0 0 0 1px var(--background, #fff)",
+													}}
+												/>
+												<div
+													className="pointer-events-none absolute"
+													style={{
+														top: 0,
+														left: "2px",
+														width: "7px",
+														height: "6px",
+														backgroundColor: "var(--foreground, #09090b)",
+														clipPath: "polygon(0 0, 100% 0, 0 100%)",
+													}}
+												/>
+											</div>
 										)}
 									</div>
 									{isWindowThrottled && throttleDisplayUntil && (

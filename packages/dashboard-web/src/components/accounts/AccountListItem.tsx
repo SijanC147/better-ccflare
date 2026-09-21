@@ -1,9 +1,11 @@
+import { supportsUsagePauseThreshold } from "@better-ccflare/core";
 import { AccountPresenter } from "@better-ccflare/ui-common";
 import {
 	AlertCircle,
 	CalendarClock,
 	Edit2,
 	Ellipsis,
+	Gauge,
 	Globe,
 	Hash,
 	KeyRound,
@@ -55,6 +57,7 @@ const ACTION_ICONS: Record<
 	priority: Zap,
 	"renewal-day": CalendarClock,
 	"custom-endpoint": Globe,
+	"usage-thresholds": Gauge,
 	"model-mappings": Hash,
 	"request-transformer": Replace,
 	reauth: KeyRound,
@@ -87,6 +90,7 @@ interface AccountListItemProps {
 	onBillingTypeToggle: (account: Account) => void;
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
+	onUsageThresholdsChange?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
 	onRequestTransformerChange?: (account: Account) => void;
@@ -111,6 +115,7 @@ export function AccountListItem({
 	onBillingTypeToggle,
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
+	onUsageThresholdsChange,
 	onCustomEndpointChange,
 	onModelMappingsChange,
 	onRequestTransformerChange,
@@ -171,6 +176,7 @@ export function AccountListItem({
 		onPriorityChange,
 		onRenewalDayChange,
 		onCustomEndpointChange,
+		onUsageThresholdsChange,
 		onModelMappingsChange,
 		onRequestTransformerChange,
 		onReauth,
@@ -506,6 +512,18 @@ export function AccountListItem({
 					usageThrottledWindows={account.usageThrottledWindows}
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
+					pauseThresholdFiveHour={
+						supportsUsagePauseThreshold(account.provider) &&
+						account.usagePauseFiveHourEnabled
+							? account.usagePauseFiveHourThreshold
+							: null
+					}
+					pauseThresholdWeekly={
+						supportsUsagePauseThreshold(account.provider) &&
+						account.usagePauseWeeklyEnabled
+							? account.usagePauseWeeklyThreshold
+							: null
+					}
 				/>
 			)}
 		</div>

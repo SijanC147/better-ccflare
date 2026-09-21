@@ -37,6 +37,7 @@ export {
 	lowestTierCodexModel,
 } from "./codex-model-catalog";
 export {
+	earliestCodexResetMs,
 	recordCodexUsageSnapshot,
 	resetCodexUsageHistoryThrottle,
 } from "./codex-usage-history";
