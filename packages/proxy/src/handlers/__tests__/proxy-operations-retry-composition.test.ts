@@ -317,14 +317,19 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		const account = makeAccount();
 		const { result, forwarded } = await runProxy(account, ctx);
 
+		// Five upstream answers, fifteen upstream fetches, for one client
+		// request, on one account, at the documented defaults. Asserted FIRST:
+		// a mutation that changes the composed budget changes these two before
+		// it changes anything about the outcome, and an outcome assertion that
+		// fails first would mask which number moved.
+		expect(counters.fetches()).toBe(15);
+		expect(counters.responses()).toBe(5);
+
+		// The outcome that proves both loops ran to exhaustion rather than the
+		// request ending some other way at the same count.
 		expect(forwarded).toBe(false);
 		expect(result).toBeNull();
 		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
-
-		// Five upstream answers, fifteen upstream fetches, for one client
-		// request, on one account, at the documented defaults.
-		expect(counters.responses()).toBe(5);
-		expect(counters.fetches()).toBe(15);
 	});
 
 	it("1305 then 529 then 5xx on one zai request: all three loops compose", async () => {
@@ -353,12 +358,13 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		const account = makeAccount({ provider: "zai", name: "zai-test" });
 		await runProxy(account, ctx);
 
-		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
-
 		// Seven upstream answers, seventeen upstream fetches, for one client
-		// request, on one account, at the documented defaults.
-		expect(counters.responses()).toBe(7);
+		// request, on one account, at the documented defaults. Asserted first,
+		// for the reason given in the Anthropic case above.
 		expect(counters.fetches()).toBe(17);
+		expect(counters.responses()).toBe(7);
+
+		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
 	});
 
 	it("a single loop still spends exactly the operator's retry_attempts", async () => {
