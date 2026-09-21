@@ -93,7 +93,7 @@ function writableConfig(label: string, mode: number): string {
 
 /** The exact line saveConfig() emits when it refuses. Asserted whole, see below. */
 function refusalMessage(configPath: string, strippedCount: number): string {
-	return `Config not saved: ${configPath} was loaded without ${strippedCount} credential or endpoint field(s) that other local users can write, and writing this file would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`;
+	return `Config not saved: ${configPath} was loaded from a file other local users can write, with ${strippedCount} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`;
 }
 
 describe("a config other local users can write", () => {
@@ -388,6 +388,67 @@ describe("a config other local users can write", () => {
 			// is what the refusal message tells the operator.
 			expect(config.get("port")).toBe(9999);
 			expect(bytesAfter.toString("utf8")).not.toContain("9999");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("strips for a SECOND Config on the same path, after we chmodded it", () => {
+		// The instance boundary, found by this PR's security reviewer at 6217144c.
+		//
+		// The first draft memoised writability per instance, and its docstring
+		// argued for that: a later Config is entitled to a fresh reading of a file
+		// the operator may have since fixed. That reasoning is wrong in the one case
+		// that matters, because THE FIRST INSTANCE IS WHAT CHMODS THE FILE. A second
+		// Config built microseconds later stats a file this process just made look
+		// clean, strips nothing, and adopts the plant. Worse, its strippedFields is
+		// empty, so its saveConfig() does not refuse and writes the attacker's values
+		// back into a now-0600 file: the exact laundering saveConfig() declines to do
+		// deliberately one method away.
+		//
+		// Measured by the reviewer with the per-instance memo: the second Config
+		// returned the planted secret AND the attacker's DSN from
+		// buildPgConnectionUrl(), and persisted a set() beside both.
+		//
+		// Not hypothetical. Three second-instance sites exist in the long-lived
+		// server: packages/http-api/src/handlers/oauth.ts:878 and :971, and
+		// packages/database/src/database-operations.ts:389, which calls
+		// buildPgConnectionUrl() itself.
+		const dir = fixtureDir("secondinstance");
+		const configPath = join(dir, "config.json");
+		writeFileSync(
+			configPath,
+			JSON.stringify({
+				lb_strategy: "session",
+				local_control_secret: "ATTACKER-PLANTED-SECRET",
+				pg_enabled: true,
+				pg_host: "attacker.example.com",
+				pg_password: "attacker-pw",
+			}),
+		);
+		chmodSync(configPath, 0o666);
+		try {
+			const first = new Config(configPath);
+			expect(first.getLocalControlSecret()).not.toBe("ATTACKER-PLANTED-SECRET");
+			// The first instance has chmodded it. This is the precondition that makes
+			// the second instance interesting, so assert it rather than assume it.
+			expect(statSync(configPath).mode & 0o022).toBe(0);
+			const bytesAfterFirst = readFileSync(configPath);
+
+			const second = new Config(configPath);
+
+			expect(second.get("lb_strategy")).toBe("session");
+			expect(second.get("local_control_secret")).toBeUndefined();
+			expect(second.get("pg_host")).toBeUndefined();
+			expect(second.getLocalControlSecret()).not.toBe(
+				"ATTACKER-PLANTED-SECRET",
+			);
+			expect(second.buildPgConnectionUrl()).toBeNull();
+			// And the second instance must refuse to save too, or it launders the
+			// plant into a file that now looks authoritative.
+			second.set("port", 9999);
+			expect(readFileSync(configPath).equals(bytesAfterFirst)).toBe(true);
+			expect(readFileSync(configPath, "utf8")).not.toContain("9999");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

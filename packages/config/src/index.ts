@@ -94,6 +94,55 @@ const unenforceableModes = new Set<string>();
  */
 const contentsNotOurs = new Set<string>();
 
+/**
+ * Whether other local users could write a config path, as observed on the FIRST
+ * read any Config in this process performed of it, before anything chmodded it
+ * (SB23-2366).
+ *
+ * Captured once and reused rather than re-derived, because the mode changes
+ * underneath every later reader. readConfigData() brings a writable file to 0600
+ * at its own report site, a few lines below the stat, and restrictConfigFile()
+ * runs again after loadConfig() returns. So a later read stats 0600, concludes
+ * the file is trustworthy, strips nothing, and adopts a planted
+ * local_control_secret, which is an authentication bypass against the local
+ * control endpoint rather than a disclosure.
+ *
+ * Module-scoped and keyed by path, beside contentsNotOurs and unenforceableModes
+ * and for the same reason: the condition is a property of the FILE, and every
+ * Config in the process shares that file. A per-instance version of this shipped
+ * in the first draft of SB23-2366 and was wrong in a way its own docstring
+ * argued for. It fixed the second read within one instance and left the instance
+ * boundary open, which is worse than it sounds, because the FIRST instance is
+ * what chmods the file to 0600. So a second Config built microseconds later
+ * stats a file this process just made look clean, strips nothing, adopts the
+ * plant, and has an empty strippedFields, so its saveConfig() does not refuse
+ * and writes the attacker's values back into a 0600 file. That is precisely the
+ * laundering saveConfig() declines to do deliberately one method away.
+ *
+ * Measured by this PR's reviewer at 6217144c: with a per-instance memo, a second
+ * Config on the same path returned the planted secret, returned the attacker's
+ * DSN from buildPgConnectionUrl(), and persisted a set() beside both. Three
+ * reachable second-instance sites exist in the long-lived server:
+ * packages/http-api/src/handlers/oauth.ts:878 and :971, and
+ * packages/database/src/database-operations.ts:389, which calls
+ * buildPgConnectionUrl() itself. loadConfig()'s own comment names the oauth pair
+ * as the reason a second Config exists at all.
+ *
+ * An absent key is not the same as false: it means no read has happened yet, and
+ * a config file that did not exist at construction is created at 0600 by
+ * saveConfig(), so a later read of it should stat fresh.
+ *
+ * Never cleared, matching its neighbours. A NEW process re-stats and gets a
+ * fresh answer, which is what lets an operator fix the mode and recover. What
+ * this refuses to do is let the process forget a change it made itself.
+ *
+ * This does NOT close the next-boot window, and saying so plainly because it
+ * will otherwise be read as closed: the file still holds the attacker's bytes at
+ * 0600, and the next process adopts them. That is the acknowledged SB23-2338
+ * trade, already recorded below at the writable-config report.
+ */
+const writableAtFirstRead = new Map<string, boolean>();
+
 /** Config paths whose stripped fields have already been named, once per process. */
 const strippedFieldsReported = new Set<string>();
 
@@ -120,6 +169,12 @@ const UNTRUSTED_FIELDS = new Set([
 	"claude_projects_dir",
 	"github_read_token",
 	"upstream_maintainer_token",
+	// Not a credential, and included anyway. An attacker-set client_id points the
+	// OAuth authorization flow at an app registration they control, which is a
+	// trust decision rather than a setting. Found by this PR's reviewer; declared
+	// at ConfigData and read into defaults.clientId, and caught by no prefix,
+	// name or suffix before this.
+	"client_id",
 	"local_control_secret",
 ]);
 
@@ -550,35 +605,6 @@ export class Config extends EventEmitter {
 	private data: ConfigData = {};
 
 	/**
-	 * Whether other local users could write the config file, as observed on the
-	 * FIRST read this instance performed, before anything chmodded it (SB23-2366).
-	 *
-	 * Captured once and reused rather than re-derived, because the mode changes
-	 * underneath the second reader. readConfigData() brings a writable file to
-	 * 0600 at its own report site, a few lines below the stat, and
-	 * restrictConfigFile() runs again after loadConfig() returns. So
-	 * readLocalControlSecretFromDisk(), which re-reads the file on the same boot,
-	 * stats 0600 and concludes the file is trustworthy: nothing is stripped on
-	 * that read and a planted local_control_secret is adopted, which is an
-	 * authentication bypass against the local control endpoint.
-	 *
-	 * That is the one read where the strip has to hold, because it is the read
-	 * that runs on the boot where the secret is absent from this.data.
-	 *
-	 * undefined means no read has happened yet, which is not the same as false:
-	 * a config file that did not exist at construction is created at 0600 by
-	 * saveConfig(), and a later read of it should stat fresh rather than inherit
-	 * a decision that was never made.
-	 *
-	 * Per instance and not module-scoped, unlike contentsNotOurs and
-	 * unenforceableModes beside it. Those record a property of the filesystem,
-	 * which outlives any one Config. This records what one instance saw at one
-	 * moment, and a second Config constructed later is entitled to a fresh
-	 * reading of a file the operator may have since fixed.
-	 */
-	private writableAtFirstRead: boolean | undefined;
-
-	/**
 	 * Credential and endpoint fields dropped from this instance's reads, so
 	 * saveConfig() can refuse rather than write a file that is missing them
 	 * (SB23-2366).
@@ -794,9 +820,9 @@ export class Config extends EventEmitter {
 			// already holds the target by then, so the branch below still fires
 			// once, and chmodAndVerify() still runs once.
 			const writableByOthers =
-				this.writableAtFirstRead ??
+				writableAtFirstRead.get(target) ??
 				(process.platform !== "win32" && (info.mode & 0o022) !== 0);
-			this.writableAtFirstRead = writableByOthers;
+			writableAtFirstRead.set(target, writableByOthers);
 			if (writableByOthers && !contentsNotOurs.has(target)) {
 				contentsNotOurs.add(target);
 				// Name the bit that was found. "group-writable (gid 20)" and
@@ -849,7 +875,7 @@ export class Config extends EventEmitter {
 				}
 				if (chmodOutcome === "took") {
 					log.error(
-						`The config file ${target} was mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user could write it and its contents may not be yours. It has been brought to 0600, which closes the window but not its effect: the WHOLE config was already loaded, not part of it, and the next write persists whatever was in it. An attacker who wrote this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. Inspect the file, or delete it so a fresh one is created. This line does not repeat on the next boot, because the file is 0600 now.`,
+						`The config file ${target} was mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user could write it and its contents may not be yours. It has been brought to 0600. Its ordinary settings were loaded and are in effect; credential and endpoint fields were NOT adopted from it, and any it contained are named in a separate line below. That is what stops an attacker who wrote this file supplying local_control_secret, which would authenticate them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which would point every credential this process persists at a database they control; and openobserve_url with openobserve_token, which would ship request and response bodies to a collector of theirs. If any were ignored, no setting is written back either, because saveConfig() refuses rather than persist a config it knows is incomplete. Inspect the file, or delete it so a fresh one is created. This line does not repeat on the next boot, because the file is 0600 now, but the bytes in it are still whatever was written, and the next boot adopts them.`,
 					);
 				} else if (chmodOutcome === "threw") {
 					// ERROR, and the level is right for the same reason the took
@@ -857,7 +883,7 @@ export class Config extends EventEmitter {
 					// enforces modes, so the mode read above is evidence. What differs
 					// is that nothing was fixed, so the operator has to fix it.
 					log.error(
-						`The config file ${target} is mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user can write it and its contents may not be yours. The chmod to 0600 FAILED, reported just above, so it is still ${modeText(info.mode & 0o777)} and this line repeats on every boot until that is fixed. The WHOLE config has been loaded, not part of it. An attacker who writes this file supplies local_control_secret, which authenticates them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which point every credential this process persists from now on at a database they control; and openobserve_url with openobserve_token, which ship request and response bodies to a collector of theirs. A read-only mount and a macOS uchg flag are the usual causes. Inspect the file, clear whatever refuses the chmod, or delete it so a fresh one is created.`,
+						`The config file ${target} is mode ${modeText(info.mode & 0o777)}, ${writers}, so another local user can write it and its contents may not be yours. The chmod to 0600 FAILED, reported just above, so it is still ${modeText(info.mode & 0o777)} and this line repeats on every boot until that is fixed. Its ordinary settings have been loaded and are in effect; credential and endpoint fields have NOT been adopted from it, and any it contained are named in a separate line below. That is what stops an attacker who writes this file supplying local_control_secret, which would authenticate them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which would point every credential this process persists at a database they control; and openobserve_url with openobserve_token, which would ship request and response bodies to a collector of theirs. If any were ignored, no setting is written back either, because saveConfig() refuses rather than persist a config it knows is incomplete. A read-only mount and a macOS uchg flag are the usual causes. Inspect the file, clear whatever refuses the chmod, or delete it so a fresh one is created.`,
 					);
 				} else {
 					// The whole point of SB23-2350. chmod reported success and changed
@@ -880,7 +906,7 @@ export class Config extends EventEmitter {
 					// who is tired of the line rather than the one who checked. The
 					// measurement is free here, so nothing is bought by asking.
 					log.warn(
-						`The config file ${target} reads mode ${modeText(info.mode & 0o777)}, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${target} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes.`,
+						`The config file ${target} reads mode ${modeText(info.mode & 0o777)}, but chmod on it reported success and did not land 0600, reported just above, so this filesystem does not enforce Unix modes and that reading says nothing about who can write the file. Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes behave this way. Whether another local user can write ${target} is decided at the mount or on the host, not by these bits, and this process cannot see it. This file is where local_control_secret, pg_password and upstream_maintainer_token are stored, so check the access rules where the volume is mounted, or move the config onto a filesystem that enforces modes. Because the mode reads writable, credential and endpoint fields were NOT adopted from it, and any it contained are named in a separate line below; no setting is written back while that holds. On this kind of filesystem that applies on every boot rather than once, so a config here loads its settings and never its credentials until the mount is fixed.`,
 					);
 				}
 			}
@@ -1563,7 +1589,7 @@ export class Config extends EventEmitter {
 		// deduplicated either.
 		if (this.strippedFields.size > 0) {
 			log.error(
-				`Config not saved: ${this.strippedFrom} was loaded without ${this.strippedFields.size} credential or endpoint field(s) that other local users can write, and writing this file would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
+				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
 			);
 			return;
 		}
