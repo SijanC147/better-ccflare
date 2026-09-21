@@ -310,6 +310,44 @@ describe("check-boolean-widening", () => {
 		expect(stderr).toContain("subject.ts:4:6");
 	});
 
+	test("stays silent on a project's own augmentation of the global `Object`", () => {
+		// The other direction of the test above, and the case `isGlobalObjectInterface`
+		// uses `.some` rather than `.every` for. This file has no import and no export, so
+		// it is a SCRIPT rather than a module and its `interface Object` merges with the
+		// one in `lib.es5.d.ts`. The merged symbol therefore has declarations in both a
+		// `.d.ts` and this file, and the merged type still accepts every non-nullish
+		// primitive, so it must stay silent.
+		//
+		// Written because a mutation found the gap, not because the case was foreseen:
+		// swapping `.some` for `.every` SURVIVED the other 23 tests, so the only thing
+		// pinning the choice was a paragraph of the function's own docstring arguing for
+		// it. Measured with the mutation applied, this fixture reports 1 offence naming
+		// `Object` at 6:6, which is a false positive on correct code.
+		//
+		// The module-scoped `interface Object` in the test above is what separates this
+		// from a blanket name match: one must be reported and the other must not, and no
+		// single rendered-name comparison can do both.
+		const dir = makeFixture(
+			[
+				"interface Object {",
+				"\taugmented: 1;",
+				"}",
+				"declare function boxed(): Object;",
+				"function guard(): boolean {",
+				"\tif (boxed()) return true;",
+				"\treturn false;",
+				"}",
+				"guard();",
+			].join("\n"),
+		);
+		const { exitCode, stdout } = runGate(dir);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("0 offences");
+		// Without this the clean case is vacuous: a gate that parsed nothing also reports
+		// zero, and this fixture has exactly one boolean context to find.
+		expect(stdout).toContain("1 boolean contexts examined");
+	});
+
 	test("separates the `false` literal from the `true` literal, through an alias too", () => {
 		// The boolean-literal branch was `checker.typeToString(type) === "false"` and no
 		// test pinned it: the PR #212 reviewer measured that mutating the string to
