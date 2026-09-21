@@ -36,6 +36,68 @@ function mockFetchOnce(response: MockFetchResponse): {
 	};
 }
 
+/**
+ * Reads the JSON request body of a recorded fetch call.
+ *
+ * `Parameters<typeof fetch>[1]` is an optional `RequestInit`, and its `body` is
+ * `BodyInit | null | undefined`, so neither the init nor the body can be handed to
+ * `JSON.parse` without being narrowed first. Narrowing here rather than at each of the
+ * eight call sites also turns a missing body into a sentence that names the problem,
+ * instead of a `TypeError` about reading a property of undefined.
+ */
+function recordedJsonBody(
+	calls: Parameters<typeof fetch>[],
+	index = 0,
+): Record<string, unknown> {
+	const init = calls[index]?.[1];
+	if (!init) {
+		throw new Error(
+			`Expected a recorded fetch call at index ${index}, but ${calls.length} call(s) were recorded`,
+		);
+	}
+	const { body } = init;
+	if (typeof body !== "string") {
+		throw new Error(
+			`Expected the recorded request body at index ${index} to be a JSON string, received ${body === null ? "null" : typeof body}`,
+		);
+	}
+	return JSON.parse(body) as Record<string, unknown>;
+}
+
+/**
+ * Awaits a call expected to reject with an `OAuthError` and returns that error, narrowed.
+ *
+ * Replaces a `try { await call(); expect.fail(...) } catch (error) { ...assert on error... }`
+ * block. That shape is self-swallowing: whatever the "should have thrown" marker throws is
+ * caught by the block's own `catch` and then asserted against as though it were the error
+ * under test. Here the resolve case throws past the caller with its own message, so the
+ * report names the missing rejection rather than the type of the marker.
+ */
+async function captureOAuthError(
+	call: () => Promise<unknown>,
+): Promise<OAuthError> {
+	let caught: unknown;
+	let rejected = false;
+	try {
+		await call();
+	} catch (error) {
+		caught = error;
+		rejected = true;
+	}
+	if (!rejected) {
+		throw new Error(
+			"Expected the call to reject with an OAuthError, but it resolved",
+		);
+	}
+	expect(caught).toBeInstanceOf(OAuthError);
+	if (!(caught instanceof OAuthError)) {
+		throw new Error(
+			`Expected an OAuthError, received ${caught instanceof Error ? caught.constructor.name : typeof caught}`,
+		);
+	}
+	return caught;
+}
+
 describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 	const createTestProvider = () => new AnthropicOAuthProvider();
 
@@ -82,7 +144,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 				config,
 			);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 			expect(requestBody.code).toBe("authorization-code-123");
 			expect(requestBody.state).toBe("state-456");
 			expect(result.refreshToken).toBe("test-refresh-token");
@@ -104,7 +166,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 				config,
 			);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 			expect(requestBody.code).toBe("authorization-code-only");
 			expect(requestBody.state).toBeUndefined();
 			expect(result.refreshToken).toBe("test-refresh-token");
@@ -121,7 +183,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			await provider.exchangeCode(codeWithMultipleHash, verifier, config);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 			// Should split on first # only, taking only the first element after split
 			expect(requestBody.code).toBe("auth-code");
 			expect(requestBody.state).toBe("state-param");
@@ -138,7 +200,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			await provider.exchangeCode(emptyCode, verifier, config);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 			expect(requestBody.code).toBe("");
 			expect(requestBody.state).toBe("state-only");
 			mockFetch.mockRestore();
@@ -154,7 +216,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			await provider.exchangeCode(codeWithEmptyState, verifier, config);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 			expect(requestBody.code).toBe("auth-code");
 			expect(requestBody.state).toBe("");
 			mockFetch.mockRestore();
@@ -172,7 +234,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			await provider.exchangeCode(code, verifier, config);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 
 			// Verify all required parameters are present
 			expect(requestBody).toEqual({
@@ -196,7 +258,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			await provider.exchangeCode(consoleCode, verifier, config);
 
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 			expect(requestBody.code).toBe("console-auth-code");
 			expect(requestBody.state).toBeUndefined();
 			mockFetch.mockRestore();
@@ -219,14 +281,11 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 			const code = "test-code#test-state";
 			const verifier = "test-verifier";
 
-			try {
-				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
-			} catch (error) {
-				expect(error).toBeInstanceOf(OAuthError);
-				expect(error.message).toBe("The request format is invalid");
-				expect(error.provider).toBe("anthropic");
-			}
+			const error = await captureOAuthError(() =>
+				provider.exchangeCode(code, verifier, config),
+			);
+			expect(error.message).toBe("The request format is invalid");
+			expect(error.provider).toBe("anthropic");
 			mockFetch.mockRestore();
 		});
 
@@ -242,14 +301,11 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 			const code = "test-code#test-state";
 			const verifier = "test-verifier";
 
-			try {
-				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
-			} catch (error) {
-				expect(error).toBeInstanceOf(OAuthError);
-				expect(error.message).toBe("Invalid request format");
-				expect(error.provider).toBe("anthropic");
-			}
+			const error = await captureOAuthError(() =>
+				provider.exchangeCode(code, verifier, config),
+			);
+			expect(error.message).toBe("Invalid request format");
+			expect(error.provider).toBe("anthropic");
 			mockFetch.mockRestore();
 		});
 
@@ -267,14 +323,11 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 			const code = "test-code#test-state";
 			const verifier = "test-verifier";
 
-			try {
-				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
-			} catch (error) {
-				expect(error).toBeInstanceOf(OAuthError);
-				// Should fall back to stringified object or status text
-				expect(error.message).toMatch(/Bad Request|UNKNOWN_ERROR/);
-			}
+			const error = await captureOAuthError(() =>
+				provider.exchangeCode(code, verifier, config),
+			);
+			// Should fall back to stringified object or status text
+			expect(error.message).toMatch(/Bad Request|UNKNOWN_ERROR/);
 			mockFetch.mockRestore();
 		});
 
@@ -293,13 +346,10 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 			const code = "test-code#test-state";
 			const verifier = "test-verifier";
 
-			try {
-				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
-			} catch (error) {
-				expect(error).toBeInstanceOf(OAuthError);
-				expect(error.message).toBe("Internal Server Error");
-			}
+			const error = await captureOAuthError(() =>
+				provider.exchangeCode(code, verifier, config),
+			);
+			expect(error.message).toBe("Internal Server Error");
 			mockFetch.mockRestore();
 		});
 	});
@@ -329,7 +379,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			// Verify the request was formatted correctly
 			expect(mockFetch.mock.calls).toHaveLength(1);
-			const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+			const requestBody = recordedJsonBody(mockFetch.mock.calls);
 
 			expect(requestBody.code).toBe("au_1x2y3z4a5b6c7d8e9f0");
 			expect(requestBody.state).toBe("xyz987");
