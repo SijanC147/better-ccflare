@@ -16,6 +16,7 @@
 		"dev:dashboard": "bun --hot packages/dashboard-web/src/index.tsx",
 		"typecheck": "bunx tsc --noEmit && bun run typecheck:tests",
 		"check:boolean-widening": "bun run scripts/check-boolean-widening.ts",
+		"check:optional-chain-silent-skip": "bun run scripts/check-optional-chain-silent-skip.ts",
 		"typecheck:tests": "bun run typecheck:dashboard && bun run typecheck:config && bun run typecheck:claude-code-discovery && bun run typecheck:logger && bun run typecheck:security && bun run typecheck:types && bun run typecheck:load-balancer && bun run typecheck:database && bun run typecheck:agents && bun run typecheck:cli-commands && bun run typecheck:oauth-flow && bun run typecheck:core && bun run typecheck:openai-formats && bun run typecheck:openai-responses-adapter && bun run typecheck:http-api && bun run typecheck:proxy && bun run typecheck:http-common && bun run typecheck:errors && bun run typecheck:ui-common && bun run typecheck:ui-constants && bun run typecheck:providers && bun run typecheck:server",
 		"typecheck:dashboard": "bunx tsc --noEmit -p packages/dashboard-web/tsconfig.json",
 		"typecheck:config": "bunx tsc --noEmit -p packages/config/tsconfig.json",
