@@ -623,6 +623,57 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		]);
 	});
 
+	it("says retry is disabled rather than blaming the budget", async () => {
+		// The third outcome. Both 1305 messages sit OUTSIDE the
+		// `retryCfg.enabled` guard, so they are reached with retry switched
+		// off and the budget untouched. A two-way split told that operator
+		// "no in-place retry budget left" and "budget spent after 0 1305
+		// retries", which would send them looking for a budget bug when the
+		// truth is that they set the kill switch. A boolean cannot hold three
+		// outcomes, which is the same defect as the 529 message in this file,
+		// one door further along.
+		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED = "false";
+		const counters = installScriptedFetch([zai1305Response]);
+		const warnings = captureWarnings();
+		try {
+			await runProxy(
+				makeAccount({ provider: "zai", name: "zai-off" }),
+				makeProxyContext(),
+			);
+		} finally {
+			warnings.stop();
+		}
+
+		expect(warnings.lines().filter((l) => l.includes("1305"))).toEqual([
+			"Account zai-off: detected 1305 overloaded in SSE stream, in-place retry is disabled",
+			"Account zai-off: 1305 in-place retry is disabled, converting to 429 for model fallback",
+		]);
+		// One fetch: the original attempt and no re-issue.
+		expect(counters.fetches()).toBe(1);
+	});
+
+	it("emits no 529 loop message at all when retry is disabled", async () => {
+		// Measured rather than argued from where the statement sits. The 529
+		// exhaustion message is inside the `retryCfg.enabled` guard, unlike
+		// the two 1305 messages, so it should be absent entirely rather than
+		// needing a disabled branch of its own. If this ever starts failing,
+		// the 529 message has moved out of the guard and needs the same
+		// three-way split the 1305 messages have.
+		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED = "false";
+		const counters = installScriptedFetch([
+			() => jsonResponse(529, overloadedBody),
+		]);
+		const warnings = captureWarnings();
+		try {
+			await runProxy(makeAccount({ name: "acc-off" }), makeProxyContext());
+		} finally {
+			warnings.stop();
+		}
+
+		expect(warnings.lines().filter((l) => l.includes("529 retr"))).toEqual([]);
+		expect(counters.fetches()).toBe(1);
+	});
+
 	it.each([
 		0, 1,
 	])("retry_attempts %i still means no in-place retry at all", async (attempts) => {

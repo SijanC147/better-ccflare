@@ -654,19 +654,23 @@ async function checkZai1305(
 		return response;
 	}
 
-	// Whether this call will actually re-issue anything. Computed BEFORE the
-	// message, because with a spent shared budget the loop body never runs and
-	// an unconditional "retrying" promises a retry that is not coming. The
-	// budget arrives spent when an earlier model cycle on this same request
-	// already paid for one, which is reachable today.
+	// THREE outcomes, not two, and a boolean cannot hold three. Computed before
+	// the message, because with a spent shared budget the loop body never runs
+	// and an unconditional "retrying" promises a retry that is not coming.
+	//
+	// An earlier version split this two ways and told an operator who had set
+	// CCFLARE_OVERLOAD_RETRY_ENABLED=false that there was "no budget left",
+	// which is false: the budget was never touched. Same mistake as the 529
+	// message this file already carries a note about, one door further along.
 	const retryCfg = getOverloadRetryConfig(retrySettings);
-	const willRetry =
-		retryCfg.enabled && retryCfg.maxAttempts > 1 && budget.remaining > 0;
+	const retryDisabled = !retryCfg.enabled || retryCfg.maxAttempts <= 1;
 
 	log.warn(
-		willRetry
-			? `Account ${account.name}: detected 1305 overloaded in SSE stream, retrying`
-			: `Account ${account.name}: detected 1305 overloaded in SSE stream, no in-place retry budget left for this request`,
+		retryDisabled
+			? `Account ${account.name}: detected 1305 overloaded in SSE stream, in-place retry is disabled`
+			: budget.remaining > 0
+				? `Account ${account.name}: detected 1305 overloaded in SSE stream, retrying`
+				: `Account ${account.name}: detected 1305 overloaded in SSE stream, no in-place retry budget left for this request`,
 	);
 
 	// The 1305 detection above only consumed a clone; drain the original
@@ -728,17 +732,28 @@ async function checkZai1305(
 		}
 	}
 
-	// Same three-way split as the 529 loop below, and for the same reason: an
-	// operator cannot tell a spent shared budget from a genuinely exhausted
-	// 1305 loop, and the two want different responses. A spent budget says
-	// another loop consumed this request's allowance; an exhausted loop says
-	// the upstream is overloaded. This is the only place the synthetic 429
-	// conversion is announced, so it is the line an operator follows when a
-	// request falls to model fallback.
+	// Three outcomes reach this line, and each wants a different response from
+	// the operator: this invocation spent its own allowance (the upstream is
+	// overloaded), the shared budget cut it short (another loop consumed this
+	// request's allowance), or retry is switched off entirely.
+	//
+	// `budget.remaining` cannot choose between them. This warn sits OUTSIDE the
+	// `retryCfg.enabled` block above, so it is reached with retries disabled
+	// and the budget untouched; and with retries enabled `remaining` is always
+	// 0 here, because the loop leaves only by exhausting the attempt counter
+	// (which makes exactly `maxAttempts - 1` decrements from a budget of at
+	// most that) or by the budget hitting zero. Every other exit from the loop
+	// body is a `return` and never arrives. That is the reviewer's finding on
+	// PR #234 and it is why this counts re-issues instead.
+	//
+	// This is the only place the synthetic 429 conversion is announced, so it
+	// is the line an operator follows when a request falls to model fallback.
 	log.warn(
-		reissuesMade >= retryCfg.maxAttempts - 1
-			? `Account ${account.name}: all ${retryCfg.maxAttempts - 1} 1305 retries exhausted, converting to 429 for model fallback`
-			: `Account ${account.name}: in-place retry budget for this request spent after ${reissuesMade} 1305 retries, converting to 429 for model fallback`,
+		retryDisabled
+			? `Account ${account.name}: 1305 in-place retry is disabled, converting to 429 for model fallback`
+			: reissuesMade >= retryCfg.maxAttempts - 1
+				? `Account ${account.name}: all ${retryCfg.maxAttempts - 1} 1305 retries exhausted, converting to 429 for model fallback`
+				: `Account ${account.name}: in-place retry budget for this request spent after ${reissuesMade} 1305 retries, converting to 429 for model fallback`,
 	);
 
 	// Convert to synthetic 429 so isModelUnavailableError triggers model cycling
