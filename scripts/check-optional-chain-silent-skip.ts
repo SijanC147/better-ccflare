@@ -64,6 +64,18 @@
  * `&&`/`||`/`??`/comma at statement level, as discarded is the fix. Zero instances of any
  * of them on this tree, which is why it is deferred rather than urgent.
  *
+ * Four more, all probed by PR #226's reviewer and all absent from this tree:
+ * `for (x?.f(); ; ) {}` (a for-initialiser is not an ExpressionStatement), a bare
+ * template-literal statement, `cond ? s?.a() : s?.b();`, and `return x?.f()` whose caller
+ * ignores the value, which needs flow analysis. Caught correctly, for contrast:
+ * `try { s?.close(); } catch {}` and the last statement of a block-bodied arrow.
+ *
+ * WHERE IT IS DELIBERATELY CONSERVATIVE. `sink?.write("a"); expect(buf).toEqual(["a"]);`
+ * IS reported, although the effect is asserted on the very next line. The gate cannot see
+ * that the following assertion observes this call, so it reports, and the advice it gives
+ * is still the right advice: drop the `?.` and throw on the guard. Noted here so the
+ * report is not read as a false positive when someone meets it.
+ *
  * The replacement is the one PR #217 used:
  *
  *     if (!x) throw new Error("<what was supposed to have captured x>");
@@ -113,6 +125,19 @@ const asJson = argv.includes("--json");
 const survey = argv.includes("--survey");
 const roots = argv.filter((a: string) => !a.startsWith("--"));
 const searchRoots = roots.length > 0 ? roots : ["packages", "apps", "scripts"];
+
+/**
+ * Which of the two invariants below applies, decided once and PRINTED, so that turning the
+ * strict one off is visible in the output rather than only in the source.
+ *
+ * Mutation M-H, found by PR #226's reviewer and left unfixed when that PR merged: setting
+ * this to a constant `false` switches off the file floor and all three count checks, and
+ * the whole suite stayed green. No fixture can catch it, because every fixture passes an
+ * explicit root and so runs the scoped branch anyway, and on a healthy tree the repository
+ * run exits 0 down either branch. Printing the mode is what makes the branch observable.
+ */
+const scanningWholeRepo = roots.length === 0;
+const scanMode = scanningWholeRepo ? "whole-tree" : "scoped";
 
 /** Directories that never hold source we own. */
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".git", "coverage", ".turbo"]);
@@ -557,6 +582,7 @@ for (const root of searchRoots) {
 // than passing.
 const summary = {
 	typescript: ts.version,
+	scanMode,
 	filesScanned,
 	optionalChainsExamined,
 	guardsFound,
@@ -570,7 +596,7 @@ if (asJson) {
 	console.log(JSON.stringify({ ...summary, detail: reported }, null, 2));
 } else {
 	console.log(
-		`check-optional-chain-silent-skip: typescript ${ts.version}, ${filesScanned} test files scanned, ${optionalChainsExamined} optional chains examined, ${guardsFound} presence assertions found, ${surveyed.length} guarded optional chains, ${offences.length} offences`,
+		`check-optional-chain-silent-skip: typescript ${ts.version}, ${scanMode} mode, ${filesScanned} test files scanned, ${optionalChainsExamined} optional chains examined, ${guardsFound} presence assertions found, ${surveyed.length} guarded optional chains, ${offences.length} offences`,
 	);
 }
 
@@ -594,7 +620,6 @@ if (asJson) {
  */
 const MIN_TEST_FILES_WHOLE_REPO = 300;
 
-const scanningWholeRepo = roots.length === 0;
 const scannedNothing = scanningWholeRepo
 	? filesScanned < MIN_TEST_FILES_WHOLE_REPO ||
 		optionalChainsExamined === 0 ||
