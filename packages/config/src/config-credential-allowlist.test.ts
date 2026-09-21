@@ -206,6 +206,32 @@ describe("a config other local users can write", () => {
 		}
 	});
 
+	it("strips client_id, which no prefix or suffix catches", () => {
+		// Mutation M8: removing "client_id" from UNTRUSTED_FIELDS. It SURVIVED when
+		// the field was first added, because nothing named it: the field was added
+		// on the reviewer's P4 and the test was not, which is the exact shape this
+		// file keeps being bitten by. Mutate what a rule NAMES, not only its
+		// mechanism.
+		//
+		// Not a credential, which is why it is easy to leave out. An attacker-set
+		// client_id points the OAuth authorization flow at an app registration they
+		// control, so it is a trust decision rather than a setting.
+		const dir = fixtureDir("clientid");
+		const configPath = join(dir, "config.json");
+		writeFileSync(
+			configPath,
+			JSON.stringify({ lb_strategy: "session", client_id: "attacker-app-id" }),
+		);
+		chmodSync(configPath, 0o666);
+		try {
+			const config = new Config(configPath);
+			expect(config.get("lb_strategy")).toBe("session");
+			expect(config.get("client_id")).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("strips from a group-writable config, not only a world-writable one", () => {
 		// Mutation M3: narrowing the strip mask from 0o022 to 0o002. On macOS the
 		// default gid is staff, which every local account belongs to, so
