@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AnthropicUsageData } from "@better-ccflare/types";
+import type { AnthropicUsageData, XaiUsageData } from "@better-ccflare/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -142,6 +142,118 @@ describe("RateLimitProgress — Codex credits", () => {
 
 		expect(html).toContain("Credits");
 		expect(html).toContain("3.25");
+	});
+
+	// The cases above all leave `showWeekly` at its default of false, which is
+	// how SB23-2462 shipped: the real card passes `showWeekly` (AccountListItem
+	// reads providerShowsWeeklyUsage("codex") === true), and only with it set
+	// does the render reach the window-selection chain where the provider
+	// detectors live. Everything below renders the card the way the dashboard
+	// renders it.
+	function renderCodexWithWeekly(
+		credits?: AnthropicUsageData["credits"],
+		utilization = 100,
+	) {
+		const usageData: AnthropicUsageData = {
+			five_hour: { utilization: 0, resets_at: null },
+			seven_day: { utilization, resets_at: WEEKLY_RESET },
+			...(credits ? { credits } : {}),
+		};
+		return renderToStaticMarkup(
+			<RateLimitProgress
+				provider="codex"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={utilization}
+				usageWindow="seven_day"
+				usageData={usageData}
+				showWeekly
+			/>,
+		);
+	}
+
+	it("keeps the weekly window and never reads as Grok when credits are present", () => {
+		// SB23-2462. `isXaiData` detected xAI by the presence of a `credits` key,
+		// and `AnthropicUsageData.credits` (Codex, #154/#156) is the second and
+		// only other member of FullUsageData carrying that key. A Codex account
+		// whose usage refresh populated credits therefore took the xAI arm, which
+		// reads `credits.utilization`; CodexCreditsData has no such field, so the
+		// bar rendered "undefined%" under the label "Grok credits", and because
+		// the chain is `else if`, the Codex weekly window was never reached.
+		const html = renderCodexWithWeekly({
+			has_credits: true,
+			unlimited: false,
+			balance: "9.99",
+		});
+
+		expect(html).not.toContain("Grok");
+		expect(html).not.toContain("undefined");
+		// The weekly bar is a Codex account's only quota bar. Asserting it is
+		// present is what pins the fall-through to the Anthropic-style arm.
+		expect(html).toContain("Weekly");
+		// The credits line is beside the bar, not instead of it.
+		expect(html).toContain("9.99");
+	});
+
+	it("still renders the weekly window when credits are absent", () => {
+		// The negative half: the label and the bar must not depend on credits.
+		const html = renderCodexWithWeekly(undefined);
+
+		expect(html).not.toContain("Grok");
+		expect(html).toContain("Weekly");
+	});
+
+	it("reads the utilization out of credits for an actual xAI account", () => {
+		// The positive direction for the detector this fix rewrites. Without it a
+		// typo in the provider string passes every other case in the file, because
+		// every other case asserts the xAI arm does NOT run.
+		//
+		// `usageUtilization` is deliberately null and `usageWindow` deliberately
+		// absent: the generic `providerShowsWeeklyUsage` fallback further down the
+		// chain also accepts provider "xai" and would render an identical "Grok
+		// credits" row from those two props. Measured — with them supplied, a
+		// mutation changing PROVIDER_NAMES.XAI to a typo survived this case. Left
+		// null, the fallback's own guards reject it and the only path that can
+		// produce a row is the xAI arm reading `credits.utilization`.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				provider="xai"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={null}
+				usageData={{ credits: { utilization: 42, resets_at: WEEKLY_RESET } }}
+				showWeekly
+			/>,
+		);
+
+		expect(html).toContain("Grok credits");
+		expect(html).toContain("42%");
+		expect(html).not.toContain("undefined");
+	});
+
+	it("says Data unavailable when an xAI credits object carries no utilization", () => {
+		// The second defect on the same path, independent of the discriminator.
+		// `usage.utilization` is declared `number | null`, but every value reaching
+		// it has crossed a JSON boundary through a cast, so a credits object that
+		// predates the field yields `undefined`. The row's availability test was
+		// `percentage !== null`, and `undefined !== null` is true, so the row was
+		// treated as available and formatted the missing number as "undefined%".
+		// Fixing the discriminator removes the Codex producer of that value; this
+		// asserts the row itself no longer prints one from any producer.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				provider="xai"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={null}
+				usageData={
+					{ credits: { resets_at: WEEKLY_RESET } } as unknown as XaiUsageData
+				}
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("undefined");
+		// The row is still rendered, saying so: a vanished bar reads as "no limit".
+		expect(html).toContain("Grok credits");
+		expect(html).toContain("N/A");
 	});
 
 	it("does not render a credits line for a non-Codex provider", () => {
