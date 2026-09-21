@@ -8,6 +8,7 @@ import {
 } from "../../../usage-fetcher";
 import {
 	CODEX_CREDITS_MAX_AGE_MS,
+	CODEX_CREDITS_NOT_OBSERVED,
 	carryCodexCredits,
 	codexCreditsCoverExhaustedWeekly,
 } from "../credits";
@@ -452,6 +453,28 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		expect(carried.data.credits).toEqual(revoked);
 		expect(carried.creditsObservedAt).toBe(NOW + 60_000);
 		expect(benched(carried.data)).toBe(true);
+	});
+
+	it("refuses a balance stamped NOT_OBSERVED rather than re-dating it", () => {
+		// CODEX_CREDITS_NOT_OBSERVED is 0, which is FALSY, so any `||` reached
+		// with that stamp silently falls through to the entry timestamp and
+		// renews the balance — the exact mechanism the `??` fallback was removed
+		// for. Today no writer produces credits beside that stamp, so a mutation
+		// swapping the plain read for `|| previous.timestamp` is equivalent and
+		// survives. This pins the invariant directly instead of relying on that
+		// reachability argument staying true.
+		const carried = carryCodexCredits(
+			{ five_hour: { utilization: 20, resets_at: FIVE_HOUR_RESET } },
+			{
+				data: weeklyExhausted(CREDITS),
+				timestamp: NOW,
+				creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+			},
+			NOW,
+		);
+
+		expect(carried.data.credits).toBeUndefined();
+		expect(carried.creditsObservedAt).toBeNull();
 	});
 
 	it("carries nothing when there was no previous entry", () => {
