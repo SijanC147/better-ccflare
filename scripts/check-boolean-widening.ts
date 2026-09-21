@@ -28,11 +28,18 @@
  *   - `??`, the comma operator, and a ternary's `whenTrue` / `whenFalse` branches under a
  *     condition root. None of those positions is truthy-tested, so descending into them
  *     would report values rather than conditions.
- *   - a user-declared `Object` that merges with the global interface. The global `Object`
- *     accepts every non-nullish primitive by assignability rather than by structure, so it
- *     cannot be recognised structurally and is matched by symbol name plus at least one
- *     declaration in a `.d.ts`. A global augmentation of `Object` in a project's own
- *     ambient file therefore stays silent even if it adds members.
+ *   - anything named `Object` carrying at least one declaration in ANY `.d.ts`, including one
+ *     of the project's own. The global `Object` accepts every non-nullish primitive by
+ *     assignability rather than by structure, so it cannot be recognised structurally and is
+ *     matched by symbol name plus a declaration in a declaration file. A global augmentation
+ *     of `Object` in a project's ambient file therefore stays silent, which is CORRECT,
+ *     because the augmented type still accepts primitives. An `interface Object` exported
+ *     from a project `.d.ts` MODULE stays silent too, and that one is WRONG: it does not
+ *     merge with the global `Object` and is an ordinary always-truthy type. `SB23-2490`,
+ *     found by this PR's reviewer. The same interface written in a `.ts` file IS reported,
+ *     so today the file extension alone decides it. This paragraph states what the code
+ *     does rather than what it was meant to do, on purpose: the two disagreed, and the
+ *     disagreement was in the silent direction.
  *   - an always-truthy value reached through an identifier or a property rather than a call:
  *     `while (true)`, `!process.env`, `if (map[key])` under `noUncheckedIndexedAccess: false`.
  *     Measured 2026-09-21: 109 such sites in 72 files, nearly all correct as written.
