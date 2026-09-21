@@ -24,6 +24,7 @@ import {
 } from "bun:test";
 import type { Config } from "@better-ccflare/config";
 import type { ProxyContext } from "../proxy";
+import { makeProxyContext as makeBaseProxyContext } from "./proxy-context-fixture";
 
 // ---------------------------------------------------------------------------
 // Module mock — must be declared before importing the scheduler so that bun's
@@ -72,9 +73,14 @@ import { fetchSlot } from "./fetch-slot";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Minimal ProxyContext — scheduler only reads runtime.port. */
+/**
+ * The scheduler reads two fields: `runtime.port` and `internalProbeSecret`
+ * (cache-keepalive-scheduler.ts:137-139). The port is the only one these
+ * tests vary, so it stays the parameter; the shared fixture supplies the
+ * rest of the context and throws by name for any field reached beyond those.
+ */
 function makeProxyContext(port = 8081): ProxyContext {
-	return { runtime: { port } } as unknown as ProxyContext;
+	return makeBaseProxyContext({ runtime: { port } });
 }
 
 type ConfigChangeListener = (evt: { key: string; newValue: unknown }) => void;

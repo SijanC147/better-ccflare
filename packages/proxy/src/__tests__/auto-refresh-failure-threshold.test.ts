@@ -6,7 +6,10 @@
  * router (SessionStrategy) skips it until an operator resumes it.
  */
 import { describe, expect, it, mock } from "bun:test";
+import { type AuthFailureEvt, authFailureEvents } from "@better-ccflare/core";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { clearAllPendingRotationsForTests } from "../handlers/pending-rotation-registry";
+import { makeProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -41,20 +44,12 @@ function makeDbWithRunError(error: Error) {
 	};
 }
 
-/** Build a minimal mock ProxyContext. */
-function makeProxyContext() {
-	return {
-		runtime: { port: 8080, clientId: "test-client" },
-		refreshInFlight: new Map(),
-	};
-}
-
 /** Instantiate the scheduler without starting the interval. */
 async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
-		makeProxyContext() as never,
+		makeProxyContext(),
 	) as unknown as PublicSurface<AutoRefreshScheduler> & {
 		recordRefreshFailure(id: string, name: string, ctx: string): Promise<void>;
 		consecutiveFailures: Map<string, number>;
@@ -191,7 +186,7 @@ describe("AutoRefreshScheduler — consecutive failure threshold", () => {
 		const db = makeDbWithRunError(dbError);
 		const scheduler = new AutoRefreshScheduler(
 			db as never,
-			makeProxyContext() as never,
+			makeProxyContext(),
 		) as unknown as PublicSurface<AutoRefreshScheduler> & {
 			recordRefreshFailure(
 				id: string,
@@ -211,5 +206,65 @@ describe("AutoRefreshScheduler — consecutive failure threshold", () => {
 
 		// Must not throw — the DB error should be caught and logged internally
 		await expect(callThreshold()).resolves.toBeUndefined();
+	});
+	// ── SB23-2446 widening proof ────────────────────────────────────────────────
+	//
+	// This case reaches `proxyContext.dbOps`, which every helper in this family
+	// declared and none supplied. It is here rather than in the rotation-race
+	// suite because that suite is the one file of the six whose helper already
+	// carried a dbOps, so widening it would prove nothing.
+	it("emits an auth-failure event when the CAS flag write confirms the token still matches", async () => {
+		const db = makeDb();
+		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
+		const scheduler = new AutoRefreshScheduler(
+			db as never,
+			makeProxyContext({
+				dbOps: {
+					flagRequiresReauthIfTokenMatches: mock(async () => true),
+				},
+			}),
+		) as unknown as PublicSurface<AutoRefreshScheduler> & {
+			flagIfDefinitiveAuthFailure(
+				error: unknown,
+				row: {
+					id: string;
+					name: string;
+					provider: string;
+					refresh_token: string;
+				},
+			): Promise<void>;
+		};
+
+		// `bun test` runs every file in one process, so the module-level pending
+		// rotation registry is shared. The rotation-race suite records a pending
+		// rotation for "acc-1" in its last case and never clears it afterwards
+		// (its beforeEach clears before its own cases, not after the last one),
+		// and a pending rotation makes flagIfDefinitiveAuthFailure return before
+		// it reaches dbOps. Clearing here plus a distinct account id makes this
+		// case independent of which files ran first.
+		clearAllPendingRotationsForTests();
+
+		const events: AuthFailureEvt[] = [];
+		const listener = (e: AuthFailureEvt) => events.push(e);
+		authFailureEvents.on("event", listener);
+		try {
+			await scheduler.flagIfDefinitiveAuthFailure(
+				new Error(
+					"Failed to refresh token for account test-account: invalid_grant: token expired",
+				),
+				{
+					id: "acc-widening-2446",
+					name: "test-account",
+					provider: "qwen",
+					refresh_token: "RT1-consumed",
+				},
+			);
+		} finally {
+			authFailureEvents.off("event", listener);
+		}
+
+		expect(events).toHaveLength(1);
+		expect(events[0].accountId).toBe("acc-widening-2446");
+		expect(events[0].reason).toBe("invalid_grant");
 	});
 });
