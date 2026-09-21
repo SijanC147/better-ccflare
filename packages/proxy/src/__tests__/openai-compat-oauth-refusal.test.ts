@@ -192,6 +192,47 @@ async function refusalCode(response: Response): Promise<string | null> {
 	}
 }
 
+/**
+ * Run `handleProxy` past the guard **hermetically** and report only what the
+ * guard did: the refusal code, or `null` for anything else.
+ *
+ * The `buildUrl` stub is what makes this hermetic, and it is load-bearing.
+ * Without it, a request that gets past the guard enters the attempt loop,
+ * where `getValidAccessToken` (token-manager.ts) finds a stale access token
+ * and **makes a real HTTP call to Anthropic's OAuth token endpoint**. That is
+ * a network call from a unit test: it is slow, it is non-deterministic, and
+ * how it fails differs between a developer's machine and a CI runner. An
+ * earlier version of these two tests did exactly that — they were green on
+ * macOS and the `/v1/messages` one was **red on Linux CI**, reported at 678 ms,
+ * which is a network round trip rather than a guard check.
+ *
+ * Throwing from `buildUrl` stops the request the moment it reaches the
+ * provider, which is already past the guard, so the distinction this function
+ * exists to draw is preserved exactly. **The assertion is not weakened**: the
+ * guard returns a response and never throws, so any throw means it did not
+ * fire, and if it wrongly fires we still see the code. What is removed is the
+ * network, not the discrimination.
+ */
+async function guardOutcome(
+	url: string,
+	accounts: Account[],
+): Promise<string | null> {
+	const ctx = makeContext(accounts, {
+		buildUrl: () => {
+			throw new Error("hermetic stub: upstream is never contacted");
+		},
+	} as Partial<Provider>);
+
+	try {
+		return await refusalCode(
+			await handleProxy(makeChatRequest(url), new URL(url), ctx),
+		);
+	} catch {
+		// Reaching a throw means execution went past the guard into the loop.
+		return null;
+	}
+}
+
 /** Seven OAuth accounts — the live pool size in the incident. */
 function sevenOAuthAccounts(): Account[] {
 	return ["EEG", "XBOX", "PRTN", "OTLK", "ICLD", "UOM", "SB23"].map((name, i) =>
@@ -263,36 +304,28 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 
 	it("does not refuse /v1/messages, the endpoint OAuth accounts do serve", async () => {
 		stubUsageCollector();
-		const ctx = makeContext(sevenOAuthAccounts());
 
 		const messagesUrl = "https://proxy.local/v1/messages";
-		const response = await handleProxy(
-			makeChatRequest(messagesUrl),
-			new URL(messagesUrl),
-			ctx,
-		);
+		const outcome = await guardOutcome(messagesUrl, sevenOAuthAccounts());
 
-		// The error CODE, not the status. This harness's `/v1/messages`
-		// request happens to 400 for an unrelated reason (the body is
-		// OpenAI-shaped and carries no `max_tokens`), so `status !== 400`
-		// fails against correct code and would tempt the next reader to loosen
-		// the guard rather than the test. The code is what only our refusal
-		// can produce.
-		expect(await refusalCode(response)).not.toBe(REFUSAL_CODE);
+		// The error CODE, not the status, and not "it threw". This request's
+		// `/v1/messages` body is OpenAI-shaped with no `max_tokens`, so it can
+		// legitimately end several ways; only one of them is our guard.
+		expect(outcome).not.toBe(REFUSAL_CODE);
 	});
 
 	it("does not refuse when an API-key Anthropic account is in the pool", async () => {
 		stubUsageCollector();
-		const ctx = makeContext([...sevenOAuthAccounts(), makeApiKeyAccount()]);
 
 		// Anthropic documents this path for API keys, so an operator who has
 		// one must still reach it; refusing here would be a regression, not a
-		// fix. The guard RETURNS a response and never throws, so reaching the
-		// ordinary all-accounts-failed throw is itself proof it let the
-		// request through to the loop.
-		await expect(
-			handleProxy(makeChatRequest(), new URL(CHAT_URL), ctx),
-		).rejects.toThrow(/All accounts failed/);
+		// fix.
+		const outcome = await guardOutcome(CHAT_URL, [
+			...sevenOAuthAccounts(),
+			makeApiKeyAccount(),
+		]);
+
+		expect(outcome).not.toBe(REFUSAL_CODE);
 	});
 
 	it("refuses before the loop: the all-OAuth pool never reaches the failover throw", async () => {
@@ -398,6 +431,29 @@ describe("SB23-2570 — the predicates the guard rests on", () => {
 		expect(
 			accountCanServeOpenAICompatPath(
 				makeAccount({ custom_endpoint: "https://gateway.internal.example" }),
+			),
+		).toBe(true);
+	});
+
+	it("lets an anthropic row carrying an api_key and no refresh token through", () => {
+		// Mirrors `getValidAccessToken`'s second branch (token-manager.ts:1009):
+		// an api_key with no refresh token returns "" and prepareHeaders sends
+		// `x-api-key`, never a Bearer. So this row can serve the path.
+		//
+		// Disclosed rather than asserted as reachable: after
+		// `migrations.ts:1833` moved every `provider='anthropic' AND api_key IS
+		// NOT NULL` row onto `claude-console-api`, it is not clear this shape
+		// still occurs in the wild — the mutation that deletes the clause
+		// survives without THIS test, because the fixture it would otherwise
+		// catch is already caught by the provider clause above.
+		//
+		// The clause stays anyway, and this test exists, because the predicate's
+		// contract is "agree with getValidAccessToken". A clause that mirrors the
+		// authoritative function is cheap; a predicate that silently diverges
+		// from it is the defect this whole fix round was about.
+		expect(
+			accountCanServeOpenAICompatPath(
+				makeAccount({ api_key: "sk-ant-key", refresh_token: null }),
 			),
 		).toBe(true);
 	});
