@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { AnthropicProvider } from "../provider";
 
 describe("AnthropicProvider", () => {
@@ -8,7 +9,7 @@ describe("AnthropicProvider", () => {
 
 	beforeEach(() => {
 		provider = new AnthropicProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-anthropic-account",
 			provider: "claude-oauth",
@@ -36,7 +37,7 @@ describe("AnthropicProvider", () => {
 			cross_region_mode: null,
 			model_fallbacks: null,
 			billing_type: null,
-		};
+		});
 	});
 
 	describe("processResponse", () => {

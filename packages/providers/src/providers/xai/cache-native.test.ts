@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import {
 	applyXaiConvIdHeader,
 	deriveXaiConvId,
@@ -14,7 +15,7 @@ const VALID_SESSION_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const OTHER_SESSION_ID = "11111111-2222-4333-8444-555555555555";
 
 function account(overrides: Partial<Account> = {}): Account {
-	return {
+	return makeAccount({
 		id: "xai-1",
 		name: "xai-test",
 		provider: "xai",
@@ -49,7 +50,7 @@ function account(overrides: Partial<Account> = {}): Account {
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
 		...overrides,
-	};
+	});
 }
 
 const enabledEnv = {

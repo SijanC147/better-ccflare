@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { AnthropicProvider } from "../provider";
 
 function oauthAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return makeAccount({
 		id: "anthropic-1",
 		name: "anthropic-test",
 		provider: "anthropic",
@@ -39,7 +40,7 @@ function oauthAccount(overrides: Partial<Account> = {}): Account {
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
 		...overrides,
-	};
+	});
 }
 
 describe("AnthropicProvider.refreshToken preserves the OAuth error code", () => {

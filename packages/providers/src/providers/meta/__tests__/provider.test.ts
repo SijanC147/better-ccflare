@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount as baseAccount } from "../../../testing/account-fixture";
 import {
 	isMetaMessagesPath,
 	isMetaModel,
@@ -8,7 +9,7 @@ import {
 } from "../provider";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return baseAccount({
 		id: "test-id",
 		name: "test-meta-account",
 		provider: "meta",
@@ -44,7 +45,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
 		...overrides,
-	} as Account;
+	});
 }
 
 async function bodyOf(request: Request): Promise<Record<string, unknown>> {

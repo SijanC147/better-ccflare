@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { OpenAIRequest } from "@better-ccflare/openai-formats";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount as baseAccount } from "../../../testing/account-fixture";
 import { QwenProvider } from "../provider";
 
 // ---------------------------------------------------------------------------
@@ -8,7 +9,7 @@ import { QwenProvider } from "../provider";
 // ---------------------------------------------------------------------------
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return baseAccount({
 		id: "qwen-1",
 		name: "qwen-test",
 		provider: "qwen",
@@ -36,7 +37,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_fallbacks: null,
 		billing_type: null,
 		...overrides,
-	};
+	});
 }
 
 function makeOpenAIRequest(
