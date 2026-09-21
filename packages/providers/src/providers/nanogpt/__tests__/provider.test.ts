@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { NanoGPTProvider } from "../provider";
 
 describe("NanoGPTProvider", () => {
@@ -8,7 +9,7 @@ describe("NanoGPTProvider", () => {
 
 	beforeEach(() => {
 		provider = new NanoGPTProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-nanogpt-account",
 			provider: "nanogpt",
@@ -31,7 +32,7 @@ describe("NanoGPTProvider", () => {
 			priority: 0,
 			auto_fallback_enabled: false,
 			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {

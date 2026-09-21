@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount as baseAccount } from "../../../testing/account-fixture";
 import { AnthropicProvider } from "../provider";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return baseAccount({
 		id: "acct-1",
 		name: "test-anthropic",
 		provider: "claude-oauth",
@@ -31,7 +32,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_fallbacks: null,
 		billing_type: null,
 		...overrides,
-	};
+	});
 }
 
 describe("AnthropicProvider — streaming.test.ts", () => {

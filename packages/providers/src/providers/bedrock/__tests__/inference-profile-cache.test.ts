@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import {
 	canUseInferenceProfile,
 	clearInferenceProfileCache,
@@ -32,7 +33,7 @@ mock.module("../index", () => ({
 }));
 
 describe("Inference Profile Cache", () => {
-	const mockAccount: Account = {
+	const mockAccount: Account = makeAccount({
 		id: "test-account-id",
 		name: "Test Bedrock Account",
 		provider: "bedrock",
@@ -41,7 +42,7 @@ describe("Inference Profile Cache", () => {
 		priority: 0,
 		created_at: Date.now(),
 		paused: false,
-	};
+	});
 
 	beforeEach(() => {
 		// Clear cache before each test

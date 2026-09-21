@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { KiloProvider } from "../provider";
 
 describe("KiloProvider", () => {
@@ -8,7 +9,7 @@ describe("KiloProvider", () => {
 
 	beforeEach(() => {
 		provider = new KiloProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-kilo-account",
 			provider: "kilo",
@@ -31,7 +32,7 @@ describe("KiloProvider", () => {
 			priority: 0,
 			auto_fallback_enabled: false,
 			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {

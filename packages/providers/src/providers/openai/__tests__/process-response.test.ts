@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount as baseAccount } from "../../../testing/account-fixture";
 import { OpenAICompatibleProvider } from "../provider";
 
 // ---------------------------------------------------------------------------
@@ -11,7 +12,7 @@ function makeProvider() {
 }
 
 function makeAccount(overrides = {}): Account {
-	return {
+	return baseAccount({
 		id: "acc-1",
 		name: "test",
 		provider: "openai-compatible",
@@ -38,7 +39,7 @@ function makeAccount(overrides = {}): Account {
 		cross_region_mode: null,
 		model_fallbacks: null,
 		...overrides,
-	};
+	});
 }
 
 function openaiJsonResponse(

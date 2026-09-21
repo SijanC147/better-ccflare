@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { OpenAICompatibleProvider } from "../provider";
 
 describe("OpenAICompatibleProvider", () => {
@@ -8,7 +9,7 @@ describe("OpenAICompatibleProvider", () => {
 
 	beforeEach(() => {
 		provider = new OpenAICompatibleProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "openai-compatible",
@@ -33,7 +34,7 @@ describe("OpenAICompatibleProvider", () => {
 			priority: 0,
 			auto_fallback_enabled: false,
 			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {
@@ -59,7 +60,7 @@ describe("OpenAICompatibleProvider", () => {
 		it("should use default endpoint when no custom endpoint", () => {
 			const accountWithoutEndpoint = {
 				...mockAccount,
-				custom_endpoint: undefined,
+				custom_endpoint: null,
 			};
 			const url = provider.buildUrl("/v1/messages", "", accountWithoutEndpoint);
 			expect(url).toBe("https://api.openai.com/v1/chat/completions");
