@@ -414,6 +414,43 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		expect(second.result).toBeNull();
 	});
 
+	it("shares the budget across the model-fallback loop's 1305 checks", async () => {
+		// checkZai1305 is called once per model the fallback loop cycles
+		// through, so "a single loop is byte-identical" holds for one
+		// INVOCATION of a loop and not for a loop invoked repeatedly. This is
+		// the case where that distinction is visible, and it is a deliberate
+		// consequence of a per-request bound rather than an oversight: model
+		// cycling costs upstream fetches on the same account, which is the
+		// thing being bounded.
+		//
+		// Two models and a 1305 on both. Before the shared budget this cost 6
+		// fetches, because each model's 1305 loop had its own two re-issues.
+		const script: ScriptStep[] = [
+			// Model 1, original attempt: 1305.
+			zai1305Response,
+			// Model 1's 1305 loop, spending the request's 2 re-issues. Still
+			// 1305 on both, so it converts to a synthetic 429 and the fallback
+			// loop cycles to model 2.
+			zai1305Response,
+			zai1305Response,
+			// Model 2's attempt: 1305 again. The budget is spent, so its 1305
+			// loop re-issues nothing and converts straight to a synthetic 429.
+			zai1305Response,
+		];
+		const counters = installScriptedFetch(script);
+
+		const account = makeAccount({
+			provider: "zai",
+			name: "zai-fallback",
+			model_mappings: JSON.stringify({
+				"claude-sonnet-4-5": ["glm-5.2", "glm-4.7"],
+			}),
+		});
+		await runProxy(account, makeProxyContext());
+
+		expect(counters.fetches()).toBe(4);
+	});
+
 	it.each([
 		0, 1,
 	])("retry_attempts %i still means no in-place retry at all", async (attempts) => {
