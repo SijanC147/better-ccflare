@@ -186,7 +186,14 @@ function makeProxyContext(): ProxyContext {
 				get: mock(() => Promise.resolve(null)),
 			})),
 		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		// The fork reads the in-place retry budget from ctx.runtime.retry rather
+		// than from a hardcoded 2. Pinned to upstream's documented numbers so the
+		// attempt arithmetic below holds unchanged; delayMs 0 keeps the loop fast.
+		runtime: {
+			port: 8080,
+			clientId: "test",
+			retry: { attempts: 2, delayMs: 0, backoff: 2 },
+		} as never,
 		provider: {
 			name: "anthropic",
 			canHandle: () => true,

@@ -5055,10 +5055,10 @@ describe("parseCodexUsageHeaders absent windows", () => {
 		});
 	});
 
-	it("leaves five_hour null when upstream reported only the weekly window", () => {
+	it("omits five_hour when upstream reported only the weekly window", () => {
 		const usage = parseCodexUsageHeaders(weeklyOnly());
 
-		expect(usage?.five_hour).toBeNull();
+		expect(usage?.five_hour).toBeUndefined();
 		// Not a zero. A fabricated 0 passes every `!= null` check downstream and
 		// renders as "0% of five hours used" for a window that does not exist.
 		expect(usage?.five_hour).not.toEqual({ utilization: 0, resets_at: null });
@@ -5069,15 +5069,16 @@ describe("parseCodexUsageHeaders absent windows", () => {
 		});
 	});
 
-	it("keeps both keys present so raw-consumer shape guards still match", () => {
-		// `usage-throttling.ts` gates its only Codex-reachable branch on
-		// `"five_hour" in data && "seven_day" in data` and reads the parser's
-		// output straight out of usageCache. Omitting the key instead of nulling it
-		// would drop an exhausted weekly window from throttling entirely.
+	it("omits the unreported key rather than nulling it", () => {
+		// An earlier fork revision kept both keys present because
+		// `usage-throttling.ts` gated its Codex branch on
+		// `"five_hour" in data && "seven_day" in data`. Upstream relaxed that
+		// gate to `||`, so a weekly-only payload still reaches the throttle with
+		// the key absent, and the parser follows upstream's omission shape.
 		const usage = parseCodexUsageHeaders(weeklyOnly());
 
 		expect(usage).not.toBeNull();
-		expect("five_hour" in (usage as object)).toBe(true);
+		expect("five_hour" in (usage as object)).toBe(false);
 		expect("seven_day" in (usage as object)).toBe(true);
 	});
 
@@ -5093,7 +5094,7 @@ describe("parseCodexUsageHeaders absent windows", () => {
 			defaultUtilization: 100,
 		});
 
-		expect(usage?.five_hour).toBeNull();
+		expect(usage?.five_hour).toBeUndefined();
 	});
 });
 

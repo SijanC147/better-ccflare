@@ -845,7 +845,12 @@ describe("alertGroupKey pins the alert id contract", () => {
 		);
 
 		expect(first).not.toBe(second);
-		expect(alertGroupKey(first)).toBe("anomaly_runaway_loop:acct:sonnet::");
+		// Every segment is length-prefixed since upstream's collision fix, so a
+		// null project, agent and gateway hint each encode as "0:" rather than
+		// as an empty raw segment.
+		expect(alertGroupKey(first)).toBe(
+			`anomaly_runaway_loop:${["4:acct", "6:sonnet", "0:", "0:", "0:"].join(GROUP_KEY_SEPARATOR)}`,
+		);
 		expect(alertGroupKey(first)).toBe(alertGroupKey(second));
 	});
 
