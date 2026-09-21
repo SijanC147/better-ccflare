@@ -30,8 +30,11 @@ import {
 } from "./nanogpt-usage-fetcher";
 import { extractChatgptAccountId } from "./providers/codex/account-id";
 import {
+	CODEX_CREDITS_NOT_OBSERVED,
 	carryCodexCredits,
+	codexCreditsAreFresh,
 	codexCreditsCoverExhaustedWeekly,
+	stripCodexCredits,
 } from "./providers/codex/credits";
 import { fetchCodexUsageData } from "./providers/codex/usage-endpoint";
 import {
@@ -1010,14 +1013,16 @@ class UsageCache {
 			data: AnyUsageData;
 			timestamp: number;
 			/**
-			 * When this entry's `credits` were read off a live response, for the
-			 * age bound in `carryCodexCredits`. Absent means "as old as the entry":
-			 * every writer except the Codex poller takes its credits off the same
-			 * response as the windows beside them, so `timestamp` is the honest
-			 * answer for those. Only the poller, which reports no credits of its
-			 * own, ever carries a value here that is older than the entry.
+			 * When this entry's `credits` were read off a live response.
+			 *
+			 * Required, so that no writer can install a balance without dating it.
+			 * It was optional in the first cut of this change and PR #236's
+			 * reviewer found both defects that followed: an absent stamp read as
+			 * "as old as the entry", and the entry timestamp is refreshed by the
+			 * very write being dated, so omitting it claimed the balance was brand
+			 * new. Meaningless but harmless on an entry with no `credits`.
 			 */
-			creditsObservedAt?: number;
+			creditsObservedAt: number;
 		}
 	>();
 	/**
@@ -1367,7 +1372,11 @@ class UsageCache {
 						getRepresentativeNanoGPTWindow,
 					} = await import("./nanogpt-usage-fetcher");
 
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeNanoGPTUtilization(
 						data as NanoGPTUsageData,
 					);
@@ -1394,7 +1403,11 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "zai", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeZaiUtilization(
 						data as ZaiUsageData,
 					);
@@ -1410,7 +1423,11 @@ class UsageCache {
 				// Fetch Kilo usage data
 				data = await fetchKiloUsageData(token);
 				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeKiloUtilization(
 						data as KiloUsageData,
 					);
@@ -1424,7 +1441,11 @@ class UsageCache {
 				// Fetch Alibaba Coding Plan usage data
 				data = await fetchAlibabaCodingPlanUsageData(token);
 				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeAlibabaCodingPlanUtilization(
 						data as AlibabaCodingPlanUsageData,
 					);
@@ -1443,7 +1464,11 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "xai", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeXaiUtilization(
 						data as XaiUsageData,
 					);
@@ -1462,7 +1487,11 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "minimax", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeMinimaxUtilization(
 						data as MinimaxUsageData,
 					);
@@ -1534,7 +1563,11 @@ class UsageCache {
 						this.cache.get(accountId),
 						Date.now(),
 					);
-					this.install(accountId, carried.data, carried.creditsObservedAt);
+					this.install(
+						accountId,
+						carried.data,
+						carried.creditsObservedAt ?? CODEX_CREDITS_NOT_OBSERVED,
+					);
 					if (rolledOver) {
 						const callback = this.windowResetCallbacks.get(accountId);
 						if (callback) {
@@ -1584,6 +1617,7 @@ class UsageCache {
 					this.cache.set(accountId, {
 						data: result.data,
 						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
 					});
 					const snapshotCb = this.snapshotCallbacks.get(accountId);
 					if (snapshotCb) snapshotCb(accountId, result.data as UsageData);
@@ -1693,6 +1727,28 @@ class UsageCache {
 			return null;
 		}
 
+		// A balance too old to act on never leaves this cache, whoever wrote it
+		// and whatever refreshed the entry around it (PR #236 review, must-fix 1).
+		//
+		// The check above cannot do this job. It dates the ENTRY, and every write
+		// refreshes that, while `creditsObservedAt` dates the balance inside it —
+		// which the poller deliberately carries across writes. So an entry can be
+		// two seconds old and hold a balance from yesterday, and the persisted-
+		// payload recovery in handlers/accounts.ts builds exactly that out of
+		// stored request headers of arbitrary age.
+		//
+		// It lives on the read path rather than on each writer because the
+		// guarantee wanted is about what admission can SEE. A writer-side check
+		// is one a future writer can forget; this one every reader gets,
+		// including ones not written yet, and it allocates only in the rare case
+		// where a stale balance is actually present.
+		if (
+			(cached.data as UsageData | null)?.credits !== undefined &&
+			!codexCreditsAreFresh(cached.creditsObservedAt, Date.now())
+		) {
+			return stripCodexCredits(cached.data);
+		}
+
 		return cached.data;
 	}
 
@@ -1704,7 +1760,7 @@ class UsageCache {
 	private install(
 		accountId: string,
 		data: AnyUsageData,
-		creditsObservedAt?: number,
+		creditsObservedAt: number,
 	): void {
 		this.cache.set(accountId, {
 			data,
@@ -1729,8 +1785,20 @@ class UsageCache {
 	/**
 	 * Set cached usage data for an account
 	 */
-	set(accountId: string, data: AnyUsageData): void {
-		this.install(accountId, data);
+	set(
+		accountId: string,
+		data: AnyUsageData,
+		/**
+		 * When the `credits` on this payload were observed. Defaults to now,
+		 * which is right for the traffic path, where the balance is read off the
+		 * very response being installed. A caller replaying a STORED payload must
+		 * pass that payload's own timestamp instead: dating a day-old balance as
+		 * though it had just arrived is what admitted an exhausted account in PR
+		 * #236's review.
+		 */
+		creditsObservedAt: number = Date.now(),
+	): void {
+		this.install(accountId, data, creditsObservedAt);
 
 		// Periodic cleanup of stale entries to prevent memory bloat
 		// Run cleanup every 100 sets to balance performance and memory

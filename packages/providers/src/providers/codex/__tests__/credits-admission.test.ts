@@ -362,7 +362,11 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		// account flips between admitted and benched once per poll interval.
 		const carried = carryCodexCredits(
 			pollPayload(),
-			{ data: weeklyExhausted(CREDITS), timestamp: NOW },
+			{
+				data: weeklyExhausted(CREDITS),
+				timestamp: NOW,
+				creditsObservedAt: NOW,
+			},
 			NOW + 60_000,
 		);
 
@@ -374,12 +378,16 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 	it("drops a balance older than the bound, and the account benches", () => {
 		const carried = carryCodexCredits(
 			pollPayload(),
-			{ data: weeklyExhausted(CREDITS), timestamp: NOW },
+			{
+				data: weeklyExhausted(CREDITS),
+				timestamp: NOW,
+				creditsObservedAt: NOW,
+			},
 			NOW + CODEX_CREDITS_MAX_AGE_MS + 1,
 		);
 
 		expect(carried.data.credits).toBeUndefined();
-		expect(carried.creditsObservedAt).toBeUndefined();
+		expect(carried.creditsObservedAt).toBeNull();
 		expect(benched(carried.data)).toBe(true);
 	});
 
@@ -393,8 +401,12 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		let previous: {
 			data: AnyUsageData;
 			timestamp: number;
-			creditsObservedAt?: number;
-		} = { data: weeklyExhausted(CREDITS), timestamp: NOW };
+			creditsObservedAt: number;
+		} = {
+			data: weeklyExhausted(CREDITS),
+			timestamp: NOW,
+			creditsObservedAt: NOW,
+		};
 
 		for (let minute = 1; minute <= 9; minute++) {
 			const at = NOW + minute * 60_000;
@@ -404,7 +416,7 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 				data: carried.data,
 				// install() always stamps the entry with the moment of the write.
 				timestamp: at,
-				creditsObservedAt: carried.creditsObservedAt,
+				creditsObservedAt: carried.creditsObservedAt ?? 0,
 			};
 		}
 		expect((previous.data as UsageData).credits).toEqual(CREDITS);
@@ -429,7 +441,11 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 
 		const carried = carryCodexCredits(
 			next,
-			{ data: weeklyExhausted(CREDITS), timestamp: NOW },
+			{
+				data: weeklyExhausted(CREDITS),
+				timestamp: NOW,
+				creditsObservedAt: NOW,
+			},
 			NOW + 60_000,
 		);
 
@@ -442,7 +458,7 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		const carried = carryCodexCredits(pollPayload(), undefined, NOW);
 
 		expect(carried.data.credits).toBeUndefined();
-		expect(carried.creditsObservedAt).toBeUndefined();
+		expect(carried.creditsObservedAt).toBeNull();
 	});
 
 	it("falls back to the entry timestamp when the stamp is absent", () => {
@@ -452,7 +468,11 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		// therefore expire, not read as age zero.
 		const stale = carryCodexCredits(
 			pollPayload(),
-			{ data: weeklyExhausted(CREDITS), timestamp: NOW },
+			{
+				data: weeklyExhausted(CREDITS),
+				timestamp: NOW,
+				creditsObservedAt: NOW,
+			},
 			NOW + CODEX_CREDITS_MAX_AGE_MS + 1,
 		);
 		expect(stale.data.credits).toBeUndefined();
@@ -462,7 +482,11 @@ describe("carryCodexCredits — the poll that reports no credits", () => {
 		const next = pollPayload();
 		carryCodexCredits(
 			next,
-			{ data: weeklyExhausted(CREDITS), timestamp: NOW },
+			{
+				data: weeklyExhausted(CREDITS),
+				timestamp: NOW,
+				creditsObservedAt: NOW,
+			},
 			NOW,
 		);
 		expect(next.credits).toBeUndefined();

@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { isUsageExhausted } from "@better-ccflare/core";
 import { supportsUsageTracking } from "@better-ccflare/types";
+import { CODEX_CREDITS_MAX_AGE_MS } from "../providers/codex/credits";
 import { CODEX_USAGE_ENDPOINT } from "../providers/codex/usage-endpoint";
-import { type UsageData, usageCache } from "../usage-fetcher";
+import {
+	getRepresentativeUtilizationForProvider,
+	type UsageData,
+	usageCache,
+} from "../usage-fetcher";
 
 const ACCOUNT_ID = "codex-polling-test-account";
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -120,6 +126,120 @@ describe("usageCache polling for codex", () => {
 		// The poll's own windows landed, so this is the post-poll entry.
 		expect(cached?.seven_day?.utilization).toBe(43);
 		expect(cached?.credits).toEqual(credits);
+	});
+
+	it("expires a carried balance after the bound, across many polls", async () => {
+		// MUST-FIX 2 from PR #236's review. The single-poll test above passes
+		// with the stamp argument dropped at the install call site, because one
+		// poll never reaches the bound. With it dropped, each install re-dates
+		// the balance to the entry it just wrote and the balance becomes
+		// immortal: the reviewer drove 1000 polls over 16 hours and it survived.
+		//
+		// This drives the REAL cache, so it covers the call site rather than
+		// carryCodexCredits, which was already covered and is not where the
+		// defect was.
+		globalThis.fetch = mock(async () =>
+			okResponse(payload()),
+		) as unknown as typeof fetch;
+
+		const credits = { has_credits: true, unlimited: false, balance: "9.99" };
+		const observedAt = Date.now();
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			observedAt,
+		);
+
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+
+		// Polls while the balance is still inside its bound keep it.
+		await usageCache.refreshNow(ACCOUNT_ID);
+		expect((usageCache.get(ACCOUNT_ID) as UsageData | null)?.credits).toEqual(
+			credits,
+		);
+
+		// Re-stamp the entry as though the observation had happened just over the
+		// bound ago, then poll again. The entry's own timestamp stays fresh —
+		// that is the point: only the credits are old.
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			observedAt - CODEX_CREDITS_MAX_AGE_MS - 1,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached?.seven_day?.utilization).toBe(43);
+		expect(cached && "credits" in cached).toBe(false);
+	});
+
+	it("never serves a balance older than the bound, however fresh the entry", async () => {
+		// MUST-FIX 1's guarantee, at the read path every admission gate uses.
+		// The entry age check in get() cannot do this: it dates the ENTRY, and
+		// any write refreshes that, while the balance inside can be far older.
+		// No poll runs here — this is purely about what the cache will hand out.
+		const credits = { has_credits: true, unlimited: false, balance: "42.50" };
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 0, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			Date.now() - CODEX_CREDITS_MAX_AGE_MS - 1,
+		);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		// The windows are untouched; only the balance is withheld.
+		expect(cached?.seven_day?.utilization).toBe(100);
+		expect(cached && "credits" in cached).toBe(false);
+		// And the account is therefore benched, which is the behaviour that
+		// matters: a stale balance must not admit anything.
+		expect(
+			isUsageExhausted(
+				getRepresentativeUtilizationForProvider(cached, "codex"),
+				null,
+				Date.now(),
+			),
+		).toBe(true);
+	});
+
+	it("serves a balance that is still inside the bound", async () => {
+		// The negative half of the test above. Without it, a get() that stripped
+		// credits unconditionally would pass that one and break the feature.
+		const credits = { has_credits: true, unlimited: false, balance: "42.50" };
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 0, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			Date.now() - 60_000,
+		);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached?.credits).toEqual(credits);
+		expect(
+			isUsageExhausted(
+				getRepresentativeUtilizationForProvider(cached, "codex"),
+				null,
+				Date.now(),
+			),
+		).toBe(false);
 	});
 
 	it("does not invent credits when none were ever observed", async () => {
