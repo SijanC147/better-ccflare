@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: ea0e332097ed8f6b2d214f0433ec1024752afadd -->
+<!-- last-sync-sha: e80429271ab6c04cb6a6970e0dab16a25180f134 -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-09-21 | main | `ea0e3320..e8042927` | 114 | 27 files (25 UU, 1 DU, 1 UD) | merge --no-ff | pass (5,614 tests at the probe head, 2 macOS-only fail; final line in the PR) | [#TBD](https://github.com/SijanC147/better-ccflare/pulls) |
 | 2026-09-13 | main | `4d27cb22..ea0e3320` | 106 | resolved by the maintainer App | merge (two-parent) | pass (4,275 tests, 2 macOS-only fail) | [#52](https://github.com/SijanC147/better-ccflare/pull/52) |
 | 2026-08-27 | main | `412e6326..4d27cb22` | 624 | 37 files / 72 hunks | merge --no-ff | pass (3967 tests, 11 inherited-upstream fail) | [#41](https://github.com/SijanC147/better-ccflare/pull/41) |
 | 2026-07-03 | main | `ab677460..412e6326` | 206 | 23 files | merge --no-ff | pass (1960 tests, 0 fail) | [#33](https://github.com/SijanC147/better-ccflare/pull/33) |
@@ -20,6 +21,125 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-09-21 — upstream `ea0e3320..e8042927` (114 commits)
+
+**PR:** see the sync table above · **Strategy:** `merge --no-ff` (hand `/sync-upstream`, lane BTCF-SYNC, SB23-2512)
+**Scale:** 194 files changed against `origin/main` · +18,097 / −1,917 · 114 non-merge commits, 126 with merges
+**Conflicts:** 27 paths, all resolved in the merge commit; the rule applied to each is listed below
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `bun install --frozen-lockfile` | pass against the committed lock, "348 packages (no changes)", at local Bun 1.4.2 (CI pins 1.3.14) |
+| `bun run typecheck` | 0 errors after 100 fixture errors in 62 files were fixed (see "Typing upstream's tests") |
+| `bunx biome check .` | 0 errors, 30 warnings, 4 infos (the pre-existing set) |
+| `bun run check:boolean-widening` | 528 files, 12,849 boolean contexts, 0 offences |
+| `bun run check:optional-chain-silent-skip` | 435 test files, 1,428 optional chains, 0 offences |
+| `bun test` | the final line is in the PR body; the probe run at `f1de89a5` read 5,529 pass / 65 skip / 20 fail of 5,614 across 436 files, and the 18 non-macOS failures are settled below |
+| `shasum -a 256 .hextap.json .hextap/tap-registration.json` | both `328f95a7…f9fb`, unchanged |
+
+`bun.lock` moved by one line during `bun install` (`apps/cli` 3.23.0 → 3.24.0, the pre-existing
+SB23-2491 drift). Upstream changed no dependency in this range, so the lock was restored and is
+not part of this sync.
+
+### Upstream features arriving
+
+- **Transient upstream 5xx path** (`e85520c9`, `930bc73b`): a 500/502/503/504 is retried once in
+  place, then the account is benched with the new `upstream_5xx_server_error` reason for
+  `CCFLARE_SERVER_ERROR_COOLDOWN_MS` (60 s) and the request fails over. Kill switch
+  `CCFLARE_SERVER_ERROR_RETRY_ENABLED=false`. The in-place error classifiers in
+  `proxy-operations.ts` are now named closures so a retry's answer is classified like a first
+  answer. **On this fork the retry budget is `retry_attempts` (3), not upstream's 2**, the same
+  widening #113 documented for the 529 loop.
+- **Usage-pause thresholds** (`0c6d8aaf`, `3a01a16d`, `c34257fe`): four new `accounts` columns
+  (`usage_pause_five_hour_threshold`, `usage_pause_weekly_threshold`, and their `_enabled`
+  flags), `POST /api/accounts/:accountId/usage-pause-thresholds`, a CLI flag
+  `--set-usage-pause-thresholds`, and a dashboard dialog. On this fork the dialog opens from the
+  card's overflow menu (`usage-thresholds` action) rather than from a card button.
+- **Adaptive vacuum scheduler** (`83daf88b`, `bcc5f450`, `5269cdee`, `a5a68aed`, `b3a5e634`):
+  `apps/server/src/vacuum-scheduler.ts`, a 5-minute catch-up tick, `auto_vacuum_enabled` /
+  `BETTER_CCFLARE_AUTO_VACUUM`, and a `vacuum` block on `/api/health`.
+- **Codex usage polling** (`5503fca2`, `d238d575`, `0263759b`, `2a2129a7`, `420f93b0`): usage
+  from the ChatGPT backend usage endpoint through the shared fetcher, and a free-first manual
+  refresh.
+- **Gateway hint headers** (`894ecf23`, `532c255f`): five `gateway_hint_*` columns on `requests`,
+  in both migration paths, shown in request details.
+- **Runaway-loop alert scope** now length-prefixes every segment (a collision fix).
+- Codex usage windows the headers did not report are **omitted** rather than minted as 0%.
+
+### Conflict resolutions
+
+| Path | Rule | Resolution |
+|---|---|---|
+| `.github/workflows/release.yml` (DU) | standing | `git rm`; one `v*` publisher only |
+| `packages/http-api/src/handlers/__tests__/accounts-integration.test.ts` (UD) | rubric 8 | **kept the fork's copy**. Upstream deleted it in `65d50ad2` as duplicate coverage; the fork's SB23-2441 typing work lives in it (90+/26−). Consequences: every future sync re-conflicts on this path, and if upstream's claim holds we run a duplicate. Follow-up filed to decide whether the typing should move to a file upstream also has. Not done here |
+| `README.md`, `apps/cli/README.md` | rubric 7 | upstream's three new contributor lines |
+| `package.json`, `apps/cli/package.json` | rubric 3 | fork version `3.24.0` kept; `3.5.88` not adopted |
+| `docs/configuration.md` | rubric 7 | the fork's deprecated `CCFLARE_OVERLOAD_RETRY_*` rows, amended with upstream's note that `_ENABLED` also gates the 5xx in-place retry; upstream's new rows taken |
+| `packages/config/src/index.ts` | rubric 2 | union: `request_storage_headers_only` and the retry setters beside `auto_vacuum_enabled` |
+| `packages/core/src/constants.ts` | rubric 2 | fork `getOverloadRetryConfig(settings)` and clamp-not-default kept; upstream's `readRetryMaxAttempts` adopted for the deprecated variable, returning `null` (so `retry_attempts` applies) instead of a hardcoded 2 |
+| `packages/core/src/index.ts` | rubric 2 | union of exports |
+| `packages/dashboard-web/…/AccountsTab.tsx`, `AccountList.tsx`, `AccountListItem.tsx` | rubric 2 | fork card structure kept; `onUsageThresholdsChange` threaded through and rendered as a menu action in `account-menu-items.ts` |
+| `packages/database/src/database-operations.ts`, `repositories/request.repository.ts`, `packages/proxy/src/usage-collector.ts` | rubric 2 | positional `saveRequest` chain: upstream's five `gatewayHint*` then the fork's `projectId`, `worktreePath`; 39 placeholders |
+| `packages/database/src/migrations-pg.ts` | rubric 2 | both the `api_keys.role` backfill tracker and upstream's per-flag newness trackers |
+| `packages/http-api/src/handlers/health.ts` | rubric 2 | `getVacuumStatus?` inserted before the fork's `getCircuitHealth` so upstream's positional callers keep a contiguous prefix |
+| `packages/http-api/src/handlers/__tests__/oauth.test.ts` | rubric 8 | both describe blocks |
+| `…/token-health-integration.test.ts` | rubric 8 | upstream's narrowed import plus the fork's `Account` type; the two handlers the fork imported are used by nothing in the merged body |
+| `packages/providers/src/providers/codex/usage.ts`, `provider.test.ts`, `packages/proxy/src/codex-usage-history.ts` | rubric 2, decided by consumers | **upstream's omission shape**. The fork nulled the key because `usage-throttling.ts` gated on `"five_hour" in data && "seven_day" in data`; upstream relaxed that gate to `\|\|` at `usage-throttling.ts:146-147` in this range, so the reason is gone. The fork's `credits` field survives on the same object |
+| `packages/providers/src/usage-fetcher.ts` | rubric 5 | upstream's `pickWinningZaiWindow` refactor, same tie-break |
+| `packages/proxy/src/__tests__/bun-leak-273-regression.test.ts` | rubric 8 | upstream's 18-site count; the fork's 16th site was upstream's own transformer retry, so the merged file has upstream's population |
+| `packages/proxy/src/circuit-breaker.ts` | rubric 7 | upstream's 5xx paragraph with the fork's wiring-note reference |
+| `packages/proxy/src/handlers/proxy-operations.ts` | rubric 5 | upstream's closure refactor taken whole; the fork's `ctx.runtime.retry` replayed onto every `checkZai1305` call and into the new 5xx loop (`getOverloadRetryConfig(ctx.runtime.retry)`, `retryDelayMs`). After resolution: 6 `ctx.runtime.retry`, 3 `getOverloadRetryConfig(`, 3 `retryDelayMs(`, 0 `Math.random() * cap`, 3 `cwdHint`, `forwardWithTransportRetry` intact |
+
+### Breaks-without-conflicting audit
+
+1. **Second release publisher**: upstream's only workflow change in the range is `release.yml`, removed. Live workflows are `ci.yml`, `hextap-release.yml`, `signpath-test.yml`; only `hextap-release.yml` carries the `v*` trigger.
+2. **New workspace package**: none. Upstream's manifest diff is two version fields.
+3. **Bun version bump**: none. `1.3.14` in `.hextap.json:23`, `ci.yml:47,177`, `package.json:57`.
+4. **Build scripts and compile flags**: no upstream change to `build-standalone.ts`, `prepare-workers.ts` or `dashboard-web/build.ts`; the four `--no-compile-autoload-*` flags are present.
+5. **`main.ts` informational flags**: upstream added only `--set-usage-pause-thresholds`; `--version`/`-v` still resolve through `getBuildIdentitySync()` at `main.ts:571,952`.
+6. **Build-identity exports**: all five present in `core/src/index.ts`; `version.ts`'s only upstream change is `CLAUDE_CLI_VERSION` 2.1.268 → 2.1.276.
+7. **Release asset names**: `hextap-targets.ts`, `.hextap.json` and `.hextap/` untouched; both JSON files hash `328f95a7…f9fb`.
+8. **Bare invocation**: `main.ts` falls through to `startServer` with `NETWORK.DEFAULT_PORT`; upstream did not touch that path.
+9. **Dashboard output path**: `server.ts:151` still imports `@better-ccflare/dashboard-web/dist/embedded`; `build.ts` still writes `dist/embedded.ts`.
+10. **Required check names**: `Bun and release tooling`, `Hextap release contract`, unchanged in `ci.yml` and `.hextap/rulesets/main.json`.
+11. **App defaults the Formula documents**: no upstream change to port, database path, `.env` loading or `BETTER_CCFLARE_LOG_DIR`.
+
+Also checked: the three tracked inline workers are untouched (no upstream change to any worker
+source, `.gitignore` untouched); `packages/proxy/src/inline-worker.ts` stays as it was; every
+column upstream added exists in both `migrations.ts` and `migrations-pg.ts` (upstream also
+back-ported `peak_hours_pause_enabled` and `stream_terminal_state` into the PG path); the four
+`usage_pause_*` columns are in all three read-side SELECT lists; and the second `accounts`
+rebuild list lacked them and now has them (`f1de89a5`). Sean's 2026-09-14 ruling on per-slot
+combo thresholds lives in `account-selector.ts:111-115` and is untouched by this range; the
+relaxed `in` gate is the other throttling feature.
+
+### Typing upstream's tests
+
+Upstream does not typecheck its test files; this fork gates every one. The merge surfaced 100
+type errors across 62 files, all fixtures meeting the other side's fields, fixed in `f1de89a5`.
+Two idioms the fork already had were applied to upstream's new files: `fetchSlot` for fetch
+doubles (Bun's `typeof fetch` carries `preconnect`) and `PublicSurface<T>` for a class
+intersected with its own private member names. `codex-usage-refresher.ts`'s `formatPercent`
+accepts `null`, the fork's spelling of an unreported window.
+
+### Behaviour changes a fork operator will see
+
+- A default install retries a transient 5xx up to 3 times in place (upstream: 2), because the
+  budget is `retry_attempts`.
+- A Codex account reporting only a weekly window now has no `five_hour` key in its usage payload
+  where the fork previously wrote `five_hour: null`.
+- Runaway-loop alert ids changed shape (length-prefixed segments), so a cooldown in flight across
+  the upgrade will not match its pre-upgrade id.
+
+### Not adopted
+
+- Upstream's `release.yml` edits (standing resolution).
+- Upstream's deletion of `accounts-integration.test.ts` (see the conflict table).
+- Upstream's version fields.
+
 
 ## 2026-09-13 — upstream `4d27cb22..ea0e3320` (106 commits)
 
