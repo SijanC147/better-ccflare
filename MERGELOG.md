@@ -11,7 +11,7 @@ owns it for idempotency.
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
-| 2026-09-21 | main | `ea0e3320..e8042927` | 114 | 27 files (25 UU, 1 DU, 1 UD) | merge --no-ff | pass (5,614 tests at the probe head, 2 macOS-only fail; final line in the PR) | [#TBD](https://github.com/SijanC147/better-ccflare/pulls) |
+| 2026-09-21 | main | `ea0e3320..e8042927` | 114 | 27 files (25 UU, 1 DU, 1 UD) | merge --no-ff | pass (5,614 tests at the probe head, 2 macOS-only fail; final line in the PR) | [#231](https://github.com/SijanC147/better-ccflare/pull/231) |
 | 2026-09-13 | main | `4d27cb22..ea0e3320` | 106 | resolved by the maintainer App | merge (two-parent) | pass (4,275 tests, 2 macOS-only fail) | [#52](https://github.com/SijanC147/better-ccflare/pull/52) |
 | 2026-08-27 | main | `412e6326..4d27cb22` | 624 | 37 files / 72 hunks | merge --no-ff | pass (3967 tests, 11 inherited-upstream fail) | [#41](https://github.com/SijanC147/better-ccflare/pull/41) |
 | 2026-07-03 | main | `ab677460..412e6326` | 206 | 23 files | merge --no-ff | pass (1960 tests, 0 fail) | [#33](https://github.com/SijanC147/better-ccflare/pull/33) |
