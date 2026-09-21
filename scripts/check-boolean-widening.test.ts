@@ -192,17 +192,30 @@ describe("check-boolean-widening", () => {
 		expect(stdout).toContain("0 offences");
 	});
 
-	test("stays silent on `{}` and `Object`, which accept falsy primitives", () => {
-		// Both carry `TypeFlags.Object` but accept every non-nullish primitive, so these
-		// conditions genuinely can be false. Reporting them fails the build on correct
-		// code. Removing the rendered-name check makes this case exit 1 with 2 offences.
+	test("stays silent on `{}`, `Object` and every other spelling of an empty object", () => {
+		// SB23-2451. `{}` and the global `Object` accept every non-nullish primitive, so
+		// these conditions genuinely can be false and reporting them fails the build on
+		// correct code. The interface and the alias are the half the shipped gate got
+		// WRONG: it compared the RENDERED name against "{}", and an empty object type is
+		// structural, so `interface Empty {}` renders as `Empty` and `type AliasEmpty = {}`
+		// renders as `AliasEmpty`. Measured against the gate at 0c0ed042: both were
+		// reported, 2 offences, exit 1, on code that compiles under `tsc --strict`.
+		//
+		// Reverting `isStructurallyEmpty` to `checker.typeToString(type) === "{}"` makes
+		// this case exit 1 with 2 offences naming `Empty` and `AliasEmpty`.
 		const dir = makeFixture(
 			[
+				"interface Empty {}",
+				"type AliasEmpty = {};",
 				"declare function empty(): {};",
 				"declare function boxed(): Object;",
+				"declare function iface(): Empty;",
+				"declare function alias(): AliasEmpty;",
 				"export function guard(): boolean {",
 				"\tif (empty()) return true;",
 				"\tif (boxed()) return true;",
+				"\tif (iface()) return true;",
+				"\tif (alias()) return true;",
 				"\treturn false;",
 				"}",
 			].join("\n"),
@@ -210,6 +223,125 @@ describe("check-boolean-widening", () => {
 		const { exitCode, stdout } = runGate(dir);
 		expect(exitCode).toBe(0);
 		expect(stdout).toContain("0 offences");
+		expect(stdout).toContain("4 boolean contexts examined");
+	});
+
+	test("fails on lowercase `object`, which is always truthy and carries a different flag", () => {
+		// SB23-2451's second half, and a FALSE NEGATIVE rather than a false positive.
+		// `object` carries `ts.TypeFlags.NonPrimitive`, a different bit from
+		// `TypeFlags.Object`, so before its own branch it matched nothing in
+		// `partHasFalsyValue` and fell to the conservative `return true` at the end,
+		// meaning falsy-capable. It is always truthy. Deleting the `NonPrimitive` branch
+		// makes this case report 0 offences and exit 0, which is the gate reading green
+		// over the defect class it exists to catch.
+		//
+		// It is also structurally empty (zero properties, zero index infos, zero
+		// signatures), so moving the branch BELOW the empty-object test has the same
+		// effect: the structural test calls it falsy and the gate goes silent.
+		const dir = makeFixture(
+			[
+				"declare function plain(): object;",
+				"export function guard(): boolean {",
+				"\tif (plain()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:3:6");
+		expect(stderr).toContain("a call returning object can never be falsy");
+	});
+
+	test("fails on an object that declares only an index, call, or construct signature", () => {
+		// The three clauses of `isStructurallyEmpty` beyond the property count, one shape
+		// each, because each is a type with ZERO properties that is nonetheless always
+		// truthy. Drop `getIndexInfosOfType` and `indexed` goes silent; drop the Call
+		// clause and `callable` goes silent; drop the Construct clause and `ctor` goes
+		// silent. The construct case is the one a property-and-call test would miss:
+		// `interface Ctor { new (): X }` has zero properties, zero index infos and zero
+		// CALL signatures, so without that clause it reads as `{}` and is not reported.
+		const dir = makeFixture(
+			[
+				"interface Ctor { new (): { a: 1 } }",
+				"declare function indexed(): { [k: string]: number };",
+				"declare function callable(): () => void;",
+				"declare function ctor(): Ctor;",
+				"export function guard(): boolean {",
+				"\tif (indexed()) return true;",
+				"\tif (callable()) return true;",
+				"\tif (ctor()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("3 offences");
+		expect(stderr).toContain("subject.ts:6:6");
+		expect(stderr).toContain("subject.ts:7:6");
+		expect(stderr).toContain("subject.ts:8:6");
+	});
+
+	test("fails on a module-scoped `interface Object`, which is not the global one", () => {
+		// The same rendered-name instrument SB23-2451 removed from the empty-object
+		// branch, one line further down. `checker.typeToString(type) === "Object"` also
+		// matches a module's OWN `interface Object`, which is an ordinary always-truthy
+		// object type and has nothing to do with the global interface that accepts
+		// primitives. Measured 2026-09-21: the shipped gate went silent on this.
+		//
+		// `isGlobalObjectInterface` matches on the symbol plus at least one declaration in
+		// a `.d.ts`; this symbol has neither, so it is reported. Replacing that function
+		// with `checker.typeToString(type) === "Object"` makes this case exit 0.
+		const dir = makeFixture(
+			[
+				"interface Object { localOnly: 1 }",
+				"declare function local(): Object;",
+				"export function guard(): boolean {",
+				"\tif (local()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:4:6");
+	});
+
+	test("separates the `false` literal from the `true` literal, through an alias too", () => {
+		// The boolean-literal branch was `checker.typeToString(type) === "false"` and no
+		// test pinned it: the PR #212 reviewer measured that mutating the string to
+		// `"true"` survived the whole suite. It is now identity against
+		// `checker.getFalseType()`, and this case kills the swap in both directions at
+		// once: `getTrueType()` in its place makes `no()` report and `yes()` go silent,
+		// so the offence count stays 1 while the line number and the rendered type both
+		// move. Asserting the line is what separates the two.
+		//
+		// The alias is here because the identity has to survive one: measured 2026-09-21,
+		// `type F = false` yields the same type object as the checker's own `false`.
+		const dir = makeFixture(
+			[
+				"type F = false;",
+				"declare function no(): false;",
+				"declare function aliased(): F;",
+				"declare function yes(): true;",
+				"export function guard(): boolean {",
+				"\tif (no()) return true;",
+				"\tif (aliased()) return true;",
+				"\tif (yes()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:8:6");
+		expect(stderr).toContain("a call returning true can never be falsy");
+		expect(stderr).not.toContain("subject.ts:6:6");
+		expect(stderr).not.toContain("subject.ts:7:6");
 	});
 
 	test("stays silent on a union that carries a falsy member, which still has two outcomes", () => {
@@ -264,6 +396,124 @@ describe("check-boolean-widening", () => {
 		const { exitCode, stdout } = runGate(dir);
 		expect(exitCode).toBe(1);
 		expect(stdout).toContain("2 offences");
+	});
+
+	test("descends a condition root through `!`, `&&`, `||` and parentheses", () => {
+		// SB23-2450, and the reviewer's fixture at 3c71d5d2 verbatim. The shipped gate
+		// visited only `node.left` of a logical operator, so the two guarded lines were
+		// NOT reported and it produced 2 offences here rather than 4. That is the
+		// SB23-2375 defect with one guard in front of it, and `replaceUntrustedLink()`,
+		// the method the whole of SB23-2375 is about, already sits behind
+		// `if (uid === undefined || link.uid === uid) return false;`, so the guarded
+		// spelling is the likely one rather than an exotic one.
+		//
+		// Reverting the condition roots from `descend` to `check` makes this case report
+		// 2 offences, naming only lines 7 and 8.
+		const dir = makeFixture(
+			[
+				'type EntryTrust = "trusted" | "directory" | "sticky-entry";',
+				"declare function entryIsTrusted(p: string): EntryTrust;",
+				"declare function isSymlink(p: string): boolean;",
+				"export function guard(p: string): boolean {",
+				"\tif (isSymlink(p) && entryIsTrusted(p)) return false;",
+				"\tif (!isSymlink(p) || entryIsTrusted(p)) return false;",
+				"\tif (entryIsTrusted(p)) return false;",
+				"\treturn isSymlink(p) ? (entryIsTrusted(p) ? true : false) : false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("4 offences");
+		expect(stderr).toContain("subject.ts:5:22");
+		expect(stderr).toContain("subject.ts:6:23");
+		expect(stderr).toContain("subject.ts:7:6");
+		expect(stderr).toContain("subject.ts:8:25");
+	});
+
+	test("stays silent on `return f() && g()`, where the right operand is the value", () => {
+		// The false positive that a naive `check(node.right)` on the logical-operator
+		// dispatch would create, and the reason the fix descends from condition ROOTS
+		// instead. Here `entryIsTrusted(p)` is not tested at all: it is what the function
+		// returns when the guard passes.
+		//
+		// `isSymlink()` is deliberately the left operand and deliberately `boolean`. With
+		// the always-truthy call on the left the standalone left-operand dispatch would
+		// report it by design, and a correct result would read as a regression.
+		const dir = makeFixture(
+			[
+				'type EntryTrust = "trusted" | "directory";',
+				"declare function entryIsTrusted(p: string): EntryTrust;",
+				"declare function isSymlink(p: string): boolean;",
+				"export function value(p: string): EntryTrust | false {",
+				"\treturn isSymlink(p) && entryIsTrusted(p);",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout } = runGate(dir);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("0 offences");
+	});
+
+	test("reports an operand reached by two routes once, not twice", () => {
+		// The dedupe half of SB23-2450. A condition root descends through its `&&` / `||`
+		// tree, and the visitor separately dispatches on every `&&`, `||` and `!` it walks
+		// past, so each of these three lines reaches the same call expression twice.
+		// Without the `visited` set each is printed on two lines of identical output and
+		// the run reports 6 offences.
+		//
+		// The always-truthy call has to be the LEFT operand, and the negated one has to be
+		// the negation's own operand, or the second route lands on a `boolean` and the
+		// duplicate is invisible whether the dedupe is there or not. The parenthesised
+		// line is the case that needs `check` to unwrap parentheses as well: without that
+		// the two routes key on different nodes, the set never matches, and the line is
+		// reported twice while the other two are reported once.
+		const dir = makeFixture(
+			[
+				'type EntryTrust = "trusted" | "directory";',
+				"declare function entryIsTrusted(p: string): EntryTrust;",
+				"declare function isSymlink(p: string): boolean;",
+				"export function guard(p: string): boolean {",
+				"\tif (entryIsTrusted(p) && isSymlink(p)) return true;",
+				"\tif (!entryIsTrusted(p)) return true;",
+				"\tif (!(entryIsTrusted(p))) return true;",
+				"\treturn false;",
+			"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("3 offences");
+		// One line of output per site. `toContain` cannot see a duplicate, and the offence
+		// count alone cannot say WHICH site doubled, so count the occurrences of each.
+		const occurrences = (needle: string) => stderr.split(needle).length - 1;
+		expect(occurrences("subject.ts:5:6")).toBe(1);
+		expect(occurrences("subject.ts:6:7")).toBe(1);
+		expect(occurrences("subject.ts:7:8")).toBe(1);
+	});
+
+	test("does not descend `??`, the comma operator, or a ternary's branches", () => {
+		// The boundary the header claims, pinned so widening it later is a deliberate act
+		// rather than an accident. None of these positions is truthy-tested: `??` tests
+		// its left operand for nullishness rather than truthiness, the comma operator
+		// discards its left operand, and a ternary's branches are the values it produces.
+		// Only `pick()` on the last line is a condition, and it is `boolean`.
+		const dir = makeFixture(
+			[
+				'type EntryTrust = "trusted" | "directory";',
+				"declare function entryIsTrusted(p: string): EntryTrust;",
+				"declare function pick(p: string): boolean;",
+				"export function guard(p: string): EntryTrust | number {",
+				"\tconst a = entryIsTrusted(p) ?? entryIsTrusted(p);",
+				"\tconst b = (entryIsTrusted(p), 1);",
+				"\tconst c = pick(p) ? entryIsTrusted(p) : entryIsTrusted(p);",
+				"\treturn pick(p) ? a : b + (c === a ? 0 : 1);",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout } = runGate(dir);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("0 offences");
 	});
 
 	test("exits 2, not 0, when it built a program that examined no boolean context", () => {
