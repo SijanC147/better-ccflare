@@ -163,7 +163,35 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 			const vertexModel = convertToVertexAIModel(transformedModel);
 			console.log(`[Vertex AI] prepareRequest - Vertex format: ${vertexModel}`);
 
-			// Store models in account for buildUrl to use
+			// Store models on the account for buildUrl and processResponse to
+			// read back.
+			//
+			// SB23-2457 asked whether two concurrent requests on one account can
+			// read each other's model here. Measured answer: no, for two
+			// different reasons, and only one of them is enforced.
+			//
+			// `_vertexModel` is safe unconditionally. `proxy-operations.ts`
+			// calls prepareRequest at :858 and buildUrl at :906 with no `await`
+			// between them, so the write and the read are one atomic step on a
+			// single-threaded runtime and no other request can run inside it.
+			//
+			// `_originalModel` has no such window: it is read at
+			// `proxy-operations.ts:1735`, after the upstream fetch. It is safe
+			// only because two concurrent requests are handed two DIFFERENT
+			// account objects — every selection path calls `getAllAccounts()`,
+			// and `AccountRepository.findAll` maps each row through
+			// `toAccount`, so nothing is retained between requests. Add a cache
+			// anywhere between that SELECT and this line and the value becomes
+			// racy, silently: a request would restore the wrong model name into
+			// its response body and its history row.
+			//
+			// That property is pinned by
+			// `packages/database/src/repositories/__tests__/account-object-identity.test.ts`,
+			// and the corruption it prevents is demonstrated on purpose in
+			// `__tests__/shared-account-state.test.ts`. Neither the type system
+			// nor any typecheck gate can see this: the fields exist on no
+			// version of `Account`, the casts below conjure them per site, so
+			// there is no declaration to inspect and no error to count.
 			(
 				account as Account & {
 					_vertexModel?: string;
@@ -188,8 +216,14 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 	 * Build Vertex AI URL with model in path
 	 * Format: https://{region}-aiplatform.googleapis.com/v1/projects/{projectId}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict
 	 *
-	 * Note: buildUrl is called BEFORE transformRequestBody in the proxy flow,
-	 * so we use a cached model from the account object (set by transformRequestBody on previous calls)
+	 * Note: buildUrl is called BEFORE transformRequestBody in the proxy flow, so
+	 * the model comes from the account object, written by prepareRequest.
+	 *
+	 * Written by prepareRequest on THIS request, not cached from a previous one:
+	 * `proxy-operations.ts` calls prepareRequest at :858 and this at :906 with
+	 * no `await` between them. An earlier version of this comment credited
+	 * transformRequestBody "on previous calls", which named the wrong writer and
+	 * implied a lifetime spanning requests. See the block comment at the write.
 	 */
 	buildUrl(path: string, query: string, account?: Account): string {
 		if (!account) {
@@ -198,7 +232,7 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 
 		const config = this.parseVertexConfig(account);
 
-		// Get model from temporary storage (set in transformRequestBody)
+		// Get model from temporary storage (written by prepareRequest, this request)
 		// Fallback to sonnet in Vertex AI format if not set
 		const model =
 			(account as Account & { _vertexModel?: string })._vertexModel ||
@@ -268,6 +302,10 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 		response: Response,
 		account: Account | null,
 	): Promise<Response> {
+		// Unlike buildUrl's read, this one is separated from its write by the
+		// whole upstream fetch (`proxy-operations.ts:1735`). It is correct only
+		// because this account object belongs to this request alone. See the
+		// block comment at the write in prepareRequest.
 		const originalModel = (account as Account & { _originalModel?: string })
 			?._originalModel;
 
