@@ -426,9 +426,14 @@ describe("check-optional-chain-silent-skip", () => {
 			['import { test } from "bun:test";', 'test("trivial", () => {});'].join("\n"),
 		);
 
-		const { exitCode, stderr } = runGate(dir);
+		const { exitCode, stdout, stderr } = runGate(dir);
 		expect(exitCode).toBe(0);
 		expect(stderr).not.toContain("scanned too little");
+		// The negative half of the mode assertion. Without this, `scanMode` could be the
+		// constant "whole-tree" and the repository test above would still pass, which is
+		// the same vacuous-guard shape M-H exploited in the first place.
+		expect(stdout).toContain("scoped mode");
+		expect(stdout).not.toContain("whole-tree mode");
 	});
 
 	test("descends into nested directories", () => {
@@ -504,6 +509,15 @@ describe("check-optional-chain-silent-skip", () => {
 		// Pinning exact counts would make this fail on every added test file, so the
 		// assertion is that each is non-zero: a zero in any of the three is what "reported
 		// zero offences having read nothing" looks like from outside.
+		// The mode must be printed AND must say whole-tree. This is what kills mutation M-H,
+		// which PR #226's reviewer found and that PR shipped without fixing: setting
+		// `scanningWholeRepo` to a constant `false` switched off the file floor and all
+		// three count checks with the entire suite green. No fixture can reach that branch,
+		// because every fixture passes an explicit root and therefore runs the scoped one,
+		// and on a healthy tree this repository run exits 0 either way. Asserting the mode
+		// string is the only observation that separates them.
+		expect(stdout).toContain("whole-tree mode");
+
 		const counts = stdout.match(
 			/(\d+) test files scanned, (\d+) optional chains examined, (\d+) presence assertions found/,
 		);
