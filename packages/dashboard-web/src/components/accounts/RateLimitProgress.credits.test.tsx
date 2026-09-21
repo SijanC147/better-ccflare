@@ -202,23 +202,30 @@ describe("RateLimitProgress — Codex credits", () => {
 		expect(html).toContain("Weekly");
 	});
 
-	it("renders the Grok credits window for an actual xAI account", () => {
+	it("reads the utilization out of credits for an actual xAI account", () => {
 		// The positive direction for the detector this fix rewrites. Without it a
-		// typo in the provider string would pass every other case in the file,
-		// because every other case asserts the xAI arm does NOT run.
+		// typo in the provider string passes every other case in the file, because
+		// every other case asserts the xAI arm does NOT run.
+		//
+		// `usageUtilization` is deliberately null and `usageWindow` deliberately
+		// absent: the generic `providerShowsWeeklyUsage` fallback further down the
+		// chain also accepts provider "xai" and would render an identical "Grok
+		// credits" row from those two props. Measured — with them supplied, a
+		// mutation changing PROVIDER_NAMES.XAI to a typo survived this case. Left
+		// null, the fallback's own guards reject it and the only path that can
+		// produce a row is the xAI arm reading `credits.utilization`.
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
 				provider="xai"
 				resetIso={WEEKLY_RESET}
-				usageUtilization={42}
-				usageWindow="credits"
+				usageUtilization={null}
 				usageData={{ credits: { utilization: 42, resets_at: WEEKLY_RESET } }}
 				showWeekly
 			/>,
 		);
 
 		expect(html).toContain("Grok credits");
-		expect(html).toContain("42");
+		expect(html).toContain("42%");
 		expect(html).not.toContain("undefined");
 	});
 
