@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import {
 	getModelName,
 	transformRequestBodyModel,
@@ -13,62 +13,62 @@ describe("getModelName", () => {
 	});
 
 	it("returns original model when account has no model_mappings", () => {
-		const account = {
+		const account = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "test-provider",
 			model_mappings: null,
-		} as Account;
+		});
 
 		const result = getModelName("claude-sonnet-4-5-20250929", account);
 		expect(result).toBe("claude-sonnet-4-5-20250929");
 	});
 
 	it("handles exact model match", () => {
-		const account = {
+		const account = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "test-provider",
 			model_mappings: JSON.stringify({
 				"claude-sonnet-4-5-20250929": "custom-sonnet",
 			}),
-		} as Account;
+		});
 
 		const result = getModelName("claude-sonnet-4-5-20250929", account);
 		expect(result).toBe("custom-sonnet");
 	});
 
 	it("handles pattern matching for sonnet", () => {
-		const account = {
+		const account = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "test-provider",
 			model_mappings: JSON.stringify({ sonnet: "custom-sonnet" }),
-		} as Account;
+		});
 
 		const result = getModelName("claude-sonnet-4-5-20250929", account);
 		expect(result).toBe("custom-sonnet");
 	});
 
 	it("handles pattern matching for opus", () => {
-		const account = {
+		const account = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "test-provider",
 			model_mappings: JSON.stringify({ opus: "custom-opus" }),
-		} as Account;
+		});
 
 		const result = getModelName("claude-opus-4-1-20250805", account);
 		expect(result).toBe("custom-opus");
 	});
 
 	it("handles pattern matching for haiku", () => {
-		const account = {
+		const account = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "test-provider",
 			model_mappings: JSON.stringify({ haiku: "custom-haiku" }),
-		} as Account;
+		});
 
 		const result = getModelName("claude-haiku-4-5-20251001", account);
 		expect(result).toBe("custom-haiku");
@@ -88,14 +88,14 @@ describe("transformRequestBodyModel", () => {
 			body: JSON.stringify(requestBody),
 		});
 
-		const account = {
+		const account = makeAccount({
 			id: "test-id",
 			name: "test-account",
 			provider: "test-provider",
 			model_mappings: JSON.stringify({
 				"claude-sonnet-4-5-20250929": "custom-sonnet",
 			}),
-		} as Account;
+		});
 
 		const result = await transformRequestBodyModel(request, account);
 		const resultBody = await result.json();

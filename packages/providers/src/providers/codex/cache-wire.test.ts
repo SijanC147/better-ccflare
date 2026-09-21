@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import { CodexCacheDiagnostics } from "./cache-diagnostics";
 import {
 	type CacheFacts,
@@ -48,7 +48,7 @@ function harness() {
 			request,
 			{
 				requestId: id,
-				account: { id: "PRIVATE-ACCOUNT-SENTINEL" } as Account,
+				account: makeAccount({ id: "PRIVATE-ACCOUNT-SENTINEL" }),
 				sourceBody: encoded({
 					messages: body.input,
 					system: body.instructions,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { logBus } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import { CODEX_CACHE_DIAGNOSTICS_ENV } from "./cache-diagnostics";
 import { CodexProvider } from "./provider";
 
@@ -171,11 +171,11 @@ describe("Claude to Codex replay cache stability", () => {
 					}),
 				});
 				const sourceBody = await original.clone().arrayBuffer();
-				const account = {
+				const account = makeAccount({
 					id: "synthetic-account",
 					provider: "codex",
 					custom_endpoint: null,
-				} as Account;
+				});
 				const wire = await provider.transformRequestBody(original, account);
 				const observer = await provider.observeUpstream(wire, {
 					requestId,
