@@ -549,6 +549,61 @@ export class Config extends EventEmitter {
 	private configPath: string;
 	private data: ConfigData = {};
 
+	/**
+	 * Whether other local users could write the config file, as observed on the
+	 * FIRST read this instance performed, before anything chmodded it (SB23-2366).
+	 *
+	 * Captured once and reused rather than re-derived, because the mode changes
+	 * underneath the second reader. readConfigData() brings a writable file to
+	 * 0600 at its own report site, a few lines below the stat, and
+	 * restrictConfigFile() runs again after loadConfig() returns. So
+	 * readLocalControlSecretFromDisk(), which re-reads the file on the same boot,
+	 * stats 0600 and concludes the file is trustworthy: nothing is stripped on
+	 * that read and a planted local_control_secret is adopted, which is an
+	 * authentication bypass against the local control endpoint.
+	 *
+	 * That is the one read where the strip has to hold, because it is the read
+	 * that runs on the boot where the secret is absent from this.data.
+	 *
+	 * undefined means no read has happened yet, which is not the same as false:
+	 * a config file that did not exist at construction is created at 0600 by
+	 * saveConfig(), and a later read of it should stat fresh rather than inherit
+	 * a decision that was never made.
+	 *
+	 * Per instance and not module-scoped, unlike contentsNotOurs and
+	 * unenforceableModes beside it. Those record a property of the filesystem,
+	 * which outlives any one Config. This records what one instance saw at one
+	 * moment, and a second Config constructed later is entitled to a fresh
+	 * reading of a file the operator may have since fixed.
+	 */
+	private writableAtFirstRead: boolean | undefined;
+
+	/**
+	 * Credential and endpoint fields dropped from this instance's reads, so
+	 * saveConfig() can refuse rather than write a file that is missing them
+	 * (SB23-2366).
+	 *
+	 * Without this, the strip is a data-loss bug rather than a defence.
+	 * saveConfig() serialises this.data wholesale, so the first set() after a
+	 * filtered load writes the file back without the stripped fields, and that
+	 * fires on the SAME boot: getLocalControlSecret() finds no secret, generates
+	 * one and calls set(). Measured on this branch at dca5c7ea against a 13-key
+	 * config: 5 keys on disk afterwards, 4 of the operator's own plus the freshly
+	 * generated local_control_secret, with pg_enabled, pg_host, pg_password,
+	 * openobserve_url, openobserve_token, alert_webhook_url, claude_projects_dir,
+	 * github_read_token and outbound_proxy deleted. buildPgConnectionUrl() then
+	 * returns null and the process runs against SQLite instead of the operator's
+	 * Postgres, with no error line.
+	 *
+	 * A Set of names rather than a boolean, so the refusal can say how many
+	 * fields are at stake, and so a second read that strips something new is
+	 * recorded rather than folded into a flag that is already true.
+	 */
+	private readonly strippedFields = new Set<string>();
+
+	/** The resolved path the stripped fields came from, named in the refusal. */
+	private strippedFrom: string | undefined;
+
 	constructor(configPath?: string) {
 		super();
 		const rawPath = configPath ?? resolveConfigPath();
@@ -728,8 +783,20 @@ export class Config extends EventEmitter {
 			// openobserve_* ships payloads, outbound_proxy redirects traffic, and
 			// ConfigData carries an index signature so an allowlist cannot be written as
 			// a subtraction.
+			//
+			// Captured on the first read and reused on every later one, rather than
+			// re-derived from a mode this method itself is about to change. The
+			// chmodAndVerify() below brings a writable file to 0600 before
+			// readLocalControlSecretFromDisk() re-reads it on the same boot, so a
+			// fresh reading there is false and the strip does not run on the one
+			// read where a planted local_control_secret would be adopted
+			// (SB23-2366). The dedupe on the report is unaffected: contentsNotOurs
+			// already holds the target by then, so the branch below still fires
+			// once, and chmodAndVerify() still runs once.
 			const writableByOthers =
-				process.platform !== "win32" && (info.mode & 0o022) !== 0;
+				this.writableAtFirstRead ??
+				(process.platform !== "win32" && (info.mode & 0o022) !== 0);
+			this.writableAtFirstRead = writableByOthers;
 			if (writableByOthers && !contentsNotOurs.has(target)) {
 				contentsNotOurs.add(target);
 				// Name the bit that was found. "group-writable (gid 20)" and
@@ -854,11 +921,16 @@ export class Config extends EventEmitter {
 	 * there reports 0666 for any writable file, so filtering would strip credentials
 	 * from every Windows config.
 	 *
-	 * Bounded honestly: restrictConfigFile() brings the file to 0600 after this read,
-	 * so on a filesystem that enforces modes this is a defence for the boot that
-	 * follows a plant, and the operator's own fields come back on the next boot.
-	 * Where chmod is a no-op, Docker bind mounts from a macOS or Windows host and FAT
-	 * or exFAT, it applies on every boot.
+	 * Bounded honestly: the file is brought to 0600 during this same read, at the
+	 * report site above, so on a filesystem that enforces modes this is a defence
+	 * for the boot that follows a plant, and the operator's own fields come back on
+	 * the next boot. Where chmod is a no-op, Docker bind mounts from a macOS or
+	 * Windows host and FAT or exFAT, it applies on every boot.
+	 *
+	 * The stripped names are recorded on the instance, and saveConfig() refuses
+	 * while any are recorded. Without that the strip is a data-loss bug rather than
+	 * a defence: this.data no longer matches the file, and saveConfig() serialises
+	 * this.data wholesale (SB23-2366).
 	 */
 	private stripUntrustedFields(
 		parsed: ConfigData,
@@ -875,6 +947,13 @@ export class Config extends EventEmitter {
 				kept[key] = parsed[key];
 			}
 		}
+		// Recorded before the report, and outside its dedupe. The report is a
+		// diagnosis and lands once per path per process; this is the state
+		// saveConfig() reads to decide whether writing would destroy the
+		// operator's fields, and it has to be true on every read that strips,
+		// including the second one (SB23-2366).
+		for (const key of stripped) this.strippedFields.add(key);
+		if (stripped.length > 0) this.strippedFrom = target;
 		if (stripped.length > 0 && !strippedFieldsReported.has(target)) {
 			strippedFieldsReported.add(target);
 			// Name the fields. Without this the process behaves as though the operator
@@ -1458,6 +1537,36 @@ export class Config extends EventEmitter {
 	}
 
 	private saveConfig(): void {
+		// Refuse rather than write a config this instance knows is incomplete
+		// (SB23-2366, ruled by Sean 2026-09-21).
+		//
+		// this.data is missing whatever stripUntrustedFields() dropped, and
+		// JSON.stringify(this.data) below is the whole file, so a save here
+		// DELETES the operator's credentials from disk. Measured at dca5c7ea on a
+		// 13-key config: 9 operator fields gone on the same boot, and
+		// buildPgConnectionUrl() then falls back to SQLite silently.
+		//
+		// Refusing, not throwing, and not retaining the stripped values to write
+		// back. Retaining them re-persists attacker-supplied values into a file
+		// that restrictConfigFile() has since brought to 0600, which is the exact
+		// laundering the strip exists to prevent. Throwing was rejected because
+		// get(key, defaultValue) calls set() on every miss, so a throw would turn
+		// every getter with a default into a crash, in a request handler as
+		// readily as at boot; every other refusal in this method already returns
+		// after an error line, and this matches them.
+		//
+		// Outcome every time, no dedupe. stripUntrustedFields() has already
+		// diagnosed the cause once per path; each refused save is a separate lost
+		// write, and suppressing the second would hide a settings change that did
+		// not persist. That is the split this file already keeps (SB23-2379,
+		// SB23-2357), and it is why the "Config not saved" line below is not
+		// deduplicated either.
+		if (this.strippedFields.size > 0) {
+			log.error(
+				`Config not saved: ${this.strippedFrom} was loaded without ${this.strippedFields.size} credential or endpoint field(s) that other local users can write, and writing this file would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
+			);
+			return;
+		}
 		const content = JSON.stringify(this.data, null, 2);
 		const target = this.writeTarget();
 		if (target === null) {
