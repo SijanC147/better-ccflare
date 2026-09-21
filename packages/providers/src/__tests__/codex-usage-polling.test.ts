@@ -86,6 +86,66 @@ describe("usageCache polling for codex", () => {
 		expect(usageCache.getRateLimitedUntil(ACCOUNT_ID)).toBeNull();
 	});
 
+	it("keeps a credit balance the traffic path wrote across a poll that reports none", async () => {
+		// SB23-2289, and the reason it is tested HERE rather than only against
+		// carryCodexCredits: the helper was fully covered while the poller's CALL
+		// to it was covered by nothing, so `install(accountId, result.data)` —
+		// the pre-change line — passed every test of the helper. Mutation M13
+		// survived until this test existed.
+		//
+		// wham/usage reports windows and says nothing about credits, and install
+		// replaces the entry wholesale, so without the carry the balance is
+		// erased here and the account flips between admitted and benched once
+		// per poll interval.
+		globalThis.fetch = mock(async () =>
+			okResponse(payload()),
+		) as unknown as typeof fetch;
+
+		const credits = { has_credits: true, unlimited: false, balance: "9.99" };
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: { utilization: 5, resets_at: null },
+			seven_day: { utilization: 100, resets_at: null },
+			credits,
+		} as UsageData);
+
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		// The poll's own windows landed, so this is the post-poll entry.
+		expect(cached?.seven_day?.utilization).toBe(43);
+		expect(cached?.credits).toEqual(credits);
+	});
+
+	it("does not invent credits when none were ever observed", async () => {
+		// The negative half. A carry that fired unconditionally would be
+		// indistinguishable from the one above on that test alone.
+		globalThis.fetch = mock(async () =>
+			okResponse(payload()),
+		) as unknown as typeof fetch;
+
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: { utilization: 5, resets_at: null },
+			seven_day: { utilization: 100, resets_at: null },
+		} as UsageData);
+
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached && "credits" in cached).toBe(false);
+	});
+
 	it("caches a weekly-only payload without a five_hour key", async () => {
 		const body = payload();
 		body.rate_limit.primary_window = null as never;
