@@ -353,6 +353,50 @@ describe("SB23-2469 — a config that cannot be read is not replaced", () => {
 	});
 
 	/**
+	 * The two diagnoses are distinguishable from each other.
+	 *
+	 * Both refuse and both leave the file alone, so an operator reading the log
+	 * has only the wording to tell "I could not open this" from "I opened it and
+	 * it is not JSON", and those call for different actions: check the
+	 * permissions, or fix the syntax.
+	 *
+	 * Pinned because the first draft used "could not read" for both. One word, in
+	 * a security message, describing something other than what the code did,
+	 * which is #182's shape at small scale. Asserted on the discriminating
+	 * phrases rather than on the whole string, so ordinary rewording does not
+	 * fail it but collapsing the two back into one does.
+	 */
+	it("says something different for a file it could not open and one it could not parse", () => {
+		withFixture((dir) => {
+			const unreadable = seed(dir, "unreadable.json", `{"a":1}`);
+			chmodSync(unreadable, 0o000);
+			const unparseable = seed(dir, "unparseable.json", TRAILING_COMMA);
+
+			const events = captureLogs(() => {
+				new Config(unreadable);
+				new Config(unparseable);
+			});
+			const errors = events
+				.filter((event) => event.level === "ERROR")
+				.map((event) => event.msg);
+
+			const readFailure = errors.find((msg) => msg.includes(unreadable));
+			const parseFailure = errors.find((msg) => msg.includes(unparseable));
+			expect(readFailure).toBeDefined();
+			expect(parseFailure).toBeDefined();
+
+			expect(readFailure).toContain("could not be read");
+			expect(readFailure).toContain("permissions");
+			expect(parseFailure).toContain("could not understand");
+			expect(parseFailure).toContain("Fix the syntax");
+
+			// The decisive assertion: neither one carries the other's wording.
+			expect(parseFailure).not.toContain("could not be read");
+			expect(readFailure).not.toContain("could not understand");
+		});
+	});
+
+	/**
 	 * A refused save does not leave the setting silently missing from the process
 	 * too: this.data still carries it, so the running process behaves as asked and
 	 * only the persistence is lost. That is what the refusal message promises with
