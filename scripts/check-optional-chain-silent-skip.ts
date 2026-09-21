@@ -17,12 +17,24 @@
  *     and the guard reads as an assertion rather than as a precondition.
  *   - Biome 2.4.10 has no rule for it and there is no eslint in this tree.
  *
- * WHAT THIS CATCHES, precisely:
- *   in a `*.test.ts` / `*.test.tsx` file, an optional property access, optional element
- *   access or optional call whose SUBJECT TEXT is identical to the argument of an
- *   `expect(...)` presence assertion appearing EARLIER in the same block or in any
- *   enclosing block. The presence assertions are `.not.toBeNull()`, `.not.toBeUndefined()`,
- *   `.toBeDefined()` and `.toBeTruthy()`.
+ * WHAT THIS CATCHES, precisely, and all four conditions must hold:
+ *   1. in a `*.test.ts` or `*.test.tsx` file (this tree has no `*.spec.ts` or `*_test.ts`,
+ *      checked with `find` rather than assumed),
+ *   2. an optional chain whose SUBJECT TEXT is identical to the argument of an
+ *      `expect(...)` presence assertion appearing EARLIER in the same block or any
+ *      enclosing block. The presence assertions are `.not.toBeNull()`,
+ *      `.not.toBeUndefined()`, `.toBeDefined()` and `.toBeTruthy()`,
+ *   3. where short-circuiting the chain skips a CALL, including one further up the chain
+ *      as in `x?.foo.bar()`, and
+ *   4. where that call's RESULT IS DISCARDED, so nothing downstream can notice the skip.
+ *
+ * Condition 4 is the discriminator and it was arrived at by being wrong first. Gating every
+ * skipped call reported nine sites shaped like `expect(col?.type.toUpperCase()).toBe("TEXT")`.
+ * Those are not silent: short-circuiting makes the whole expression `undefined`,
+ * `expect(undefined).toBe("TEXT")` fails, and the test goes red with a legible message.
+ * Failing a build over code that already catches its own defect is how a gate gets
+ * switched off. Measured on this tree: gating every skipped call reports 9 offences,
+ * requiring the result to be discarded reports 2, and both were real.
  *
  * The replacement is the one PR #217 used:
  *
@@ -166,8 +178,64 @@ function guardSubject(node: ts.Node): { subject: string; matcher: string } | nul
  * skipped call is filed as a skipped read.
  */
 function isCalleeOfCall(node: ts.Node): boolean {
-	const parent = node.parent;
-	return parent !== undefined && ts.isCallExpression(parent) && parent.expression === node;
+	// The call can sit further up the chain than the `?.` does. In `x?.foo.bar()` only
+	// `x?.foo` carries a questionDotToken; its parent is the PropertyAccess `x?.foo.bar`,
+	// whose parent is the call. Short-circuiting `x?.foo` still skips `.bar()`, so testing
+	// only the immediate parent files a skipped call as a skipped read and the gate stays
+	// silent on it. Walk up for as long as this node is what the parent is reading THROUGH,
+	// and stop at the first thing that is not a member access.
+	let current: ts.Node = node;
+	let parent = current.parent;
+	while (
+		parent !== undefined &&
+		(ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+		parent.expression === current
+	) {
+		current = parent;
+		parent = current.parent;
+	}
+	return parent !== undefined && ts.isCallExpression(parent) && parent.expression === current;
+}
+
+/**
+ * True when the value of the expression containing this optional chain is thrown away, so
+ * nothing downstream can notice that the chain short-circuited.
+ *
+ * This is the discriminator, and it was arrived at by being wrong first. Gating every
+ * skipped call reported nine sites of the shape
+ * `expect(col?.type.toUpperCase()).toBe("TEXT")`. Those are not silent: short-circuiting
+ * makes the whole expression `undefined`, `expect(undefined).toBe("TEXT")` fails, and the
+ * test goes red with a legible message. Reporting them would have been the gate failing a
+ * build over code that already catches its own defect.
+ *
+ * The two genuinely dangerous sites on this tree were the ones whose result nobody reads:
+ * `reader?.cancel("client disconnected")` and, in PR #217's former shape,
+ * `timeoutCallback?.()`. A call made for its effect, skipped, observed by nothing.
+ */
+function isResultDiscarded(node: ts.Node): boolean {
+	let current: ts.Node = node;
+	let parent = current.parent;
+	// Climb out of the chain itself and out of anything that merely passes the value along
+	// unchanged, so `await (x?.close())` is judged on where the `await` sits.
+	while (parent !== undefined) {
+		const passesValueThrough =
+			((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+				parent.expression === current) ||
+			(ts.isCallExpression(parent) && parent.expression === current) ||
+			ts.isParenthesizedExpression(parent) ||
+			ts.isAwaitExpression(parent) ||
+			ts.isNonNullExpression(parent) ||
+			ts.isAsExpression(parent) ||
+			ts.isSatisfiesExpression(parent);
+		if (!passesValueThrough) break;
+		current = parent;
+		parent = current.parent;
+	}
+	if (parent === undefined) return false;
+	// A statement is the only place a value goes nowhere. `void x?.f()` says so explicitly.
+	if (ts.isExpressionStatement(parent)) return true;
+	if (ts.isVoidExpression(parent)) return true;
+	return false;
 }
 
 /**
@@ -183,18 +251,22 @@ function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsC
 		return {
 			subject: normalise(node.expression.getText()),
 			kind: isCalleeOfCall(node) ? "optional call through a member" : "optional property access",
-			skipsCall: isCalleeOfCall(node),
+			skipsCall: isCalleeOfCall(node) && isResultDiscarded(node),
 		};
 	}
 	if (ts.isElementAccessExpression(node) && node.questionDotToken) {
 		return {
 			subject: normalise(node.expression.getText()),
 			kind: isCalleeOfCall(node) ? "optional call through an element" : "optional element access",
-			skipsCall: isCalleeOfCall(node),
+			skipsCall: isCalleeOfCall(node) && isResultDiscarded(node),
 		};
 	}
 	if (ts.isCallExpression(node) && node.questionDotToken) {
-		return { subject: normalise(node.expression.getText()), kind: "optional call", skipsCall: true };
+		return {
+			subject: normalise(node.expression.getText()),
+			kind: "optional call",
+			skipsCall: isResultDiscarded(node),
+		};
 	}
 	return null;
 }
@@ -203,19 +275,25 @@ function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsC
  * The narrowing, and the reason the gate can fail the build instead of warning.
  *
  * Measured on this tree at 6be70246, with the guard clause applied and nothing else:
- * **275 offences across 60 test files**, of which **263 optional property accesses**,
- * **12 optional element accesses** and **0 of any call-skipping shape**. Reporting all 275
- * would have been a warning nobody reads, which is the outcome SB23-2375 rejected.
+ * **275 offences across 60 test files**, of which **263 optional property accesses** and
+ * **12 optional element accesses**. Reporting all 275 would have been a warning nobody
+ * reads, which is the outcome SB23-2375 rejected.
  *
- * So the gate reports only the shapes where short-circuiting skips a CALL, and that set is
- * empty today. The split is not a convenience, it is the distinction SB23-2460 drew itself:
+ * So the gate reports only a skipped call whose result is discarded. The split is not a
+ * convenience, it is the distinction SB23-2460 drew itself:
  *
- *   - A skipped CALL means the subject under test never ran. The test asserts nothing and
- *     passes. There is no second chance to notice.
- *   - A skipped READ yields `undefined`, which is then almost always handed to an
- *     `expect(...)` that fails on it. SB23-2460 records `observedSignal?.aborted` as safe
- *     "only by luck" for exactly this reason: luck that holds in the overwhelming majority
- *     of the 275, and a build failure cannot be built on a majority.
+ *   - A skipped call whose result nobody reads means the subject under test never ran.
+ *     The test asserts nothing and passes. There is no second chance to notice.
+ *   - Everything else yields `undefined`, which is then handed to an `expect(...)` that
+ *     fails on it. SB23-2460 records `observedSignal?.aborted` as safe "only by luck" for
+ *     exactly this reason: luck that holds across the overwhelming majority of the 275,
+ *     and a build failure cannot be built on a majority.
+ *
+ * Of the 275, exactly **2** survive conditions 3 and 4, both in `codex/provider.test.ts`:
+ * `reader?.read()` and `reader?.cancel("client disconnected")` under an
+ * `expect(reader).toBeDefined()`. The cancel is the entire subject of that test, so
+ * skipping it leaves the assertion below passing because nothing was ever registered to
+ * clear. Both are fixed in the commit that adds this file, which is why it reads 0.
  *
  * The 275 are a real population and not noise. They are recorded in SB23-2460 with this
  * script's `--survey` mode as the way to re-derive them, so a later lane can take them on

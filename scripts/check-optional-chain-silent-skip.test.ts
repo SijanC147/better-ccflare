@@ -104,11 +104,11 @@ describe("check-optional-chain-silent-skip", () => {
 		const dir = makeFixture(
 			[
 				'import { expect, test } from "bun:test";',
-				'test("reads every header", () => {',
-				"\tconst entry: { has(k: string): boolean } | null = null as never;",
-				"\texpect(entry).not.toBeNull();",
-				'\tfor (const key of ["a", "b"]) {',
-				"\t\texpect(entry?.has(key)).toBe(false);",
+				'test("replays every buffered chunk", () => {',
+				"\tconst sink: { write(k: string): void } | null = null as never;",
+				"\texpect(sink).not.toBeNull();",
+				'\tfor (const chunk of ["a", "b"]) {',
+				"\t\tsink?.write(chunk);",
 				"\t}",
 				"});",
 			].join("\n"),
@@ -116,7 +116,55 @@ describe("check-optional-chain-silent-skip", () => {
 
 		const { exitCode, stderr } = runGate(dir);
 		expect(exitCode).toBe(1);
-		expect(stderr).toContain("subject.test.ts:6:10");
+		expect(stderr).toContain("subject.test.ts:6:3");
+	});
+
+	test("passes a skipped call whose RESULT IS ASSERTED, because that fails loudly", () => {
+		// This is the discriminator, and it was arrived at by being wrong first. An earlier
+		// version gated every skipped call and reported nine sites shaped like
+		// `expect(col?.type.toUpperCase()).toBe("TEXT")`. Short-circuiting makes the whole
+		// expression undefined, `expect(undefined).toBe("TEXT")` fails, and the test goes red
+		// with a legible message. Those are not silent, and failing a build over code that
+		// already catches its own defect is how a gate gets switched off.
+		//
+		// If this test ever starts failing, the gate has been widened back over the nine and
+		// the build is red on `packages/database/src/migrations.test.ts` among others.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("reports the column type", () => {',
+				"\tconst col: { type: string } | undefined = undefined;",
+				"\texpect(col).toBeDefined();",
+				'\texpect(col?.type.toUpperCase()).toBe("TEXT");',
+				"});",
+			].join("\n"),
+		);
+
+		const { exitCode, stdout } = runGate(dir);
+		expect(exitCode).toBe(0);
+		// Surveyed, so the population stays visible, but not gated.
+		expect(stdout).toContain("1 guarded optional chains");
+		expect(stdout).toContain("0 offences");
+	});
+
+	test("fails on a skipped call one hop further up the chain", () => {
+		// In `x?.foo.bar()` only `x?.foo` carries a questionDotToken; its parent is the
+		// property access `x?.foo.bar`, and only ITS parent is the call. Testing just the
+		// immediate parent files this as a skipped read and the gate is silent on it.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("flushes through the nested handle", () => {',
+				"\tconst conn: { stream: { close(): void } } | null = null as never;",
+				"\texpect(conn).not.toBeNull();",
+				"\tconn?.stream.close();",
+				"});",
+			].join("\n"),
+		);
+
+		const { exitCode, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("subject.test.ts:5:2");
 	});
 
 	test("passes the `if (!x) throw` replacement, which is the fix the gate asks for", () => {
@@ -311,14 +359,21 @@ describe("check-optional-chain-silent-skip", () => {
 		expect(stdout).toContain("0 offences");
 		expect(result.exitCode).toBe(0);
 
-		// This is also where the whole-tree scanned-nothing invariant is exercised, and it
-		// is the only place it can be: that stricter branch needs `roots.length === 0`, so
-		// no fixture can reach it. Break the walker, the parser or the guard recogniser and
-		// this run exits 2 rather than 0, so `toBe(0)` above is the assertion that kills a
-		// `process.exit(2)` to `exit(0)` mutation. Pinning exact counts would make the test
-		// fail on every added test file, so the assertion is that each is non-zero: a zero
-		// in any of the three is what "reported zero offences having read nothing" looks
-		// like from outside.
+		// This is also where the whole-tree scanned-nothing invariant is exercised, and it is
+		// the only place it can be: that stricter branch needs `roots.length === 0`, so no
+		// fixture can reach it. Break the walker, the parser or the guard recogniser and this
+		// run exits 2 rather than 0.
+		//
+		// It is NOT what kills a `process.exit(2)` to `exit(0)` mutation, and an earlier
+		// version of this comment claimed it was. On a healthy tree this run never reaches
+		// that branch, so the mutation survives here; the two fixture tests below, which do
+		// reach it, are what killed it when measured. Correcting the claim rather than the
+		// coverage, because a comment asserting a kill the measurement attributes elsewhere
+		// is the same defect as a label written before reading the output.
+		//
+		// Pinning exact counts would make this fail on every added test file, so the
+		// assertion is that each is non-zero: a zero in any of the three is what "reported
+		// zero offences having read nothing" looks like from outside.
 		const counts = stdout.match(
 			/(\d+) test files scanned, (\d+) optional chains examined, (\d+) presence assertions found/,
 		);
