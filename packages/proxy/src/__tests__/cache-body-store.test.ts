@@ -262,13 +262,12 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-strip", 10);
 
-			const entry = cacheBodyStore.getLastCachedRequest("account-a");
-			expect(entry).not.toBeNull();
+			const entry = requireCachedRequest("account-a");
 
 			for (const key of Object.keys(sensitiveHeaders)) {
 				// Headers API lowercases keys; the stored record keys come from
 				// the Headers iterator which also lowercases them.
-				expect(entry?.headers[key]).toBeUndefined();
+				expect(entry.headers[key]).toBeUndefined();
 			}
 		});
 
@@ -282,11 +281,10 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-keep", 10);
 
-			const entry = cacheBodyStore.getLastCachedRequest("account-a");
-			expect(entry).not.toBeNull();
+			const entry = requireCachedRequest("account-a");
 
 			for (const [key, value] of Object.entries(safeHeaders)) {
-				expect(entry?.headers[key]).toBe(value);
+				expect(entry.headers[key]).toBe(value);
 			}
 		});
 
@@ -338,10 +336,9 @@ describe("CacheBodyStore", () => {
 			);
 			cacheBodyStore.onSummary("req-promote", 7);
 
-			const entry = cacheBodyStore.getLastCachedRequest("account-a");
-			expect(entry).not.toBeNull();
-			expect(entry?.path).toBe("/v1/messages");
-			expect(entry?.headers["content-type"]).toBe("application/json");
+			const entry = requireCachedRequest("account-a");
+			expect(entry.path).toBe("/v1/messages");
+			expect(entry.headers["content-type"]).toBe("application/json");
 		});
 
 		it("does NOT promote when cacheCreationInputTokens is 0", () => {
