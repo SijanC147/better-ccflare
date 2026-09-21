@@ -20,11 +20,11 @@
  *
  * Real values, because a test can meaningfully read them:
  *
- * - `runtime` — a complete `RuntimeConfig`. Override any subset.
- * - `refreshInFlight` — a real `Map`, fresh per call so two contexts never
+ * - `runtime`, a complete `RuntimeConfig`. Override any subset.
+ * - `refreshInFlight`, a real `Map`, fresh per call so two contexts never
  *   share one.
- * - `dbOps` — whatever methods the caller supplies, and nothing else.
- * - `internalProbeSecret` — absent unless supplied, which is what the six
+ * - `dbOps`, whatever methods the caller supplies, and nothing else.
+ * - `internalProbeSecret`, absent unless supplied, which is what the six
  *   suites had. It is the one optional field on the type.
  *
  * Throwing stubs, because no test in this directory constructs one and a
@@ -39,16 +39,31 @@
  *
  * ## What a throwing stub does not buy you
  *
- * Five of the six `dbOps` read sites in `auto-refresh-scheduler.ts` sit inside
- * a `try` that catches everything: 1018 and 1213 catch their own write, 1312
- * catches and returns early, and 935 and 1132 hand `dbOps` to
- * `flushPendingRotation`, which has its own catch. So at those sites neither a
- * `TypeError` from `undefined` nor this stub's named error reaches the test as
- * a throw. Both are swallowed and the method takes its failure branch, which
- * surfaces as a wrong result rather than an error. The stub still wins, because
- * the swallowed message names the field in the log line instead of reading as a
- * database outage, but do not expect a reached stub to fail a test loudly. Only
- * site 738, `recordUsageSnapshot`, is outside a catch.
+ * **No `dbOps` read site in `auto-refresh-scheduler.ts` produces a `TypeError`
+ * a test can see.** All six are inside a `try` that catches everything: 1018
+ * and 1213 catch their own write, 1312 catches and returns early, 935 and 1132
+ * hand `dbOps` to `flushPendingRotation`, which has its own catch, and 738 sits
+ * inside the `try` that `sendDummyMessage` opens at :353 and does not close
+ * until its catch at :804.
+ *
+ * That last catch calls `recordRefreshFailure`, so an absent `dbOps` at 738 is
+ * counted as a refresh failure against the account and pushes it toward
+ * `FAILURE_THRESHOLD`. A widened suite would watch an account drift toward a
+ * pause, with no type error and no crash anywhere.
+ *
+ * So neither a `TypeError` from `undefined` nor this stub's named error reaches
+ * a test as a throw. Both are swallowed and the method takes its failure
+ * branch, which surfaces as a wrong result. The stub still wins, because the
+ * swallowed message names the field in the log line instead of reading as a
+ * database outage, but do not expect a reached stub to fail a test loudly.
+ *
+ * An earlier version of this comment said only site 738 was uncaught. That was
+ * measured with a window starting at line 690, which found the `try` at 769,
+ * below the site, and could not see the one opening above it. **A window around
+ * a line cannot answer whether the line is enclosed**; that is a brace-balance
+ * question over the whole enclosing scope:
+ * `awk 'NR>=335 && NR<=738 {if (/try \{/) t++; if (/\} catch/) c++}' ` gives
+ * `try=3 catch=2`, one unclosed.
  *
  * ## No assertion on the result
  *
