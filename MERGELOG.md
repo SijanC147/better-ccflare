@@ -170,9 +170,13 @@ Fixed at `6500e105` and the commit after it:
   `retry_attempts`. **Upstream documents 2 for this path and the fork does 3, deliberately**: the
   fork's `retry_attempts` is the single source for all three in-place loops (ZAI 1305, 529, 5xx)
   and for the transport retry, the widening `#113` disclosed. Do not read the divergence from
-  upstream's docs as a bug at the next sync. Worst case on one account at the default is 17
-  fetches (1305 then 529 then 5xx, each reissue costing up to 3 transport attempts), 15 for an
-  account that never sees 1305; `CLAUDE.md`'s 9 predates the 5xx loop.
+  upstream's docs as a bug at the next sync. The worst case that arithmetic implied, 17 fetches
+  on one account (1305 then 529 then 5xx, each reissue costing up to 3 transport attempts) and
+  15 for an account that never sees 1305, was confirmed by measurement in `SB23-2522` and then
+  bounded: the three loops now share one budget of `retry_attempts - 1` re-issues per account,
+  so the worst case is back to `retry_attempts` squared, 9 fetches and 3 upstream responses at
+  the default. A loop running alone is unchanged. See
+  `packages/proxy/src/handlers/__tests__/proxy-operations-retry-composition.test.ts`.
 - A Codex account reporting only a weekly window now has no `five_hour` key in its usage payload
   where the fork previously wrote `five_hour: null`.
 - Runaway-loop alert ids changed shape (length-prefixed segments), so a cooldown in flight across

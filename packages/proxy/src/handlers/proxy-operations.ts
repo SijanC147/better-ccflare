@@ -579,6 +579,50 @@ export async function isModelUnavailableError(
 }
 
 /**
+ * How many in-place re-issues the retry loops may still spend on ONE client
+ * request against ONE account.
+ *
+ * Three loops re-issue the same request in place, in program order on a single
+ * request: `checkZai1305`, the reset-less 529 loop, and the transient-5xx loop.
+ * Each reads the same `retry_attempts`. Before this budget existed they each
+ * held a private counter, so the composed cost was the product of the budgets
+ * rather than the sum, and nothing measured it: every retry suite in this
+ * package drives one loop.
+ *
+ * Measured at the global fetch seam before the budget was added, at the
+ * documented defaults (`retry_attempts: 3`), in
+ * `proxy-operations-retry-composition.test.ts`: a zai request whose 1305 retry
+ * answers 529, whose 529 retry answers 500, cost 17 upstream fetches and 7
+ * upstream responses. An operator who set `retry_attempts: 3` was asking for
+ * three attempts.
+ *
+ * Ten of those seventeen were connect-phase throws that never reached the
+ * upstream, so 17 is a latency and connection-churn figure while 7 is the
+ * figure that consumes rate-limit quota. The 7 is the one that works against
+ * what a load balancer for rate-limit avoidance exists to do, and it is worst
+ * exactly when the upstream is already unwell and every other request is also
+ * retrying.
+ *
+ * The budget is `retry_attempts - 1`, which is what a single loop has always
+ * spent, so a loop that runs alone is byte-identical and an operator's
+ * `retry_attempts` still means what it says. `retry_attempts` of 0 and 1 both
+ * give a budget of 0, matching `getOverloadRetryConfig`, whose `enabled`
+ * already requires `maxAttempts > 1`.
+ *
+ * Scope is deliberately per account, not per client request: the budget is
+ * created inside `proxyWithAccount`, so a request that exhausts it on one
+ * account and fails over starts fresh on the next. The budget exists to stop
+ * one account being hammered, and the next account has taken no punishment.
+ * The consequence, stated rather than hidden, is that the POOL-wide total for
+ * one client request is not bounded by this; it is bounded by the failover
+ * limit, which is a separate mechanism.
+ */
+interface InPlaceRetryBudget {
+	/** Re-issues left. Decremented immediately before each one is issued. */
+	remaining: number;
+}
+
+/**
  * Detects ZAI error 1305 ("service overloaded") inside an SSE stream.
  * ZAI returns HTTP 200 with content-type: text/event-stream, but the SSE body
  * contains an error event with code 1305. This function:
@@ -594,6 +638,7 @@ async function checkZai1305(
 	requestClone: Request,
 	log: Logger,
 	retrySettings: RetrySettings,
+	budget: InPlaceRetryBudget,
 ): Promise<Response> {
 	if (
 		response.status !== 200 ||
@@ -609,8 +654,23 @@ async function checkZai1305(
 		return response;
 	}
 
+	// THREE outcomes, not two, and a boolean cannot hold three. Computed before
+	// the message, because with a spent shared budget the loop body never runs
+	// and an unconditional "retrying" promises a retry that is not coming.
+	//
+	// An earlier version split this two ways and told an operator who had set
+	// CCFLARE_OVERLOAD_RETRY_ENABLED=false that there was "no budget left",
+	// which is false: the budget was never touched. Same mistake as the 529
+	// message this file already carries a note about, one door further along.
+	const retryCfg = getOverloadRetryConfig(retrySettings);
+	const retryDisabled = !retryCfg.enabled || retryCfg.maxAttempts <= 1;
+
 	log.warn(
-		`Account ${account.name}: detected 1305 overloaded in SSE stream, retrying`,
+		retryDisabled
+			? `Account ${account.name}: detected 1305 overloaded in SSE stream, in-place retry is disabled`
+			: budget.remaining > 0
+				? `Account ${account.name}: detected 1305 overloaded in SSE stream, retrying`
+				: `Account ${account.name}: detected 1305 overloaded in SSE stream, no in-place retry budget left for this request`,
 	);
 
 	// The 1305 detection above only consumed a clone; drain the original
@@ -618,10 +678,20 @@ async function checkZai1305(
 	// buffer is released instead of leaking (issue #382/#437).
 	cancelDiscardedResponseBody(response);
 
-	// Retry with backoff (same config as 529 retry)
-	const retryCfg = getOverloadRetryConfig(retrySettings);
+	// Retry with backoff (same config as 529 retry). retryCfg is resolved above,
+	// beside the message that depends on it.
+	let reissuesMade = 0;
 	if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
-		for (let attempt = 1; attempt < retryCfg.maxAttempts; attempt++) {
+		// `budget.remaining > 0` is the shared per-account bound, see
+		// InPlaceRetryBudget. This loop is the first of the three to run on a
+		// request, so it normally sees a full budget; it can see a spent one
+		// when the model-fallback loop has already cycled a model and paid for
+		// a 1305 retry on that earlier model.
+		for (
+			let attempt = 1;
+			attempt < retryCfg.maxAttempts && budget.remaining > 0;
+			attempt++
+		) {
 			const delayMs = retryDelayMs(retryCfg, attempt);
 			await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 
@@ -629,6 +699,11 @@ async function checkZai1305(
 				`Account ${account.name}: 1305 retry ${attempt}/${retryCfg.maxAttempts - 1} after ${Math.round(delayMs)}ms`,
 			);
 
+			// Decremented BEFORE the re-issue, not after: a re-issue that
+			// throws unwinds past any post-call decrement, and the fetch it
+			// spent has already been made.
+			budget.remaining--;
+			reissuesMade++;
 			const retryRaw = await makeProxyRequest(requestClone.clone());
 			const retryHeaders = new Headers(retryRaw.headers);
 			retryHeaders.set(
@@ -657,8 +732,28 @@ async function checkZai1305(
 		}
 	}
 
+	// Three outcomes reach this line, and each wants a different response from
+	// the operator: this invocation spent its own allowance (the upstream is
+	// overloaded), the shared budget cut it short (another loop consumed this
+	// request's allowance), or retry is switched off entirely.
+	//
+	// `budget.remaining` cannot choose between them. This warn sits OUTSIDE the
+	// `retryCfg.enabled` block above, so it is reached with retries disabled
+	// and the budget untouched; and with retries enabled `remaining` is always
+	// 0 here, because the loop leaves only by exhausting the attempt counter
+	// (which makes exactly `maxAttempts - 1` decrements from a budget of at
+	// most that) or by the budget hitting zero. Every other exit from the loop
+	// body is a `return` and never arrives. That is the reviewer's finding on
+	// PR #234 and it is why this counts re-issues instead.
+	//
+	// This is the only place the synthetic 429 conversion is announced, so it
+	// is the line an operator follows when a request falls to model fallback.
 	log.warn(
-		`Account ${account.name}: all 1305 retries exhausted, converting to 429 for model fallback`,
+		retryDisabled
+			? `Account ${account.name}: 1305 in-place retry is disabled, converting to 429 for model fallback`
+			: reissuesMade >= retryCfg.maxAttempts - 1
+				? `Account ${account.name}: all ${retryCfg.maxAttempts - 1} 1305 retries exhausted, converting to 429 for model fallback`
+				: `Account ${account.name}: in-place retry budget for this request spent after ${reissuesMade} 1305 retries, converting to 429 for model fallback`,
 	);
 
 	// Convert to synthetic 429 so isModelUnavailableError triggers model cycling
@@ -1792,6 +1887,17 @@ export async function proxyWithAccount(
 			return classifyNoFallback429(retried, requestedModel);
 		};
 
+		// One budget for every in-place retry loop below, spent by whichever
+		// runs. See InPlaceRetryBudget for the measurement that motivated it.
+		// Created here, inside proxyWithAccount, so it is per account: a
+		// failover starts the next account fresh.
+		const inPlaceRetryBudget: InPlaceRetryBudget = {
+			remaining: Math.max(
+				0,
+				getOverloadRetryConfig(ctx.runtime.retry).maxAttempts - 1,
+			),
+		};
+
 		const extraUsageOutcome = await classifyExtraUsageExhausted(rawResponse);
 		if (extraUsageOutcome !== NOT_CLASSIFIED) return extraUsageOutcome;
 
@@ -1802,6 +1908,7 @@ export async function proxyWithAccount(
 			outgoing.request,
 			log,
 			ctx.runtime.retry,
+			inPlaceRetryBudget,
 		);
 
 		const orgPermissionOutcome = await classifyOrgPermissionDenied(rawResponse);
@@ -1978,6 +2085,7 @@ export async function proxyWithAccount(
 						retryTransformedRequest,
 						log,
 						ctx.runtime.retry,
+						inPlaceRetryBudget,
 					);
 					zai1305AlreadyChecked = true;
 					if (!(await isModelUnavailableError(rawResponse.clone()))) {
@@ -2000,6 +2108,7 @@ export async function proxyWithAccount(
 					outgoing.request,
 					log,
 					ctx.runtime.retry,
+					inPlaceRetryBudget,
 				);
 			}
 			if (await isModelUnavailableError(rawResponse)) {
@@ -2219,7 +2328,21 @@ export async function proxyWithAccount(
 			if (!rlInfo.resetTime) {
 				const retryCfg = getOverloadRetryConfig(ctx.runtime.retry);
 				if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
-					for (let attempt = 1; attempt < retryCfg.maxAttempts; attempt++) {
+					// `budget.remaining > 0` is the shared per-account bound, see
+					// InPlaceRetryBudget. A 1305 loop that already ran on this
+					// request has spent from the same budget, which is what stops
+					// the two composing into a product.
+					// `reissuesMade` counts what THIS loop did. The budget cannot
+					// carry that: it is `maxAttempts - 1`, exactly the number of
+					// iterations the attempt counter permits, so on the ordinary path
+					// both bounds reach zero on the same iteration and `remaining`
+					// cannot say which one stopped the loop.
+					let reissuesMade = 0;
+					for (
+						let attempt = 1;
+						attempt < retryCfg.maxAttempts && inPlaceRetryBudget.remaining > 0;
+						attempt++
+					) {
 						// Full-jitter backoff: sleep in
 						// [0, min(base * backoff^attempt, max)]
 						const delayMs = retryDelayMs(retryCfg, attempt);
@@ -2237,6 +2360,11 @@ export async function proxyWithAccount(
 						// the await. That left the whole 529 body holding its
 						// off-heap backing store until GC — issue #273.
 						cancelDiscardedResponseBody(response);
+						// Decremented BEFORE the re-issue: a re-issue that throws
+						// unwinds past any post-call decrement, and the fetches it
+						// spent have already been made.
+						inPlaceRetryBudget.remaining--;
+						reissuesMade++;
 						const retryResponse = await reissueRequestInPlace();
 						response = retryResponse;
 						retriedInPlace = true;
@@ -2267,9 +2395,30 @@ export async function proxyWithAccount(
 						}
 					}
 					if (response.status === 529) {
-						log.warn(
-							`Account ${account.name}: all ${retryCfg.maxAttempts - 1} in-place 529 retries exhausted, applying cooldown and failing over`,
-						);
+						// Exactly three ways to arrive here still holding a 529, and
+						// each gets a message that is true of it. An earlier version
+						// chose between two of them on `inPlaceRetryBudget.remaining >
+						// 0` and was wrong in BOTH reachable exits: on the ordinary
+						// path the budget and the attempt bound reach zero together, so
+						// it named the shared budget as the constraint when no other
+						// loop had touched it; and on the reset-hint break it reported
+						// all retries exhausted after one. Order matters, because the
+						// first two conditions are simultaneously true on the ordinary
+						// path and "I spent my own allowance" is the honest reading.
+						const maxReissues = retryCfg.maxAttempts - 1;
+						if (reissuesMade >= maxReissues) {
+							log.warn(
+								`Account ${account.name}: all ${maxReissues} in-place 529 retries exhausted, applying cooldown and failing over`,
+							);
+						} else if (inPlaceRetryBudget.remaining === 0) {
+							log.warn(
+								`Account ${account.name}: in-place retry budget for this request spent after ${reissuesMade} 529 retries, applying cooldown and failing over`,
+							);
+						} else {
+							log.warn(
+								`Account ${account.name}: stopped retrying 529 after ${reissuesMade} retries on an upstream reset hint, applying cooldown and failing over`,
+							);
+						}
 					}
 				}
 			}
@@ -2290,23 +2439,29 @@ export async function proxyWithAccount(
 		// probe must not amplify an upstream outage into extra traffic, and its
 		// failure is not a client-visible request.
 		//
-		// BUDGET STACKING WITH THE 529 BLOCK ABOVE — the two loops have separate
-		// budgets, not a shared counter, and only one order stacks:
+		// BUDGET SHARING WITH THE 529 BLOCK ABOVE AND WITH checkZai1305 — all
+		// three loops spend one `inPlaceRetryBudget`, so they add rather than
+		// multiply. See InPlaceRetryBudget for the measurement.
 		//
-		//   529 → retry → 500: the 529 loop breaks on `status !== 529`, then this
-		//     block enters with a full, fresh budget. At the defaults that is up
-		//     to three upstream calls on one account (original + one 529 retry +
-		//     one 5xx retry) before the bench and the failover.
+		//   529 → retry → 500: the 529 loop breaks on `status !== 529`, and this
+		//     block then enters with whatever the 529 loop LEFT, which at the
+		//     defaults is nothing. The account is still benched with
+		//     upstream_5xx_server_error and still fails over, which is what the
+		//     2026-09-13 incident needed; only the in-place 500 re-issue is
+		//     skipped, and only when another loop already re-issued this request.
 		//   500 → retry → 529: this loop stops (529 is deliberately not a
 		//     transient-5xx status), no 5xx bench is applied, and the 529 block
 		//     cannot run again because it already did. The overload cooldown is
-		//     applied downstream by processProxyResponse instead. Two calls, one
-		//     budget.
+		//     applied downstream by processProxyResponse instead.
 		//
-		// With N = CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS the worst case in the first
-		// order is 1 + (N-1) + (N-1) = 2N-1 upstream calls on one account, so
-		// raising N grows that count linearly with a factor of two, and each
-		// call can take as long as the slow 5xx that triggered it.
+		// An earlier version of this comment said the two loops had separate
+		// budgets and gave the worst case as 1 + (N-1) + (N-1) = 2N-1 upstream
+		// calls. That was correct for one loop and blind to composition: it
+		// counted re-issues, while a re-issue made through reissueRequestInPlace
+		// is itself up to N fetches because forwardUpstream wraps every attempt
+		// in forwardWithTransportRetry. Measured at 17 fetches and 7 responses
+		// for three composed loops at N=3, which is what the shared budget now
+		// bounds at N + (N-1)*N = N² fetches and N responses.
 		// True once the block below has benched this account for a transient 5xx
 		// AND fallen through instead of failing over (terminal candidate
 		// account). Consumed by processProxyResponse, which must not re-classify
@@ -2321,7 +2476,15 @@ export async function proxyWithAccount(
 			let attemptsMade = 1;
 
 			if (retryCfg.enabled && retryCfg.maxAttempts > 1) {
-				for (let attempt = 1; attempt < retryCfg.maxAttempts; attempt++) {
+				// `remaining > 0` is the shared per-account bound, see
+				// InPlaceRetryBudget. This is the last of the three loops, so it
+				// is the one most often left with nothing, which is deliberate:
+				// reaching it means the request has already been re-issued.
+				for (
+					let attempt = 1;
+					attempt < retryCfg.maxAttempts && inPlaceRetryBudget.remaining > 0;
+					attempt++
+				) {
 					// `x-should-retry: false` is the upstream telling us the
 					// response in hand is deterministic for this request.
 					// Anthropic sends it on the 500s that a replay cannot fix;
@@ -2348,6 +2511,10 @@ export async function proxyWithAccount(
 					// body. Only the body is consumed — the `x-should-retry`
 					// header read at the top of the next iteration still works.
 					cancelDiscardedResponseBody(response);
+					// Decremented BEFORE the re-issue, as in the other two loops:
+					// a re-issue that throws unwinds past any post-call
+					// decrement, and the fetches it spent have already been made.
+					inPlaceRetryBudget.remaining--;
 					const retryResponse = await reissueRequestInPlace();
 					response = retryResponse;
 					retriedInPlace = true;
