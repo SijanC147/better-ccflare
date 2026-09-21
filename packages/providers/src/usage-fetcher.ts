@@ -1558,6 +1558,22 @@ class UsageCache {
 					// (SB23-2289). Keep the previous balance while it is fresh
 					// enough, bounded on the credits' OWN age rather than on the
 					// entry's, which this stamp is what makes possible.
+					// The RAW map, deliberately, not `this.get(accountId)`.
+					//
+					// `get` withholds a balance past the bound, so reading through
+					// it here would hand the carry an already-stripped entry. The
+					// two agree on the outcome — a stale balance is refused either
+					// way, since `carryCodexCredits` applies the same bound itself
+					// — but they are different questions. `get` answers "what may
+					// admission act on"; this answers "what did the previous entry
+					// hold, and when was it observed", which needs the stamp beside
+					// the value and so needs the entry rather than the payload.
+					//
+					// Flagged by PR #236's reviewer as the kind of split a later
+					// reader collapses by tidying one into the other. Do not: the
+					// carry would then have no way to distinguish a balance that
+					// was never there from one `get` had just withheld, and
+					// `creditsObservedAt` would be unreachable from it.
 					const carried = carryCodexCredits(
 						result.data,
 						this.cache.get(accountId),
