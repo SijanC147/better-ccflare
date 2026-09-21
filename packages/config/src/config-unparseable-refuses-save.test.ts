@@ -353,6 +353,95 @@ describe("SB23-2469 — a config that cannot be read is not replaced", () => {
 	});
 
 	/**
+	 * F1 from this PR's review, and the defect this PR's first draft introduced.
+	 *
+	 * `readLocalControlSecretFromDisk()` is a SECOND reader of the same file. It
+	 * reads one field and discards the rest, and it runs on an instance whose
+	 * load already succeeded, so its failure says nothing about whether saving
+	 * would lose anything. The first draft recorded the refusal inside
+	 * `readConfigData()`, shared by both readers, so a file that was unparseable
+	 * for the duration of that one call poisoned a healthy instance for the life
+	 * of the process.
+	 *
+	 * Measured on that draft: the file kept `session` while memory held
+	 * `round-robin`, and the refusal printed "running on defaults" while
+	 * `pg_password` sat in `this.data`. In a long-lived server that is a process
+	 * that silently never persists another setting.
+	 *
+	 * Reachable with no attacker: an operator hand-editing the config, which this
+	 * repository documents as a workflow, or the zero-byte window of the in-place
+	 * `writeFileSync` fallback that the race this second reader exists for runs
+	 * through.
+	 *
+	 * The assertion is on the SAVE, not on a log line, because a log line is what
+	 * the broken draft also produced.
+	 */
+	it("is not poisoned by a transient parse failure in the second reader", () => {
+		withFixture((dir) => {
+			const good = `{"lb_strategy":"session","pg_password":"operator-secret"}`;
+			const path = seed(dir, "better-ccflare.json", good);
+
+			const config = new Config(path);
+			expect(config.get("pg_password")).toBe("operator-secret");
+
+			// Unparseable for exactly as long as the second reader takes.
+			writeFileSync(path, `{"lb_strategy":"session",}`, { mode: 0o600 });
+			config.getLocalControlSecret();
+			writeFileSync(path, good, { mode: 0o600 });
+
+			config.set("lb_strategy", "round-robin");
+
+			expect(JSON.parse(readFileSync(path, "utf8")).lb_strategy).toBe(
+				"round-robin",
+			);
+			// The operator's other fields survive the save, which is the whole point
+			// of the instance having loaded cleanly.
+			expect(JSON.parse(readFileSync(path, "utf8")).pg_password).toBe(
+				"operator-secret",
+			);
+		});
+	});
+
+	/**
+	 * F2 from this PR's review. The parser's message can quote a value out of the
+	 * file, and for this file that value is a credential.
+	 *
+	 * JSC names the offending token for one malformed shape of the five measured:
+	 * `{"pg_password": SUPERSECRETVALUE}` yields `Unexpected identifier
+	 * "SUPERSECRETVALUE"`. The line is ERROR, which is at or above the
+	 * OpenObserve exporter's default INFO floor, so on a host shipping logs the
+	 * plaintext value lands in `better_ccflare_logs`.
+	 *
+	 * The four other shapes name no token, which is exactly why interpolating the
+	 * message looked safe. The fixture uses the one shape that leaks, because a
+	 * test built on a trailing comma passes against the defect.
+	 */
+	it("never puts a config value in the parse-failure log line", () => {
+		withFixture((dir) => {
+			const secret = "SUPERSECRETVALUE";
+			const path = seed(
+				dir,
+				"better-ccflare.json",
+				`{"pg_password": ${secret}}`,
+			);
+
+			const events = captureLogs(() => {
+				new Config(path).getLocalControlSecret();
+			});
+
+			// Every line, not only the ERROR ones: the point is that the value does
+			// not reach the log at all.
+			for (const event of events) {
+				expect(event.msg).not.toContain(secret);
+			}
+			// And the diagnosis still happened, so this is not passing by silence.
+			expect(
+				events.some((event) => event.msg.includes("is not valid JSON")),
+			).toBe(true);
+		});
+	});
+
+	/**
 	 * The two diagnoses are distinguishable from each other.
 	 *
 	 * Both refuse and both leave the file alone, so an operator reading the log
@@ -389,6 +478,20 @@ describe("SB23-2469 — a config that cannot be read is not replaced", () => {
 			expect(readFailure).toContain("permissions");
 			expect(parseFailure).toContain("could not understand");
 			expect(parseFailure).toContain("Fix the syntax");
+
+			// F5: the read failure must not announce itself as a parse failure.
+			// `what` is "parse config file", so the shared phrasing put "Failed to
+			// parse config file" at the head of a line about an unreadable file,
+			// which is the half a log reader greps.
+			expect(readFailure).not.toContain("Failed to parse config file");
+			expect(parseFailure).toContain("Failed to parse config file");
+
+			// F3: the mode is NOT left as it was. restrictConfigFile() runs after
+			// the failed read and brings 0000 to 0600, so a message claiming the
+			// file is untouched contradicts the one thing its own remedy sentence
+			// tells the operator to go and check.
+			expect(readFailure).not.toContain("left exactly as it is");
+			expect(readFailure).toContain("contents are left exactly as they are");
 
 			// The decisive assertion: neither one carries the other's wording.
 			expect(parseFailure).not.toContain("could not be read");
