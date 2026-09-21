@@ -1022,7 +1022,7 @@ export class Config extends EventEmitter {
 				// by one of them is a flag the other can miss.
 				this.unparseableFrom = target;
 				log.error(
-					`Failed to ${what}: ${error}. ${target} is left exactly as it is and no setting is written back to it, because writing this process's config over a file it could not read would delete whatever is in it. This process runs on defaults until it is fixed: local_control_secret is regenerated and never persisted, which presents as local control clients failing to authenticate after a restart. Fix the syntax in ${target}, or move it aside so a fresh one is created, then restart.`,
+					`Failed to ${what}: ${error}. ${target} is left exactly as it is and no setting is written back to it, because writing this process's config over a file it could not understand would delete whatever is in it. This process runs on defaults until it is fixed: local_control_secret is regenerated and never persisted, which presents as local control clients failing to authenticate after a restart. Fix the syntax in ${target}, or move it aside so a fresh one is created, then restart.`,
 				);
 				return null;
 			}
