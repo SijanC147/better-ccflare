@@ -57,9 +57,17 @@ export function isOpenAICompatCompletionPath(pathname: string): boolean {
  * True when a request on this account will carry an **OAuth bearer token** to
  * `api.anthropic.com`.
  *
- * Derived from `getValidAccessToken` (handlers/token-manager.ts), which is the
- * only function whose branch decides which credential leaves the process. Read
- * that function, not this comment, if you need to change this.
+ * Clauses 1 and 3 are derived from `getValidAccessToken`
+ * (handlers/token-manager.ts), which is the only function whose branch decides
+ * which credential leaves the process. Read that function, not this comment,
+ * if you need to change either of them.
+ *
+ * **Clause 2 is deliberately NOT in that function and must not be deleted for
+ * being absent from it.** `getValidAccessToken` never reads `custom_endpoint`.
+ * That clause answers a different question — *where* the credential is going,
+ * not *which* credential it is — and a bearer sent to somebody else's gateway
+ * is outside everything this guard measured. The contract "agree with
+ * `getValidAccessToken`" is asserted over clauses 1 and 3 only.
  *
  * It is deliberately NOT the `isEligibleForReauthDeadline` test, which an
  * earlier version of this file copied. That function answers a different
@@ -122,15 +130,50 @@ export function accountCanServeOpenAICompatPath(account: Account): boolean {
 	return !sendsOAuthBearer(account);
 }
 
+/**
+ * The escape hatch, and the reason it exists is not convenience.
+ *
+ * This guard rests on a measurement of how `api.anthropic.com` behaved on one
+ * day. If Anthropic later serves OAuth on that path, **nothing will notice** —
+ * and the reason is sharper than "the check goes stale". Once the refusal is
+ * generated locally, the upstream 429 that would falsify it is exactly the
+ * signal the guard stops producing. The guard suppresses its own evidence.
+ *
+ * So the cost that matters is detection, not reversal. Setting this to `1`
+ * restores the pre-guard behaviour and lets an operator falsify the
+ * measurement in thirty seconds without waiting for a release. The refusal
+ * message names it, and names the date the measurement was taken, so whoever
+ * reads the message has both halves.
+ *
+ * Asked for by the independent reviewer of PR #238.
+ */
+export const OPENAI_COMPAT_OVERRIDE_ENV =
+	"BETTER_CCFLARE_ALLOW_OAUTH_OPENAI_COMPAT";
+
+/**
+ * True when an operator has explicitly turned the guard off.
+ *
+ * Read at call time rather than captured at module load, so a test can set it
+ * and so a value is never frozen into a long-lived process by import order.
+ */
+export function isOpenAICompatGuardDisabled(): boolean {
+	return process.env[OPENAI_COMPAT_OVERRIDE_ENV] === "1";
+}
+
 /** The status this proxy answers for an unsupported OpenAI-compatible path. */
 export const OPENAI_COMPAT_UNSUPPORTED_STATUS = 400;
 
 export const OPENAI_COMPAT_UNSUPPORTED_ERROR_TYPE = "invalid_request_error";
 
+/** The date the 28-of-28 measurement behind this guard was taken. */
+export const OPENAI_COMPAT_MEASURED_ON = "2026-09-21";
+
 export const OPENAI_COMPAT_UNSUPPORTED_MESSAGE =
 	"Anthropic's OpenAI compatibility layer requires a Claude API key, and every " +
 	"account routed to this request authenticates with OAuth. Send this request to " +
-	"/v1/messages instead, or add an Anthropic account that uses an API key.";
+	"/v1/messages instead, or add an Anthropic account that uses an API key. " +
+	`This refusal is based on upstream behaviour measured ${OPENAI_COMPAT_MEASURED_ON}; ` +
+	`set ${OPENAI_COMPAT_OVERRIDE_ENV}=1 to bypass it and re-test that behaviour.`;
 
 /**
  * Refuse the request locally, in the OpenAI error shape the caller expects.

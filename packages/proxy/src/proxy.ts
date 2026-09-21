@@ -33,6 +33,7 @@ import {
 	isForceAccountModelEnabled,
 	isInternalProbe,
 	isOpenAICompatCompletionPath,
+	isOpenAICompatGuardDisabled,
 	isRefreshTokenLikelyExpired,
 	markTrustedNativeResponses,
 	OPENAI_COMPAT_UNSUPPORTED_STATUS,
@@ -816,13 +817,19 @@ async function handleProxyRequest(
 	//     while those same accounts served 950 `/v1/messages` requests with
 	//     zero 429s. See handlers/openai-compat-path.ts and SB23-2570.
 	//
-	//     Only refuse when NOTHING in the pool can serve it. An API-key
-	//     Anthropic account can, and this must not speak for it. A mixed pool
+	//     Only refuse when NOTHING in the pool can serve it. An account that
+	//     reaches Anthropic with an API key can serve it, and this must not
+	//     speak for it — in practice that is a `claude-console-api` row, which
+	//     is where `migrations.ts:1833` moved every legacy `anthropic` row
+	//     carrying an api_key, and which the operator's own account list shows.
+	//     (An `anthropic` row with an api_key and no refresh token is the same
+	//     case and is also allowed, but it is the rarer shape.) A mixed pool
 	//     still fans out, benching its OAuth members: narrowing `accounts`
 	//     here would desync `filteredComboInfo.slots[i]` from `accounts[i]`,
 	//     which the loop below logs as a hard error, so the mixed case needs a
 	//     slot-aware skip and is left to its own issue.
 	if (
+		!isOpenAICompatGuardDisabled() &&
 		isOpenAICompatCompletionPath(url.pathname) &&
 		accounts.length > 0 &&
 		!accounts.some(accountCanServeOpenAICompatPath)

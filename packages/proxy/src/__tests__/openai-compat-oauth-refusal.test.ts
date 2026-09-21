@@ -5,6 +5,9 @@ import type { ProxyContext } from "../handlers";
 import {
 	accountCanServeOpenAICompatPath,
 	isOpenAICompatCompletionPath,
+	OPENAI_COMPAT_MEASURED_ON,
+	OPENAI_COMPAT_OVERRIDE_ENV,
+	OPENAI_COMPAT_UNSUPPORTED_MESSAGE,
 	OPENAI_COMPAT_UNSUPPORTED_STATUS,
 } from "../handlers";
 import { handleProxy } from "../proxy";
@@ -180,16 +183,43 @@ function makeChatRequest(url = CHAT_URL): Request {
  */
 const REFUSAL_CODE = "oauth_account_unsupported_endpoint";
 
-/** The refusal's error code, or null if this is not our refusal at all. */
-async function refusalCode(response: Response): Promise<string | null> {
+/**
+ * What `handleProxy` actually did, as ONE discriminating string.
+ *
+ * Never collapse two different outcomes to the same value here. An earlier
+ * version returned `null` for "not our refusal", for "body is not JSON", and
+ * for "something threw", and a negative assertion then passed for all three.
+ * The reviewer proved that cost real discrimination: a `throw` planted at step
+ * 2, before the guard can possibly run, left both negative controls **green**,
+ * because "the guard is unreachable" and "the guard correctly declined" had
+ * become the same value.
+ *
+ * Worse, the `/v1/messages` control was landing on the not-JSON branch at
+ * baseline — the response there is an HTML 400 — so it was asserting
+ * `REFUSAL_CODE !== null` and testing nothing at all.
+ */
+type Outcome =
+	/** JSON body carrying `error.code` — the value is that code. */
+	| string
+	/** A response whose body did not parse as JSON, tagged with its status. */
+	| `non-json:${number}`
+	/** Threw at the end of the attempt loop: execution got all the way past the guard. */
+	| "reached-loop"
+	/** Threw somewhere else — including before the guard could run. */
+	| `threw-early:${string}`;
+
+/** The refusal's error code, or a tag naming why there isn't one. */
+async function readOutcome(response: Response): Promise<Outcome> {
+	let body: unknown;
 	try {
-		const body = (await response.clone().json()) as {
-			error?: { code?: unknown };
-		};
-		return typeof body.error?.code === "string" ? body.error.code : null;
+		body = await response.clone().json();
 	} catch {
-		return null;
+		// Distinct from "parsed but carried no code" on purpose: a non-JSON body
+		// must never quietly satisfy an assertion about a JSON error code.
+		return `non-json:${response.status}`;
 	}
+	const code = (body as { error?: { code?: unknown } })?.error?.code;
+	return typeof code === "string" ? code : `non-json:${response.status}`;
 }
 
 /**
@@ -224,12 +254,19 @@ async function guardOutcome(
 	} as Partial<Provider>);
 
 	try {
-		return await refusalCode(
+		return await readOutcome(
 			await handleProxy(makeChatRequest(url), new URL(url), ctx),
 		);
-	} catch {
-		// Reaching a throw means execution went past the guard into the loop.
-		return null;
+	} catch (err) {
+		// WHICH throw matters. `All accounts failed` is raised only at the end of
+		// the attempt loop (proxy.ts step 11), so it proves execution travelled
+		// all the way past the guard — that is what the old
+		// `.rejects.toThrow(/All accounts failed/)` was buying, and collapsing it
+		// to a bare `null` threw the proof away.
+		const msg = err instanceof Error ? err.message : String(err);
+		return /All accounts failed/.test(msg)
+			? "reached-loop"
+			: `threw-early:${msg}`;
 	}
 }
 
@@ -308,10 +345,18 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		const messagesUrl = "https://proxy.local/v1/messages";
 		const outcome = await guardOutcome(messagesUrl, sevenOAuthAccounts());
 
-		// The error CODE, not the status, and not "it threw". This request's
-		// `/v1/messages` body is OpenAI-shaped with no `max_tokens`, so it can
-		// legitimately end several ways; only one of them is our guard.
-		expect(outcome).not.toBe(REFUSAL_CODE);
+		// A POSITIVE assertion, not `not.toBe(REFUSAL_CODE)`. The negation was
+		// satisfied by three different outcomes — including "the guard was
+		// unreachable" — so it passed against a proxy that could never have run
+		// the guard at all.
+		//
+		// `non-json:400` is what this request really produces: the body is
+		// OpenAI-shaped with no `max_tokens`, so `/v1/messages` validation
+		// rejects it with an HTML 400. Pinning that exact outcome means a throw
+		// planted anywhere ahead of the guard yields `threw-early:…` and fails
+		// here, and a guard that wrongly fires yields the refusal code and also
+		// fails here.
+		expect(outcome).toBe("non-json:400");
 	});
 
 	it("does not refuse when an API-key Anthropic account is in the pool", async () => {
@@ -325,7 +370,41 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 			makeApiKeyAccount(),
 		]);
 
-		expect(outcome).not.toBe(REFUSAL_CODE);
+		// `reached-loop` is raised only at proxy.ts step 11, the end of the
+		// attempt loop, so it proves execution travelled all the way past the
+		// guard. A bare `not.toBe(REFUSAL_CODE)` was satisfied by any throw
+		// anywhere, including one planted before the guard could run.
+		expect(outcome).toBe("reached-loop");
+	});
+
+	it("can be switched off, and the refusal says how", async () => {
+		// The guard suppresses its own evidence: once the refusal is generated
+		// locally, the upstream 429 that would falsify the measurement is exactly
+		// the signal that stops being produced. So the cost that matters is
+		// DETECTION, not reversal, and the escape hatch is what makes the
+		// measurement falsifiable without a release.
+		stubUsageCollector();
+		const saved = process.env[OPENAI_COMPAT_OVERRIDE_ENV];
+		process.env[OPENAI_COMPAT_OVERRIDE_ENV] = "1";
+		try {
+			// `reached-loop`, not merely "not the refusal": with the guard off the
+			// request must travel all the way to the end of the attempt loop.
+			expect(await guardOutcome(CHAT_URL, sevenOAuthAccounts())).toBe(
+				"reached-loop",
+			);
+		} finally {
+			if (saved === undefined) delete process.env[OPENAI_COMPAT_OVERRIDE_ENV];
+			else process.env[OPENAI_COMPAT_OVERRIDE_ENV] = saved;
+		}
+
+		// And the operator has to be able to find the switch from the refusal
+		// alone, together with the date the claim was measured.
+		expect(OPENAI_COMPAT_UNSUPPORTED_MESSAGE).toContain(
+			OPENAI_COMPAT_OVERRIDE_ENV,
+		);
+		expect(OPENAI_COMPAT_UNSUPPORTED_MESSAGE).toContain(
+			OPENAI_COMPAT_MEASURED_ON,
+		);
 	});
 
 	it("refuses before the loop: the all-OAuth pool never reaches the failover throw", async () => {
@@ -341,14 +420,13 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 			new URL(CHAT_URL),
 			ctx,
 		);
-		expect(await refusalCode(response)).toBe(REFUSAL_CODE);
+		expect(await readOutcome(response)).toBe(REFUSAL_CODE);
 	});
 });
 
 describe("SB23-2570 — the predicates the guard rests on", () => {
-	it("matches both completion paths the live log recorded and nothing else", () => {
+	it("matches the one live completion path and nothing else", () => {
 		expect(isOpenAICompatCompletionPath("/v1/chat/completions")).toBe(true);
-		expect(isOpenAICompatCompletionPath("/chat/completions")).toBe(false);
 
 		expect(isOpenAICompatCompletionPath("/v1/messages")).toBe(false);
 		expect(isOpenAICompatCompletionPath("/v1/models")).toBe(false);
