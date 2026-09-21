@@ -1,8 +1,10 @@
 import { computeWindowStartMs, registerUIRefresh } from "@better-ccflare/core";
-import type {
-	AnthropicUsageData,
-	CodexCreditsData,
-	FullUsageData,
+import {
+	type AnthropicUsageData,
+	type CodexCreditsData,
+	type FullUsageData,
+	PROVIDER_NAMES,
+	type XaiUsageData,
 } from "@better-ccflare/types";
 import { useEffect, useState } from "react";
 import { formatRelativeReset } from "../../lib/pool-usage";
@@ -270,8 +272,16 @@ export function RateLimitProgress({
 	const isZaiData =
 		usageData && ("time_limit" in usageData || "tokens_limit" in usageData);
 
-	// Check if this is xAI/Grok usage data
-	const isXaiData = usageData && "credits" in usageData;
+	// Check if this is xAI/Grok usage data. Detected by the PROVIDER, not by the
+	// presence of a `credits` key: `credits` is carried by two members of
+	// FullUsageData, XaiUsageData (required) and AnthropicUsageData (optional,
+	// populated for Codex by #154/#156), so key-presence detection claimed every
+	// Codex account whose usage refresh had returned a credit balance. That
+	// account then took the xAI arm below, which reads `credits.utilization`;
+	// CodexCreditsData has no such field, so the bar rendered "undefined%" under
+	// the label "Grok credits" and — the chain being `else if` — the Codex weekly
+	// window, its only quota bar, was never reached at all. SB23-2462.
+	const isXaiData = usageData != null && provider === PROVIDER_NAMES.XAI;
 
 	// Check if this is Alibaba Coding Plan usage data
 	const isAlibabaData =
@@ -387,9 +397,15 @@ export function RateLimitProgress({
 		}
 	} else if (isXaiData && showWeekly) {
 		// xAI/Grok usage data - show Grok Build credits utilization.
-		const xaiData = usageData as {
-			credits?: { utilization: number; resets_at: string | null };
-		};
+		// Named as XaiUsageData rather than an inline shape: the inline cast
+		// asserted a `credits.utilization` that nothing produced for Codex, which
+		// is why the typechecker had nothing to say about SB23-2462. Reaching here
+		// now requires provider === "xai", whose only producer is the xAI usage
+		// fetcher, so the cast restates that fetcher's declared output — and a
+		// future change to XaiUsageData fails typecheck here instead of rendering
+		// `undefined%`. `credits` is still guarded because the value crosses a
+		// JSON boundary and an older row may predate the field.
+		const xaiData = usageData as XaiUsageData;
 		if (xaiData.credits) {
 			usages.push({
 				utilization: xaiData.credits.utilization,

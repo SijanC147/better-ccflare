@@ -144,6 +144,84 @@ describe("RateLimitProgress — Codex credits", () => {
 		expect(html).toContain("3.25");
 	});
 
+	// The cases above all leave `showWeekly` at its default of false, which is
+	// how SB23-2462 shipped: the real card passes `showWeekly` (AccountListItem
+	// reads providerShowsWeeklyUsage("codex") === true), and only with it set
+	// does the render reach the window-selection chain where the provider
+	// detectors live. Everything below renders the card the way the dashboard
+	// renders it.
+	function renderCodexWithWeekly(
+		credits?: AnthropicUsageData["credits"],
+		utilization = 100,
+	) {
+		const usageData: AnthropicUsageData = {
+			five_hour: { utilization: 0, resets_at: null },
+			seven_day: { utilization, resets_at: WEEKLY_RESET },
+			...(credits ? { credits } : {}),
+		};
+		return renderToStaticMarkup(
+			<RateLimitProgress
+				provider="codex"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={utilization}
+				usageWindow="seven_day"
+				usageData={usageData}
+				showWeekly
+			/>,
+		);
+	}
+
+	it("keeps the weekly window and never reads as Grok when credits are present", () => {
+		// SB23-2462. `isXaiData` detected xAI by the presence of a `credits` key,
+		// and `AnthropicUsageData.credits` (Codex, #154/#156) is the second and
+		// only other member of FullUsageData carrying that key. A Codex account
+		// whose usage refresh populated credits therefore took the xAI arm, which
+		// reads `credits.utilization`; CodexCreditsData has no such field, so the
+		// bar rendered "undefined%" under the label "Grok credits", and because
+		// the chain is `else if`, the Codex weekly window was never reached.
+		const html = renderCodexWithWeekly({
+			has_credits: true,
+			unlimited: false,
+			balance: "9.99",
+		});
+
+		expect(html).not.toContain("Grok");
+		expect(html).not.toContain("undefined");
+		// The weekly bar is a Codex account's only quota bar. Asserting it is
+		// present is what pins the fall-through to the Anthropic-style arm.
+		expect(html).toContain("Weekly");
+		// The credits line is beside the bar, not instead of it.
+		expect(html).toContain("9.99");
+	});
+
+	it("still renders the weekly window when credits are absent", () => {
+		// The negative half: the label and the bar must not depend on credits.
+		const html = renderCodexWithWeekly(undefined);
+
+		expect(html).not.toContain("Grok");
+		expect(html).toContain("Weekly");
+	});
+
+	it("renders the Grok credits window for an actual xAI account", () => {
+		// The positive direction for the detector this fix rewrites. Without it a
+		// typo in the provider string would pass every other case in the file,
+		// because every other case asserts the xAI arm does NOT run.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				provider="xai"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={42}
+				usageWindow="credits"
+				usageData={{ credits: { utilization: 42, resets_at: WEEKLY_RESET } }}
+				showWeekly
+			/>,
+		);
+
+		expect(html).toContain("Grok credits");
+		expect(html).toContain("42");
+		expect(html).not.toContain("undefined");
+	});
+
 	it("does not render a credits line for a non-Codex provider", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
