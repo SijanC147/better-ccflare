@@ -24,9 +24,18 @@ import { VertexAIProvider } from "../provider";
  *    production shape.
  *
  * Every assertion here is about the provider in isolation. What makes the
- * production path safe is argued in the block comment above the reads in
- * `../provider.ts`, and pinned in
- * `packages/database/src/__tests__/account-object-identity.test.ts`.
+ * production path safe is argued in the block comment above the WRITES, in
+ * `prepareRequest` in `../provider.ts`, and pinned in
+ * `packages/database/src/repositories/__tests__/account-object-identity.test.ts`.
+ *
+ * Both of those references were wrong when this file first landed in #229: the
+ * path omitted `repositories/` and named a file that does not exist, and the
+ * argument was credited to the reads rather than the writes. That is the same
+ * class of defect #229 was correcting two directories away, where a comment
+ * named `transformRequestBody` as the writer instead of `prepareRequest`. A
+ * stale cross-reference costs nothing to write and is invisible to every gate
+ * in this repository: no typechecker, linter or test resolves a path inside a
+ * comment. The only thing that catches one is a reader following it.
  */
 
 const VERTEX_CONFIG = JSON.stringify({
