@@ -27,6 +27,7 @@ import {
 import { Logger } from "@better-ccflare/logger";
 import {
 	type AnyUsageData,
+	CODEX_CREDITS_NOT_OBSERVED,
 	fetchUsageData,
 	getRepresentativeUtilization,
 	getRepresentativeUtilizationForProvider,
@@ -241,7 +242,23 @@ async function getCachedOrPersistedCodexUsage(
 			// The cache's window type still declares `utilization: number`, while a
 			// normalized window may legitimately be unknown (null). Storing it is
 			// intended: every reader re-normalizes, and null renders as N/A.
-			usageCache.set(accountId, normalizedUsage as AnyUsageData);
+			// Date the credit balance by the payload it came from, NOT by now.
+			// These rows are stored request payloads of arbitrary age and there is
+			// no age filter above, so this balance can be days old. Installing it
+			// undated made `usageCache` report it as freshly observed, and since
+			// SB23-2289 a fresh positive balance ADMITS an account whose weekly
+			// window is spent — so a plain dashboard poll after a restart routed
+			// traffic at an account upstream would refuse. Found by PR #236's
+			// reviewer.
+			//
+			// `normalizeCodexUsageData` drops a window whose `resets_at` has
+			// passed, but credits carry no `resets_at`, so nothing here ages them.
+			// Passing the real timestamp lets the cache's own bound do it.
+			usageCache.set(
+				accountId,
+				normalizedUsage as AnyUsageData,
+				payloadTimestamp,
+			);
 			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
 			return normalizedUsage;
 		} catch (error) {
@@ -3999,7 +4016,20 @@ export function createAccountForceResetRateLimitHandler(
 			) {
 				const { data: usageData } = await fetchUsageData(account.access_token);
 				if (usageData) {
-					usageCache.set(account.id, usageData);
+					// Anthropic, so no Codex credit balance was observed here.
+					// The other Anthropic writer, the poller's own branch in
+					// usage-fetcher.ts, already stamps this; the two used to
+					// disagree for the identical payload out of the identical
+					// function, and by CODEX_CREDITS_NOT_OBSERVED's own definition
+					// one of them had to be wrong. Unreachable today because
+					// admission gates credits on PROVIDER_NAMES.CODEX, and left
+					// consistent rather than argued about, because
+					// "unreachable" here rests on what api.anthropic.com sends
+					// rather than on anything this code enforces: `fetchUsageData`
+					// casts the whole body to a type that declares `credits?`.
+					// PR #236's second reviewer called this must-fix 1 at a third
+					// address, waiting on an upstream field name.
+					usageCache.set(account.id, usageData, CODEX_CREDITS_NOT_OBSERVED);
 					dbOps
 						.recordUsageSnapshot(account.id, usageData, Date.now())
 						.catch((err) =>

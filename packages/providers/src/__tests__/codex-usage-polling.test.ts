@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { isUsageExhausted } from "@better-ccflare/core";
 import { supportsUsageTracking } from "@better-ccflare/types";
+import {
+	CODEX_CREDITS_MAX_AGE_MS,
+	CODEX_CREDITS_NOT_OBSERVED,
+} from "../providers/codex/credits";
 import { CODEX_USAGE_ENDPOINT } from "../providers/codex/usage-endpoint";
-import { type UsageData, usageCache } from "../usage-fetcher";
+import {
+	getRepresentativeUtilizationForProvider,
+	type UsageData,
+	usageCache,
+} from "../usage-fetcher";
 
 const ACCOUNT_ID = "codex-polling-test-account";
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -84,6 +93,269 @@ describe("usageCache polling for codex", () => {
 		expect(cached?.five_hour?.utilization).toBe(12);
 		expect(cached?.seven_day?.utilization).toBe(43);
 		expect(usageCache.getRateLimitedUntil(ACCOUNT_ID)).toBeNull();
+	});
+
+	it("keeps a credit balance the traffic path wrote across a poll that reports none", async () => {
+		// SB23-2289, and the reason it is tested HERE rather than only against
+		// carryCodexCredits: the helper was fully covered while the poller's CALL
+		// to it was covered by nothing, so `install(accountId, result.data)` —
+		// the pre-change line — passed every test of the helper. Mutation M13
+		// survived until this test existed.
+		//
+		// wham/usage reports windows and says nothing about credits, and install
+		// replaces the entry wholesale, so without the carry the balance is
+		// erased here and the account flips between admitted and benched once
+		// per poll interval.
+		globalThis.fetch = mock(async () =>
+			okResponse(payload()),
+		) as unknown as typeof fetch;
+
+		const credits = { has_credits: true, unlimited: false, balance: "9.99" };
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: { utilization: 5, resets_at: null },
+			seven_day: { utilization: 100, resets_at: null },
+			credits,
+		} as UsageData);
+
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		// The poll's own windows landed, so this is the post-poll entry.
+		expect(cached?.seven_day?.utilization).toBe(43);
+		expect(cached?.credits).toEqual(credits);
+	});
+
+	it("expires a carried balance after the bound, across many polls", async () => {
+		// MUST-FIX 2 from PR #236's review. The single-poll test above passes
+		// with the stamp argument dropped at the install call site, because one
+		// poll never reaches the bound. With it dropped, each install re-dates
+		// the balance to the entry it just wrote and the balance becomes
+		// immortal: the reviewer drove 1000 polls over 16 hours and it survived.
+		//
+		// This drives the REAL cache, so it covers the call site rather than
+		// carryCodexCredits, which was already covered and is not where the
+		// defect was.
+		globalThis.fetch = mock(async () =>
+			okResponse(payload()),
+		) as unknown as typeof fetch;
+
+		const credits = { has_credits: true, unlimited: false, balance: "9.99" };
+		const observedAt = Date.now();
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			observedAt,
+		);
+
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+
+		// Polls while the balance is still inside its bound keep it.
+		await usageCache.refreshNow(ACCOUNT_ID);
+		expect((usageCache.get(ACCOUNT_ID) as UsageData | null)?.credits).toEqual(
+			credits,
+		);
+
+		// Re-stamp the entry as though the observation had happened just over the
+		// bound ago, then poll again. The entry's own timestamp stays fresh —
+		// that is the point: only the credits are old.
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			observedAt - CODEX_CREDITS_MAX_AGE_MS - 1,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached?.seven_day?.utilization).toBe(43);
+		expect(cached && "credits" in cached).toBe(false);
+	});
+
+	it("never serves a balance older than the bound, however fresh the entry", async () => {
+		// MUST-FIX 1's guarantee, at the read path every admission gate uses.
+		// The entry age check in get() cannot do this: it dates the ENTRY, and
+		// any write refreshes that, while the balance inside can be far older.
+		// No poll runs here — this is purely about what the cache will hand out.
+		const credits = { has_credits: true, unlimited: false, balance: "42.50" };
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 0, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			Date.now() - CODEX_CREDITS_MAX_AGE_MS - 1,
+		);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		// The windows are untouched; only the balance is withheld.
+		expect(cached?.seven_day?.utilization).toBe(100);
+		expect(cached && "credits" in cached).toBe(false);
+		// And the account is therefore benched, which is the behaviour that
+		// matters: a stale balance must not admit anything.
+		expect(
+			isUsageExhausted(
+				getRepresentativeUtilizationForProvider(cached, "codex"),
+				null,
+				Date.now(),
+			),
+		).toBe(true);
+	});
+
+	it("serves a balance that is still inside the bound", async () => {
+		// The negative half of the test above. Without it, a get() that stripped
+		// credits unconditionally would pass that one and break the feature.
+		const credits = { has_credits: true, unlimited: false, balance: "42.50" };
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 0, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits,
+			} as UsageData,
+			Date.now() - 60_000,
+		);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached?.credits).toEqual(credits);
+		expect(
+			isUsageExhausted(
+				getRepresentativeUtilizationForProvider(cached, "codex"),
+				null,
+				Date.now(),
+			),
+		).toBe(false);
+	});
+
+	it("does not touch an xAI payload, whose only field is named credits", async () => {
+		// MUST-FIX 1 of PR #236's second review, and the sharpest lesson in the
+		// whole change. The strip in get() used to fire on the FIELD NAME, and
+		// XaiUsageData is `{ credits: XaiUsageWindow }` — `credits` is its only
+		// field. An xAI entry, stamped NOT_OBSERVED because no Codex balance was
+		// ever dated into it, therefore came back as `{}`, breaking xAI ranking,
+		// throttling, the health counter and the dashboard card.
+		//
+		// Same collision as #219 from the other direction: there a key-presence
+		// check made every Codex card render "Grok credits". The field name is
+		// shared between two providers; only the stamp says whose balance it is.
+		// See mem:detect-the-provider-not-the-key.
+		const xai = {
+			credits: { utilization: 42, resets_at: "2030-01-01T00:00:00.000Z" },
+		} as unknown as UsageData;
+		usageCache.set(ACCOUNT_ID, xai, CODEX_CREDITS_NOT_OBSERVED);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+
+		expect(cached).toEqual(xai);
+		// The assertion that actually bites: the payload must still carry its
+		// one field. `toEqual` against `{}` would pass a lot of broken shapes.
+		expect(
+			(cached as unknown as { credits?: { utilization?: number } } | null)
+				?.credits?.utilization,
+		).toBe(42);
+	});
+
+	it("expires a carried balance on the credits' own clock across real polls", async () => {
+		// MUST-FIX 2 of the second review: the test named for the first review's
+		// must-fix 2 did NOT cover the call site it named. Mutating the stamp
+		// argument to `Date.now()` left all of this file green, because in that
+		// test the carry had already refused and so the stamp never mattered.
+		//
+		// To reach it the carry must SUCCEED on one poll and then be refused on
+		// a later one, which needs the clock to cross the bound between two real
+		// polls. Hence the seam: Date.now is controlled here rather than the
+		// bound being made injectable, so the code under test is the shipped
+		// code.
+		const realNow = Date.now;
+		try {
+			let clock = realNow.call(Date);
+			Date.now = () => clock;
+
+			globalThis.fetch = mock(async () =>
+				okResponse(payload()),
+			) as unknown as typeof fetch;
+
+			const credits = { has_credits: true, unlimited: false, balance: "9.99" };
+			usageCache.set(
+				ACCOUNT_ID,
+				{
+					five_hour: { utilization: 5, resets_at: null },
+					seven_day: { utilization: 100, resets_at: null },
+					credits,
+				} as UsageData,
+				clock,
+			);
+
+			usageCache.startPolling(
+				ACCOUNT_ID,
+				async () => TOKEN,
+				"codex",
+				ONE_HOUR_MS,
+			);
+
+			// Poll inside the bound: the balance is carried and, crucially, keeps
+			// its ORIGINAL stamp rather than being re-dated to this poll.
+			clock += 6 * 60 * 1000;
+			await usageCache.refreshNow(ACCOUNT_ID);
+			expect((usageCache.get(ACCOUNT_ID) as UsageData | null)?.credits).toEqual(
+				credits,
+			);
+
+			// Second poll, 12 minutes after the balance was observed but only 6
+			// after the previous poll. With the stamp preserved this is past the
+			// bound and the balance dies. Re-dating it at each poll would keep it
+			// alive here, and forever after.
+			clock += 6 * 60 * 1000;
+			await usageCache.refreshNow(ACCOUNT_ID);
+
+			const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+			expect(cached?.seven_day?.utilization).toBe(43);
+			expect(cached && "credits" in cached).toBe(false);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	it("does not invent credits when none were ever observed", async () => {
+		// The negative half. A carry that fired unconditionally would be
+		// indistinguishable from the one above on that test alone.
+		globalThis.fetch = mock(async () =>
+			okResponse(payload()),
+		) as unknown as typeof fetch;
+
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: { utilization: 5, resets_at: null },
+			seven_day: { utilization: 100, resets_at: null },
+		} as UsageData);
+
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached && "credits" in cached).toBe(false);
 	});
 
 	it("caches a weekly-only payload without a five_hour key", async () => {

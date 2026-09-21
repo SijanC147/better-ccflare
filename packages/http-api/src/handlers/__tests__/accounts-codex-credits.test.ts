@@ -237,6 +237,70 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
 		expect(usage?.seven_day.utilization).toBe(100);
 	});
 
+	it("does not let a STALE stored balance reach the routing cache", async () => {
+		// MUST-FIX 1 from PR #236's review. These rows are stored request
+		// payloads of arbitrary age and there is no age filter on them, so this
+		// path can reparse a balance from days ago. Before the fix it was
+		// installed into `usageCache` undated, which reads as "observed just
+		// now", and since SB23-2289 a fresh positive balance ADMITS an account
+		// whose weekly window is spent. The trigger is a plain dashboard poll of
+		// GET /api/accounts after any restart, so it needed nobody to do
+		// anything unusual, and it repeats every time the entry expires.
+		//
+		// `normalizeCodexUsageData` drops a WINDOW whose resets_at has passed;
+		// credits carry no resets_at, so nothing else here ages them.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const longAgo = Date.now() - 24 * 60 * 60 * 1000;
+		await adapter.run(
+			`INSERT INTO requests (id, timestamp, method, path, account_used, model, success)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				"req-stale-credits",
+				longAgo,
+				"POST",
+				"/v1/messages",
+				ACCOUNT_ID,
+				"gpt-5.5",
+				1,
+			],
+		);
+		await adapter.run(
+			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
+			[
+				"req-stale-credits",
+				JSON.stringify({
+					meta: { timestamp: longAgo },
+					response: {
+						status: 200,
+						headers: {
+							"x-codex-primary-window-minutes": "300",
+							"x-codex-primary-used-percent": "0",
+							"x-codex-primary-reset-at": String(nowSeconds + 3600),
+							"x-codex-secondary-window-minutes": "10080",
+							"x-codex-secondary-used-percent": "100",
+							"x-codex-secondary-reset-at": String(nowSeconds + 129_600),
+							"x-codex-credits-has-credits": "true",
+							"x-codex-credits-unlimited": "false",
+							"x-codex-credits-balance": "42.50",
+						},
+					},
+				}),
+				longAgo,
+			],
+		);
+
+		await readUsage();
+
+		// The cache is what account selection reads. A day-old balance must not
+		// be in it, however fresh the entry that carries it.
+		const routed = usageCache.get(ACCOUNT_ID) as UsageWithCredits | null;
+		expect(routed).not.toBeNull();
+		expect(routed && "credits" in routed).toBe(false);
+		// The windows themselves are untouched: this withholds a stale balance,
+		// it does not discard the usage reading beside it.
+		expect(routed?.seven_day.utilization).toBe(100);
+	});
+
 	it("omits the credits key on the persisted path when no credit header was stored", async () => {
 		const nowSeconds = Math.floor(Date.now() / 1000);
 		await adapter.run(

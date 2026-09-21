@@ -3,7 +3,7 @@ import {
 	CLAUDE_CLI_VERSION,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
-import { supportsUsageTracking } from "@better-ccflare/types";
+import { PROVIDER_NAMES, supportsUsageTracking } from "@better-ccflare/types";
 import {
 	type AlibabaCodingPlanUsageData,
 	fetchAlibabaCodingPlanUsageData,
@@ -29,6 +29,13 @@ import {
 	type NanoGPTUsageData,
 } from "./nanogpt-usage-fetcher";
 import { extractChatgptAccountId } from "./providers/codex/account-id";
+import {
+	CODEX_CREDITS_NOT_OBSERVED,
+	carryCodexCredits,
+	codexCreditsAreFresh,
+	codexCreditsCoverExhaustedWeekly,
+	stripCodexCredits,
+} from "./providers/codex/credits";
 import { fetchCodexUsageData } from "./providers/codex/usage-endpoint";
 import {
 	codexWindowRolledOver,
@@ -413,6 +420,7 @@ export function getRepresentativeUtilization(
 function representativeWindow(
 	usage: UsageData | null,
 	includeExtraUsage: boolean,
+	excludeCreditCoveredWeekly = false,
 ): string | null {
 	if (!usage) return null;
 
@@ -421,6 +429,15 @@ function representativeWindow(
 	// Iterate through all properties to find UsageWindow objects
 	for (const [key, value] of Object.entries(usage)) {
 		if (key === "extra_usage" && !includeExtraUsage) continue;
+		// Must drop exactly what utilizationForProvider dropped. If the weekly
+		// window is out of the admission fold but still in here, the winner
+		// becomes five_hour while the reset comes from seven_day, and the
+		// staleness guard in isUsageExhausted is then reading a recovery time
+		// that belongs to a window nobody gated on. That divergence is the
+		// failure this file's other docstrings already warn about for
+		// extra_usage; the caller passes one boolean to both so it cannot happen.
+		if (excludeCreditCoveredWeekly && key === CODEX_CREDIT_COVERED_WINDOW)
+			continue;
 		// Check if this is a UsageWindow object
 		if (
 			value &&
@@ -443,6 +460,8 @@ function representativeWindow(
 	}
 
 	for (const { window, util } of accountLevelLimitWindows(usage)) {
+		if (excludeCreditCoveredWeekly && window === CODEX_CREDIT_COVERED_WINDOW)
+			continue;
 		windows.push({ name: window, util });
 	}
 
@@ -499,10 +518,50 @@ function getWinningZaiTokenWindow(usage: ZaiUsageData): ZaiUsageWindow | null {
 	return pickWinningZaiWindow([usage.tokens_limit, usage.tokens_limit_weekly]);
 }
 
+/**
+ * The one window a positive Codex credit balance covers.
+ *
+ * Sean's ruling of 2026-09-21 on SB23-2289 names the weekly window and only
+ * the weekly window. `five_hour` is deliberately left alone: an account whose
+ * five-hour window is spent stays benched whatever its balance says, which is
+ * the behaviour that shipped before this and which recovers on its own inside
+ * five hours. Widening this to every window would be deciding something that
+ * was not ruled on, in the direction that routes traffic at an account
+ * upstream may refuse.
+ */
+const CODEX_CREDIT_COVERED_WINDOW = "seven_day";
+
+/**
+ * Whether this payload's weekly window should be left out of the admission
+ * fold because the account holds credits to keep serving on.
+ *
+ * The provider gate is an equality test against `PROVIDER_NAMES.CODEX`, never
+ * `"credits" in data`. `#219` was an Urgent bug from exactly that shape: a
+ * key-presence guard collided the moment a shared field appeared and every
+ * Codex card rendered "Grok credits" and `undefined%`. See
+ * `mem:detect-the-provider-not-the-key`.
+ *
+ * Computed once by each exported wrapper and handed to BOTH
+ * {@link utilizationForProvider} and {@link representativeWindow}, rather than
+ * recomputed inside each. That is what keeps the utilization and the reset in
+ * lockstep by construction: they cannot disagree about which windows are in
+ * play, because they are given the same answer rather than asked the same
+ * question twice.
+ */
+function codexCreditsExcludeWeekly(
+	data: AnyUsageData | null | undefined,
+	provider: string,
+): boolean {
+	if (provider !== PROVIDER_NAMES.CODEX) return false;
+	if (!data || typeof data !== "object") return false;
+	return codexCreditsCoverExhaustedWeekly((data as UsageData).credits);
+}
+
 function utilizationForProvider(
 	data: AnyUsageData | null | undefined,
 	provider: string,
 	includeExtraUsage: boolean,
+	excludeCreditCoveredWeekly: boolean,
 ): number | null {
 	// Same defensive guard as getRepresentativeUsageResetMs — callers that
 	// derive a display label may hold a null payload for providers that expose
@@ -521,6 +580,8 @@ function utilizationForProvider(
 				"seven_day",
 				"seven_day_oauth_apps",
 			] as const) {
+				if (excludeCreditCoveredWeekly && key === CODEX_CREDIT_COVERED_WINDOW)
+					continue;
 				const w = d[key] as UsageWindow | undefined;
 				if (w?.utilization != null) utils.push(w.utilization);
 			}
@@ -529,7 +590,18 @@ function utilizationForProvider(
 			if (includeExtraUsage && d.extra_usage?.utilization != null)
 				utils.push(d.extra_usage.utilization);
 			// Account-level limits[] caps (session / weekly_all) for limits-only payloads.
-			for (const { util } of accountLevelLimitWindows(d)) utils.push(util);
+			// The weekly exclusion has to reach these too: accountLevelLimitWindows
+			// folds a `weekly_all` limit into the same synthetic `seven_day` name, so
+			// skipping only the flat property would let the identical 100 back in
+			// through the limits[] door on a payload that happens to use that shape.
+			for (const { window, util } of accountLevelLimitWindows(d)) {
+				if (
+					excludeCreditCoveredWeekly &&
+					window === CODEX_CREDIT_COVERED_WINDOW
+				)
+					continue;
+				utils.push(util);
+			}
 			return utils.length > 0 ? Math.max(...utils) : null;
 		}
 		case "nanogpt": {
@@ -591,7 +663,12 @@ export function getRepresentativeUtilizationForProvider(
 	data: AnyUsageData | null | undefined,
 	provider: string,
 ): number | null {
-	return utilizationForProvider(data, provider, false);
+	return utilizationForProvider(
+		data,
+		provider,
+		false,
+		codexCreditsExcludeWeekly(data, provider),
+	);
 }
 
 /**
@@ -600,12 +677,20 @@ export function getRepresentativeUtilizationForProvider(
  * except that `extra_usage` counts: an account whose overage pool is spent has
  * genuinely less headroom than one with credits left, so it should sort later.
  * Ordering only — this value must never gate admission.
+ *
+ * A Codex credit balance is deliberately NOT folded in here either, and for
+ * the mirror-image reason. SB23-2289 ruled on admission alone and pointed at
+ * `extra_usage` as the precedent to follow, so the spent weekly window stays
+ * in this number: an account serving off paid credits has genuinely less
+ * headroom than one still inside its plan quota, and should be the later pick
+ * among equals. Admission says "still usable", ranking says "use it last", and
+ * those are different questions with different right answers.
  */
 export function getRankingUtilizationForProvider(
 	data: AnyUsageData | null | undefined,
 	provider: string,
 ): number | null {
-	return utilizationForProvider(data, provider, true);
+	return utilizationForProvider(data, provider, true, false);
 }
 
 /**
@@ -687,7 +772,14 @@ export function getRepresentativeUsageResetMs(
 				// set with a reset drawn from a set that includes extra_usage
 				// would report the wrong window's recovery time (and extra_usage
 				// has no resets_at at all, so it would report none).
-				const windowName = representativeWindow(data as UsageData, false);
+				// The same boolean the utilization fold was given, so the window
+				// this reset is read from is one of the windows that fold could
+				// have won on (SB23-2289).
+				const windowName = representativeWindow(
+					data as UsageData,
+					false,
+					codexCreditsExcludeWeekly(data, provider),
+				);
 				// Flat legacy shape: the window name is an actual property
 				// (five_hour/seven_day/...) carrying its own resets_at.
 				const flatReset = extractUsageResetMs(data, windowName);
@@ -915,7 +1007,44 @@ export type AccessTokenProvider = () => Promise<string>;
  * In-memory cache for usage data per account
  */
 class UsageCache {
-	private cache = new Map<string, { data: AnyUsageData; timestamp: number }>();
+	/**
+	 * How long a cache ENTRY may be served before it is discarded as stale.
+	 *
+	 * Named because `CODEX_CREDITS_MAX_AGE_MS` is silently coupled to it, and
+	 * the coupling is what makes a writer that takes `set`'s default stamp safe:
+	 * with `creditsObservedAt` equal to the entry's own `timestamp`, credits age
+	 * equals entry age, so this check discards the entry at the same moment the
+	 * credits bound would have fired, and the strip is unreachable for that
+	 * writer.
+	 *
+	 * **The invariant is `CODEX_CREDITS_MAX_AGE_MS >= ENTRY_MAX_AGE_MS`.** Today
+	 * they are equal, by coincidence rather than by construction. PR #236's
+	 * second reviewer measured what breaking it costs: set the credits bound to
+	 * five minutes, change nothing else, and a default-stamped payload read six
+	 * minutes later comes back with its credits withheld though nothing was ever
+	 * stale. Lower the credits bound and this must come down too.
+	 */
+	private static readonly ENTRY_MAX_AGE_MS = 10 * 60 * 1000;
+
+	private cache = new Map<
+		string,
+		{
+			data: AnyUsageData;
+			timestamp: number;
+			/**
+			 * When this entry's `credits` were read off a live response.
+			 *
+			 * Required, so that no writer can install a balance without dating it.
+			 * It was optional in the first cut of this change and PR #236's
+			 * reviewer found both defects that followed: an absent stamp read as
+			 * "as old as the entry", and the entry timestamp is refreshed by the
+			 * very write being dated, so omitting it claimed the balance was brand
+			 * new. `null` means no Codex balance was dated into this entry,
+			 * which is what the read path keys on rather than on a field name.
+			 */
+			creditsObservedAt: number | null;
+		}
+	>();
 	/**
 	 * Per-account write counter, bumped by {@link install} and by every teardown
 	 * ({@link invalidateInFlight}). A poll captures it before its request goes on
@@ -1263,7 +1392,11 @@ class UsageCache {
 						getRepresentativeNanoGPTWindow,
 					} = await import("./nanogpt-usage-fetcher");
 
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeNanoGPTUtilization(
 						data as NanoGPTUsageData,
 					);
@@ -1290,7 +1423,11 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "zai", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeZaiUtilization(
 						data as ZaiUsageData,
 					);
@@ -1306,7 +1443,11 @@ class UsageCache {
 				// Fetch Kilo usage data
 				data = await fetchKiloUsageData(token);
 				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeKiloUtilization(
 						data as KiloUsageData,
 					);
@@ -1320,7 +1461,11 @@ class UsageCache {
 				// Fetch Alibaba Coding Plan usage data
 				data = await fetchAlibabaCodingPlanUsageData(token);
 				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeAlibabaCodingPlanUtilization(
 						data as AlibabaCodingPlanUsageData,
 					);
@@ -1339,7 +1484,11 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "xai", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeXaiUtilization(
 						data as XaiUsageData,
 					);
@@ -1358,7 +1507,11 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "minimax", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
 					const utilization = getRepresentativeMinimaxUtilization(
 						data as MinimaxUsageData,
 					);
@@ -1417,7 +1570,55 @@ class UsageCache {
 						Date.now(),
 						slot,
 					);
-					this.install(accountId, result.data);
+					// `wham/usage` reports the windows and, unless its response
+					// carried the credit headers, nothing about credits — and
+					// `install` replaces the entry wholesale, so a balance the
+					// traffic path wrote would be erased here and the account
+					// would flip between admitted and benched once per poll
+					// (SB23-2289). Keep the previous balance while it is fresh
+					// enough, bounded on the credits' OWN age rather than on the
+					// entry's, which this stamp is what makes possible.
+					// The RAW map, deliberately, not `this.get(accountId)`.
+					//
+					// `get` withholds a balance past the bound, so reading through
+					// it here would hand the carry an already-stripped entry. The
+					// two agree on the outcome — a stale balance is refused either
+					// way, since `carryCodexCredits` applies the same bound itself
+					// — but they are different questions. `get` answers "what may
+					// admission act on"; this answers "what did the previous entry
+					// hold, and when was it observed", which needs the stamp beside
+					// the value and so needs the entry rather than the payload.
+					//
+					// That agreement rests on an invariant worth stating, because
+					// nothing enforces it and a new writer could break it without
+					// touching either side: `creditsObservedAt` is NEVER LATER THAN
+					// `timestamp`. Every writer establishes it, since the stamp is
+					// either this write's own `Date.now()`, an earlier entry's
+					// stamp, a past database timestamp, or null. So credits are
+					// always at least as old as the entry that holds them, which
+					// forecloses the one disagreement that would matter: a balance
+					// the carry keeps and `get` would refuse. The three reachable
+					// states all agree: entry stale (get deletes, carry drops),
+					// both fresh (get serves, carry keeps), entry fresh with stale
+					// credits (get strips, carry drops), and that last state is
+					// reachable only because the poller carries a stamp across
+					// writes. Identified by PR #236's second reviewer.
+					//
+					// Flagged by PR #236's reviewer as the kind of split a later
+					// reader collapses by tidying one into the other. Do not: the
+					// carry would then have no way to distinguish a balance that
+					// was never there from one `get` had just withheld, and
+					// `creditsObservedAt` would be unreachable from it.
+					const carried = carryCodexCredits(
+						result.data,
+						this.cache.get(accountId),
+						Date.now(),
+					);
+					this.install(
+						accountId,
+						carried.data,
+						carried.creditsObservedAt ?? CODEX_CREDITS_NOT_OBSERVED,
+					);
 					if (rolledOver) {
 						const callback = this.windowResetCallbacks.get(accountId);
 						if (callback) {
@@ -1467,6 +1668,7 @@ class UsageCache {
 					this.cache.set(accountId, {
 						data: result.data,
 						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
 					});
 					const snapshotCb = this.snapshotCallbacks.get(accountId);
 					if (snapshotCb) snapshotCb(accountId, result.data as UsageData);
@@ -1542,7 +1744,7 @@ class UsageCache {
 	/**
 	 * Clean up stale cache entries older than maxAgeMs
 	 */
-	cleanupStaleEntries(maxAgeMs: number = 10 * 60 * 1000): void {
+	cleanupStaleEntries(maxAgeMs: number = UsageCache.ENTRY_MAX_AGE_MS): void {
 		const now = Date.now();
 		let cleanedCount = 0;
 
@@ -1567,13 +1769,35 @@ class UsageCache {
 
 		// Clean up stale entries while accessing
 		const age = Date.now() - cached.timestamp;
-		if (age > 10 * 60 * 1000) {
+		if (age > UsageCache.ENTRY_MAX_AGE_MS) {
 			// 10 minutes max age
 			this.cache.delete(accountId);
 			log.debug(
 				`Removed stale cache entry for account ${accountId} (age: ${Math.round(age / 1000)}s)`,
 			);
 			return null;
+		}
+
+		// A balance too old to act on never leaves this cache, whoever wrote it
+		// and whatever refreshed the entry around it (PR #236 review, must-fix 1).
+		//
+		// The check above cannot do this job. It dates the ENTRY, and every write
+		// refreshes that, while `creditsObservedAt` dates the balance inside it —
+		// which the poller deliberately carries across writes. So an entry can be
+		// two seconds old and hold a balance from yesterday, and the persisted-
+		// payload recovery in handlers/accounts.ts builds exactly that out of
+		// stored request headers of arbitrary age.
+		//
+		// It lives on the read path rather than on each writer because the
+		// guarantee wanted is about what admission can SEE. A writer-side check
+		// is one a future writer can forget; this one every reader gets,
+		// including ones not written yet, and it allocates only in the rare case
+		// where a stale balance is actually present.
+		if (
+			cached.creditsObservedAt !== null &&
+			!codexCreditsAreFresh(cached.creditsObservedAt, Date.now())
+		) {
+			return stripCodexCredits(cached.data);
 		}
 
 		return cached.data;
@@ -1584,8 +1808,16 @@ class UsageCache {
 	 * write must go through here so an in-flight poll can tell that it lost a
 	 * race — see {@link generations}.
 	 */
-	private install(accountId: string, data: AnyUsageData): void {
-		this.cache.set(accountId, { data, timestamp: Date.now() });
+	private install(
+		accountId: string,
+		data: AnyUsageData,
+		creditsObservedAt: number | null,
+	): void {
+		this.cache.set(accountId, {
+			data,
+			timestamp: Date.now(),
+			creditsObservedAt,
+		});
 		this.invalidateInFlight(accountId);
 	}
 
@@ -1604,8 +1836,30 @@ class UsageCache {
 	/**
 	 * Set cached usage data for an account
 	 */
-	set(accountId: string, data: AnyUsageData): void {
-		this.install(accountId, data);
+	set(
+		accountId: string,
+		data: AnyUsageData,
+		/**
+		 * When the `credits` on this payload were observed. Defaults to now,
+		 * which is right for the traffic path, where the balance is read off the
+		 * very response being installed. A caller replaying a STORED payload must
+		 * pass that payload's own timestamp instead: dating a day-old balance as
+		 * though it had just arrived is what admitted an exhausted account in PR
+		 * #236's review.
+		 *
+		 * **Passing a PAST stamp is the only way to make `get` withhold a field,
+		 * so weigh it for any provider whose payload has a `credits` key.** The
+		 * default and an explicit `null` are both safe by construction: credits
+		 * then age no faster than the entry, which is discarded first. A replay
+		 * of a stored payload is not, and `handlers/accounts.ts` is a worked
+		 * example of that pattern, which is the obvious thing to copy for, say,
+		 * an xAI card that survives a restart. Copying it without reading this
+		 * would put back the defect PR #236's second reviewer found, at a new
+		 * address.
+		 */
+		creditsObservedAt: number | null = Date.now(),
+	): void {
+		this.install(accountId, data, creditsObservedAt);
 
 		// Periodic cleanup of stale entries to prevent memory bloat
 		// Run cleanup every 100 sets to balance performance and memory
@@ -1670,7 +1924,7 @@ class UsageCache {
 
 		const age = Date.now() - cached.timestamp;
 		// Clean up if too old
-		if (age > 10 * 60 * 1000) {
+		if (age > UsageCache.ENTRY_MAX_AGE_MS) {
 			// 10 minutes max age
 			this.cache.delete(accountId);
 			return null;

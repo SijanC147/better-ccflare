@@ -21,6 +21,10 @@ export {
 	PresetProviders,
 } from "./providers/anthropic-compatible/factory";
 // Export providers
+export {
+	CODEX_CREDITS_MAX_AGE_MS,
+	CODEX_CREDITS_NOT_OBSERVED,
+} from "./providers/codex/credits";
 export * from "./providers/index";
 // Export registry functions
 export {
