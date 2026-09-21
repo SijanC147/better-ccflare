@@ -1,3 +1,4 @@
+import { describe, expect, it } from "bun:test";
 import {
 	effortForThinkingBudget,
 	META_MAX_OUTPUT_TOKENS,
