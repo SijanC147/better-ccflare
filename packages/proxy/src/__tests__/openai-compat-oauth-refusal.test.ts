@@ -165,14 +165,16 @@ function makeContext(
 
 const CHAT_URL = "https://proxy.local/v1/chat/completions";
 
-function makeChatRequest(url = CHAT_URL): Request {
+function makeChatRequest(url = CHAT_URL, body?: unknown): Request {
 	return new Request(url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			model: "claude-opus-5",
-			messages: [{ role: "user", content: "hello" }],
-		}),
+		body: JSON.stringify(
+			body ?? {
+				model: "claude-opus-5",
+				messages: [{ role: "user", content: "hello" }],
+			},
+		),
 	});
 }
 
@@ -201,8 +203,10 @@ const REFUSAL_CODE = "oauth_account_unsupported_endpoint";
 type Outcome =
 	/** JSON body carrying `error.code` — the value is that code. */
 	| string
-	/** A response whose body did not parse as JSON, tagged with its status. */
+	/** The body did not parse as JSON at all, tagged with its status. */
 	| `non-json:${number}`
+	/** The body parsed as JSON but carried no `error.code`, tagged with its status. */
+	| `json-no-code:${number}`
 	/** Threw at the end of the attempt loop: execution got all the way past the guard. */
 	| "reached-loop"
 	/** Threw somewhere else — including before the guard could run. */
@@ -219,7 +223,12 @@ async function readOutcome(response: Response): Promise<Outcome> {
 		return `non-json:${response.status}`;
 	}
 	const code = (body as { error?: { code?: unknown } })?.error?.code;
-	return typeof code === "string" ? code : `non-json:${response.status}`;
+	// `json-no-code:`, NOT `non-json:`. An earlier version returned the same tag
+	// for both, three lines under a comment promising they were kept distinct,
+	// and the type's own doc then described only half of that tag's producers.
+	// Most JSON 400s this proxy emits carry no `error.code`, so the two cases
+	// are not rare siblings — they are the common case and the odd one.
+	return typeof code === "string" ? code : `json-no-code:${response.status}`;
 }
 
 /**
@@ -246,7 +255,8 @@ async function readOutcome(response: Response): Promise<Outcome> {
 async function guardOutcome(
 	url: string,
 	accounts: Account[],
-): Promise<string | null> {
+	body?: unknown,
+): Promise<Outcome> {
 	const ctx = makeContext(accounts, {
 		buildUrl: () => {
 			throw new Error("hermetic stub: upstream is never contacted");
@@ -255,7 +265,7 @@ async function guardOutcome(
 
 	try {
 		return await readOutcome(
-			await handleProxy(makeChatRequest(url), new URL(url), ctx),
+			await handleProxy(makeChatRequest(url, body), new URL(url), ctx),
 		);
 	} catch (err) {
 		// WHICH throw matters. `All accounts failed` is raised only at the end of
@@ -343,20 +353,44 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		stubUsageCollector();
 
 		const messagesUrl = "https://proxy.local/v1/messages";
-		const outcome = await guardOutcome(messagesUrl, sevenOAuthAccounts());
+		const outcome = await guardOutcome(
+			messagesUrl,
+			sevenOAuthAccounts(),
+			// A VALID Anthropic body. This is load-bearing and is the second
+			// platform bug in this one test: sending the OpenAI-shaped body here
+			// made the outcome depend on `/v1/messages` validation, which rejected
+			// it on macOS (an HTML 400) and did not on Linux (straight into the
+			// attempt loop). CI read `reached-loop` against a macOS
+			// `non-json:400`. The body was never the point of this test, so the
+			// fix is to stop the test depending on how it is judged rather than to
+			// accept both answers — accepting both is the collapse this file has
+			// already been bitten by twice.
+			{
+				model: "claude-opus-5",
+				max_tokens: 16,
+				messages: [{ role: "user", content: "hello" }],
+			},
+		);
 
-		// A POSITIVE assertion, not `not.toBe(REFUSAL_CODE)`. The negation was
-		// satisfied by three different outcomes — including "the guard was
-		// unreachable" — so it passed against a proxy that could never have run
-		// the guard at all.
+		// A CLOSED SET of two named values, not a negation and not one value.
 		//
-		// `non-json:400` is what this request really produces: the body is
-		// OpenAI-shaped with no `max_tokens`, so `/v1/messages` validation
-		// rejects it with an HTML 400. Pinning that exact outcome means a throw
-		// planted anywhere ahead of the guard yields `threw-early:…` and fails
-		// here, and a guard that wrongly fires yields the refusal code and also
-		// fails here.
-		expect(outcome).toBe("non-json:400");
+		// Both members mean the same thing — execution got past step 2 and the
+		// guard declined — and they differ only by platform. `/v1/messages`
+		// under this harness answers an HTML 400 on macOS and runs on into the
+		// attempt loop on Linux. CI caught that after an earlier version of this
+		// line pinned the macOS value; the Linux answer is `reached-loop`.
+		// Supplying a valid Anthropic body does NOT remove the split, so the
+		// cause is not body validation. It is filed as SB23-2576, and **when
+		// that issue is fixed this set should shrink to one member** — if it
+		// does not, the shapes have drifted again.
+		//
+		// This is an allowlist rather than `not.toBe(REFUSAL_CODE)` on purpose.
+		// The negation was satisfied by any outcome at all, including "the guard
+		// was unreachable", which is how it passed against a proxy that could
+		// never have run the guard. Here a throw planted ahead of the guard
+		// yields `threw-early:…`, which is not in the set and fails; a guard
+		// that wrongly fires yields the refusal code, also not in the set.
+		expect(["reached-loop", "non-json:400"]).toContain(outcome);
 	});
 
 	it("does not refuse when an API-key Anthropic account is in the pool", async () => {
@@ -421,6 +455,52 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 			ctx,
 		);
 		expect(await readOutcome(response)).toBe(REFUSAL_CODE);
+	});
+});
+
+describe("SB23-2570 — readOutcome itself, the instrument these tests read", () => {
+	// Without these, the `json-no-code:` / `non-json:` split is untested: a
+	// mutation collapsing them back onto one tag survives the whole file,
+	// because no control above ever receives a JSON body without an
+	// `error.code`. An instrument nothing checks is the thing that made the
+	// earlier version of this file vacuous, so it gets its own cases.
+
+	it("distinguishes a body that did not parse from one that parsed without a code", async () => {
+		const html = new Response("<html>", {
+			status: 400,
+			headers: { "Content-Type": "text/html" },
+		});
+		expect(await readOutcome(html)).toBe("non-json:400");
+
+		// The common case: nearly every JSON error this proxy emits carries
+		// `error.type` and `error.message` but no `error.code`. It must NOT read
+		// as "the body was not JSON".
+		const jsonNoCode = new Response(
+			JSON.stringify({
+				type: "error",
+				error: { type: "service_unavailable_error", message: "nope" },
+			}),
+			{ status: 503, headers: { "Content-Type": "application/json" } },
+		);
+		expect(await readOutcome(jsonNoCode)).toBe("json-no-code:503");
+	});
+
+	it("returns the code itself when one is present", async () => {
+		const refusal = new Response(
+			JSON.stringify({ error: { code: REFUSAL_CODE } }),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+		expect(await readOutcome(refusal)).toBe(REFUSAL_CODE);
+	});
+
+	it("does not treat a non-string code as a code", async () => {
+		// `error.code: 400` would otherwise stringify into the same slot as a
+		// real code and could collide with a refusal value.
+		const numericCode = new Response(JSON.stringify({ error: { code: 400 } }), {
+			status: 418,
+			headers: { "Content-Type": "application/json" },
+		});
+		expect(await readOutcome(numericCode)).toBe("json-no-code:418");
 	});
 });
 
