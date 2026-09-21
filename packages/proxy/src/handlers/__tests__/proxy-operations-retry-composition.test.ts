@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { RETRY_DEFAULTS } from "@better-ccflare/core";
+import { RETRY_DEFAULTS, type RetrySettings } from "@better-ccflare/core";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
 import { proxyWithAccount } from "../proxy-operations";
@@ -274,7 +274,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 	beforeEach(() => {
 		originalFetch = fetchSlot.fetch;
 		// Zero the backoff so this is an attempt-count test and not a timing
-		// test. These two override the delay only; the ATTEMPT count is left to
+		// test. These two override the DELAY only; the attempt count is left to
 		// ctx.runtime.retry so the number measured is a default install's.
 		process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS = "0";
 		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "0";
@@ -296,19 +296,19 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		resetRateLimitProbeGatesForTests();
 	});
 
-	it("529 then 5xx on one Anthropic request: two loops compose", async () => {
+	it("529 then 5xx on one Anthropic request costs 9 fetches, not 15", async () => {
+		// Before the shared budget this cost 15 fetches and 5 upstream
+		// responses: the 529 loop spent two re-issues, then the 5xx loop
+		// entered with a full fresh budget and spent two more, and each
+		// re-issue was itself up to three fetches through the transport retry.
 		const script: ScriptStep[] = [
 			// The original attempt.
 			...withTransportRetries(() => jsonResponse(529, overloadedBody)),
-			// 529 loop, retry 1 of 2: still 529, so the loop continues.
+			// 529 loop, re-issue 1 of the request's 2: still 529.
 			...withTransportRetries(() => jsonResponse(529, overloadedBody)),
-			// 529 loop, retry 2 of 2: a 500 breaks the 529 loop on
-			// `status !== 529` and hands a transient 5xx to the next block,
-			// which enters with a full fresh budget.
-			...withTransportRetries(() => jsonResponse(500, serverErrorBody)),
-			// 5xx loop, retry 1 of 2.
-			...withTransportRetries(() => jsonResponse(500, serverErrorBody)),
-			// 5xx loop, retry 2 of 2: budget exhausted, bench and fail over.
+			// 529 loop, re-issue 2 of the request's 2: a 500 breaks the 529
+			// loop on `status !== 529` and hands a transient 5xx to the next
+			// block, which now finds the budget spent and re-issues nothing.
 			...withTransportRetries(() => jsonResponse(500, serverErrorBody)),
 		];
 		const counters = installScriptedFetch(script);
@@ -317,40 +317,39 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		const account = makeAccount();
 		const { result, forwarded } = await runProxy(account, ctx);
 
-		// Five upstream answers, fifteen upstream fetches, for one client
-		// request, on one account, at the documented defaults. Asserted FIRST:
-		// a mutation that changes the composed budget changes these two before
-		// it changes anything about the outcome, and an outcome assertion that
-		// fails first would mask which number moved.
-		expect(counters.fetches()).toBe(15);
-		expect(counters.responses()).toBe(5);
+		// Asserted before the outcome: a mutation that changes the composed
+		// budget changes these two first, and an outcome assertion placed
+		// first would fail before the count the mutation was aimed at.
+		expect(counters.fetches()).toBe(9);
+		expect(counters.responses()).toBe(3);
 
-		// The outcome that proves both loops ran to exhaustion rather than the
-		// request ending some other way at the same count.
+		// The 2026-09-13 incident the 5xx block was written for is preserved.
+		// The bench sits OUTSIDE that block's retry loop, so a spent budget
+		// skips the in-place 500 re-issue and nothing else: the account is
+		// still benched and the request still fails over rather than handing
+		// the client a 500 with failover_attempts=0.
+		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
+		expect(account.rate_limited_until).not.toBeNull();
 		expect(forwarded).toBe(false);
 		expect(result).toBeNull();
-		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
 	});
 
-	it("1305 then 529 then 5xx on one zai request: all three loops compose", async () => {
+	it("1305 then 529 on one zai request costs 5 fetches, not 17", async () => {
+		// Before the shared budget the full chain cost 17 fetches and 7
+		// upstream responses, walking all three loops. Now the 1305 loop
+		// spends the request's whole budget, so the 529 that its last retry
+		// returns is benched and failed over rather than re-issued twice more.
 		const script: ScriptStep[] = [
 			// The original attempt: a 200 whose SSE body carries 1305.
 			...withTransportRetries(zai1305Response),
-			// 1305 loop, retry 1 of 2. It reissues through makeProxyRequest
-			// directly, so there is no transport retry here and a single fetch
-			// is the whole retry. Still 1305, so the loop continues.
+			// 1305 loop, re-issue 1 of the request's 2. It reissues through
+			// makeProxyRequest directly, so there is no transport retry here
+			// and one fetch is the whole re-issue. Still 1305.
 			zai1305Response,
-			// 1305 loop, retry 2 of 2: a 529 carries no 1305, so checkZai1305
-			// returns it unchanged and the 529 block downstream receives it.
+			// 1305 loop, re-issue 2 of the request's 2: a 529 carries no 1305,
+			// so checkZai1305 returns it unchanged. The budget is now spent, so
+			// the 529 block downstream re-issues nothing.
 			() => jsonResponse(529, overloadedBody),
-			// 529 loop, retry 1 of 2.
-			...withTransportRetries(() => jsonResponse(529, overloadedBody)),
-			// 529 loop, retry 2 of 2: a 500 breaks it and starts the 5xx loop.
-			...withTransportRetries(() => jsonResponse(500, serverErrorBody)),
-			// 5xx loop, retry 1 of 2.
-			...withTransportRetries(() => jsonResponse(500, serverErrorBody)),
-			// 5xx loop, retry 2 of 2: exhausted.
-			...withTransportRetries(() => jsonResponse(500, serverErrorBody)),
 		];
 		const counters = installScriptedFetch(script);
 
@@ -358,19 +357,14 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		const account = makeAccount({ provider: "zai", name: "zai-test" });
 		await runProxy(account, ctx);
 
-		// Seven upstream answers, seventeen upstream fetches, for one client
-		// request, on one account, at the documented defaults. Asserted first,
-		// for the reason given in the Anthropic case above.
-		expect(counters.fetches()).toBe(17);
-		expect(counters.responses()).toBe(7);
-
-		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
+		expect(counters.fetches()).toBe(5);
+		expect(counters.responses()).toBe(3);
 	});
 
 	it("a single loop still spends exactly the operator's retry_attempts", async () => {
-		// The composition above must not be read as a licence to change what
-		// one loop costs. With one loop and no transport failure, three
-		// attempts means three fetches and no more.
+		// The shared budget must not be readable as a cut to what one loop
+		// costs. With one loop and no transport failure, three attempts means
+		// three fetches, which is what it meant before.
 		const script: ScriptStep[] = [
 			() => jsonResponse(500, serverErrorBody),
 			() => jsonResponse(500, serverErrorBody),
@@ -378,12 +372,61 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		];
 		const counters = installScriptedFetch(script);
 
-		const ctx = makeProxyContext();
-		const account = makeAccount();
-		const { result } = await runProxy(account, ctx);
+		const { result } = await runProxy(makeAccount(), makeProxyContext());
 
-		expect(result).toBeNull();
 		expect(counters.fetches()).toBe(3);
 		expect(counters.responses()).toBe(3);
+		expect(result).toBeNull();
+	});
+
+	it("gives each account its own budget across a failover", async () => {
+		// The budget is created inside proxyWithAccount, so it is per account
+		// rather than per client request. A request that exhausts it on one
+		// account starts fresh on the next: the budget exists to stop ONE
+		// account being hammered, and the next account has taken no
+		// punishment. The consequence, which this test states rather than
+		// hides, is that the pool-wide total for one client request is bounded
+		// by the failover limit and not by this budget.
+		const perAccount: ScriptStep[] = [
+			() => jsonResponse(500, serverErrorBody),
+			() => jsonResponse(500, serverErrorBody),
+			() => jsonResponse(500, serverErrorBody),
+		];
+		const counters = installScriptedFetch([...perAccount, ...perAccount]);
+
+		const ctx = makeProxyContext();
+		const first = await runProxy(makeAccount({ id: "acc-1" }), ctx);
+		expect(counters.fetches()).toBe(3);
+
+		const second = await runProxy(makeAccount({ id: "acc-2" }), ctx);
+		// Six, not three: the second account spent its own full budget. Three
+		// would mean the budget had leaked across the failover.
+		expect(counters.fetches()).toBe(6);
+		expect(first.result).toBeNull();
+		expect(second.result).toBeNull();
+	});
+
+	it.each([
+		0, 1,
+	])("retry_attempts %i still means no in-place retry at all", async (attempts) => {
+		// SB23-1980 is the record of a validation fallback that turned 0
+		// into 3, the largest value in play. The budget must not
+		// reintroduce that: 0 clamps to 1 in getOverloadRetryConfig and
+		// `enabled` requires maxAttempts > 1, so both values give a budget
+		// of 0 and the original attempt is the only fetch.
+		const counters = installScriptedFetch([
+			() => jsonResponse(500, serverErrorBody),
+		]);
+
+		const ctx = makeProxyContext();
+		(ctx.runtime as unknown as { retry: RetrySettings }).retry = {
+			attempts,
+			delayMs: 0,
+			backoff: 2,
+		};
+		const { result } = await runProxy(makeAccount(), ctx);
+
+		expect(counters.fetches()).toBe(1);
+		expect(result).toBeNull();
 	});
 });
