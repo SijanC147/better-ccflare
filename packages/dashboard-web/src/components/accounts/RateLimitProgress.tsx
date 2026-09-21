@@ -595,7 +595,17 @@ export function RateLimitProgress({
 			)}
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
-				const isAvailable = percentage !== null;
+				// `!= null`, not `!== null`, matching the credits block below. Every
+				// value here arrives through a cast over a JSON boundary, so a
+				// window object missing its percentage field yields `undefined`
+				// rather than null. `undefined !== null` is true, so strict
+				// inequality called the row available and formatted the missing
+				// number, which is what printed the literal "undefined%" in
+				// SB23-2462 instead of the "N/A" and "Data unavailable" this path
+				// already renders for a genuinely absent value. Fixing the xAI
+				// discriminator removes the one producer we know about; this
+				// removes the class.
+				const isAvailable = percentage != null;
 
 				// Group header shown before the first row of each group (limits[] rows).
 				const showGroupHeader =

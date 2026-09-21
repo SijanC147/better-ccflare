@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AnthropicUsageData } from "@better-ccflare/types";
+import type { AnthropicUsageData, XaiUsageData } from "@better-ccflare/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -227,6 +227,33 @@ describe("RateLimitProgress — Codex credits", () => {
 		expect(html).toContain("Grok credits");
 		expect(html).toContain("42%");
 		expect(html).not.toContain("undefined");
+	});
+
+	it("says Data unavailable when an xAI credits object carries no utilization", () => {
+		// The second defect on the same path, independent of the discriminator.
+		// `usage.utilization` is declared `number | null`, but every value reaching
+		// it has crossed a JSON boundary through a cast, so a credits object that
+		// predates the field yields `undefined`. The row's availability test was
+		// `percentage !== null`, and `undefined !== null` is true, so the row was
+		// treated as available and formatted the missing number as "undefined%".
+		// Fixing the discriminator removes the Codex producer of that value; this
+		// asserts the row itself no longer prints one from any producer.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				provider="xai"
+				resetIso={WEEKLY_RESET}
+				usageUtilization={null}
+				usageData={
+					{ credits: { resets_at: WEEKLY_RESET } } as unknown as XaiUsageData
+				}
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("undefined");
+		// The row is still rendered, saying so: a vanished bar reads as "no limit".
+		expect(html).toContain("Grok credits");
+		expect(html).toContain("N/A");
 	});
 
 	it("does not render a credits line for a non-Codex provider", () => {
