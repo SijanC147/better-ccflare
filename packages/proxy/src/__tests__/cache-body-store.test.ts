@@ -396,12 +396,12 @@ describe("CacheBodyStore", () => {
 			cacheBodyStore.onSummary("req-known", 3);
 
 			const entry = requireCachedRequest("account-known");
-			expect(entry?.path).toBe("/v1/messages");
-			expect(Buffer.from(entry?.body).toString()).toBe(
+			expect(entry.path).toBe("/v1/messages");
+			expect(Buffer.from(entry.body).toString()).toBe(
 				'{"model":"claude-opus","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
-			expect(entry?.headers["anthropic-version"]).toBe("2023-06-01");
-			expect(typeof entry?.timestamp).toBe("number");
+			expect(entry.headers["anthropic-version"]).toBe("2023-06-01");
+			expect(typeof entry.timestamp).toBe("number");
 		});
 
 		it("returns null after setEnabled(false)", () => {
@@ -798,18 +798,18 @@ describe("CacheBodyStore", () => {
 			const entryA = requireCachedRequest("account-alpha");
 			const entryB = requireCachedRequest("account-beta");
 
-			expect(Buffer.from(entryA?.body).toString()).toBe(
+			expect(Buffer.from(entryA.body).toString()).toBe(
 				'{"model":"claude-a","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
-			expect(Buffer.from(entryB?.body).toString()).toBe(
+			expect(Buffer.from(entryB.body).toString()).toBe(
 				'{"model":"claude-b","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
 
-			expect(entryA?.path).toBe("/v1/messages");
-			expect(entryB?.path).toBe("/v1/messages");
+			expect(entryA.path).toBe("/v1/messages");
+			expect(entryB.path).toBe("/v1/messages");
 
-			expect(entryA?.headers["anthropic-version"]).toBe("2023-06-01");
-			expect(entryB?.headers["anthropic-version"]).toBe("2024-01-01");
+			expect(entryA.headers["anthropic-version"]).toBe("2023-06-01");
+			expect(entryB.headers["anthropic-version"]).toBe("2024-01-01");
 		});
 
 		it("a newer request replaces the older one for the same account", () => {
@@ -835,10 +835,10 @@ describe("CacheBodyStore", () => {
 			cacheBodyStore.onSummary("req-second", 8);
 
 			const entry = requireCachedRequest("account-replace");
-			expect(Buffer.from(entry?.body).toString()).toBe(
+			expect(Buffer.from(entry.body).toString()).toBe(
 				'{"model":"claude-second","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
-			expect(entry?.path).toBe("/v1/messages");
+			expect(entry.path).toBe("/v1/messages");
 
 			// getAllCachedAccounts should only list the account once
 			expect(

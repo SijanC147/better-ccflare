@@ -22,7 +22,12 @@
  */
 import { Database } from "bun:sqlite";
 import { beforeAll, describe, expect, it, mock } from "bun:test";
-import { ensureSchema, runMigrations } from "@better-ccflare/database";
+import {
+	type BunSqlAdapter,
+	ensureSchema,
+	runMigrations,
+} from "@better-ccflare/database";
+import type { ProxyContext } from "../proxy";
 
 type QueryCall = { sql: string; params: unknown[] };
 
@@ -47,7 +52,15 @@ function makeProxyContext() {
 
 async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
-	return new AutoRefreshScheduler(db as never, makeProxyContext() as never);
+	// The mock records the SQL the scheduler issues rather than executing it, so
+	// a real adapter cannot stand in here. `BunSqlAdapter` also declares private
+	// fields, so no structural mock satisfies it without an assertion. Naming the
+	// target type keeps a constructor signature change failing at this line, which
+	// `as never` would absorb silently.
+	return new AutoRefreshScheduler(
+		db as unknown as BunSqlAdapter,
+		makeProxyContext() as ProxyContext,
+	);
 }
 
 /**
