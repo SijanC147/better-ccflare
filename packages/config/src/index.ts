@@ -823,7 +823,37 @@ export class Config extends EventEmitter {
 				);
 				return null;
 			}
-			const content = readFileSync(target, "utf8");
+			// Its own try, separate from the outer one, because the two failures it
+			// separates need opposite handling and folding them together left a
+			// reachable hole (SB23-2469, found by this PR's own mutation (g)).
+			//
+			// statSync above has just said this is a regular file that exists, so a
+			// read that fails here is a file WITH CONTENTS this process could not
+			// see, and replacing it destroys them. Reachable without an attacker: a
+			// config at mode 0000, owned by us, stats fine and throws EACCES on the
+			// read. Measured as uid 501 against a 0000 file: stat succeeds,
+			// open() raises errno 13.
+			//
+			// The outer catch is the other case and deliberately does NOT set the
+			// flag. It covers statSync, including a file that vanished between the
+			// caller's existsSync and that stat, where nothing was read and there
+			// are no contents a save could destroy. Refusing there would turn a
+			// transient race into a process that never persists anything again.
+			//
+			// One flag with one meaning would have collapsed these, which is
+			// mem:a-boolean-cannot-hold-three-outcomes: absent file, unreadable
+			// file and unparseable file are three outcomes, and only the last two
+			// refuse.
+			let content: string;
+			try {
+				content = readFileSync(target, "utf8");
+			} catch (error) {
+				this.unparseableFrom = target;
+				log.error(
+					`Failed to ${what}: ${target} exists and is a regular file but could not be read: ${error}. It is left exactly as it is and no setting is written back to it, because writing this process's config over a file it could not read would delete whatever is in it. This process runs on defaults until it is fixed: local_control_secret is regenerated and never persisted, which presents as local control clients failing to authenticate after a restart. Check the file's permissions, or move it aside so a fresh one is created, then restart.`,
+				);
+				return null;
+			}
 			// Say so when another local user could have written these bytes. Read first
 			// and report after, deliberately (SB23-2338).
 			//
@@ -1034,17 +1064,26 @@ export class Config extends EventEmitter {
 				writableByOthers,
 			);
 		} catch (error) {
-			// Deliberately does NOT set unparseableFrom. This catch covers the
-			// statSync and the readFileSync, so it also covers a file that vanished
-			// between the caller's existsSync and this stat. Refusing every later
-			// save on that would turn a transient race into a process that never
-			// persists anything again, and unlike the parse failures above there is
-			// no file whose contents a save would destroy: the failures that reach
-			// here are ones where nothing was read, not ones where something was
-			// read and not understood. The non-regular-file guard earlier in this
-			// method is the same case and likewise does not set it, because
-			// writeTarget() and restrictConfigFile() already refuse to write
-			// through a FIFO or a directory.
+			// Deliberately does NOT set unparseableFrom, and after the read got its
+			// own try above, this catch covers only the statSync.
+			//
+			// A stat that throws is a path nothing was read from: the file vanished
+			// between the caller's existsSync and here, or its directory stopped
+			// being traversable. There are no contents a save could destroy, and
+			// refusing every later save on a transient race would leave a process
+			// that never persists anything again.
+			//
+			// Not reachable from either caller in practice, and that is stated
+			// rather than guessed at: both gate on existsSync(), and loadConfig()
+			// additionally passes a target writeTarget() has already lstat-walked,
+			// so a dangling or untrusted path is refused before this method runs.
+			// It is left unflagged because a branch nothing can reach is the wrong
+			// place to put a refusal that would be permanent if it ever did.
+			//
+			// The non-regular-file guard earlier in this method is the same case and
+			// likewise does not set it: writeTarget() and restrictConfigFile()
+			// already refuse to write through a FIFO or a directory, so nothing
+			// reaches a save that would replace one.
 			log.error(`Failed to read config file: ${error}`);
 			return null;
 		}

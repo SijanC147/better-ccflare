@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	chmodSync,
 	existsSync,
 	mkdtempSync,
 	readFileSync,
@@ -225,6 +226,42 @@ describe("SB23-2469 — a config that cannot be read is not replaced", () => {
 			});
 		});
 	}
+
+	/**
+	 * A file that exists and cannot be READ, as distinct from one that cannot be
+	 * parsed. Both destroy the operator's file without the refusal; they are
+	 * separate branches and this is the one nothing covered.
+	 *
+	 * It exists because mutation (g) on this PR survived. The first draft caught
+	 * the read failure and the stat failure in one try/catch and set no flag for
+	 * either, so an unreadable config was still replaced. Adding the flag to that
+	 * shared catch also passed every test, which is what said the tests could not
+	 * tell the two branches apart.
+	 *
+	 * Reachable with no attacker and no exotic filesystem: mode 0000 on a file we
+	 * own. statSync succeeds, so the non-regular-file guard passes, and
+	 * readFileSync throws EACCES. Measured as uid 501: stat ok, open() errno 13.
+	 *
+	 * The set() is what reaches the overwrite here rather than
+	 * getLocalControlSecret(). restrictConfigFile() brings the file to 0600
+	 * during the same load, so the re-read inside getLocalControlSecret()
+	 * succeeds and finds the existing secret, and no save follows. this.data is
+	 * still empty from the failed load, so the next ordinary set() is what
+	 * serialises that empty config over the file.
+	 */
+	it("leaves a config it could not read byte-identical", () => {
+		withFixture((dir) => {
+			const bytes = `{"lb_strategy":"session","pg_password":"operator-secret"}`;
+			const path = seed(dir, "better-ccflare.json", bytes);
+			chmodSync(path, 0o000);
+
+			const config = new Config(path);
+			config.set("lb_strategy", "round-robin");
+
+			// Readable again: restrictConfigFile() chmodded it during the load.
+			expect(readFileSync(path, "utf8")).toBe(bytes);
+		});
+	});
 
 	/**
 	 * An empty file is a parse failure, and this is a deliberate behaviour change
