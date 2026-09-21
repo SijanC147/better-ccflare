@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { RETRY_DEFAULTS } from "@better-ccflare/core";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
 import * as responseHandlerModule from "../../response-handler";
@@ -331,6 +332,69 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		);
 		// The 429 streak is reserved for genuine quota exhaustion.
 		expect(account.consecutive_rate_limits).toBe(0);
+	});
+
+	// The fixture above pins retry to upstream's documented 2 attempts so the
+	// call arithmetic in this file holds unchanged. The fork's default is
+	// different and these two tests pin it, so the pin cannot hide a
+	// regression in either direction: a default install reads the budget from
+	// retry_attempts (RETRY_DEFAULTS, 3), and retry_attempts: 0 is an operator
+	// asking for no retries and clamps to a single attempt rather than
+	// becoming 3 (SB23-1980).
+	it("retries a 5xx up to retry_attempts on a default install: 3 fetches, then bench and fail over", async () => {
+		let callCount = 0;
+		fetchSlot.fetch = mock(async () => {
+			callCount++;
+			return serverErrorResponse(503);
+		});
+
+		const ctx = makeProxyContext();
+		// No retry on the runtime: getOverloadRetryConfig falls back to
+		// RETRY_DEFAULTS, which is what a config with none of the three keys
+		// resolves to.
+		ctx.runtime = { port: 8080, clientId: "test" } as never;
+		const account = makeAccount();
+		const bodyBuffer = makeRequestBody();
+		const { result, forwarded } = await runProxy(
+			makeRequest(bodyBuffer),
+			account,
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(forwarded).toBe(false);
+		expect(result).toBeNull();
+		expect(callCount).toBe(RETRY_DEFAULTS.attempts);
+		expect(callCount).toBe(3);
+		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
+	});
+
+	it("makes a single attempt when retry_attempts is 0, never the default", async () => {
+		let callCount = 0;
+		fetchSlot.fetch = mock(async () => {
+			callCount++;
+			return serverErrorResponse(503);
+		});
+
+		const ctx = makeProxyContext();
+		ctx.runtime = {
+			port: 8080,
+			clientId: "test",
+			retry: { attempts: 0, delayMs: 0, backoff: 2 },
+		} as never;
+		const account = makeAccount();
+		const bodyBuffer = makeRequestBody();
+		const { result, forwarded } = await runProxy(
+			makeRequest(bodyBuffer),
+			account,
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(forwarded).toBe(false);
+		expect(result).toBeNull();
+		expect(callCount).toBe(1);
+		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
 	});
 
 	it("records an audit row for the failed attempt before failing over", async () => {
