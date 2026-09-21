@@ -26,15 +26,43 @@
  *      `.not.toBeUndefined()`, `.toBeDefined()` and `.toBeTruthy()`,
  *   3. where short-circuiting the chain skips a CALL, including one further up the chain
  *      as in `x?.foo.bar()`, and
- *   4. where that call's RESULT IS DISCARDED, so nothing downstream can notice the skip.
+ *   4. and NOTHING DOWNSTREAM CAN REJECT `undefined`, which is true in two ways:
+ *        a. the value is discarded (statement position, or `void`), or
+ *        b. it is handed to an `expect(...)` whose matcher PASSES on `undefined`, such as
+ *           `toBeUndefined()`, `toBeFalsy()` or `not.toBe(...)`.
  *
- * Condition 4 is the discriminator and it was arrived at by being wrong first. Gating every
- * skipped call reported nine sites shaped like `expect(col?.type.toUpperCase()).toBe("TEXT")`.
- * Those are not silent: short-circuiting makes the whole expression `undefined`,
- * `expect(undefined).toBe("TEXT")` fails, and the test goes red with a legible message.
- * Failing a build over code that already catches its own defect is how a gate gets
- * switched off. Measured on this tree: gating every skipped call reports 9 offences,
- * requiring the result to be discarded reports 2, and both were real.
+ * Condition 4 is the discriminator and it took three attempts, each corrected by a
+ * measurement rather than by an argument.
+ *
+ * Gating every skipped call reported nine sites shaped like
+ * `expect(col?.type.toUpperCase()).toBe("TEXT")`. Those are not silent: short-circuiting
+ * makes the whole expression `undefined`, `expect(undefined).toBe("TEXT")` fails, and the
+ * test goes red with a legible message. Failing a build over code that already catches its
+ * own defect is how a required gate gets switched off, which is the one failure mode it
+ * cannot survive. So 4a was added and the nine dropped out.
+ *
+ * 4a alone was then too narrow, and the PR's reviewer found it: discarding the value is
+ * only ONE way to ensure nothing rejects `undefined`. A guarded `?.` feeding
+ * `toBeUndefined()` is exactly as silent, and it demonstrated three live instances in
+ * `requests-stream-terminal-state.test.ts` at rung 4 — with the row lookup made to find
+ * nothing and the guard deleted, that file still read 5 pass / 0 fail. Hence 4b.
+ *
+ * Measured on this tree, same day, same commit range: every skipped call = 9 offences,
+ * 4a alone = 2, 4a-or-4b = 5. All five were real and all five are fixed here.
+ *
+ * Note that 4b is why `not.` is computed rather than matched. `expect(x).not.toBe(5)`
+ * passes on `undefined` so it is tolerant, but `expect(x).not.toBeUndefined()` FAILS on
+ * `undefined`, so it REJECTS a skip and must not be reported. A rule reading "or starts
+ * with not." would have had that exactly backwards.
+ *
+ * KNOWN MISSES, deferred rather than hidden. Callback and operator positions also discard
+ * the call and are NOT reported: `xs.forEach((k) => sink?.write(k))`,
+ * `ok && sink?.flush()`, `(sink?.flush(), n++)`, and `setTimeout(() => cb?.(), 0)`. The
+ * last of those is SB23-2460's own founding instance with the stub on the other side, so
+ * this gate cannot see the example it was written for. Widening `isResultDiscarded` to
+ * treat an expression-bodied arrow in argument position, and the right operand of
+ * `&&`/`||`/`??`/comma at statement level, as discarded is the fix. Zero instances of any
+ * of them on this tree, which is why it is deferred rather than urgent.
  *
  * The replacement is the one PR #217 used:
  *
@@ -212,6 +240,86 @@ function isCalleeOfCall(node: ts.Node): boolean {
  * `reader?.cancel("client disconnected")` and, in PR #217's former shape,
  * `timeoutCallback?.()`. A call made for its effect, skipped, observed by nothing.
  */
+/**
+ * Climbs out of the chain and out of anything that passes the value along unchanged,
+ * returning the first parent that actually does something with it. Shared by the two
+ * silence tests below so they cannot disagree about where the expression ends.
+ */
+function climbOutOfExpression(node: ts.Node): { current: ts.Node; parent: ts.Node | undefined } {
+	let current: ts.Node = node;
+	let parent = current.parent;
+	while (parent !== undefined) {
+		const passesValueThrough =
+			((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+				parent.expression === current) ||
+			(ts.isCallExpression(parent) && parent.expression === current) ||
+			ts.isParenthesizedExpression(parent) ||
+			ts.isAwaitExpression(parent) ||
+			ts.isNonNullExpression(parent) ||
+			ts.isAsExpression(parent) ||
+			ts.isSatisfiesExpression(parent);
+		if (!passesValueThrough) break;
+		current = parent;
+		parent = current.parent;
+	}
+	return { current, parent };
+}
+
+/**
+ * The matchers that PASS when handed `undefined`, so a chain short-circuiting into one of
+ * them is not observed by anything. `toBeNull` is deliberately absent: `expect(undefined)
+ * .toBeNull()` fails, so it rejects a skip.
+ */
+const UNDEFINED_TOLERANT_MATCHERS = new Set([
+	"toBeUndefined",
+	"toBeFalsy",
+	"toBeNil",
+	"toBeNullish",
+]);
+
+/**
+ * True when this chain's value is handed to an `expect(...)` whose matcher PASSES on
+ * `undefined`, which makes the skip invisible exactly as discarding it does.
+ *
+ * Found by the PR's reviewer, and it is the half of the silence predicate condition 4
+ * missed. The real rule is "nothing downstream can reject `undefined`"; discarding the
+ * value is only one way to achieve that. `expect(row?.streamTerminalState).toBeUndefined()`
+ * under an `expect(row).toBeDefined()` passes whether the field is absent OR the row is,
+ * and the reviewer demonstrated it at rung 4: making the lookup find nothing and deleting
+ * the guard leaves that file reading 5 pass / 0 fail.
+ *
+ * Negation is computed rather than pattern-matched, because `not.` does not universally
+ * mean tolerant. `expect(x).not.toBe(5)` passes on undefined, so it is tolerant; but
+ * `expect(x).not.toBeUndefined()` FAILS on undefined, so it rejects a skip and must not be
+ * reported. A rule reading "or starts with not." would have got that backwards.
+ */
+function isConsumedByUndefinedTolerantMatcher(node: ts.Node): boolean {
+	const { current, parent } = climbOutOfExpression(node);
+	if (parent === undefined) return false;
+	// The value must BE the argument of an `expect(...)` call.
+	if (!ts.isCallExpression(parent)) return false;
+	if (!ts.isIdentifier(parent.expression) || parent.expression.text !== "expect") return false;
+	if (parent.arguments.length !== 1 || parent.arguments[0] !== current) return false;
+
+	// Walk the matcher chain hanging off `expect(...)`, counting `.not.`
+	let chain: ts.Node | undefined = parent.parent;
+	let negated = false;
+	while (chain !== undefined && ts.isPropertyAccessExpression(chain)) {
+		const name = chain.name.text;
+		if (name === "not") {
+			negated = !negated;
+			chain = chain.parent;
+			continue;
+		}
+		// `.resolves` / `.rejects` change what is asserted about, so the skip is observed by
+		// the promise machinery rather than by the matcher. Treat as rejecting.
+		if (name === "resolves" || name === "rejects") return false;
+		const tolerantWhenPositive = UNDEFINED_TOLERANT_MATCHERS.has(name);
+		return negated ? !tolerantWhenPositive : tolerantWhenPositive;
+	}
+	return false;
+}
+
 function isResultDiscarded(node: ts.Node): boolean {
 	let current: ts.Node = node;
 	let parent = current.parent;
@@ -233,9 +341,37 @@ function isResultDiscarded(node: ts.Node): boolean {
 	}
 	if (parent === undefined) return false;
 	// A statement is the only place a value goes nowhere. `void x?.f()` says so explicitly.
-	if (ts.isExpressionStatement(parent)) return true;
 	if (ts.isVoidExpression(parent)) return true;
-	return false;
+	if (!ts.isExpressionStatement(parent)) return false;
+
+	// ...unless the statement is inside a function that `expect(...)` is holding, in which
+	// case the skip IS observed. `expect(() => { h?.dispatch("x"); }).toThrow(/bad/)` fails
+	// when `h` is null, because nothing throws. Reporting it would fail a correct build,
+	// which is the one failure mode a required gate cannot survive, and the reviewer notes
+	// it is the first shape a test author hits. Zero instances on this tree today.
+	let scope: ts.Node | undefined = parent;
+	while (scope !== undefined) {
+		if (
+			ts.isFunctionDeclaration(scope) ||
+			ts.isFunctionExpression(scope) ||
+			ts.isArrowFunction(scope) ||
+			ts.isMethodDeclaration(scope)
+		) {
+			const holder = scope.parent;
+			if (
+				holder !== undefined &&
+				ts.isCallExpression(holder) &&
+				ts.isIdentifier(holder.expression) &&
+				holder.expression.text === "expect" &&
+				holder.arguments.includes(scope as ts.Expression)
+			) {
+				return false;
+			}
+			break;
+		}
+		scope = scope.parent;
+	}
+	return true;
 }
 
 /**
@@ -251,21 +387,25 @@ function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsC
 		return {
 			subject: normalise(node.expression.getText()),
 			kind: isCalleeOfCall(node) ? "optional call through a member" : "optional property access",
-			skipsCall: isCalleeOfCall(node) && isResultDiscarded(node),
+			skipsCall:
+				(isCalleeOfCall(node) && isResultDiscarded(node)) ||
+				isConsumedByUndefinedTolerantMatcher(node),
 		};
 	}
 	if (ts.isElementAccessExpression(node) && node.questionDotToken) {
 		return {
 			subject: normalise(node.expression.getText()),
 			kind: isCalleeOfCall(node) ? "optional call through an element" : "optional element access",
-			skipsCall: isCalleeOfCall(node) && isResultDiscarded(node),
+			skipsCall:
+				(isCalleeOfCall(node) && isResultDiscarded(node)) ||
+				isConsumedByUndefinedTolerantMatcher(node),
 		};
 	}
 	if (ts.isCallExpression(node) && node.questionDotToken) {
 		return {
 			subject: normalise(node.expression.getText()),
 			kind: "optional call",
-			skipsCall: isResultDiscarded(node),
+			skipsCall: isResultDiscarded(node) || isConsumedByUndefinedTolerantMatcher(node),
 		};
 	}
 	return null;
@@ -441,14 +581,29 @@ if (asJson) {
 //
 // So the strong invariant applies to the whole-tree invocation, which is the one CI makes,
 // and an explicit-root run only has to have found a file to parse.
+/**
+ * A floor, not a target. The reviewer killed the `> 0` version by adding `"src"` to
+ * `SKIP_DIRS`: the walker then read `scripts/` alone, found 2 files, 1 chain and 1
+ * assertion, and every `> 0` check passed, so the gate reported a clean tree having read
+ * almost none of it. That is the scanned-nothing hole in a new suit.
+ *
+ * 300 is deliberately far below the 404 measured on 2026-09-21, because this must never
+ * fail on a legitimately shrinking tree; it exists to catch a walker that lost a whole
+ * directory, which is an order-of-magnitude event rather than a drift. If this ever fires,
+ * the question is which directory stopped being scanned, not whether to lower the number.
+ */
+const MIN_TEST_FILES_WHOLE_REPO = 300;
+
 const scanningWholeRepo = roots.length === 0;
 const scannedNothing = scanningWholeRepo
-	? filesScanned === 0 || optionalChainsExamined === 0 || guardsFound === 0
+	? filesScanned < MIN_TEST_FILES_WHOLE_REPO ||
+		optionalChainsExamined === 0 ||
+		guardsFound === 0
 	: filesScanned === 0;
 
 if (scannedNothing) {
 	console.error(
-		`check-optional-chain-silent-skip: scanned nothing (${filesScanned} files, ${optionalChainsExamined} optional chains, ${guardsFound} presence assertions), so this run is not evidence of a clean tree`,
+		`check-optional-chain-silent-skip: scanned too little (${filesScanned} files, ${optionalChainsExamined} optional chains, ${guardsFound} presence assertions${scanningWholeRepo ? `, floor ${MIN_TEST_FILES_WHOLE_REPO} files` : ""}), so this run is not evidence of a clean tree`,
 	);
 	process.exit(2);
 }

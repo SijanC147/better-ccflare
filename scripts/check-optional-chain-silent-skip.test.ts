@@ -271,6 +271,136 @@ describe("check-optional-chain-silent-skip", () => {
 		expect(survey.stdout).toContain("1 guarded optional chains in 1 files, 0 of which skip a call");
 	});
 
+	test("fails when the value reaches a matcher that PASSES on undefined", () => {
+		// Condition 4b, found by the PR's reviewer. Discarding the value is only one way to
+		// ensure nothing rejects `undefined`; handing it to `toBeUndefined()` is another,
+		// and it is exactly as silent. Three live instances existed in
+		// `requests-stream-terminal-state.test.ts`, demonstrated at rung 4: with the row
+		// lookup made to find nothing and the guard deleted, that file still read 5 pass.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("omits the field when nothing was recorded", () => {',
+				"\tconst row: { state?: string } | undefined = undefined;",
+				"\texpect(row).toBeDefined();",
+				"\texpect(row?.state).toBeUndefined();",
+				"});",
+			].join("\n"),
+		);
+
+		const { exitCode, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("subject.test.ts:5:9");
+	});
+
+	test("fails on `not.toBe`, which also passes on undefined", () => {
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("is not the sentinel", () => {',
+				"\tconst row: { code?: number } | undefined = undefined;",
+				"\texpect(row).toBeDefined();",
+				"\texpect(row?.code).not.toBe(5);",
+				"});",
+			].join("\n"),
+		);
+
+		expect(runGate(dir).exitCode).toBe(1);
+	});
+
+	test("passes `not.toBeUndefined`, which REJECTS undefined", () => {
+		// The polarity trap in condition 4b. A rule reading "or starts with `not.`" would
+		// report this, and it is the one shape in the family that is already correct:
+		// `expect(undefined).not.toBeUndefined()` fails, so a skip IS observed.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("records the field", () => {',
+				"\tconst row: { state?: string } | undefined = undefined;",
+				"\texpect(row).toBeDefined();",
+				"\texpect(row?.state).not.toBeUndefined();",
+				"});",
+			].join("\n"),
+		);
+
+		expect(runGate(dir).exitCode).toBe(0);
+	});
+
+	test("passes a skipped call inside a function that `expect` is holding", () => {
+		// The reviewer's false positive. `expect(() => { h?.dispatch("x"); }).toThrow(/bad/)`
+		// discards the call in statement position, but the skip IS observed: a null `h`
+		// means nothing throws and `toThrow` fails. Zero instances on this tree, and the
+		// first shape a test author would hit, which is why it is fixed rather than filed.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("rejects a bad event", () => {',
+				"\tconst h: { dispatch(k: string): void } | null = null as never;",
+				"\texpect(h).not.toBeNull();",
+				'\texpect(() => {',
+				'\t\th?.dispatch("x");',
+				"\t}).toThrow(/bad/);",
+				"});",
+			].join("\n"),
+		);
+
+		expect(runGate(dir).exitCode).toBe(0);
+	});
+
+	test("fails on an optional call through an ELEMENT access", () => {
+		// Kills the reviewer's M-A: no fixture previously exercised the element-access
+		// branch, so `skipsCall: false` could be hardcoded there and every test still passed.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("invokes the first handler", () => {',
+				"\tconst hs: Array<() => void> | null = null as never;",
+				"\texpect(hs).not.toBeNull();",
+				"\ths?.[0]();",
+				"});",
+			].join("\n"),
+		);
+
+		expect(runGate(dir).exitCode).toBe(1);
+	});
+
+	test("recognises `toBeTruthy` as a presence assertion", () => {
+		// Kills M-B. No fixture used `toBeTruthy`, so it could be dropped from
+		// PRESENCE_MATCHERS with the whole suite green.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("flushes", () => {',
+				"\tconst sink: { flush(): void } | null = null as never;",
+				"\texpect(sink).toBeTruthy();",
+				"\tsink?.flush();",
+				"});",
+			].join("\n"),
+		);
+
+		expect(runGate(dir).exitCode).toBe(1);
+	});
+
+	test("recognises `not.toBeUndefined` as a presence assertion", () => {
+		// Kills M-C, and this is the one worth naming: no fixture used
+		// `not.toBeUndefined`, which is the exact matcher the real
+		// `codex/provider.test.ts:1160` site had. A gap in the fixtures that lines up with a
+		// real site is evidence the fixtures were written from the code rather than from the
+		// population they are supposed to cover.
+		const dir = makeFixture(
+			[
+				'import { expect, test } from "bun:test";',
+				'test("closes", () => {',
+				"\tconst sink: { close(): void } | undefined = undefined;",
+				"\texpect(sink).not.toBeUndefined();",
+				"\tsink?.close();",
+				"});",
+			].join("\n"),
+		);
+
+		expect(runGate(dir).exitCode).toBe(1);
+	});
+
 	test("exits 2 rather than 0 when it scans no test file at all", () => {
 		// PR #212's reviewer changed that gate's `process.exit(2)` to `exit(0)` and the
 		// mutant survived all seven of its tests: a gate that reads no files reports zero
@@ -282,7 +412,7 @@ describe("check-optional-chain-silent-skip", () => {
 
 		const { exitCode, stderr } = runGate(dir);
 		expect(exitCode).toBe(2);
-		expect(stderr).toContain("scanned nothing");
+		expect(stderr).toContain("scanned too little");
 	});
 
 	test("a scoped run over files with no presence assertion is a pass, not an error", () => {
@@ -298,7 +428,7 @@ describe("check-optional-chain-silent-skip", () => {
 
 		const { exitCode, stderr } = runGate(dir);
 		expect(exitCode).toBe(0);
-		expect(stderr).not.toContain("scanned nothing");
+		expect(stderr).not.toContain("scanned too little");
 	});
 
 	test("descends into nested directories", () => {

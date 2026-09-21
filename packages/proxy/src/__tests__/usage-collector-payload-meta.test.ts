@@ -142,8 +142,12 @@ describe("UsageCollector - RequestPayload.meta includes projectAttributionSource
 		const payload = (await dbOps.getRequestPayload(requestId)) as {
 			meta?: { project?: string; projectAttributionSource?: string };
 		} | null;
-		expect(payload).not.toBeNull();
-		expect(payload?.meta?.project).toBeUndefined();
-		expect(payload?.meta?.projectAttributionSource).toBe("none");
+		// A throw, not `expect(payload).not.toBeNull()`: that narrows nothing, so
+		// `expect(payload?.meta?.project).toBeUndefined()` below would pass on a null
+		// payload, which is the opposite of what this asserts. The `?.` on `meta` stays:
+		// that one is a genuinely optional field rather than a guarded subject.
+		if (!payload) throw new Error("no payload was recorded for the request");
+		expect(payload.meta?.project).toBeUndefined();
+		expect(payload.meta?.projectAttributionSource).toBe("none");
 	});
 });
