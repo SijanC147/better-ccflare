@@ -94,6 +94,56 @@ const unenforceableModes = new Set<string>();
  */
 const contentsNotOurs = new Set<string>();
 
+/** Config paths whose stripped fields have already been named, once per process. */
+const strippedFieldsReported = new Set<string>();
+
+/**
+ * Whole families that are an endpoint or a credential, stripped from a config
+ * another local user can write (SB23-2351).
+ *
+ * `pg_` is the family and not just `pg_password`, because `pg_enabled` is the gate
+ * that makes the rest take effect: apps/server bridges these into DATABASE_URL when
+ * it is unset, so an attacker who sets the whole family points every credential
+ * this process later persists at a database they own, and the accounts table stores
+ * api_key, refresh_token and access_token as plaintext. `openobserve_` likewise:
+ * the stream names are harmless alone, but the family is an outbound destination.
+ *
+ * `alert_` is deliberately NOT here. Those are numeric thresholds and keeping them
+ * costs nothing; only alert_webhook_url is an endpoint, and it is named below.
+ */
+const UNTRUSTED_FIELD_PREFIXES = ["pg_", "openobserve_"] as const;
+
+/** Individually named endpoints and credentials that no prefix or suffix catches. */
+const UNTRUSTED_FIELDS = new Set([
+	"alert_webhook_url",
+	"outbound_proxy",
+	"claude_projects_dir",
+	"github_read_token",
+	"upstream_maintainer_token",
+	"local_control_secret",
+]);
+
+/**
+ * Anything whose name ends this way, whether or not it was listed.
+ *
+ * This is the half that answers the acceptance criterion's actual reason. It asked
+ * for a positive allowlist because ConfigData carries an index signature, so a
+ * credential field added later would be adopted by default with nobody having to
+ * forget anything. A suffix rule closes that without enumerating the roughly fifty
+ * safe fields, whose own failure mode is worse: a legitimate setting missed from an
+ * allowlist silently stops loading, with nothing to say why, which is the
+ * looks-fine-but-does-nothing shape this family keeps producing.
+ */
+const UNTRUSTED_FIELD_SUFFIX = /(?:token|secret|password)$/;
+
+function isUntrustedField(key: string): boolean {
+	return (
+		UNTRUSTED_FIELD_SUFFIX.test(key) ||
+		UNTRUSTED_FIELDS.has(key) ||
+		UNTRUSTED_FIELD_PREFIXES.some((prefix) => key.startsWith(prefix))
+	);
+}
+
 /**
  * Why a hop failed the walk's trust check, rather than whether it failed
  * (SB23-2318).
@@ -558,22 +608,15 @@ export class Config extends EventEmitter {
 				this.restrictConfigDir();
 				return;
 			}
-			// readRegularFile() returns null for anything that is not a regular
+			// readConfigData() returns null for anything that is not a regular
 			// file, which keeps a FIFO at the config path from stalling startup
 			// forever. It has already said why, at error level. Fall through
 			// rather than returning, so the directory is still brought to 0700
 			// and stale temp files are still swept.
-			const content = this.readRegularFile(trusted);
-			if (content === null) {
-				this.data = {};
-			} else {
-				try {
-					this.data = JSON.parse(content) as ConfigData;
-				} catch (error) {
-					log.error(`Failed to parse config file: ${error}`);
-					this.data = {};
-				}
-			}
+			// readConfigData() reads, parses AND strips credential or endpoint fields
+			// when other local users can write the file, so there is no way to reach
+			// parsed config data without the filter having run (SB23-2351).
+			this.data = this.readConfigData(trusted, "parse config file") ?? {};
 			// An upgrade from a version that wrote 0644 may never write a setting
 			// again, because getLocalControlSecret() returns early once the secret
 			// exists, so the file would stay world-readable indefinitely if the
@@ -625,7 +668,7 @@ export class Config extends EventEmitter {
 	 * failure. This is the same isFile() guard restrictConfigFile() applies
 	 * before chmod, applied to the read.
 	 */
-	private readRegularFile(target: string): string | null {
+	private readConfigData(target: string, what: string): ConfigData | null {
 		try {
 			const info = statSync(target);
 			if (!info.isFile()) {
@@ -685,11 +728,9 @@ export class Config extends EventEmitter {
 			// openobserve_* ships payloads, outbound_proxy redirects traffic, and
 			// ConfigData carries an index signature so an allowlist cannot be written as
 			// a subtraction.
-			if (
-				process.platform !== "win32" &&
-				(info.mode & 0o022) !== 0 &&
-				!contentsNotOurs.has(target)
-			) {
+			const writableByOthers =
+				process.platform !== "win32" && (info.mode & 0o022) !== 0;
+			if (writableByOthers && !contentsNotOurs.has(target)) {
 				contentsNotOurs.add(target);
 				// Name the bit that was found. "group-writable (gid 20)" and
 				// "world-writable" call for different actions, and on macOS the default
@@ -776,11 +817,75 @@ export class Config extends EventEmitter {
 					);
 				}
 			}
-			return content;
+			let parsed: ConfigData;
+			try {
+				parsed = JSON.parse(content) as ConfigData;
+			} catch (error) {
+				log.error(`Failed to ${what}: ${error}`);
+				return null;
+			}
+			return this.stripUntrustedFields(parsed, target, writableByOthers);
 		} catch (error) {
 			log.error(`Failed to read config file: ${error}`);
 			return null;
 		}
+	}
+
+	/**
+	 * Drop credential and endpoint fields from a config another local user can write
+	 * (SB23-2351).
+	 *
+	 * SB23-2338 decided to warn and load the whole config, because refusing is a
+	 * permanent outage where chmod is a no-op. This keeps the loading and removes the
+	 * part that is not a setting. An attacker who can write the file still changes
+	 * behaviour; they no longer supply authentication material or an outbound
+	 * destination.
+	 *
+	 * Inside the only method that produces parsed config data, deliberately, rather
+	 * than applied by each caller from a flag. The obvious design returns the content
+	 * alongside "this file was writable" and filters at each parse site, and it fails
+	 * on its own terms: the warning is deduplicated per path through a module Set, so
+	 * a flag derived near that dedupe reads false on the second read of the same
+	 * file, and the filter would be bypassed exactly where the mode is still
+	 * writable. There is no flag to forget here, and no second parse site to miss.
+	 * The warning stays deduplicated; the filtering does not.
+	 *
+	 * Skipped on win32 along with the writability test itself, because Stats.mode
+	 * there reports 0666 for any writable file, so filtering would strip credentials
+	 * from every Windows config.
+	 *
+	 * Bounded honestly: restrictConfigFile() brings the file to 0600 after this read,
+	 * so on a filesystem that enforces modes this is a defence for the boot that
+	 * follows a plant, and the operator's own fields come back on the next boot.
+	 * Where chmod is a no-op, Docker bind mounts from a macOS or Windows host and FAT
+	 * or exFAT, it applies on every boot.
+	 */
+	private stripUntrustedFields(
+		parsed: ConfigData,
+		target: string,
+		writableByOthers: boolean,
+	): ConfigData {
+		if (!writableByOthers) return parsed;
+		const kept: ConfigData = {};
+		const stripped: string[] = [];
+		for (const key of Object.keys(parsed)) {
+			if (isUntrustedField(key)) {
+				stripped.push(key);
+			} else {
+				kept[key] = parsed[key];
+			}
+		}
+		if (stripped.length > 0 && !strippedFieldsReported.has(target)) {
+			strippedFieldsReported.add(target);
+			// Name the fields. Without this the process behaves as though the operator
+			// never set them, which is indistinguishable from a config that does not
+			// contain them, and that is the report this whole change would otherwise
+			// turn into.
+			log.error(
+				`Ignored ${stripped.length} credential or endpoint field(s) from ${target} because other local users can write it: ${stripped.sort().join(", ")}. The process behaves as though these were never set. Settings from that file are still applied.`,
+			);
+		}
+		return kept;
 	}
 
 	/**
@@ -1132,7 +1237,7 @@ export class Config extends EventEmitter {
 		// saying nothing here is what keeps the accurate message. A directory has
 		// nlink >= 2, so it used to reach the hardlink branch below and be told it
 		// was "a regular file with 2 names", advising the operator to delete it; a
-		// directory holding subdirectories read "with 17 names". readRegularFile()
+		// directory holding subdirectories read "with 17 names". readConfigData()
 		// already refuses a non-regular path with the message that is true of it,
 		// and restrictConfigFile() has its own isFile() guard, so handing the path
 		// back is exactly the behaviour that shipped before this check existed.
@@ -1912,18 +2017,19 @@ export class Config extends EventEmitter {
 		// one runs from getLocalControlSecret(), which the server calls after
 		// construction, so a FIFO planted at the config path would stall here
 		// instead of at startup if only loadConfig() were guarded.
-		const content = this.readRegularFile(trusted);
-		if (content === null) return undefined;
-		try {
-			const parsed = JSON.parse(content) as ConfigData;
-			const value = parsed.local_control_secret;
-			return typeof value === "string" && value.length > 0 ? value : undefined;
-		} catch (error) {
-			log.error(
-				`Failed to re-read config file for local_control_secret: ${error}`,
-			);
-			return undefined;
-		}
+		// The site that matters for SB23-2351. This runs on the boot where the secret
+		// is absent from this.data, so a filter applied only in loadConfig() would be
+		// bypassed exactly when an attacker-supplied secret would be adopted.
+		// local_control_secret is stripped from a writable config, so this returns
+		// undefined and the caller generates a fresh one: the same path a refused read
+		// already takes, which is why the filter costs nothing here.
+		const parsed = this.readConfigData(
+			trusted,
+			"re-read config file for local_control_secret",
+		);
+		if (parsed === null) return undefined;
+		const value = parsed.local_control_secret;
+		return typeof value === "string" && value.length > 0 ? value : undefined;
 	}
 
 	getSystemPromptCacheTtl1h(): boolean {
