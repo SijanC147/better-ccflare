@@ -18,7 +18,9 @@ import {
 import type { Account } from "@better-ccflare/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
+	accountCanServeOpenAICompatPath,
 	createModelFamilyExhaustedResponse,
+	createOpenAICompatUnsupportedResponse,
 	createPoolExhaustedResponse,
 	createRequestMetadata,
 	createUsageThrottledResponse,
@@ -30,8 +32,11 @@ import {
 	isComboSessionFallbackDisabled,
 	isForceAccountModelEnabled,
 	isInternalProbe,
+	isOpenAICompatCompletionPath,
+	isOpenAICompatGuardDisabled,
 	isRefreshTokenLikelyExpired,
 	markTrustedNativeResponses,
+	OPENAI_COMPAT_UNSUPPORTED_STATUS,
 	type ProxyContext,
 	prepareRequestBody,
 	proxyUnauthenticated,
@@ -797,6 +802,101 @@ async function handleProxyRequest(
 		process.env.NODE_ENV === "development"
 	) {
 		log.info(`Request: ${req.method} ${url.pathname}`);
+	}
+
+	// 8b. Refuse Anthropic's OpenAI-compatible completion path when no selected
+	//     account can authenticate against it.
+	//
+	//     That path is real upstream (api.anthropic.com/v1/ is a documented
+	//     OpenAI-compatible base URL) but is documented for Claude API keys
+	//     only. A Claude OAuth account gets 429, and because
+	//     `isModelUnavailableError` treats ANY 429 as model-unavailable, every
+	//     one of those benches a healthy account under `model_fallback_429`.
+	//     Measured 2026-09-21: one client request fanned out across seven OAuth
+	//     accounts and benched all seven, four times over eighteen minutes,
+	//     while those same accounts served 950 `/v1/messages` requests with
+	//     zero 429s. See handlers/openai-compat-path.ts and SB23-2570.
+	//
+	//     Only refuse when NOTHING in the pool can serve it. An account that
+	//     reaches Anthropic with an API key can serve it, and this must not
+	//     speak for it — in practice that is a `claude-console-api` row, which
+	//     is where `migrations.ts:1833` moved every legacy `anthropic` row
+	//     carrying an api_key, and which the operator's own account list shows.
+	//     (An `anthropic` row with an api_key and no refresh token is the same
+	//     case and is also allowed, but it is the rarer shape.) A mixed pool
+	//     still fans out, benching its OAuth members: narrowing `accounts`
+	//     here would desync `filteredComboInfo.slots[i]` from `accounts[i]`,
+	//     which the loop below logs as a hard error, so the mixed case needs a
+	//     slot-aware skip and is left to its own issue.
+	if (
+		!isOpenAICompatGuardDisabled() &&
+		isOpenAICompatCompletionPath(url.pathname) &&
+		accounts.length > 0 &&
+		!accounts.some(accountCanServeOpenAICompatPath)
+	) {
+		log.warn(
+			`Refusing ${url.pathname}: all ${accounts.length} selected account(s) authenticate with OAuth, which Anthropic's OpenAI compatibility layer does not accept`,
+		);
+		const unsupportedResponse = createOpenAICompatUnsupportedResponse();
+
+		// The pool-exhausted terminal above stages a row and the
+		// all-accounts-failed terminal (step 11) does not, which is why seven
+		// 429 rows could be followed by a 503 the request log never recorded.
+		// This refusal stages one, so the dashboard shows the terminal beside
+		// the attempts rather than leaving the reader to infer it.
+		if (!isInternalProbe(req.headers, ctx, "auto-refresh")) {
+			getUsageCollector().handleStart({
+				type: "start",
+				messageId: crypto.randomUUID(),
+				requestId: requestMeta.id,
+				accountId: null,
+				method: req.method,
+				path: url.pathname,
+				timestamp: requestMeta.timestamp,
+				requestHeaders: Object.fromEntries(req.headers.entries()),
+				requestBody: null,
+				project: project ?? null,
+				projectAttributionSource: projectAttributionSource ?? "none",
+				agentAttributionSource: agentAttributionSource ?? "none",
+				responseStatus: OPENAI_COMPAT_UNSUPPORTED_STATUS,
+				responseHeaders: Object.fromEntries(
+					unsupportedResponse.headers.entries(),
+				),
+				isStream: false,
+				projectId: null,
+				worktreePath: null,
+				providerName: ctx.provider.name,
+				accountBillingType: null,
+				accountAutoPauseOnOverageEnabled: 0,
+				accountName: null,
+				agentUsed: agentUsed || null,
+				clientSessionId: requestMeta.clientSessionId ?? null,
+				originalModel: originalModel || null,
+				appliedModel: appliedModel || null,
+				comboName: null,
+				apiKeyId: apiKeyId || null,
+				apiKeyName: apiKeyName || null,
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			});
+
+			getUsageCollector()
+				.handleEnd({
+					type: "end",
+					requestId: requestMeta.id,
+					success: false,
+					error: "openai_compat_oauth_unsupported",
+				})
+				.catch((err: unknown) => {
+					log.error(
+						`handleEnd failed for openai_compat_oauth_unsupported request ${requestMeta.id}`,
+						err,
+					);
+				});
+		}
+
+		cacheBodyStore.discardStaged(requestMeta.id);
+		return unsupportedResponse;
 	}
 
 	// 9. Try each account

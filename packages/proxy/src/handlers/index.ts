@@ -36,6 +36,17 @@ export {
 	resolveOverageStatus,
 } from "./model-capacity";
 export {
+	accountCanServeOpenAICompatPath,
+	createOpenAICompatUnsupportedResponse,
+	isOpenAICompatCompletionPath,
+	isOpenAICompatGuardDisabled,
+	OPENAI_COMPAT_MEASURED_ON,
+	OPENAI_COMPAT_OVERRIDE_ENV,
+	OPENAI_COMPAT_UNSUPPORTED_ERROR_TYPE,
+	OPENAI_COMPAT_UNSUPPORTED_MESSAGE,
+	OPENAI_COMPAT_UNSUPPORTED_STATUS,
+} from "./openai-compat-path";
+export {
 	clearPendingRotation,
 	flushPendingRotation,
 	getPendingRotation,
