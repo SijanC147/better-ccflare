@@ -27,7 +27,7 @@ import {
 	ensureSchema,
 	runMigrations,
 } from "@better-ccflare/database";
-import type { ProxyContext } from "../proxy";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 type QueryCall = { sql: string; params: unknown[] };
 
@@ -43,13 +43,6 @@ function makeDb(queryResult: unknown[] = []) {
 	};
 }
 
-function makeProxyContext() {
-	return {
-		runtime: { port: 8080, clientId: "test-client" },
-		refreshInFlight: new Map(),
-	};
-}
-
 async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	// The mock records the SQL the scheduler issues rather than executing it, so
@@ -59,7 +52,7 @@ async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	// `as never` would absorb silently.
 	return new AutoRefreshScheduler(
 		db as unknown as BunSqlAdapter,
-		makeProxyContext() as ProxyContext,
+		makeProxyContext(),
 	);
 }
 
