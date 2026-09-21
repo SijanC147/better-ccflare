@@ -631,10 +631,18 @@ describe("check-boolean-widening", () => {
 	});
 
 	// 120s, not the 5000ms default. This case runs the gate over the whole program,
-	// 517 files and 13515 boolean contexts, which is 2.3s on an unloaded darwin laptop
-	// and timed out at 5001ms on CI at cc8f39cc. The bound is a timeout, not a
-	// performance assertion: `SB23-2266` is two wall-clock assertions in this repo that
-	// fail on unmodified main under concurrent load, and this must not become a third.
+	// 519 files and 12451 boolean contexts measured 2026-09-21 at `a0ec0e65`, which is a
+	// couple of seconds on an unloaded darwin laptop and timed out at 5001ms on CI at
+	// cc8f39cc. The bound is a timeout, not a performance assertion: `SB23-2266` is two
+	// wall-clock assertions in this repo that fail on unmodified main under concurrent
+	// load, and this must not become a third.
+	//
+	// Those two figures are a reading with a shelf life, not an invariant, which is why
+	// the assertions below are `> 100` files and `0 offences` rather than either number.
+	// The comment said 517 and 13515 until this PR; the file count had moved with the
+	// tree and the context count moved because this PR's dedupe removes more sites than
+	// its descent adds. Correcting one sentence in a file restales the sentences beside
+	// it, and this is the one that was beside the others.
 	test("the repository itself is clean, and the run says how much it read", () => {
 		const result = Bun.spawnSync(["bun", "run", gate], { cwd: repoRoot });
 		const stdout = result.stdout.toString();
