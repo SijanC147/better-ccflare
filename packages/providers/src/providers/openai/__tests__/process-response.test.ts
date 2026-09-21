@@ -405,7 +405,7 @@ describe("processResponse – SSE (text/event-stream)", () => {
 
 		const messageStart = events.find((e) => e.event === "message_start");
 		expect(messageStart).toBeDefined();
-		if (!messageStart) throw new Error("expected message_start event");
+		if (!messageStart?.data) throw new Error("expected message_start event");
 		const msgData = JSON.parse(messageStart.data);
 		expect(msgData.type).toBe("message_start");
 
@@ -416,7 +416,7 @@ describe("processResponse – SSE (text/event-stream)", () => {
 				JSON.parse(e.data).delta?.type === "text_delta",
 		);
 		expect(textDelta).toBeDefined();
-		if (!textDelta) throw new Error("expected text_delta event");
+		if (!textDelta?.data) throw new Error("expected text_delta event");
 		const deltaData = JSON.parse(textDelta.data);
 		expect(deltaData.delta.text).toBe("Hello world");
 	});
@@ -478,7 +478,7 @@ describe("processResponse – SSE (text/event-stream)", () => {
 				JSON.parse(e.data).content_block?.type === "tool_use",
 		);
 		expect(blockStart).toBeDefined();
-		if (!blockStart) throw new Error("expected block_start event");
+		if (!blockStart?.data) throw new Error("expected block_start event");
 		const blockData = JSON.parse(blockStart.data);
 		expect(blockData.content_block.name).toBe("search");
 
@@ -490,7 +490,7 @@ describe("processResponse – SSE (text/event-stream)", () => {
 				JSON.parse(e.data).delta?.type === "input_json_delta",
 		);
 		expect(jsonDelta).toBeDefined();
-		if (!jsonDelta) throw new Error("expected input_json_delta event");
+		if (!jsonDelta?.data) throw new Error("expected input_json_delta event");
 		const jsonDeltaData = JSON.parse(jsonDelta.data);
 		expect(jsonDeltaData.delta.partial_json).toBe('{"q":"bun"}');
 	});

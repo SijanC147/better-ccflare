@@ -50,7 +50,7 @@ function stubFetch(body: unknown): void {
 		new Response(JSON.stringify(body), {
 			status: 200,
 			headers: { "content-type": "application/json" },
-		})) as typeof fetch;
+		})) as unknown as typeof fetch;
 }
 
 describe("Zai usage fetcher", () => {
