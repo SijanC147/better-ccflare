@@ -401,7 +401,7 @@ describe("Messages fallback cache and continuation", () => {
 		await reader.read();
 		await reader.cancel();
 		// `start` runs synchronously inside the `ReadableStream` constructor
-		// per the Streams spec, so this has been assigned since line 364. The
+		// per the Streams spec, so `start()` above has already assigned it. The
 		// throw states that assumption: a `?.` here would skip both the
 		// enqueue and the close below and leave the case asserting that a
 		// completion event it never sent failed to promote a checkpoint.

@@ -176,7 +176,7 @@ describe("CodexProvider stream liveness", () => {
 		);
 
 		// `start` runs synchronously inside the `ReadableStream` constructor
-		// per the Streams spec, so this has been assigned since line 150.
+		// per the Streams spec, so `start()` above has already assigned this.
 		// The throw states that assumption instead of letting a `?.` skip the
 		// enqueue and leave the assertions below asserting nothing.
 		if (!upstreamController)
