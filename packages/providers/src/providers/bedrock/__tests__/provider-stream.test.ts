@@ -105,7 +105,7 @@ describe("BedrockProvider.createAnthropicCompatibleStream", () => {
 			{
 				contentBlockDelta: {
 					contentBlockIndex: 0,
-					delta: { toolUse: { input: "" } },
+					delta: { toolUse: { input: undefined } },
 				},
 			},
 			{ contentBlockStop: { contentBlockIndex: 0 } },
