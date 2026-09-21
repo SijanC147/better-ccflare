@@ -159,18 +159,31 @@ package.json           "version": "X.Y.Z"
 apps/cli/package.json  "version": "X.Y.Z"
 ```
 
+**Then run `bun install` and commit `bun.lock` in the same PR.** The lockfile records
+`apps/cli`'s version under its workspace entry, so a manifest bump without an install leaves
+it stale. See the `bun.lock` bullet below for why this instruction is newer than the rest of
+this section.
+
 Nothing else carries a release version. `packages/core/src/version.ts` holds
 `CLAUDE_CLI_VERSION` (the Claude CLI user-agent) and the compile-time define declarations —
 **not** a version-bump target. `apps/cli/__tests__/cli.test.ts` derives its expectation from
 `apps/cli/package.json` rather than hardcoding, so it follows the bump automatically.
 
-Two things that look like they need updating and do not:
-
-- **`bun.lock`** carries a stale `"version"` under the `apps/cli` workspace entry. `bun
-  install` does not rewrite it on a version-only change, and `bun install --frozen-lockfile`
-  passes regardless — the field is informational and bun resolves workspaces by path.
-  Verified 2026-08-28. (The v3.8.0 release failure was a *missing workspace package*, which
-  is a different problem and does require a regenerated committed lockfile.)
+- **`bun.lock` does need updating, and this section said the opposite until 2026-09-21.** It
+  carried "`bun install` does not rewrite it on a version-only change, verified 2026-08-28".
+  That reading was correct on the Bun it was taken on and is **version-dependent**, which the
+  sentence did not say. Measured at `364aaa4c` in fresh clones, against a lock recording
+  `3.23.0` under a manifest saying `3.24.0`: Bun **1.3.14** leaves the tree clean, and Bun
+  **1.4.2** rewrites that one line. 1.3.14 is the pinned version (`.hextap.json` and
+  `ci.yml:47`), and it never writes the field at all, so it can neither create the drift nor
+  clear it. Only a newer Bun does. That is why this went unnoticed for two releases: CI runs
+  the version that is blind to it, while developers run the version that reports it, and
+  every lane saw a dirty tree it was told to ignore.
+- **`bun install --frozen-lockfile` passes either way**, at 1.3.14, against both values. The
+  field is informational and bun resolves workspaces by path, so this was never a release
+  hazard. `.hextap.json` runs that exact argv at `runtime_version` 1.3.14, byte-identical to
+  `ci.yml:51`. The v3.8.0 release failure was a *missing workspace package*, which is a
+  different problem and does require a regenerated committed lockfile.
 - **npm.** This fork does not publish there; `better-ccflare` on npm is upstream's package.
   `cd apps/cli && bun publish` is not part of any release path here.
 
