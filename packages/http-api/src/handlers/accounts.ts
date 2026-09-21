@@ -27,6 +27,7 @@ import {
 import { Logger } from "@better-ccflare/logger";
 import {
 	type AnyUsageData,
+	CODEX_CREDITS_NOT_OBSERVED,
 	fetchUsageData,
 	getRepresentativeUtilization,
 	getRepresentativeUtilizationForProvider,
@@ -4015,7 +4016,20 @@ export function createAccountForceResetRateLimitHandler(
 			) {
 				const { data: usageData } = await fetchUsageData(account.access_token);
 				if (usageData) {
-					usageCache.set(account.id, usageData);
+					// Anthropic, so no Codex credit balance was observed here.
+					// The other Anthropic writer, the poller's own branch in
+					// usage-fetcher.ts, already stamps this; the two used to
+					// disagree for the identical payload out of the identical
+					// function, and by CODEX_CREDITS_NOT_OBSERVED's own definition
+					// one of them had to be wrong. Unreachable today because
+					// admission gates credits on PROVIDER_NAMES.CODEX, and left
+					// consistent rather than argued about, because
+					// "unreachable" here rests on what api.anthropic.com sends
+					// rather than on anything this code enforces: `fetchUsageData`
+					// casts the whole body to a type that declares `credits?`.
+					// PR #236's second reviewer called this must-fix 1 at a third
+					// address, waiting on an upstream field name.
+					usageCache.set(account.id, usageData, CODEX_CREDITS_NOT_OBSERVED);
 					dbOps
 						.recordUsageSnapshot(account.id, usageData, Date.now())
 						.catch((err) =>

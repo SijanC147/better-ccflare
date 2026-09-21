@@ -1570,6 +1570,21 @@ class UsageCache {
 					// hold, and when was it observed", which needs the stamp beside
 					// the value and so needs the entry rather than the payload.
 					//
+					// That agreement rests on an invariant worth stating, because
+					// nothing enforces it and a new writer could break it without
+					// touching either side: `creditsObservedAt` is NEVER LATER THAN
+					// `timestamp`. Every writer establishes it, since the stamp is
+					// either this write's own `Date.now()`, an earlier entry's
+					// stamp, a past database timestamp, or null. So credits are
+					// always at least as old as the entry that holds them, which
+					// forecloses the one disagreement that would matter: a balance
+					// the carry keeps and `get` would refuse. The three reachable
+					// states all agree: entry stale (get deletes, carry drops),
+					// both fresh (get serves, carry keeps), entry fresh with stale
+					// credits (get strips, carry drops), and that last state is
+					// reachable only because the poller carries a stamp across
+					// writes. Identified by PR #236's second reviewer.
+					//
 					// Flagged by PR #236's reviewer as the kind of split a later
 					// reader collapses by tidying one into the other. Do not: the
 					// carry would then have no way to distinguish a balance that
