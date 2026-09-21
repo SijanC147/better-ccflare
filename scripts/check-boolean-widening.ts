@@ -71,6 +71,13 @@ const checker = program.getTypeChecker();
  * things that are always truthy, along with a non-empty string literal and a non-zero number.
  */
 function partHasFalsyValue(type: ts.Type): boolean {
+	// An intersection is falsy-capable only when every constituent is, and
+	// `TypeFlags.Intersection` is not `TypeFlags.Object`, so without this branch
+	// `{ a: 1 } & { b: 2 }` falls through to the conservative `return true` at the
+	// end and the gate goes SILENT on an always-truthy call result. That is the
+	// direction that matters: it reads green over the defect class it exists to
+	// catch. Found by probing the gate rather than by reading it.
+	if (type.isIntersection()) return type.types.every(partHasFalsyValue);
 	const f = type.flags;
 	if (
 		f &
@@ -91,7 +98,16 @@ function partHasFalsyValue(type: ts.Type): boolean {
 	if (f & ts.TypeFlags.NumberLiteral) return (type as ts.NumberLiteralType).value === 0;
 	if (f & (ts.TypeFlags.Boolean | ts.TypeFlags.String | ts.TypeFlags.Number)) return true;
 	if (f & (ts.TypeFlags.BigInt | ts.TypeFlags.BigIntLiteral | ts.TypeFlags.EnumLike)) return true;
-	if (f & ts.TypeFlags.Object) return false;
+	if (f & ts.TypeFlags.Object) {
+		// `{}` and the `Object` interface carry `TypeFlags.Object` but accept every
+		// non-nullish primitive, so `if (f())` where f returns `{}` genuinely can be
+		// false and reporting it fails the build on a correct condition. Every other
+		// object type, including arrays, functions and class instances, is always
+		// truthy.
+		const rendered = checker.typeToString(type);
+		if (rendered === "{}" || rendered === "Object") return true;
+		return false;
+	}
 	return true;
 }
 
