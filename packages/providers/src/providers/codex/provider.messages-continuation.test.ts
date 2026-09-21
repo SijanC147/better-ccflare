@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import { CodexProvider } from "./provider";
 
 const old = process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION;
@@ -15,7 +15,11 @@ afterEach(() => {
 	if (old === undefined) delete process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION;
 	else process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION = old;
 });
-const account = { id: "fixture-account", provider: "codex" } as Account;
+// Not `{ id, provider } as Account`. That cast asserted a two-field literal
+// was a complete `Account`, which suppressed three TS2345 errors at the call
+// sites that take it (SB23-2449). The factory supplies the whole shape, so
+// removing the cast this way exposes nothing rather than exposing those three.
+const account = makeAccount({ id: "fixture-account", provider: "codex" });
 const history = [
 	{ role: "user", content: "original task" },
 	{
@@ -83,6 +87,10 @@ async function request(
 	expect(result.headers.has("x-better-ccflare-authenticated-caller")).toBe(
 		false,
 	);
+	// `input` carries the Responses-API item shape. The fields below are the
+	// ones this file asserts on; they were missing, so a `toEqual` naming
+	// `role`, `type` or `text` was an excess-property error against the
+	// declaration rather than a disagreement with the wire format.
 	return (await result.json()) as {
 		model: string;
 		instructions?: string;
@@ -90,7 +98,12 @@ async function request(
 		previous_response_id?: string;
 		input: Array<{
 			type?: string;
-			content: Array<{ prompt_cache_breakpoint?: unknown }>;
+			role?: string;
+			content: Array<{
+				prompt_cache_breakpoint?: unknown;
+				type?: string;
+				text?: string;
+			}>;
 		}>;
 	};
 }
@@ -357,7 +370,10 @@ describe("Messages fallback cache and continuation", () => {
 	test("cancellation cannot promote even a buffered completion candidate", async () => {
 		const provider = new CodexProvider();
 		await request(provider, "cancel");
-		let source: ReadableStreamDefaultController<Uint8Array>;
+		// Declared without an initializer and with `undefined` in the union:
+		// `= null` would pin the flow type at `null`, because TypeScript
+		// cannot see the assignment made inside `start` below (TS#9998).
+		let source: ReadableStreamDefaultController<Uint8Array> | undefined;
 		const upstream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				source = controller;
@@ -384,6 +400,13 @@ describe("Messages fallback cache and continuation", () => {
 		const reader = response.body.getReader();
 		await reader.read();
 		await reader.cancel();
+		// `start` runs synchronously inside the `ReadableStream` constructor
+		// per the Streams spec, so `start()` above has already assigned it. The
+		// throw states that assumption: a `?.` here would skip both the
+		// enqueue and the close below and leave the case asserting that a
+		// completion event it never sent failed to promote a checkpoint.
+		if (!source)
+			throw new Error("upstream stream start() did not assign a controller");
 		source.enqueue(
 			new TextEncoder().encode(
 				event("response.completed", {

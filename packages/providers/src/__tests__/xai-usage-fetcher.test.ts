@@ -125,7 +125,7 @@ describe("xAI Grok usage fetcher", () => {
 					"1",
 				);
 				expect([...(init?.body as Uint8Array)]).toEqual([0, 0, 0, 0, 0]);
-				return new Response(responseBody, { status: 200 });
+				return new Response(responseBody as BodyInit, { status: 200 });
 			},
 		);
 		globalThis.fetch = fetchMock as unknown as typeof fetch;

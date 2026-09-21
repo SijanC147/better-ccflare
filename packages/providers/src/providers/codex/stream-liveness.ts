@@ -15,7 +15,10 @@ export interface CodexStreamHeartbeatGate {
 	waitUntilReady(signal: AbortSignal): Promise<void>;
 }
 
-type CodexStreamReader = Pick<ReadableStreamDefaultReader<Uint8Array>, "read">;
+export type CodexStreamReader = Pick<
+	ReadableStreamDefaultReader<Uint8Array>,
+	"read"
+>;
 
 type CodexUpstreamReadResult = Awaited<
 	ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
