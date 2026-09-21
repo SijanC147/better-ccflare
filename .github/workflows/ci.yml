@@ -54,6 +54,25 @@ jobs:
         if: steps.changes.outputs.relevant != 'false'
         run: bun run typecheck
 
+      # SB23-2375. `bun run typecheck` cannot be this gate. TypeScript accepts a
+      # non-boolean in a boolean context, so when PR #190 widened
+      # `Config.entryIsTrusted()` from `boolean` to a reason union and one caller
+      # kept `if (this.entryIsTrusted(path))`, typecheck was clean and the focused
+      # suite for the changed file was green while `replaceUntrustedLink()` had
+      # stopped replacing untrusted links.
+      #
+      # Scoped to a call result that can never be falsy, which measured 0 sites in
+      # this tree, so it fails the build rather than warning. The blanket
+      # strict-boolean rule measured 3836 sites in 333 files and was not
+      # shippable; the script's header carries both numbers and the boundary.
+      #
+      # A step inside this job for the same reason as the biome step below: both
+      # job names are required checks in ruleset `hextap/main` and a new job would
+      # need a ruleset change.
+      - name: Check for boolean-context widening
+        if: steps.changes.outputs.relevant != 'false'
+        run: bun run check:boolean-widening
+
       # SB23-1918. `bun run lint` cannot be this gate: it is
       # `biome check --write --unsafe`, which mutates the tree and can exit 0
       # having rewritten files, so it reports nothing. This is the read-only
