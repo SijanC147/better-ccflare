@@ -150,14 +150,37 @@ describe("check-boolean-widening", () => {
 		expect(stdout).toContain("1 offences");
 	});
 
-	test("stays silent on an intersection that carries a falsy constituent", () => {
-		// An intersection's inhabitants are the intersection of its constituents' value
-		// sets, so it is falsy-capable only when EVERY constituent is. `string & unknown`
-		// still contains the empty string. Mutating `.every` to `.some` makes this case
-		// report an offence and exit 1.
+	test("fails on an intersection mixing a falsy-capable constituent with an object", () => {
+		// This is the case that separates `.every` from `.some` in the intersection
+		// branch, and it is the only one that does. An intersection's inhabitants are the
+		// intersection of its constituents' value sets, so `{ a: 1 } & string` contains
+		// only strings that also carry `a`, which excludes `""`: always truthy. `.every`
+		// returns false here and reports it; `.some` returns true and goes silent.
+		//
+		// The first attempt at this test used `string & unknown`, which TypeScript
+		// collapses to plain `string` because `unknown` is the identity for intersection,
+		// so it never reached the branch at all and the `.some` mutant SURVIVED it. A
+		// mutation that survives because the test never exercised the predicate looks
+		// exactly like a weak assertion.
 		const dir = makeFixture(
 			[
-				"declare function loose(): string & unknown;",
+				"declare function tagged(): { a: 1 } & string;",
+				"export function guard(): boolean {",
+				"\tif (tagged()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:3:6");
+	});
+
+	test("stays silent on an intersection whose every constituent is falsy-capable", () => {
+		const dir = makeFixture(
+			[
+				"declare function loose(): string & (string | number);",
 				"export function guard(): boolean {",
 				"\tif (loose()) return true;",
 				"\treturn false;",
