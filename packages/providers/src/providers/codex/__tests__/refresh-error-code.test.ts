@@ -1,45 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount as baseAccount } from "../../../testing/account-fixture";
 import { CodexProvider } from "../provider";
 
+// Only the fields this file's assertions depend on are named here; the rest
+// come from the shared fixture. `expires_at: 1` is the point of the file: it
+// puts the account past expiry so every case exercises the refresh path.
 function codexAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return baseAccount({
 		id: "codex-1",
 		name: "codex-test",
 		provider: "codex",
-		api_key: null,
 		refresh_token: "refresh-token",
 		access_token: "expired-access-token",
 		expires_at: 1,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		requires_reauth: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
-		consecutive_rate_limits: 0,
 		...overrides,
-	};
+	});
 }
 
 describe("CodexProvider.refreshToken preserves the OAuth error code", () => {
