@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import { CodexProvider } from "./provider";
 
 const old = process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION;
@@ -15,7 +15,11 @@ afterEach(() => {
 	if (old === undefined) delete process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION;
 	else process.env.CCFLARE_CODEX_MESSAGES_CONTINUATION = old;
 });
-const account = { id: "fixture-account", provider: "codex" } as Account;
+// Not `{ id, provider } as Account`. That cast asserted a two-field literal
+// was a complete `Account`, which suppressed three TS2345 errors at the call
+// sites that take it (SB23-2449). The factory supplies the whole shape, so
+// removing the cast this way exposes nothing rather than exposing those three.
+const account = makeAccount({ id: "fixture-account", provider: "codex" });
 const history = [
 	{ role: "user", content: "original task" },
 	{
