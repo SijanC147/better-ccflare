@@ -125,6 +125,45 @@ doubles (Bun's `typeof fetch` carries `preconnect`) and `PublicSurface<T>` for a
 intersected with its own private member names. `codex-usage-refresher.ts`'s `formatPercent`
 accepts `null`, the fork's spelling of an unreported window.
 
+### Reviewer round
+
+Independent reviewer on `0e301daa`: "ready pending a fix round", four findings, posted on PR #231.
+Fixed at `6500e105` and the commit after it:
+
+- **Finding 1 (HIGH as filed, live reach narrower than filed).** The merged Codex parser omits an
+  unreported window and three guards decided "anthropic-style" by
+  `"five_hour" in x && "seven_day" in x`: `pool-usage.ts` `isAnthropicStyleShape`,
+  `RateLimitProgress.tsx` `hasAnthropicStyleData`, and the accounts list handler. Upstream
+  carries all three conjunctions, so the defect is upstream's; recorded here, not reported.
+  Live reach measured at rung 4: **nil for Codex through `GET /api/accounts`**, because the
+  handler passes every Codex cache entry through `normalizeCodexUsageData`
+  (`accounts.ts:145-150`, `:174-176`), which rebuilds both keys before the guard, and that
+  handler (`:800`) is the only emitter of `usageData` to the dashboard. **Real for `usageCache`'s
+  direct readers**: `usage-throttling.ts` (upstream relaxed it) and `health.ts` (tolerant). The
+  three guards are relaxed to `||` anyway, the minimum fix: it is the `SB23-2462` class and the
+  next raw-shape path would hit them. They remain key-shaped by choice; the provider-typed form
+  `#219` landed is a separate issue.
+  Tests: `pool-usage` asserts a weekly-only Codex account moves the weekly average and lands in
+  `contributing`; `RateLimitProgress` asserts the weekly row renders with no `five_hour` key,
+  **with the fallback props nulled**, because a mutation restoring the conjunction survived while
+  `usageUtilization`/`usageWindow` were set (the component had a second route to the same row).
+  Both die with the conjunction restored. The handler test seeds a `seven_day`-only cache entry
+  and reads `usageUtilization` 87; **a mutation restoring the handler's conjunction survives it by
+  construction**, which is the evidence that the guard is unreachable from that path, not a weak
+  test. Do not strengthen it.
+- **Finding 2 (MEDIUM).** The four `usage_pause_*` columns were absent from SQLite
+  `ensureSchema()`, upstream's own omission and place 1 of the ten. Added. With the second rebuild
+  list (`f1de89a5`) that is two of the ten places wrong in one sync, from two authors.
+- **Finding 3 (LOW).** The `UsageData` contract comment in `usage-fetcher.ts` no longer claims the
+  key stays present.
+- **Finding 4 (LOW, disclosure).** The second rebuild's `CREATE TABLE ... AS SELECT` carries values
+  but not `NOT NULL DEFAULT 0` on the two enabled flags. Pre-existing for every column in that
+  list; every reader wraps them in `COALESCE(..., 0)`.
+- **Finding 5 (LOW, second addendum).** The default-install 5xx test drove the
+  `settings ?? RETRY_DEFAULTS` fallback while its comment claimed the default-install path;
+  `Config.getRuntime()` always emits `retry`. Now two cases: runtime with `retry: RETRY_DEFAULTS`,
+  and runtime with no retry block.
+
 ### Behaviour changes a fork operator will see
 
 - A default install retries a transient 5xx up to 3 times in place, because the budget is

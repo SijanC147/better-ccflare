@@ -349,10 +349,14 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		});
 
 		const ctx = makeProxyContext();
-		// No retry on the runtime: getOverloadRetryConfig falls back to
-		// RETRY_DEFAULTS, which is what a config with none of the three keys
-		// resolves to.
-		ctx.runtime = { port: 8080, clientId: "test" } as never;
+		// What a default install's runtime carries: Config.getRuntime() always
+		// emits `retry`, equal to RETRY_DEFAULTS when none of the three keys is
+		// set. The absent-runtime fallback is the separate case below.
+		ctx.runtime = {
+			port: 8080,
+			clientId: "test",
+			retry: { ...RETRY_DEFAULTS },
+		} as never;
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -367,6 +371,32 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		expect(callCount).toBe(RETRY_DEFAULTS.attempts);
 		expect(callCount).toBe(3);
 		expect(account.rate_limited_reason).toBe("upstream_5xx_server_error");
+	});
+
+	it("falls back to RETRY_DEFAULTS when the runtime carries no retry block at all", async () => {
+		// The `settings ?? RETRY_DEFAULTS` arm in getOverloadRetryConfig, reserved
+		// for callers with no access to the runtime config. Not the default
+		// install's path; kept so the fallback is pinned on its own.
+		let callCount = 0;
+		fetchSlot.fetch = mock(async () => {
+			callCount++;
+			return serverErrorResponse(503);
+		});
+
+		const ctx = makeProxyContext();
+		ctx.runtime = { port: 8080, clientId: "test" } as never;
+		const account = makeAccount();
+		const bodyBuffer = makeRequestBody();
+		const { result, forwarded } = await runProxy(
+			makeRequest(bodyBuffer),
+			account,
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(forwarded).toBe(false);
+		expect(result).toBeNull();
+		expect(callCount).toBe(3);
 	});
 
 	it("makes a single attempt when retry_attempts is 0, never the default", async () => {
