@@ -245,6 +245,57 @@ describe("check-boolean-widening", () => {
 		expect(stdout).toContain("0 offences");
 	});
 
+	test("fails on a call result behind a type assertion", () => {
+		// The reviewer's third false negative. `as`, the angle-bracket form and
+		// `satisfies` are none of the node kinds `isCallResult` unwrapped, so the walk
+		// stopped and the gate went silent. A cast is what an author adds when a return
+		// type has just been widened, so this is the likeliest spelling of the defect.
+		const dir = makeFixture(
+			[
+				'type EntryTrust = "trusted" | "directory";',
+				"declare function t(): EntryTrust;",
+				"export function guard(): boolean {",
+				"\tif (t() as EntryTrust) return true;",
+				"\tif (t() satisfies EntryTrust) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("2 offences");
+	});
+
+	test("exits 2, not 0, when it built a program that examined no boolean context", () => {
+		// Claim 3's entire mechanism, and the reviewer measured that mutating this
+		// `process.exit(2)` to `process.exit(0)` survived all seven original tests: the
+		// tsconfig-missing case exits at `readConfigFile` before a program is ever built,
+		// so nothing reached this branch. A gate that never read the tree otherwise
+		// reports zero offences forever, which is indistinguishable from a clean tree.
+		const dir = makeFixture("export const x = 1;\n");
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(2);
+		expect(stdout).toContain("0 boolean contexts examined");
+		expect(stderr).toContain("not evidence of a clean tree");
+	});
+
+	test("stays silent on a union mixing one truthy and one falsy member", () => {
+		// Separates `.every` from `.some` in `alwaysTruthy`. `string | undefined` does not,
+		// because `string` is itself falsy-capable; `"a" | undefined` does.
+		const dir = makeFixture(
+			[
+				'declare function maybe(): "a" | undefined;',
+				"export function guard(): boolean {",
+				"\tif (maybe()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+		);
+		const { exitCode, stdout } = runGate(dir);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("0 offences");
+	});
+
 	test("exits 2 rather than passing when it is pointed at a tsconfig that does not exist", () => {
 		const dir = makeFixture("export const x = 1;\n");
 		const result = Bun.spawnSync(

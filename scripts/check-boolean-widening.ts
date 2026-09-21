@@ -18,6 +18,13 @@
  *   - `boolean` widened to `string`, `number`, or any union carrying a falsy member
  *     (`"a" | null`, `"a" | ""`, `number`). Those can be false, so the call site still has
  *     two outcomes and is not unconditionally broken.
+ *   - the RIGHT operand of `&&` or `||`. Only the left operand of a logical operator is
+ *     a boolean context in its own right, so `if (isSymlink(p) && entryIsTrusted(p))` is
+ *     NOT flagged: the SB23-2375 shape with one guard in front of it. Measured by the
+ *     reviewer at 3c71d5d2, who also measured that descending condition roots through
+ *     `&&` / `||` closes it at a cost of zero new offences on this tree. That widening is
+ *     SB23-2450 rather than this commit, because restructuring the visitor unreviewed at
+ *     the end of a time budget is how PR #57 wrote six of its seven defects.
  *   - an always-truthy value reached through an identifier or a property rather than a call:
  *     `while (true)`, `!process.env`, `if (map[key])` under `noUncheckedIndexedAccess: false`.
  *     Measured 2026-09-21: 109 such sites in 72 files, nearly all correct as written.
@@ -119,11 +126,29 @@ function alwaysTruthy(type: ts.Type): boolean {
 /** Unwraps parentheses and `!` assertions to ask whether the value came out of a call. */
 function isCallResult(expr: ts.Expression): boolean {
 	let inner: ts.Expression = expr;
-	while (ts.isParenthesizedExpression(inner) || ts.isNonNullExpression(inner)) {
+	// A cast has to be unwrapped, and it is the case that matters most: a cast is
+	// exactly what an author reaches for when a return type has just been widened and
+	// something downstream complains, so `if (f() as EntryTrust)` is the same defect
+	// with the author's own workaround in front of it. Found by the reviewer at
+	// 3c71d5d2; before this, all three assertion forms walked off the end of the loop
+	// and the gate was silent on them.
+	while (
+		ts.isParenthesizedExpression(inner) ||
+		ts.isNonNullExpression(inner) ||
+		ts.isAsExpression(inner) ||
+		ts.isTypeAssertionExpression(inner) ||
+		ts.isSatisfiesExpression(inner)
+	) {
 		inner = inner.expression;
 	}
 	if (ts.isAwaitExpression(inner)) return isCallResult(inner.expression);
-	return ts.isCallExpression(inner);
+	// `new C()` is always truthy by construction and a tagged template is a call in
+	// everything but node kind. Neither is a `CallExpression`.
+	return (
+		ts.isCallExpression(inner) ||
+		ts.isNewExpression(inner) ||
+		ts.isTaggedTemplateExpression(inner)
+	);
 }
 
 type Offence = { file: string; line: number; column: number; context: string; type: string; text: string };
