@@ -1,4 +1,28 @@
 {
 	"extends": "../../tsconfig.json",
-	"include": ["src/**/*"]
+	// The first entry is this app's own source. The two that follow are ambient
+	// declaration files owned by other packages, and they are listed here
+	// because an ambient `declare module` enters a program only through
+	// `include` or `files`, never through the import graph. The root config
+	// admits both through `packages/*/src/**/*`, which is why `bunx tsc` at the
+	// root is green while a `-p apps/server` program reported three TS2307 on
+	// `@better-ccflare/dashboard-web/dist/embedded`,
+	// `@better-ccflare/dashboard-web/dist/manifest.json` and
+	// `../../../../MERGELOG.md`, all of which are generated or bundler-inlined
+	// artifacts absent from an unbuilt checkout (SB23-2354).
+	//
+	// Listing the declarations rather than adding a build step keeps the gate
+	// runnable on a clean checkout and keeps a red gate unambiguous: it means
+	// the types are wrong, not that a build failed.
+	"include": [
+		"src/**/*",
+		"../../packages/dashboard-web/src/embedded.d.ts",
+		"../../packages/http-api/src/mergelog.d.ts"
+	],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's `**/__tests__`, `**/*.test.ts` and
+	// `**/*.test.tsx` entries and brings this app's test file into the program.
+	// Same mechanism as packages/http-api (SB23-2304). Wired into the root
+	// `typecheck` script; without that script entry the gate never runs.
+	"exclude": ["node_modules", "dist"]
 }
