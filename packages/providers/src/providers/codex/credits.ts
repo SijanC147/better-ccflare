@@ -8,10 +8,17 @@ import type {
  * A credit balance older than this is treated as absent.
  *
  * It is the same bound the usage cache already applies to a usage reading
- * (`cleanupStaleEntries`'s default and the two age checks in
- * `usage-fetcher.ts`), chosen so a carried balance can never be older than an
- * entry the cache would still serve. Picking a second, larger number here
- * would mean admission trusting a balance the cache itself considers stale.
+ * (`UsageCache.ENTRY_MAX_AGE_MS`), chosen so a carried balance can never be
+ * older than an entry the cache would still serve. Picking a second, larger
+ * number here would mean admission trusting a balance the cache itself
+ * considers stale.
+ *
+ * **Lowering it below `UsageCache.ENTRY_MAX_AGE_MS` breaks something that is
+ * not obvious from here.** A writer that takes `usageCache.set`'s default stamp
+ * is safe only because credits then age at the same rate as the entry, so the
+ * entry is discarded before this bound can fire. Drop this below the entry TTL
+ * and the strip starts withholding fields from entries that are not stale at
+ * all. PR #236's second reviewer measured it at five minutes.
  */
 export const CODEX_CREDITS_MAX_AGE_MS = 10 * 60 * 1000;
 

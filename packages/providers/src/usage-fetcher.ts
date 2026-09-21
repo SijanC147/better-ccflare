@@ -1007,6 +1007,25 @@ export type AccessTokenProvider = () => Promise<string>;
  * In-memory cache for usage data per account
  */
 class UsageCache {
+	/**
+	 * How long a cache ENTRY may be served before it is discarded as stale.
+	 *
+	 * Named because `CODEX_CREDITS_MAX_AGE_MS` is silently coupled to it, and
+	 * the coupling is what makes a writer that takes `set`'s default stamp safe:
+	 * with `creditsObservedAt` equal to the entry's own `timestamp`, credits age
+	 * equals entry age, so this check discards the entry at the same moment the
+	 * credits bound would have fired, and the strip is unreachable for that
+	 * writer.
+	 *
+	 * **The invariant is `CODEX_CREDITS_MAX_AGE_MS >= ENTRY_MAX_AGE_MS`.** Today
+	 * they are equal, by coincidence rather than by construction. PR #236's
+	 * second reviewer measured what breaking it costs: set the credits bound to
+	 * five minutes, change nothing else, and a default-stamped payload read six
+	 * minutes later comes back with its credits withheld though nothing was ever
+	 * stale. Lower the credits bound and this must come down too.
+	 */
+	private static readonly ENTRY_MAX_AGE_MS = 10 * 60 * 1000;
+
 	private cache = new Map<
 		string,
 		{
@@ -1725,7 +1744,7 @@ class UsageCache {
 	/**
 	 * Clean up stale cache entries older than maxAgeMs
 	 */
-	cleanupStaleEntries(maxAgeMs: number = 10 * 60 * 1000): void {
+	cleanupStaleEntries(maxAgeMs: number = UsageCache.ENTRY_MAX_AGE_MS): void {
 		const now = Date.now();
 		let cleanedCount = 0;
 
@@ -1750,7 +1769,7 @@ class UsageCache {
 
 		// Clean up stale entries while accessing
 		const age = Date.now() - cached.timestamp;
-		if (age > 10 * 60 * 1000) {
+		if (age > UsageCache.ENTRY_MAX_AGE_MS) {
 			// 10 minutes max age
 			this.cache.delete(accountId);
 			log.debug(
@@ -1827,6 +1846,16 @@ class UsageCache {
 		 * pass that payload's own timestamp instead: dating a day-old balance as
 		 * though it had just arrived is what admitted an exhausted account in PR
 		 * #236's review.
+		 *
+		 * **Passing a PAST stamp is the only way to make `get` withhold a field,
+		 * so weigh it for any provider whose payload has a `credits` key.** The
+		 * default and an explicit `null` are both safe by construction: credits
+		 * then age no faster than the entry, which is discarded first. A replay
+		 * of a stored payload is not, and `handlers/accounts.ts` is a worked
+		 * example of that pattern, which is the obvious thing to copy for, say,
+		 * an xAI card that survives a restart. Copying it without reading this
+		 * would put back the defect PR #236's second reviewer found, at a new
+		 * address.
 		 */
 		creditsObservedAt: number | null = Date.now(),
 	): void {
@@ -1895,7 +1924,7 @@ class UsageCache {
 
 		const age = Date.now() - cached.timestamp;
 		// Clean up if too old
-		if (age > 10 * 60 * 1000) {
+		if (age > UsageCache.ENTRY_MAX_AGE_MS) {
 			// 10 minutes max age
 			this.cache.delete(accountId);
 			return null;
