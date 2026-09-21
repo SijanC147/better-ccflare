@@ -222,6 +222,14 @@ describe("admission — the ruling", () => {
 			12,
 		);
 		expect(benched(limitsShaped)).toBe(false);
+		// And the reset must come from the session limit, not the weekly one.
+		// The utilization assertion above cannot see this: representativeWindow
+		// has its OWN limits[] fold, so dropping the exclusion there alone leaves
+		// the number at 12 while the reset slides four days out. Found by
+		// mutation M7, which survived until this line existed.
+		expect(
+			getRepresentativeUsageSnapshotForProvider(limitsShaped, "codex"),
+		).toEqual({ utilization: 12, resetMs: Date.parse(FIVE_HOUR_RESET) });
 	});
 
 	it("has no opinion when the weekly window was the only window", () => {
