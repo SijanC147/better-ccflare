@@ -48,6 +48,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		refresh_token_issued_at: null,
 		last_manual_reauth_at: null,
 		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -514,6 +518,51 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 		await processProxyResponse(response, account, ctx);
 
 		// Successful response clears cooldown
+		expect(account.rate_limited_until).toBeNull();
+	});
+
+	it("does not clear an existing bench when the upstream returns 5xx", async () => {
+		// A server error is not evidence that the account recovered. Clearing
+		// the bench here took an account straight back off the cooldown a 5xx
+		// failover had just applied, so the next request hit the same broken
+		// upstream org again.
+		const benchedUntil = Date.now() + 60_000;
+		const account = makeAccount({ rate_limited_until: benchedUntil });
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: false,
+		});
+		const response = new Response(
+			'{"type":"error","error":{"type":"api_error"}}',
+			{
+				status: 500,
+				headers: { "content-type": "application/json" },
+			},
+		);
+
+		await processProxyResponse(response, account, ctx);
+
+		expect(account.rate_limited_until).toBe(benchedUntil);
+	});
+
+	it("still clears an existing bench on a non-server-error failure (4xx)", async () => {
+		// Only status >= 500 is exempt: a 4xx still reached the account's own
+		// quota accounting upstream, so the pre-5xx behaviour is kept.
+		const account = makeAccount({ rate_limited_until: Date.now() + 60_000 });
+		const { ctx } = makeCtx({
+			isStream: false,
+			rateLimited: false,
+		});
+		const response = new Response(
+			'{"type":"error","error":{"type":"invalid_request_error"}}',
+			{
+				status: 400,
+				headers: { "content-type": "application/json" },
+			},
+		);
+
+		await processProxyResponse(response, account, ctx);
+
 		expect(account.rate_limited_until).toBeNull();
 	});
 

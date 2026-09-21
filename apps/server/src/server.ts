@@ -8,18 +8,22 @@ import {
 import {
 	CACHE,
 	DEFAULT_STRATEGY,
+	effectiveThreshold,
+	evaluateUsagePause,
 	getVersion,
 	HTTP_STATUS,
 	initializeNanoGPTPricingIfAccountsExist,
 	installOutboundProxy,
 	intervalManager,
 	NETWORK,
+	readUsageUtilization,
 	registerCleanup,
 	registerDisposable,
 	setForceAccountModel,
 	setPricingLogger,
 	shutdown,
 	TIME_CONSTANTS,
+	USAGE_THRESHOLD_PAUSE_REASON,
 } from "@better-ccflare/core";
 import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
 import type { DatabaseOperations } from "@better-ccflare/database";
@@ -53,11 +57,16 @@ import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	CODEX_PING_MODEL,
+	extractChatgptAccountId,
 	extractWeeklyResetTime,
+	fetchCodexUsageData,
 	fetchCodexUsageOnDemand,
 	getProvider,
 	getRankingUtilizationForProvider,
+	isCodexSubscriptionEndpoint,
+	normalizeUsageSnapshotForHistory,
 	setProviderModelDefaultOverrides,
+	type UsageData,
 	usageCache,
 } from "@better-ccflare/providers";
 import {
@@ -70,6 +79,7 @@ import {
 	CacheKeepaliveScheduler,
 	DiscoveryScheduler,
 	drainUsageCollector,
+	earliestCodexResetMs,
 	forceCloseCircuit,
 	getCodexModels,
 	getModelCatalog,
@@ -104,6 +114,8 @@ import {
 	type StrategyStore,
 } from "@better-ccflare/types";
 import { serve } from "bun";
+import { createCodexUsageRefresher } from "./codex-usage-refresher";
+import { createVacuumScheduler, runVacuumBootstrap } from "./vacuum-scheduler";
 
 /**
  * Build a load-balancing strategy from its enum name. Add new strategies here
@@ -162,10 +174,179 @@ const MEMORY_MONITOR_INTERVAL_MS = 60 * 1000;
 const MEMORY_GROWTH_WARN_BYTES = 512 * 1024 * 1024;
 const MEMORY_GROWTH_ERROR_BYTES = 1024 * 1024 * 1024;
 
+/**
+ * Whether this provider is polled through `startUsagePollingWithRefresh` —
+ * the OAuth-refresh-backed path that syncs a rotated `access_token`/
+ * `refresh_token` pair from the database before every poll. Only anthropic,
+ * codex and xai have OAuth session tokens to refresh in the first place.
+ *
+ * This is now a STRICT SUBSET of `supportsUsagePauseThreshold`'s providers,
+ * not the same set: zai, nanogpt and minimax also support pause thresholds,
+ * but they are API-key providers polled through their own dedicated
+ * bootstrap blocks further down this file (`usageCache.startPolling` calls
+ * with an `apiKeyProvider`, no refresh-token machinery involved) and reach
+ * `applyUsagePauseThresholds` via their own `onSnapshot` wiring instead of
+ * this path. Do not delegate this function to `supportsUsagePauseThreshold`
+ * again — doing so would leak API-key-only accounts into
+ * `refreshBackedUsageAccounts` below, which expects `access_token`/
+ * `refresh_token` and would log spurious "no token, skipping" warnings (or
+ * double-register polling for accounts already handled by the dedicated
+ * nanogpt/zai/minimax blocks).
+ */
 export function supportsRefreshBackedUsagePolling(
 	provider: string | null | undefined,
 ): boolean {
-	return provider === "anthropic" || provider === "xai";
+	return provider === "anthropic" || provider === "codex" || provider === "xai";
+}
+
+/**
+ * Whether `startUsagePollingWithRefresh` should poll this account. Codex is
+ * polled only against OpenAI's own ChatGPT backend: the usage endpoint is a
+ * chatgpt.com path, so an account pointed at a custom OpenAI-compatible
+ * endpoint has nothing to poll and is skipped instead of failing every 90 s.
+ */
+export function supportsUsagePollingForAccount(account: {
+	provider: string | null | undefined;
+	custom_endpoint?: string | null;
+}): boolean {
+	if (!supportsRefreshBackedUsagePolling(account.provider)) return false;
+	if (account.provider !== "codex") return true;
+	return (
+		!account.custom_endpoint ||
+		isCodexSubscriptionEndpoint(account.custom_endpoint)
+	);
+}
+
+/**
+ * Build the `onSnapshot` callback `usageCache.startPolling` fires after every
+ * successful poll. Anthropic rows are written as-is. Codex goes through
+ * `recordCodexUsageSnapshot` (drops windows without a real reset, shares the
+ * 90 s throttle with the traffic path in response-processor).
+ *
+ * Polled windows are deliberately NOT written to `accounts.rate_limit_reset`.
+ * `AutoRefreshScheduler` only picks up accounts whose `rate_limit_reset <= now`
+ * and `codexWindowHasReset` / `peek-availability` likewise need the ELAPSED
+ * value to survive until they act on it — a 90 s poller would overwrite it with
+ * the next future reset within seconds of every rollover and neither would ever
+ * fire. Only real traffic (`response-processor.ts`) and the manual refresh
+ * button write that column, exactly as they do on main.
+ */
+export function createUsageSnapshotRecorder(
+	account: Pick<Account, "id" | "name" | "provider">,
+	dbOps: DatabaseOperations,
+	logger: Logger,
+): (accountId: string, data: UsageData) => Promise<void> {
+	return async (accountId, data) => {
+		if (account.provider === "codex") {
+			const usage = data as unknown as Record<string, unknown>;
+			try {
+				await recordCodexUsageSnapshot(
+					dbOps,
+					accountId,
+					account.name,
+					usage,
+					Date.now(),
+				);
+			} catch (err) {
+				logger.warn(
+					`Failed to record Codex usage snapshot for account ${accountId}: ${err}`,
+				);
+			}
+			await applyUsagePauseThresholds(accountId, usage, dbOps, logger);
+			return;
+		}
+		try {
+			const historyPayload = normalizeUsageSnapshotForHistory(
+				account.provider,
+				data,
+			);
+			if (Object.keys(historyPayload).length > 0) {
+				await dbOps.recordUsageSnapshot(accountId, historyPayload, Date.now());
+			}
+		} catch (err) {
+			logger.warn(
+				`Failed to record usage snapshot for account ${accountId}: ${err}`,
+			);
+		}
+		await applyUsagePauseThresholds(accountId, data, dbOps, logger);
+	};
+}
+
+/**
+ * Pause or resume an account according to its usage-window thresholds.
+ *
+ * Runs on every usage snapshot, for whichever provider produced it — the
+ * thresholds are a property of the account, not of Anthropic. Reads the
+ * account back from the database rather than trusting the cached row the
+ * poller was started with, so a threshold edited in the dashboard takes effect
+ * on the next poll instead of at the next restart.
+ *
+ * Never throws: a failure here must not cost the caller its usage snapshot.
+ */
+export async function applyUsagePauseThresholds(
+	accountId: string,
+	data: unknown,
+	dbOps: DatabaseOperations,
+	logger: Logger,
+): Promise<void> {
+	try {
+		const account = await dbOps.getAccount(accountId);
+		if (!account) return;
+
+		const thresholds = {
+			fiveHour: {
+				enabled: account.usage_pause_five_hour_enabled,
+				percent: account.usage_pause_five_hour_threshold ?? null,
+			},
+			weekly: {
+				enabled: account.usage_pause_weekly_enabled,
+				percent: account.usage_pause_weekly_threshold ?? null,
+			},
+		};
+		// Nothing in force and nothing of ours to lift — the common case, and not
+		// worth a read of the payload.
+		if (
+			effectiveThreshold(thresholds.fiveHour) === null &&
+			effectiveThreshold(thresholds.weekly) === null &&
+			!account.paused
+		) {
+			return;
+		}
+
+		const decision = evaluateUsagePause({
+			thresholds,
+			utilization: readUsageUtilization(data, account.provider),
+			paused: account.paused,
+			pauseReason: account.pause_reason ?? null,
+		});
+
+		// Both writes are guarded on the state this decision was made from: a
+		// manual or overage pause can land between the read above and the write
+		// below, and it must win rather than have its reason overwritten (pause)
+		// or cleared outright (resume).
+		if (decision.action === "pause") {
+			const window = decision.window === "five_hour" ? "5-hour" : "weekly";
+			logger.info(
+				`Pausing account '${account.name}' (${accountId}): ${window} usage at ${decision.utilization}% reached the configured ${decision.threshold}% threshold`,
+			);
+			await dbOps.pauseAccountForUsageThreshold(
+				accountId,
+				USAGE_THRESHOLD_PAUSE_REASON,
+			);
+		} else if (decision.action === "resume") {
+			logger.info(
+				`Resuming account '${account.name}' (${accountId}): usage is back below its pause threshold`,
+			);
+			await dbOps.resumeAccountFromUsageThreshold(
+				accountId,
+				USAGE_THRESHOLD_PAUSE_REASON,
+			);
+		}
+	} catch (err) {
+		logger.warn(
+			`Failed to apply usage pause thresholds for account ${accountId}: ${err}`,
+		);
+	}
 }
 
 /**
@@ -173,6 +354,11 @@ export function supportsRefreshBackedUsagePolling(
  * `@better-ccflare/providers`. Declared locally so the bootstrap helper
  * can be unit-tested with a mock without dragging the full UsageCache
  * class (which is not exported) into the public type surface.
+ *
+ * Mirrors the real `startPolling`'s trailing optional callback params
+ * (`onWindowReset`/`onCapacityRestored`/`onStaleWeeklyReset`/`onSnapshot`)
+ * as a faithful subset so this interface doesn't need widening again the
+ * next time a bootstrap helper needs one of them.
  */
 export interface UsageCacheRegistrar {
 	startPolling(
@@ -180,6 +366,11 @@ export interface UsageCacheRegistrar {
 		tokenProvider: () => Promise<string>,
 		provider: string,
 		intervalMs: number,
+		customEndpoint?: string | null,
+		onWindowReset?: (accountId: string) => void,
+		onCapacityRestored?: (accountId: string) => void,
+		onStaleWeeklyReset?: (accountId: string, observedAt: number) => void,
+		onSnapshot?: (accountId: string, data: UsageData) => void,
 	): void;
 }
 
@@ -199,11 +390,22 @@ export interface UsageCacheRegistrar {
  * sibling nanogpt/zai/kilo blocks (Greptile #350 P2): "X account <name> has
  * no API key, skipping usage polling". The account name is the only
  * identifier in the message — never the key value or any part of it.
+ *
+ * `dbOps` is required (unlike `logger`, which stays optional for back-compat)
+ * because it is needed to build the `onSnapshot` callback via
+ * {@link createUsageSnapshotRecorder}, which records every successful poll
+ * and feeds `applyUsagePauseThresholds` — the same wiring the anthropic/
+ * codex/xai path uses. When `logger` is omitted, a fallback `Logger` is
+ * constructed for the recorder so the callback always has a real logger,
+ * even though the "no API key" warn above stays silent in that case (that
+ * warn intentionally no-ops when `logger` is absent — see the back-compat
+ * test).
  */
 export function registerMinimaxUsagePolling(
 	account: Account,
 	usageCache: UsageCacheRegistrar,
 	intervalMs: number,
+	dbOps: DatabaseOperations,
 	logger?: Logger,
 ): boolean {
 	if (account.provider !== "minimax") return false;
@@ -219,6 +421,15 @@ export function registerMinimaxUsagePolling(
 		apiKeyProvider,
 		account.provider,
 		intervalMs,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createUsageSnapshotRecorder(
+			account,
+			dbOps,
+			logger ?? new Logger("MinimaxUsagePolling"),
+		),
 	);
 	return true;
 }
@@ -237,6 +448,9 @@ export function registerMinimaxUsagePolling(
  * `logger` is forwarded to {@link registerMinimaxUsagePolling} so per-account
  * "no API key" warnings surface from the unit-testable helper, keeping
  * behavior consistent with the sibling nanogpt/zai/kilo bootstrap blocks.
+ * `dbOps` is forwarded too, so every registered account's `onSnapshot`
+ * callback can record its usage snapshot and evaluate pause thresholds
+ * exactly like the anthropic/codex/xai path does.
  *
  * Extracted from the inline bootstrap block so a regression test can exercise
  * the exact wiring path (filter → forEach → registerMinimaxUsagePolling) with
@@ -249,12 +463,21 @@ export function bootstrapMinimaxUsagePolling(
 	accounts: readonly Account[],
 	usageCache: UsageCacheRegistrar,
 	intervalMs: number,
+	dbOps: DatabaseOperations,
 	logger?: Logger,
 ): string[] {
 	const minimaxAccounts = accounts.filter((a) => a.provider === "minimax");
 	const registered: string[] = [];
 	for (const account of minimaxAccounts) {
-		if (registerMinimaxUsagePolling(account, usageCache, intervalMs, logger)) {
+		if (
+			registerMinimaxUsagePolling(
+				account,
+				usageCache,
+				intervalMs,
+				dbOps,
+				logger,
+			)
+		) {
 			registered.push(account.id);
 		}
 	}
@@ -358,6 +581,7 @@ let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
+let stopVacuumCatchUpJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let stopModelCatalogRefreshJob: (() => void) | null = null;
@@ -545,9 +769,40 @@ async function prewarmBedrockCache(account: Account, region: string) {
 	}
 }
 
+/** What {@link createRefreshBackedTokenProvider} needs from the server. */
+export interface RefreshBackedTokenProviderDeps {
+	getAccount(accountId: string): Promise<Account | null>;
+	getValidAccessToken(account: Account): Promise<string>;
+}
+
 /**
- * Start usage polling for an account with automatic token refresh
- * Temporarily resumes paused accounts for token refresh, then restores original state
+ * Token provider for usage polling: re-read the account's tokens from the DB
+ * on every call (OpenAI and Anthropic rotate refresh tokens, and re-auth
+ * replaces them), then let the token manager refresh if needed. It never
+ * touches the persisted pause state — the token manager does not care
+ * whether the account is paused, and the old resume/pause toggle rewrote an
+ * automatic pause_reason (overage, rate_limit_window) to "manual", which
+ * blocked auto-resume, and briefly exposed a paused account to traffic.
+ */
+export function createRefreshBackedTokenProvider(
+	account: Account,
+	deps: RefreshBackedTokenProviderDeps,
+): () => Promise<string> {
+	return async () => {
+		const current = await deps.getAccount(account.id);
+		if (current) {
+			account.access_token = current.access_token;
+			account.refresh_token = current.refresh_token;
+			account.expires_at = current.expires_at;
+		}
+		return deps.getValidAccessToken(account);
+	};
+}
+
+/**
+ * Start usage polling for an account with automatic token refresh.
+ * Polling runs regardless of the account's paused state and leaves that state
+ * untouched — see {@link createRefreshBackedTokenProvider}.
  */
 function startUsagePollingWithRefresh(
 	account: Account,
@@ -562,43 +817,12 @@ function startUsagePollingWithRefresh(
 	// Initial polling with token refresh
 	const pollWithRefresh = async () => {
 		try {
-			// Create a token provider function that gets a fresh token each time
-			const tokenProvider = async () => {
-				// Get the current paused state from the database to avoid stale state issues
-				// This is important because the account might be paused/resumed via API during runtime
-				const currentAccount = await proxyContext.dbOps.getAccount(account.id);
-				const wasTemporarilyResumed = currentAccount?.paused === true;
-
-				// Update in-memory account with fresh token data from DB
-				// This prevents using stale tokens after re-authentication
-				if (currentAccount) {
-					account.access_token = currentAccount.access_token;
-					account.refresh_token = currentAccount.refresh_token;
-					account.expires_at = currentAccount.expires_at;
-				}
-
-				// If account is currently paused, temporarily resume it for token refresh
-				if (wasTemporarilyResumed) {
-					logger.debug(
-						`Temporarily resuming account ${account.name} for token refresh`,
-					);
-					proxyContext.dbOps.resumeAccount(account.id);
-					account.paused = false;
-				}
-
-				try {
-					// Get a valid access token (refreshes if necessary)
-					const accessToken = await getValidAccessToken(account, proxyContext);
-					return accessToken;
-				} finally {
-					// Restore paused state ONLY if we temporarily resumed it above
-					if (wasTemporarilyResumed) {
-						logger.debug(`Restoring paused state for account ${account.name}`);
-						proxyContext.dbOps.pauseAccount(account.id);
-						account.paused = true;
-					}
-				}
-			};
+			// Fresh token on every poll, read back from the DB first so a
+			// rotated or re-authenticated token is never missed.
+			const tokenProvider = createRefreshBackedTokenProvider(account, {
+				getAccount: (accountId) => proxyContext.dbOps.getAccount(accountId),
+				getValidAccessToken: (acc) => getValidAccessToken(acc, proxyContext),
+			});
 
 			// Start usage polling with the token provider
 			usageCache.startPolling(
@@ -687,15 +911,7 @@ function startUsagePollingWithRefresh(
 							),
 						);
 				},
-				(accountId, data) => {
-					proxyContext.dbOps
-						.recordUsageSnapshot(accountId, data, Date.now())
-						.catch((err) =>
-							logger.warn(
-								`Failed to record usage snapshot for account ${accountId}: ${err}`,
-							),
-						);
-				},
+				createUsageSnapshotRecorder(account, proxyContext.dbOps, logger),
 			);
 
 			// Reset retry count on success
@@ -774,7 +990,6 @@ function startUsagePollingWithRefresh(
 				return;
 			}
 
-			// Don't restore paused state on error - let the user control pause/resume via API
 			// Retry with exponential backoff (5 min, 10 min, 20 min, ...)
 			const baseDelayMs = 5 * 60 * 1000; // 5 minutes
 			const delayMs = Math.min(
@@ -805,6 +1020,10 @@ function startUsagePollingWithRefresh(
 		pollWithRefresh();
 	}
 }
+
+// shouldRunVacuumCatchUp(), VACUUM_CATCHUP_FREELIST_RATIO_THRESHOLD, and
+// VACUUM_CATCHUP_MAX_PAGES_PER_TICK moved to ./vacuum-scheduler.ts
+// (internal-5) — see that module's doc comment for why.
 
 // Export for programmatic use
 let serverLifecycleOwned = false;
@@ -904,6 +1123,13 @@ export default async function startServer(options?: {
 	// route. The config POST handler mirrors it again after a write.
 	setForceAccountModel(config.getForceAccountModel());
 	installOutboundProxy(() => config.getOutboundProxy());
+	// The usage poller detects Codex window rollovers with the same predicate
+	// as the traffic path, so it must ride the same window. Config cannot be
+	// imported from @better-ccflare/providers, so hand the reader over once,
+	// before any polling starts. Read lazily so a live config change applies.
+	usageCache.setCodexRolloverPolicy({
+		pinFiveHour: () => config.getCodexFiveHourWindowEnabled(),
+	});
 	const outboundProxyUrl = config.getOutboundProxy();
 	if (outboundProxyUrl) {
 		const { protocol, host } = new URL(outboundProxyUrl);
@@ -971,43 +1197,13 @@ export default async function startServer(options?: {
 	// `PRAGMA auto_vacuum = INCREMENTAL` are already in mode 2 and this is a
 	// fast no-op. Existing DBs upgraded into this build run a full VACUUM
 	// here — minutes on a multi-GB file. Done BEFORE the HTTP listener binds
-	// so the proxy never sees a stalled writer slot.
+	// so the proxy never sees a stalled writer slot. Gated on the operator
+	// switch (internal-7) — see runVacuumBootstrap()'s doc comment for why:
+	// without the gate, a still-mode-0 file would run this blocking VACUUM
+	// even when the operator just disabled reclaim for a maintenance window.
 	if (dbOps.isSQLite) {
 		const startupLog = new Logger("Startup");
-		try {
-			const result = dbOps.bootstrapAutoVacuum();
-			if (result.migrated) {
-				startupLog.info(
-					`One-time auto_vacuum migration: mode ${result.modeBefore} → ${result.modeAfter} ` +
-						`in ${result.durationMs}ms. Future free-page reclamation runs incrementally via the ` +
-						`hourly worker — no more blocking VACUUM.`,
-				);
-				if (result.modeAfter !== 2) {
-					startupLog.error(
-						`auto_vacuum still ${result.modeAfter} after migration VACUUM — ` +
-							`incremental reclamation will be a no-op. Investigate disk space and DB integrity.`,
-					);
-				}
-			} else if (result.modeBefore === 1) {
-				// Operator set auto_vacuum=FULL on purpose. We don't migrate it to
-				// INCREMENTAL silently because FULL reclaims pages on every COMMIT
-				// while INCREMENTAL only reclaims when our hourly worker runs —
-				// rewriting that policy without notice would surprise the user.
-				// Log so it shows up in startup logs and `journalctl`. (Greptile #230)
-				startupLog.info(
-					`auto_vacuum=FULL (mode 1) detected — left in place. The hourly incremental_vacuum ` +
-						`worker is a no-op under FULL mode; pages are reclaimed on every COMMIT. ` +
-						`Switch to INCREMENTAL manually if you want the worker-driven cadence.`,
-				);
-			}
-		} catch (err) {
-			startupLog.error(
-				`Bootstrap auto_vacuum migration failed: ${err instanceof Error ? err.message : String(err)}. ` +
-					`Free pages will not be reclaimed until this is resolved. ` +
-					`Common causes: disk full (VACUUM needs ~2× DB size free), DB corruption.`,
-			);
-			throw err;
-		}
+		runVacuumBootstrap(dbOps, config.getAutoVacuumEnabled(), startupLog);
 	}
 
 	// Start periodic integrity scheduler. The startup `PRAGMA integrity_check`
@@ -1061,6 +1257,17 @@ export default async function startServer(options?: {
 	};
 	const getRetentionStatus = (): RetentionStatus => ({ ...retentionState });
 
+	// The shared in-flight guard, the hourly tick, and the catch-up tick's
+	// dispatch policy live in ./vacuum-scheduler.ts (internal-5) — see that
+	// module's doc comment for why (testability: none of this was reachable
+	// from a test while it lived in closures here).
+	const vacuumScheduler = createVacuumScheduler({
+		dbOps,
+		config,
+		asyncWriter,
+		log,
+	});
+
 	// Registered here (before runStartupMaintenance() below) so intervalManager
 	// has "data-retention-cleanup" on record and runNow() can find it — startup
 	// maintenance triggers the very same callback via runNow() instead of
@@ -1091,20 +1298,10 @@ export default async function startServer(options?: {
 				// yields between chunks, so the single writer slot is never held
 				// long and concurrent main-thread writes (rate-limit updates, OAuth
 				// refresh, post-processor inserts) aren't starved. Off-thread via
-				// the incremental-vacuum worker. Fire-and-forget so the cleanup
-				// callback isn't blocked on it.
-				dbOps
-					.incrementalVacuumAdaptive()
-					.then((r) => {
-						if (r.reclaimedPages > 0) {
-							log.info(
-								`Adaptive incremental vacuum reclaimed ${r.reclaimedPages} pages in ${r.chunks} chunk(s)`,
-							);
-						}
-					})
-					.catch((err) => {
-						log.error(`Incremental vacuum error: ${err}`);
-					});
+				// the incremental-vacuum worker. Fire-and-forget (via the vacuum
+				// scheduler's shared guard) so the cleanup callback isn't blocked
+				// on it.
+				vacuumScheduler.runHourlyTick();
 			}
 			const usageHistoryDays = config.getUsageHistoryRetentionDays();
 			const removedSnapshots = await dbOps.pruneUsageSnapshots(
@@ -1143,6 +1340,27 @@ export default async function startServer(options?: {
 	});
 	stopDataCleanupJob = unregisterDataCleanup;
 
+	// Catch-up incremental vacuum: the hourly retention-driven tick above caps
+	// reclaim at ~1 GiB, which cannot keep pace with a sustained delete rate
+	// above that — on one production instance retention was removing
+	// ~2.2 GiB/h of payload rows, so the freelist grew without bound purely
+	// because the hourly path never got another turn soon enough. This runs
+	// every 5 minutes; the dispatch policy (including its internal-2 busy-skip
+	// telemetry) lives in vacuumScheduler.runCatchUpTick — see
+	// ./vacuum-scheduler.ts.
+	const unregisterVacuumCatchUp = registerCleanup({
+		id: "vacuum-catchup",
+		callback: vacuumScheduler.runCatchUpTick,
+		minutes: 5,
+		// Mirrors data-retention-cleanup's guard: incrementalVacuumAdaptive()
+		// already bounds a single call, but a catch-up tick firing while the
+		// previous one (or the hourly one) is still draining chunks would
+		// double the writer-slot pressure this exists to avoid.
+		maxConcurrent: 1,
+		description: "Catch-up incremental vacuum when the freelist ratio is high",
+	});
+	stopVacuumCatchUpJob = unregisterVacuumCatchUp;
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
@@ -1179,6 +1397,7 @@ export default async function startServer(options?: {
 		getUsageWorkerHealth: () => getUsageCollectorHealth(),
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 		getRetentionStatus,
+		getVacuumStatus: () => dbOps.getVacuumStatus(),
 		getStrategy: () => currentStrategy,
 		internalProbeSecret,
 		localControlSecret,
@@ -1352,9 +1571,12 @@ export default async function startServer(options?: {
 			);
 			return false;
 		}
-		if (!supportsRefreshBackedUsagePolling(account.provider)) {
-			log.warn(
-				`Cannot restart usage polling: account ${account.name} does not support refresh-backed usage polling`,
+		if (!supportsUsagePollingForAccount(account)) {
+			// Debug, not warn: every account creation now asks to start polling,
+			// so this fires routinely for the many API-key providers that have
+			// no usage endpoint. That is the expected answer, not a problem.
+			log.debug(
+				`Cannot restart usage polling: account ${account.name} does not support usage polling (provider or custom endpoint)`,
 			);
 			return false;
 		}
@@ -1377,153 +1599,76 @@ export default async function startServer(options?: {
 		return true;
 	});
 
-	// Register this server's codex on-demand usage refresher. Codex does not
-	// expose a free usage endpoint (unlike Anthropic's /api/oauth/usage), so
-	// each call sends a tiny upstream request and parses the x-codex-* headers
-	// from the response. The subscription endpoint rejects output-token caps,
-	// so fetchCodexUsageOnDemand aborts and cancels immediately after headers.
-	registerCodexUsageRefresher(serverId, async (accountId: string) => {
-		const account = await dbOps.getAccount(accountId);
-		if (!account) {
-			return {
-				success: false,
-				message: `Account ${accountId} not found`,
-			};
-		}
-		if (account.provider !== "codex") {
-			return {
-				success: false,
-				message: `Account '${account.name}' is not a Codex account`,
-			};
-		}
-		if (!account.access_token && !account.refresh_token) {
-			return {
-				success: false,
-				message: `Account '${account.name}' has no tokens — please re-authenticate`,
-			};
-		}
-
-		let accessToken: string;
-		try {
-			accessToken = await getValidAccessToken(account, proxyContext);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			log.warn(
-				`Codex usage refresh: failed to get access token for ${account.name}: ${message}`,
-			);
-			return {
-				success: false,
-				message: `Could not refresh access token for '${account.name}': ${message}`,
-			};
-		}
-
-		const endpoint = account.custom_endpoint ?? CODEX_DEFAULT_ENDPOINT;
-
-		// Ping with a model this account can actually address, and with the
-		// cheapest one of those. A hardcoded name goes stale silently and fatally:
-		// the subscription endpoint rejects an unknown model before it accounts for
-		// quota, so the 400 carries no `x-codex-*` headers and the refresh fails
-		// with nothing to show. The account's own listing already answers the
-		// "which models exist" half for the family mapping — reuse it, and take the
-		// tail rather than the head, because the reply is discarded as soon as the
-		// headers arrive and the headers describe the subscription, not the model.
-		// `CODEX_PING_MODEL` is only reached when that listing has never been
-		// readable.
-		let pingModel = CODEX_PING_MODEL;
-		try {
-			pingModel =
-				lowestTierCodexModel(await getCodexModels(accountId, proxyContext)) ??
-				CODEX_PING_MODEL;
-		} catch (error) {
-			log.debug(
-				`Codex usage refresh: could not resolve the model list for ${account.name}, pinging ${pingModel}: ${error}`,
-			);
-		}
-
-		let fetchResult: Awaited<ReturnType<typeof fetchCodexUsageOnDemand>>;
-		try {
-			fetchResult = await fetchCodexUsageOnDemand(
-				accessToken,
-				endpoint,
-				pingModel,
-			);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			log.error(
-				`Codex usage refresh: upstream fetch failed for ${account.name}:`,
-				message,
-			);
-			return {
-				success: false,
-				message: `Codex request failed for '${account.name}': ${message}`,
-			};
-		}
-
-		// Persist rate-limit reset even on non-2xx so the dashboard sees the
-		// most accurate reset time when the account is currently limited.
-		const codexProvider = getProvider("codex");
-		if (codexProvider) {
-			const rl = codexProvider.parseRateLimit(fetchResult.response);
-			if (rl.resetTime != null) {
+	// Register this server's Codex usage refresher (the dashboard refresh
+	// button). It reads the free ChatGPT usage endpoint first and falls back
+	// to the quota-spending /responses probe only when that endpoint yields
+	// nothing (custom endpoint, 403). See apps/server/src/codex-usage-refresher.ts.
+	registerCodexUsageRefresher(
+		serverId,
+		createCodexUsageRefresher({
+			getAccount: (accountId) => dbOps.getAccount(accountId),
+			getAccessToken: (account) => getValidAccessToken(account, proxyContext),
+			fetchFromUsageEndpoint: async (accessToken) => {
+				const result = await fetchCodexUsageData(accessToken, {
+					chatgptAccountId: extractChatgptAccountId(accessToken),
+				});
+				return { data: result.data, status: result.status };
+			},
+			usageEndpointAvailable: isCodexSubscriptionEndpoint,
+			defaultEndpoint: CODEX_DEFAULT_ENDPOINT,
+			resolvePingModel: async (accountId) => {
+				// Ping with a model this account can actually address, and with the
+				// cheapest one of those. A hardcoded name goes stale silently and
+				// fatally: the subscription endpoint rejects an unknown model before
+				// it accounts for quota, so the 400 carries no `x-codex-*` headers
+				// and the refresh fails with nothing to show. The account's own
+				// listing already answers the "which models exist" half for the
+				// family mapping — reuse it, and take the tail rather than the head,
+				// because the reply is discarded as soon as the headers arrive and
+				// the headers describe the subscription, not the model.
+				// `CODEX_PING_MODEL` is only reached when that listing has never
+				// been readable.
 				try {
-					await db.run(
-						"UPDATE accounts SET rate_limit_reset = ? WHERE id = ?",
-						[rl.resetTime, account.id],
+					return (
+						lowestTierCodexModel(
+							await getCodexModels(accountId, proxyContext),
+						) ?? CODEX_PING_MODEL
 					);
 				} catch (error) {
-					log.warn(
-						`Codex usage refresh: failed to update rate_limit_reset for ${account.name}:`,
-						error,
+					log.debug(
+						`Codex usage refresh: could not resolve the model list for ${accountId}, pinging ${CODEX_PING_MODEL}: ${error}`,
 					);
+					return CODEX_PING_MODEL;
 				}
-			}
-		}
-
-		if (!fetchResult.data) {
-			// Naming the model matters here: this is the shape a rejected model
-			// takes, and without it the message says nothing actionable.
-			return {
-				success: false,
-				message: `Codex returned no usage headers (status ${fetchResult.response.status}) for '${account.name}' when pinging model '${pingModel}'`,
-			};
-		}
-
-		usageCache.set(accountId, fetchResult.data);
-
-		// Persist alongside the cache: this on-demand read costs quota, so it must
-		// outlive the 10-minute cache. `force` skips the traffic throttle — the
-		// operator asked for this read explicitly.
-		await recordCodexUsageSnapshot(
-			dbOps,
-			accountId,
-			account.name,
-			fetchResult.data as unknown as Record<string, unknown>,
-			Date.now(),
-			true,
-		);
-
-		const fiveHour = fetchResult.data.five_hour?.utilization ?? 0;
-		const sevenDay = fetchResult.data.seven_day?.utilization ?? 0;
-		const isRateLimited = fetchResult.response.status === 429;
-		log.info(
-			`Codex usage refreshed for '${account.name}' via ${pingModel}: 5h=${fiveHour}%, 7d=${sevenDay}%${
-				isRateLimited ? " (rate-limited)" : ""
-			}`,
-		);
-
-		// 429 still produces a successful header refresh (the usage payload is
-		// what we wanted), but the dashboard message must not celebrate it —
-		// otherwise the operator sees "refreshed successfully" while the
-		// account is fully exhausted. See tombii's PR #219 review note.
-		const message = isRateLimited
-			? `Usage refreshed for '${account.name}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
-			: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
-
-		return {
-			success: true,
-			message,
-		};
-	});
+			},
+			fetchFromProbe: fetchCodexUsageOnDemand,
+			probeResetTime: (response) =>
+				getProvider("codex")?.parseRateLimit(response).resetTime ?? null,
+			cacheSet: (accountId, data) => usageCache.set(accountId, data),
+			getCachedUsage: (accountId) =>
+				(usageCache.get(accountId) as UsageData | null) ?? null,
+			resetSession: (accountId) =>
+				dbOps.resetAccountSession(accountId, Date.now()),
+			pinFiveHour: () => config.getCodexFiveHourWindowEnabled(),
+			recordSnapshot: (accountId, accountName, usage, now, force) =>
+				recordCodexUsageSnapshot(
+					dbOps,
+					accountId,
+					accountName,
+					usage,
+					now,
+					force,
+				),
+			updateRateLimitReset: async (accountId, resetMs) => {
+				await db.run("UPDATE accounts SET rate_limit_reset = ? WHERE id = ?", [
+					resetMs,
+					accountId,
+				]);
+			},
+			earliestResetMs: earliestCodexResetMs,
+			log,
+		}),
+	);
 
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
 	autoRefreshScheduler = new AutoRefreshScheduler(db, proxyContext);
@@ -1738,6 +1883,10 @@ export default async function startServer(options?: {
 							JSON.stringify({
 								type: "error",
 								error: {
+									// "service_unavailable_error" is listed in
+									// LOCAL_REFUSAL_ERROR_TYPES — the auto-refresh scheduler
+									// recognises this shape as a local refusal, so keep the two
+									// in sync.
 									type: isServiceUnavailable
 										? "service_unavailable_error"
 										: "proxy_error",
@@ -1879,7 +2028,7 @@ Available endpoints:
 	// grok.com gRPC-web and may need to refresh an expired imported Grok CLI token
 	// before the first usage fetch.
 	const refreshBackedUsageAccounts = accounts.filter((a) =>
-		supportsRefreshBackedUsagePolling(a.provider),
+		supportsUsagePollingForAccount(a),
 	);
 	if (refreshBackedUsageAccounts.length > 0) {
 		log.info(
@@ -1949,6 +2098,10 @@ Available endpoints:
 					account.provider,
 					config.getUsagePollIntervalMs(),
 					account.custom_endpoint,
+					undefined,
+					undefined,
+					undefined,
+					createUsageSnapshotRecorder(account, dbOps, log),
 				);
 				log.info(`Started usage polling for NanoGPT account ${account.name}`);
 			} else {
@@ -1995,6 +2148,9 @@ Available endpoints:
 								),
 							);
 					},
+					undefined,
+					undefined,
+					createUsageSnapshotRecorder(account, dbOps, log),
 				);
 				log.info(`Started usage polling for Zai account ${account.name}`);
 			} else {
@@ -2041,6 +2197,7 @@ Available endpoints:
 		accounts,
 		usageCache,
 		config.getUsagePollIntervalMs(),
+		dbOps,
 		log,
 	);
 	if (minimaxAccounts.length === 0) {
@@ -2322,6 +2479,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (stopDataCleanupJob) {
 			stopDataCleanupJob();
 			stopDataCleanupJob = null;
+		}
+		if (stopVacuumCatchUpJob) {
+			stopVacuumCatchUpJob();
+			stopVacuumCatchUpJob = null;
 		}
 		if (stopWalCheckpointJob) {
 			stopWalCheckpointJob();

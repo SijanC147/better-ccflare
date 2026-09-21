@@ -3,16 +3,25 @@ import {
 	computeOverloadCooldownMs,
 	computeOverloadWithResetCapMs,
 	computeRateLimitBackoffMs,
+	computeServerErrorCooldownMs,
+	getOverloadRetryConfig,
 	getRateLimitResetStabilityMs,
+	getServerErrorRetryEnabled,
+	isOverloadReason,
+	isServerErrorReason,
+	RETRY_DEFAULTS,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 
 const ENV_KEYS = [
 	"CCFLARE_OVERLOAD_COOLDOWN_MS",
+	"CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS",
 	"CCFLARE_OVERLOAD_WITH_RESET_MAX_MS",
 	"CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS",
 	"CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS",
 	"CCFLARE_RATE_LIMIT_RESET_STABILITY_MS",
+	"CCFLARE_SERVER_ERROR_COOLDOWN_MS",
+	"CCFLARE_SERVER_ERROR_RETRY_ENABLED",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -101,5 +110,92 @@ describe("duration env overrides", () => {
 		const capUntil = now + computeOverloadWithResetCapMs();
 		expect(Math.min(threeHoursOut, capUntil)).toBe(capUntil);
 		expect(capUntil).toBeLessThan(threeHoursOut);
+	});
+});
+
+describe("transient upstream 5xx knobs", () => {
+	it("defaults the server-error cooldown to 60s and honors a positive override", () => {
+		expect(computeServerErrorCooldownMs()).toBe(
+			TIME_CONSTANTS.SERVER_ERROR_COOLDOWN_MS,
+		);
+		process.env.CCFLARE_SERVER_ERROR_COOLDOWN_MS = "15000";
+		expect(computeServerErrorCooldownMs()).toBe(15000);
+	});
+
+	it("falls back to the default for unparseable, zero, negative and non-finite values", () => {
+		for (const raw of ["not-a-number", "0", "-5000", "Infinity"]) {
+			process.env.CCFLARE_SERVER_ERROR_COOLDOWN_MS = raw;
+			expect(computeServerErrorCooldownMs()).toBe(
+				TIME_CONSTANTS.SERVER_ERROR_COOLDOWN_MS,
+			);
+		}
+	});
+
+	it("enables the 5xx retry unless the kill switch is set to the literal false", () => {
+		expect(getServerErrorRetryEnabled()).toBe(true);
+		process.env.CCFLARE_SERVER_ERROR_RETRY_ENABLED = "true";
+		expect(getServerErrorRetryEnabled()).toBe(true);
+		process.env.CCFLARE_SERVER_ERROR_RETRY_ENABLED = "false";
+		expect(getServerErrorRetryEnabled()).toBe(false);
+	});
+
+	it("keeps the 5xx reason distinct from the 529 overload reasons", () => {
+		expect(isServerErrorReason("upstream_5xx_server_error")).toBe(true);
+		expect(isServerErrorReason("upstream_529_overloaded_no_reset")).toBe(false);
+		expect(isOverloadReason("upstream_5xx_server_error")).toBe(false);
+	});
+});
+
+describe("overload retry attempt count", () => {
+	// The fork resolves the count from `retry_attempts` (RETRY_DEFAULTS when no
+	// settings are supplied), so the unset default is 3 here where upstream
+	// hardcodes 2. The deprecated variable still overrides it when set.
+	it("defaults to retry_attempts and honors a valid integer override", () => {
+		expect(getOverloadRetryConfig().maxAttempts).toBe(RETRY_DEFAULTS.attempts);
+		expect(
+			getOverloadRetryConfig({ attempts: 5, delayMs: 0, backoff: 2 })
+				.maxAttempts,
+		).toBe(5);
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = "3";
+		expect(getOverloadRetryConfig().maxAttempts).toBe(3);
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = " 4 ";
+		expect(getOverloadRetryConfig().maxAttempts).toBe(4);
+	});
+
+	it("truncates a fractional attempt count", () => {
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = "2.9";
+		expect(getOverloadRetryConfig().maxAttempts).toBe(2);
+	});
+
+	// The three retry loops in proxy-operations spin on `attempt < maxAttempts`
+	// while the upstream keeps returning 5xx/529, so a non-finite count is an
+	// unbounded retry loop against a sick upstream, not a generous one.
+	it("ignores a non-finite or unparseable override so retry_attempts applies", () => {
+		for (const raw of ["Infinity", "-Infinity", "NaN", "abc"]) {
+			process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = raw;
+			expect(getOverloadRetryConfig().maxAttempts).toBe(
+				RETRY_DEFAULTS.attempts,
+			);
+			expect(
+				getOverloadRetryConfig({ attempts: 5, delayMs: 0, backoff: 2 })
+					.maxAttempts,
+			).toBe(5);
+		}
+	});
+
+	// 0 and negatives would silently disable the retry; the documented way to
+	// turn it off is CCFLARE_OVERLOAD_RETRY_ENABLED=false.
+	it("ignores a zero or negative override so retry_attempts applies", () => {
+		for (const raw of ["0", "-4"]) {
+			process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = raw;
+			expect(getOverloadRetryConfig().maxAttempts).toBe(
+				RETRY_DEFAULTS.attempts,
+			);
+		}
+	});
+
+	it("clamps an oversized attempt count to 10", () => {
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = "50";
+		expect(getOverloadRetryConfig().maxAttempts).toBe(10);
 	});
 });

@@ -3,7 +3,7 @@ import { isAccountAvailable, TtlCache } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { jsonResponse } from "@better-ccflare/http-common";
 import {
-	getRepresentativeUtilizationForProvider,
+	getRepresentativeUsageSnapshotForProvider,
 	usageCache,
 } from "@better-ccflare/providers";
 import { circuitHealthSnapshot } from "@better-ccflare/proxy";
@@ -13,11 +13,9 @@ import type {
 	IntegrityStatus,
 	PoolStatus,
 	RetentionStatus,
+	VacuumStatus,
 } from "../types";
-import {
-	getRepresentativeUsageResetMs,
-	isUsageExhausted,
-} from "./rate-limit-status";
+import { isUsageExhausted } from "./rate-limit-status";
 
 /**
  * Usage snapshot for exhaustion accounting: representative utilization
@@ -29,21 +27,17 @@ export interface AccountUsageInfo {
 }
 export type AccountUsageInfoFn = (account: Account) => AccountUsageInfo | null;
 
-const usageCacheUsageInfo: AccountUsageInfoFn = (account) => {
-	const data = usageCache.get(account.id);
-	if (!data) return null;
-	const provider = account.provider ?? "anthropic";
-	const utilization = getRepresentativeUtilizationForProvider(data, provider);
-	if (utilization === null) return null;
-	// Same provider-aware reset derivation as the accounts handler, so the
-	// staleness guard sees identical inputs on both surfaces (PR #299 review
-	// finding: guarding only anthropic-shaped payloads recreated the /health
-	// vs accounts split-brain for the other providers).
-	return {
-		utilization,
-		resetMs: getRepresentativeUsageResetMs(data, provider),
-	};
-};
+// The one shared snapshot helper, so the staleness guard sees identical
+// inputs here, in the accounts handler and in account selection (PR #299
+// review finding: guarding only anthropic-shaped payloads recreated the
+// /health vs accounts split-brain for the other providers). It pairs the
+// utilization with the reset of the same window, which for zai means the
+// winning window's own reset rather than the token window's.
+const usageCacheUsageInfo: AccountUsageInfoFn = (account) =>
+	getRepresentativeUsageSnapshotForProvider(
+		usageCache.get(account.id),
+		account.provider ?? "anthropic",
+	);
 
 type AsyncWriterHealthFn = () => {
 	healthy: boolean;
@@ -71,6 +65,7 @@ type RetentionStatusFn = () => RetentionStatus;
  * open circuit cannot flip this endpoint's status code or its `pool` counters.
  */
 export type CircuitHealthFn = () => CircuitHealth;
+type VacuumStatusFn = () => VacuumStatus;
 
 export function computePoolStatus(
 	accounts: Account[],
@@ -201,6 +196,7 @@ export function createHealthHandler(
 	getIntegrityStatus?: IntegrityStatusFn,
 	getAccountUsageInfo: AccountUsageInfoFn = usageCacheUsageInfo,
 	getRetentionStatus?: RetentionStatusFn,
+	getVacuumStatus?: VacuumStatusFn,
 	getCircuitHealth: CircuitHealthFn = circuitHealthSnapshot,
 ) {
 	const normalCache = new TtlCache<HealthResponse>(2000);
@@ -299,6 +295,35 @@ export function createHealthHandler(
 					lastErrorAt: retention.lastErrorAt
 						? new Date(retention.lastErrorAt).toISOString()
 						: null,
+				},
+			};
+		}
+
+		// Add adaptive-vacuum job telemetry independently — orthogonal to the
+		// blocks above. Lets operators see the freelist ratio and skip streak
+		// (e.g. after disabling BETTER_CCFLARE_AUTO_VACUUM, or during sustained
+		// writer contention) instead of only finding out via a log line.
+		if (getVacuumStatus) {
+			const runtime = response.runtime ?? {};
+			response.runtime = runtime;
+			const vacuum = getVacuumStatus();
+			runtime.storage = {
+				...runtime.storage,
+				vacuum: {
+					enabled: vacuum.enabled,
+					supported: vacuum.supported,
+					lastRunAt: vacuum.lastRunAt
+						? new Date(vacuum.lastRunAt).toISOString()
+						: null,
+					lastReclaimedPages: vacuum.lastReclaimedPages,
+					lastChunks: vacuum.lastChunks,
+					freelistPages: vacuum.freelistPages,
+					freelistRatio: vacuum.freelistRatio,
+					consecutiveBusySkips: vacuum.consecutiveBusySkips,
+					escalated: vacuum.escalated,
+					lastError: vacuum.lastError,
+					catchUpBusySkips: vacuum.catchUpBusySkips,
+					catchUpBusySkipsTotal: vacuum.catchUpBusySkipsTotal,
 				},
 			};
 		}

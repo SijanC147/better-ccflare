@@ -5,11 +5,14 @@ export {
 	computeOverloadCooldownMs,
 	computeOverloadWithResetCapMs,
 	computeRateLimitBackoffMs,
+	computeServerErrorCooldownMs,
 	getOverloadRetryConfig,
 	getRateLimitResetStabilityMs,
+	getServerErrorRetryEnabled,
 	HTTP_STATUS,
 	isOverloadReason,
 	isRetryableUpstreamError,
+	isServerErrorReason,
 	LIMITS,
 	NETWORK,
 	RETRY_DEFAULTS,
@@ -120,6 +123,20 @@ export {
 	type SupportedWindow,
 } from "./throttle-utils";
 export { TtlCache } from "./ttl-cache";
+export {
+	effectiveThreshold,
+	evaluateUsagePause,
+	parseUsagePauseThreshold,
+	readUsageUtilization,
+	supportsUsagePauseThreshold,
+	USAGE_THRESHOLD_PAUSE_REASON,
+	type UsagePauseDecision,
+	type UsagePauseInput,
+	type UsagePauseSetting,
+	type UsagePauseThresholds,
+	type UsagePauseWindow,
+	type UsageUtilization,
+} from "./usage-threshold";
 export { levenshteinDistance } from "./utils";
 export {
 	patterns,

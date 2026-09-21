@@ -41,6 +41,7 @@ interface AccountListProps {
 	onBillingTypeToggle: (account: Account) => void;
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
+	onUsageThresholdsChange?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
 	onRequestTransformerChange?: (account: Account) => void;
@@ -63,6 +64,7 @@ export function AccountList({
 	onBillingTypeToggle,
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
+	onUsageThresholdsChange,
 	onCustomEndpointChange,
 	onModelMappingsChange,
 	onRequestTransformerChange,
@@ -190,6 +192,7 @@ export function AccountList({
 							onAutoPauseOnOverageToggle={onAutoPauseOnOverageToggle}
 							onPeakHoursPauseToggle={onPeakHoursPauseToggle}
 							onCustomEndpointChange={onCustomEndpointChange}
+							onUsageThresholdsChange={onUsageThresholdsChange}
 							onModelMappingsChange={onModelMappingsChange}
 							onRequestTransformerChange={onRequestTransformerChange}
 							onReauth={onReauth}

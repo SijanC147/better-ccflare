@@ -64,6 +64,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		request_transformer: null,
 		last_manual_reauth_at: null,
 		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -242,7 +246,9 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 		expect(args[6]).toBe("org_permission_denied");
 		expect(args[9]).toEqual({ model: "claude-sonnet-4-5" });
 		// The tail arguments are easy to drop when copying a sibling branch.
-		expect(args[args.length - 1]).toBe("sess-1");
+		// clientSessionId sits six from the end — the five gatewayHint* fields
+		// (all null here, since the request carries none of those headers) follow it.
+		expect(args[args.length - 6]).toBe("sess-1");
 	});
 
 	it("matches on error.type, not on the message wording", async () => {

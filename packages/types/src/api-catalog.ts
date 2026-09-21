@@ -446,6 +446,13 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "POST",
+		path: "/api/accounts/:accountId/usage-pause-thresholds",
+		category: "Accounts",
+		summary:
+			"Set the percentages of the 5-hour and weekly usage windows at which the account pauses itself, each window switchable on its own.",
+	},
+	{
+		method: "POST",
 		path: "/api/accounts/:accountId/model-fallbacks",
 		category: "Accounts",
 		summary: "Replace the account's model fallbacks.",

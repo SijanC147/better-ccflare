@@ -120,8 +120,13 @@ export function isAnthropicStyleShape(
 	if (isNanoGPTShape(usageData)) return false;
 	if (isAlibabaShape(usageData)) return false;
 	if (isZaiShape(usageData)) return false;
+	// Either window, not both: since the upstream sync of 2026-09-21 the Codex
+	// parser omits a window the headers did not report, and a Pro account
+	// reports only the weekly one. The provider-specific shapes are excluded
+	// above, so a lone key is enough to route here.
 	return (
-		("five_hour" in usageData && "seven_day" in usageData) ||
+		"five_hour" in usageData ||
+		"seven_day" in usageData ||
 		Array.isArray((usageData as { limits?: unknown }).limits)
 	);
 }

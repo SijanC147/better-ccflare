@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
 import {
+	collectWindows,
 	createUsageThrottledResponse,
 	getUsageThrottleStatus,
 	getUsageThrottleUntil,
@@ -45,6 +46,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		last_manual_reauth_at: null,
 		consecutive_rate_limits: 0,
 		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -376,5 +381,64 @@ describe("createUsageThrottledResponse", () => {
 		expect(body.error.type).toBe("overloaded_error");
 		expect(body.error.message).toContain("Codex A");
 		expect(body.error.message).toContain("Codex B");
+	});
+});
+
+describe("collectWindows with a single flat window", () => {
+	it("collects seven_day from a Codex payload that has no five_hour key", () => {
+		// parseCodexUsageHeaders omits a window the upstream did not report, so a
+		// Pro account's payload is { seven_day } alone. It must still throttle.
+		const resetsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+		const windows = collectWindows({
+			seven_day: { utilization: 100, resets_at: resetsAt.toISOString() },
+		} as never);
+
+		expect(windows).toHaveLength(1);
+		expect(windows[0].window).toBe("seven_day");
+		expect(windows[0].utilization).toBe(100);
+		expect(windows[0].resetAtMs).toBe(resetsAt.getTime());
+	});
+
+	it("collects five_hour from a payload that has no seven_day key", () => {
+		const resetsAt = new Date(Date.now() + 60 * 60 * 1000);
+		const windows = collectWindows({
+			five_hour: { utilization: 50, resets_at: resetsAt.toISOString() },
+		} as never);
+
+		expect(windows.map((w) => w.window)).toEqual(["five_hour"]);
+	});
+
+	it("still routes an Alibaba Coding Plan payload (five_hour without seven_day) to the Alibaba branch", () => {
+		const now = Date.now();
+		const windows = collectWindows({
+			five_hour: {
+				used: 10,
+				total: 100,
+				percentUsed: 10,
+				resetAt: now + 60_000,
+			},
+			weekly: {
+				used: 95,
+				total: 100,
+				percentUsed: 95,
+				resetAt: now + 3 * 24 * 60 * 60 * 1000,
+			},
+			monthly: {
+				used: 50,
+				total: 100,
+				percentUsed: 50,
+				resetAt: now + 20 * 24 * 60 * 60 * 1000,
+			},
+			planName: "Coding Plan Lite",
+			status: "VALID",
+			remainingDays: 20,
+		} as never);
+
+		expect(windows.map((w) => w.window)).toEqual([
+			"five_hour",
+			"weekly",
+			"monthly",
+		]);
+		expect(windows.find((w) => w.window === "weekly")?.utilization).toBe(95);
 	});
 });

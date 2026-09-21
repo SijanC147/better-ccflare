@@ -137,6 +137,17 @@ export interface RequestData {
 	projectId?: string | null;
 	/** Resolved worktree path matched during attribution (Phase 3) */
 	worktreePath?: string | null;
+	/**
+	 * Claude Code's opt-in "gateway hint" request headers (CLI >= 2.1.273,
+	 * `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`) — pure observability metadata,
+	 * absent for the overwhelming majority of clients that don't send them.
+	 * See packages/proxy/src/gateway-hint-headers.ts for the producer.
+	 */
+	gatewayHintRequestClass?: string | null;
+	gatewayHintAgentType?: string | null;
+	gatewayHintPrevToolDurations?: string | null;
+	gatewayHintCompaction?: string | null;
+	gatewayHintContextCompacted?: string | null;
 	usage?: {
 		model?: string;
 		promptTokens?: number;
@@ -182,9 +193,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				billing_type, combo_name, original_model, applied_model,
 				project_attribution_source, agent_attribution_source,
 				stream_terminal_state, client_session_id,
+				gateway_hint_request_class, gateway_hint_agent_type,
+				gateway_hint_prev_tool_durations, gateway_hint_compaction,
+				gateway_hint_context_compacted,
 				project_id, worktree_path
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -234,6 +248,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				-- so a later save without it cannot blank out what the main path
 				-- recorded.
 				client_session_id = COALESCE(EXCLUDED.client_session_id, requests.client_session_id),
+				-- Same preserve-first reasoning as client_session_id: these are
+				-- extracted once from the request headers at start and a re-save
+				-- (error paths, updateUsage-adjacent saves) never carries them, so
+				-- an omitted incoming value must not blank out what was recorded.
+				gateway_hint_request_class = COALESCE(EXCLUDED.gateway_hint_request_class, requests.gateway_hint_request_class),
+				gateway_hint_agent_type = COALESCE(EXCLUDED.gateway_hint_agent_type, requests.gateway_hint_agent_type),
+				gateway_hint_prev_tool_durations = COALESCE(EXCLUDED.gateway_hint_prev_tool_durations, requests.gateway_hint_prev_tool_durations),
+				gateway_hint_compaction = COALESCE(EXCLUDED.gateway_hint_compaction, requests.gateway_hint_compaction),
+				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted),
 				project_id = COALESCE(EXCLUDED.project_id, requests.project_id),
 				worktree_path = COALESCE(EXCLUDED.worktree_path, requests.worktree_path)
 		`,
@@ -270,6 +293,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.agentAttributionSource || null,
 				data.streamTerminalState ?? null,
 				sanitizeClientSessionId(data.clientSessionId),
+				data.gatewayHintRequestClass || null,
+				data.gatewayHintAgentType || null,
+				data.gatewayHintPrevToolDurations || null,
+				data.gatewayHintCompaction || null,
+				data.gatewayHintContextCompacted || null,
 				data.projectId ?? null,
 				data.worktreePath ?? null,
 			],

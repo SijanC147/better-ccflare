@@ -76,6 +76,9 @@ async function bodyOf(circuit: CircuitHealth, accounts = routableAccounts) {
 		undefined,
 		() => null,
 		undefined,
+		// getVacuumStatus sits before getCircuitHealth: upstream's positional
+		// callers keep a contiguous prefix, the fork's parameter comes last.
+		undefined,
 		() => circuit,
 	);
 	const response = await handler(new URL("http://localhost/health"));

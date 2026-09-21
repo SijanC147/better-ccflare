@@ -11,6 +11,7 @@ import {
 	AccountPriorityDialog,
 	AccountRenewalDayDialog,
 	AccountRequestTransformerDialog,
+	AccountUsageThresholdsDialog,
 	AnthropicReauthDialog,
 	CodexReauthDialog,
 	DeleteConfirmationDialog,
@@ -70,6 +71,13 @@ export function AccountsTab() {
 		account: null,
 	});
 	const [customEndpointDialog, setCustomEndpointDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
+	const [usageThresholdsDialog, setUsageThresholdsDialog] = useState<{
 		isOpen: boolean;
 		account: Account | null;
 	}>({
@@ -583,6 +591,27 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleUsageThresholdsChange = (account: Account) => {
+		setUsageThresholdsDialog({ isOpen: true, account });
+	};
+
+	const handleUpdateUsageThresholds = async (
+		accountId: string,
+		fiveHour: { enabled: boolean; percent: number | null },
+		weekly: { enabled: boolean; percent: number | null },
+	) => {
+		try {
+			await api.updateAccountUsagePauseThresholds(accountId, fiveHour, weekly);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+			// Rethrow so the dialog stays open on a failed save. Swallowing it
+			// here would close the dialog as if the write had landed, throwing
+			// away what was typed.
+			throw err;
+		}
+	};
+
 	const handleCustomEndpointChange = (account: Account) => {
 		setCustomEndpointDialog({ isOpen: true, account });
 	};
@@ -745,6 +774,7 @@ export function AccountsTab() {
 						onBillingTypeToggle={handleBillingTypeToggle}
 						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onPeakHoursPauseToggle={handlePeakHoursPauseToggle}
+						onUsageThresholdsChange={handleUsageThresholdsChange}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}
 						onRequestTransformerChange={handleRequestTransformerChange}
@@ -813,6 +843,20 @@ export function AccountsTab() {
 						})
 					}
 					onUpdateRenewalDay={handleUpdateRenewalDay}
+				/>
+			)}
+
+			{usageThresholdsDialog.isOpen && usageThresholdsDialog.account && (
+				<AccountUsageThresholdsDialog
+					account={usageThresholdsDialog.account}
+					isOpen={usageThresholdsDialog.isOpen}
+					onOpenChange={(open) =>
+						setUsageThresholdsDialog({
+							isOpen: open,
+							account: open ? usageThresholdsDialog.account : null,
+						})
+					}
+					onUpdateThresholds={handleUpdateUsageThresholds}
 				/>
 			)}
 

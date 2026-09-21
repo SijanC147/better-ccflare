@@ -415,12 +415,15 @@ describe("RateLimitProgress", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Codex: the 5-hour bar was misleading (its percentage was either absent or
-	// borrowed from elapsed time), so the weekly window is the only bar left —
-	// and it must be permanent, including when there is no data at all.
+	// Codex: OpenAI removed the 5-hour window on 2026-07-12 and restored it for
+	// Plus accounts on 2026-08-25 (Pro stays weekly-only). The 5-hour row is
+	// shown only when the account really reported one — a number AND a reset.
+	// An unknown window (null) or a reset-less percentage stays hidden, so a
+	// Pro account never shows a fabricated 0% and never the elapsed-time bar.
+	// The weekly row is permanent.
 	// -------------------------------------------------------------------------
 
-	it("drops the Codex 5-hour row and keeps the weekly one", () => {
+	it("shows the Codex 5-hour row when the account reports a real one", () => {
 		const fiveHourReset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 		const sevenDayReset = new Date(
 			Date.now() + 3 * 24 * 60 * 60 * 1000,
@@ -439,12 +442,56 @@ describe("RateLimitProgress", () => {
 			/>,
 		);
 
+		expect(html).toContain("Usage (5-hour)");
+		expect(html).toContain(">10%<");
+		expect(html).toContain("Usage (Weekly)");
+		expect(html).toContain(">63%<");
+	});
+
+	it("hides the Codex 5-hour row when the window is unknown", () => {
+		const sevenDayReset = new Date(
+			Date.now() + 3 * 24 * 60 * 60 * 1000,
+		).toISOString();
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={sevenDayReset}
+				usageUtilization={63}
+				usageWindow="seven_day"
+				usageData={{
+					five_hour: { utilization: null, resets_at: null },
+					seven_day: { utilization: 63, resets_at: sevenDayReset },
+				}}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+
 		expect(html).not.toContain("Usage (5-hour)");
 		expect(html).toContain("Usage (Weekly)");
 		expect(html).toContain(">63%<");
-		// Anchored to the percentage span: a bare "10%" also matches the tooltip's
-		// CSS `clamp(10%, ...)`, which has nothing to do with the 5-hour window.
-		expect(html).not.toContain(">10%<");
+	});
+
+	it("hides a Codex 5-hour percentage that has no reset (legacy minted zero)", () => {
+		// Older caches and snapshots can still carry { utilization: 0, resets_at: null }.
+		const sevenDayReset = new Date(
+			Date.now() + 3 * 24 * 60 * 60 * 1000,
+		).toISOString();
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={sevenDayReset}
+				usageUtilization={63}
+				usageWindow="seven_day"
+				usageData={{
+					five_hour: { utilization: 0, resets_at: null },
+					seven_day: { utilization: 63, resets_at: sevenDayReset },
+				}}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (Weekly)");
 	});
 
 	it("keeps the same Anthropic payload's 5-hour row for Anthropic", () => {
@@ -544,6 +591,37 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain(">100%<");
 	});
 
+	it("renders the weekly row for a weekly-only Codex payload with no five_hour key at all", () => {
+		// The Codex parser omits a window the headers did not report, so a Pro
+		// account's payload has no five_hour key. The shape guard used to require
+		// both keys, which left this account with no quota bar (PR #231 review,
+		// finding 1). Distinct from the case above, where the key is present and
+		// null.
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso="2026-08-20T18:30:13.000Z"
+				// Nulled so the Anthropic-style branch is the only path that can
+				// render the row: the generic fallback draws the same row from these
+				// two props, and a mutation restoring the two-key guard survived
+				// while they were set.
+				usageUtilization={null}
+				usageWindow={null}
+				usageData={{
+					seven_day: {
+						utilization: 100,
+						resets_at: "2026-08-20T18:30:13.000Z",
+					},
+				}}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("Usage (5-hour)");
+		expect(html).toContain("Usage (Weekly)");
+		expect(html).toContain(">100%<");
+	});
+
 	it("still warns about throttling on a window whose row was suppressed", () => {
 		// Removing the 5-hour bar must not remove the notice that requests are
 		// actually being delayed.
@@ -564,5 +642,143 @@ describe("RateLimitProgress", () => {
 			"Usage throttling enabled; requests are being delayed",
 		);
 		expect(html).not.toContain("Usage (5-hour)");
+	});
+});
+
+describe("RateLimitProgress — usage pause threshold marker", () => {
+	const anthropicUsage: AnthropicUsageData = {
+		five_hour: {
+			utilization: 62,
+			resets_at: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+		},
+		seven_day: {
+			utilization: 40,
+			resets_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+		},
+	};
+
+	it("marks the 5-hour bar at the configured threshold", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={62}
+				usageWindow="five_hour"
+				usageData={anthropicUsage}
+				provider="anthropic"
+				showWeekly
+				pauseThresholdFiveHour={80}
+				pauseThresholdWeekly={null}
+			/>,
+		);
+
+		expect(html).toContain("Pause threshold · 80%");
+		expect(html).toContain("left:80%");
+		// The tooltip says where this window stands against the threshold.
+		expect(html).toContain("usage is 62%");
+		expect(html).toContain("pauses at 80%");
+	});
+
+	it("marks the weekly bar at its own threshold", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={62}
+				usageWindow="five_hour"
+				usageData={anthropicUsage}
+				provider="anthropic"
+				showWeekly
+				pauseThresholdFiveHour={null}
+				pauseThresholdWeekly={90}
+			/>,
+		);
+
+		expect(html).toContain("Pause threshold · 90%");
+		expect(html).toContain("left:90%");
+	});
+
+	it("draws no marker when no threshold is set", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={62}
+				usageWindow="five_hour"
+				usageData={anthropicUsage}
+				provider="anthropic"
+				showWeekly
+			/>,
+		);
+
+		expect(html).not.toContain("Pause threshold ·");
+	});
+
+	it("does not mark per-model weekly caps, which carry no threshold of their own", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={62}
+				usageWindow="five_hour"
+				usageData={{
+					...anthropicUsage,
+					seven_day_opus: {
+						utilization: 95,
+						resets_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+					},
+				}}
+				provider="anthropic"
+				showWeekly
+				pauseThresholdFiveHour={null}
+				pauseThresholdWeekly={90}
+			/>,
+		);
+
+		// Exactly one marker: the all-models weekly bar, not the Opus sub-cap.
+		expect(html.split("Pause threshold ·").length - 1).toBe(1);
+		expect(html).toContain("Pause threshold · 90%");
+	});
+});
+
+describe("RateLimitProgress — threshold tooltip wording", () => {
+	const usage = {
+		five_hour: {
+			utilization: 94,
+			resets_at: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+		},
+	};
+
+	it("says the account is already paused when usage is past the threshold", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={94}
+				usageWindow="five_hour"
+				usageData={usage}
+				provider="anthropic"
+				pauseThresholdFiveHour={90}
+			/>,
+		);
+
+		expect(html).toContain("past the threshold");
+		expect(html).toContain("paused until the window resets");
+	});
+
+	it("says where the window stands while it is still below the threshold", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={20}
+				usageWindow="five_hour"
+				usageData={{
+					five_hour: {
+						utilization: 20,
+						resets_at: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+					},
+				}}
+				provider="anthropic"
+				pauseThresholdFiveHour={90}
+			/>,
+		);
+
+		expect(html).toContain("usage is 20%");
+		expect(html).not.toContain("past the threshold");
 	});
 });

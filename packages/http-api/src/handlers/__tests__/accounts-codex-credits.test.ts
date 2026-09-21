@@ -117,6 +117,31 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
 		expect(usage?.seven_day.resets_at).not.toBeNull();
 	});
 
+	it("reports usageUtilization for a weekly-only Codex payload with no five_hour key", async () => {
+		// The parser omits a window the headers did not report, and a Pro
+		// account reports only the weekly one. This pins the live path: the
+		// handler's normalizeCodexUsageData rebuilds BOTH keys (an absent window
+		// becomes UNKNOWN_WINDOW), so the account keeps its utilization whatever
+		// shape the cache holds. It does not exercise the shape guard at the
+		// anthropic-style branch, which the dashboard tests cover (PR #231
+		// review, finding 1); a mutation restoring that guard's two-key
+		// conjunction survives this test by design.
+		usageCache.set(ACCOUNT_ID, {
+			seven_day: {
+				utilization: 87,
+				resets_at: new Date(Date.now() + 129_600_000).toISOString(),
+			},
+		} as never);
+
+		const response = await makeHandler()();
+		const accounts = (await response.json()) as AccountResponse[];
+		const account = accounts.find((a) => a.id === ACCOUNT_ID);
+
+		expect(account?.usageUtilization).toBe(87);
+		expect(account?.usageWindow).toBe("seven_day");
+		expect(account?.usageData).not.toBeNull();
+	});
+
 	it("carries credits stored the way the live proxy path stores them", async () => {
 		// The test above hand-builds the cache entry, which proves the normalizer
 		// passes `credits` through but says nothing about whether anything ever

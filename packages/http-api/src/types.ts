@@ -22,4 +22,5 @@ export type {
 	StrategyUpdateRequest,
 	TimePoint,
 	TokenBreakdown,
+	VacuumStatus,
 } from "@better-ccflare/types";

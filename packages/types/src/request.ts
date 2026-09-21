@@ -145,6 +145,11 @@ export interface RequestRow {
 	agent_attribution_source: string | null;
 	client_session_id: string | null;
 	stream_terminal_state: string | null;
+	gateway_hint_request_class: string | null;
+	gateway_hint_agent_type: string | null;
+	gateway_hint_prev_tool_durations: string | null;
+	gateway_hint_compaction: string | null;
+	gateway_hint_context_compacted: string | null;
 }
 
 // Domain model
@@ -183,6 +188,17 @@ export interface Request {
 	agentAttributionSource?: AgentAttributionSource;
 	clientSessionId?: string;
 	streamTerminalState?: ReportedStreamTerminalState;
+	/**
+	 * Claude Code's opt-in "gateway hint" request headers (CLI >= 2.1.273,
+	 * `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`). Pure observability metadata —
+	 * absent for every client that doesn't send them, which is the normal
+	 * case. See packages/proxy/src/gateway-hint-headers.ts for the producer.
+	 */
+	gatewayHintRequestClass?: string;
+	gatewayHintAgentType?: string;
+	gatewayHintPrevToolDurations?: string;
+	gatewayHintCompaction?: string;
+	gatewayHintContextCompacted?: string;
 }
 
 // API response type
@@ -230,6 +246,12 @@ export interface RequestResponse {
 	 */
 	clientSessionId?: string;
 	streamTerminalState?: ReportedStreamTerminalState;
+	/** See the matching field on `Request` above. */
+	gatewayHintRequestClass?: string;
+	gatewayHintAgentType?: string;
+	gatewayHintPrevToolDurations?: string;
+	gatewayHintCompaction?: string;
+	gatewayHintContextCompacted?: string;
 }
 
 // Detailed request with payload
@@ -333,6 +355,13 @@ export function toRequest(row: RequestRow): Request {
 		),
 		clientSessionId: row.client_session_id || undefined,
 		streamTerminalState: toStreamTerminalState(row.stream_terminal_state),
+		gatewayHintRequestClass: row.gateway_hint_request_class || undefined,
+		gatewayHintAgentType: row.gateway_hint_agent_type || undefined,
+		gatewayHintPrevToolDurations:
+			row.gateway_hint_prev_tool_durations || undefined,
+		gatewayHintCompaction: row.gateway_hint_compaction || undefined,
+		gatewayHintContextCompacted:
+			row.gateway_hint_context_compacted || undefined,
 	};
 }
 
@@ -373,6 +402,11 @@ export function toRequestResponse(request: Request): RequestResponse {
 		agentAttributionSource: request.agentAttributionSource,
 		clientSessionId: request.clientSessionId,
 		streamTerminalState: request.streamTerminalState,
+		gatewayHintRequestClass: request.gatewayHintRequestClass,
+		gatewayHintAgentType: request.gatewayHintAgentType,
+		gatewayHintPrevToolDurations: request.gatewayHintPrevToolDurations,
+		gatewayHintCompaction: request.gatewayHintCompaction,
+		gatewayHintContextCompacted: request.gatewayHintContextCompacted,
 	};
 }
 

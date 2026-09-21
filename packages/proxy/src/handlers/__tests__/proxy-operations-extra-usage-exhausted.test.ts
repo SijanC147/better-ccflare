@@ -44,6 +44,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		request_transformer: null,
 		last_manual_reauth_at: null,
 		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
 		...overrides,
 	};
 }
@@ -142,10 +146,10 @@ function extraUsageExhaustedResponse(): Response {
 }
 
 describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
-	let originalFetch: typeof globalThis.fetch;
+	let originalFetch: typeof fetchSlot.fetch;
 
 	beforeEach(() => {
-		originalFetch = globalThis.fetch;
+		originalFetch = fetchSlot.fetch;
 	});
 
 	afterEach(() => {
@@ -292,5 +296,77 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 		expect(args[17]).toBeNull();
 		expect(args[18]).toBe("path_project");
 		expect(args[19]).toBe("prompt_agent");
+	});
+
+	it("threads gateway hint headers through to saveRequest when present on the request", async () => {
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
+
+		const ctx = makeProxyContextWithAsyncExec();
+		const account = makeAccount();
+		const bodyBuffer = makeRequestBody("claude-sonnet-4-5");
+		const req = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			body: bodyBuffer,
+			headers: {
+				"Content-Type": "application/json",
+				"x-claude-code-request-class": "primary",
+				"x-claude-code-agent-type": "explore",
+				"x-claude-code-prev-tool-durations": "[12,34]",
+				"x-claude-code-compaction": "auto",
+				"x-claude-code-context-compacted": "true",
+			},
+		});
+
+		await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		const saveMock = ctx.dbOps.saveRequest as ReturnType<typeof mock>;
+		expect(saveMock.mock.calls.length).toBe(1);
+		const args = saveMock.mock.calls[0] as unknown[];
+		expect(args[6]).toBe("extra_usage_exhausted");
+		// 23rd-27th positional args (0-indexed 22-26) are the five
+		// gatewayHint* trailing parameters, in header-declaration order.
+		expect(args[22]).toBe("primary");
+		expect(args[23]).toBe("explore");
+		expect(args[24]).toBe("[12,34]");
+		expect(args[25]).toBe("auto");
+		expect(args[26]).toBe("true");
+	});
+
+	it("persists null gateway hint fields when the request carries none of the headers", async () => {
+		fetchSlot.fetch = mock(async () => extraUsageExhaustedResponse());
+
+		const ctx = makeProxyContextWithAsyncExec();
+		const account = makeAccount();
+		const bodyBuffer = makeRequestBody("claude-sonnet-4-5");
+		const req = makeRequest(bodyBuffer);
+
+		await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		const saveMock = ctx.dbOps.saveRequest as ReturnType<typeof mock>;
+		expect(saveMock.mock.calls.length).toBe(1);
+		const args = saveMock.mock.calls[0] as unknown[];
+		expect(args[22]).toBeNull();
+		expect(args[23]).toBeNull();
+		expect(args[24]).toBeNull();
+		expect(args[25]).toBeNull();
+		expect(args[26]).toBeNull();
 	});
 });

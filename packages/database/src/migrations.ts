@@ -127,7 +127,11 @@ export function ensureSchema(db: Database): void {
 			requires_reauth INTEGER DEFAULT 0,
 			last_manual_reauth_at INTEGER,
 			renewal_day INTEGER,
-			request_transformer TEXT
+			request_transformer TEXT,
+			usage_pause_five_hour_threshold INTEGER,
+			usage_pause_weekly_threshold INTEGER,
+			usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0,
+			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0
 		)
 	`);
 
@@ -164,7 +168,12 @@ export function ensureSchema(db: Database): void {
 			project_attribution_source TEXT,
 			agent_attribution_source TEXT,
 			stream_terminal_state TEXT,
-			client_session_id TEXT
+			client_session_id TEXT,
+			gateway_hint_request_class TEXT,
+			gateway_hint_agent_type TEXT,
+			gateway_hint_prev_tool_durations TEXT,
+			gateway_hint_compaction TEXT,
+			gateway_hint_context_compacted TEXT
 		)
 	`);
 
@@ -664,6 +673,10 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 		   request_transformer = COALESCE(request_transformer, ${freshest("request_transformer")}),
 		   model_fallbacks = COALESCE(model_fallbacks, ${freshest("model_fallbacks")}),
 		   cross_region_mode = COALESCE(cross_region_mode, ${freshest("cross_region_mode")}),
+		   usage_pause_five_hour_threshold = COALESCE(usage_pause_five_hour_threshold, ${freshest("usage_pause_five_hour_threshold")}),
+		   usage_pause_weekly_threshold = COALESCE(usage_pause_weekly_threshold, ${freshest("usage_pause_weekly_threshold")}),
+		   usage_pause_five_hour_enabled = ${agg("MAX", "usage_pause_five_hour_enabled")},
+		   usage_pause_weekly_enabled = ${agg("MAX", "usage_pause_weekly_enabled")},
 		   billing_type = COALESCE(billing_type, ${freshest("billing_type")})
 		 WHERE rowid = $rowid`,
 	);
@@ -1274,6 +1287,74 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Made refresh_token nullable in accounts table");
 		}
 
+		// Add per-account usage-window pause thresholds. NULL = no threshold, so
+		// every existing account keeps its current behaviour until someone sets one.
+		//
+		// Deliberately placed AFTER the refresh_token rebuild above and read from
+		// a fresh PRAGMA rather than `initialAccountsColumnNames`: that rebuild
+		// copies a fixed column list into `accounts_new`, so any column added
+		// before it is dropped when the new table replaces the old one.
+		const accountsColumnsBeforeThresholds = db
+			.prepare("PRAGMA table_info(accounts)")
+			.all() as Array<{ name: string }>;
+		const thresholdColumnNames = accountsColumnsBeforeThresholds.map(
+			(col) => col.name,
+		);
+
+		if (!thresholdColumnNames.includes("usage_pause_five_hour_threshold")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN usage_pause_five_hour_threshold INTEGER",
+			).run();
+			log.info(
+				"Added usage_pause_five_hour_threshold column to accounts table",
+			);
+		}
+
+		if (!thresholdColumnNames.includes("usage_pause_weekly_threshold")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN usage_pause_weekly_threshold INTEGER",
+			).run();
+			log.info("Added usage_pause_weekly_threshold column to accounts table");
+		}
+
+		// The percentage and whether it is in force are stored separately, so
+		// switching a window off keeps the number the owner chose instead of
+		// making them type it again when they switch it back on.
+		if (!thresholdColumnNames.includes("usage_pause_five_hour_enabled")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0",
+			).run();
+			log.info("Added usage_pause_five_hour_enabled column to accounts table");
+		}
+
+		if (!thresholdColumnNames.includes("usage_pause_weekly_enabled")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0",
+			).run();
+			log.info("Added usage_pause_weekly_enabled column to accounts table");
+		}
+
+		// A threshold written before this pair existed was in force by virtue of
+		// being set at all; keep it that way rather than silently switching it
+		// off. Each flag is backfilled only on the run that adds it: afterwards,
+		// `enabled = 0` with a percentage still stored is a deliberate "off",
+		// and rewriting it would switch a window back on behind its owner.
+		if (!thresholdColumnNames.includes("usage_pause_five_hour_enabled")) {
+			db.prepare(
+				`UPDATE accounts
+				 SET usage_pause_five_hour_enabled = 1
+				 WHERE usage_pause_five_hour_threshold IS NOT NULL`,
+			).run();
+		}
+
+		if (!thresholdColumnNames.includes("usage_pause_weekly_enabled")) {
+			db.prepare(
+				`UPDATE accounts
+				 SET usage_pause_weekly_enabled = 1
+				 WHERE usage_pause_weekly_threshold IS NOT NULL`,
+			).run();
+		}
+
 		// Add UNIQUE index on (name, provider, COALESCE(custom_endpoint,'')) to
 		// enforce atomic uniqueness for the account-add path. The previous
 		// SELECT-then-INSERT pre-check in `assertAccountNameAvailable` is
@@ -1543,6 +1624,46 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added stream_terminal_state column to requests table");
 		}
 
+		// Add gateway_hint_* columns if they don't exist. These persist Claude
+		// Code's opt-in "gateway hint" request headers (CLI >= 2.1.273,
+		// CLAUDE_CODE_GATEWAY_HINT_HEADERS=1): x-claude-code-request-class,
+		// x-claude-code-agent-type, x-claude-code-prev-tool-durations,
+		// x-claude-code-compaction, x-claude-code-context-compacted. Pure
+		// observability metadata — NULL for the overwhelming majority of
+		// clients/versions that never send them.
+		if (!requestsColumnNames.includes("gateway_hint_request_class")) {
+			db.prepare(
+				"ALTER TABLE requests ADD COLUMN gateway_hint_request_class TEXT",
+			).run();
+			log.info("Added gateway_hint_request_class column to requests table");
+		}
+		if (!requestsColumnNames.includes("gateway_hint_agent_type")) {
+			db.prepare(
+				"ALTER TABLE requests ADD COLUMN gateway_hint_agent_type TEXT",
+			).run();
+			log.info("Added gateway_hint_agent_type column to requests table");
+		}
+		if (!requestsColumnNames.includes("gateway_hint_prev_tool_durations")) {
+			db.prepare(
+				"ALTER TABLE requests ADD COLUMN gateway_hint_prev_tool_durations TEXT",
+			).run();
+			log.info(
+				"Added gateway_hint_prev_tool_durations column to requests table",
+			);
+		}
+		if (!requestsColumnNames.includes("gateway_hint_compaction")) {
+			db.prepare(
+				"ALTER TABLE requests ADD COLUMN gateway_hint_compaction TEXT",
+			).run();
+			log.info("Added gateway_hint_compaction column to requests table");
+		}
+		if (!requestsColumnNames.includes("gateway_hint_context_compacted")) {
+			db.prepare(
+				"ALTER TABLE requests ADD COLUMN gateway_hint_context_compacted TEXT",
+			).run();
+			log.info("Added gateway_hint_context_compacted column to requests table");
+		}
+
 		// Add timestamp column to request_payloads if it doesn't exist
 		if (!requestPayloadsColumnNames.includes("timestamp")) {
 			db.prepare(
@@ -1613,7 +1734,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
 			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
 			       rate_limited_at, requires_reauth,
-			       consecutive_rate_limits, last_manual_reauth_at, renewal_day
+			       consecutive_rate_limits, last_manual_reauth_at, renewal_day,
+			       usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
+			       usage_pause_five_hour_enabled, usage_pause_weekly_enabled
 			FROM accounts
 		`).run();
 
