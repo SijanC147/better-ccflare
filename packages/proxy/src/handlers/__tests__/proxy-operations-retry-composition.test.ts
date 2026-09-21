@@ -215,6 +215,14 @@ type ScriptStep = "throw" | (() => Response);
  * fallback response: a silent fallback would let a miscounted script pass by
  * absorbing the extra calls, which is the one way this instrument could report
  * the number it was written to expect.
+ *
+ * One consequence to read correctly when mutation-testing this file. Because
+ * each script is sized exactly to the bounded path, a mutant that overruns is
+ * caught by the exhaustion throw on its FIRST extra call, so the failure
+ * reports one more than expected (9 against 10, 5 against 6) whatever the
+ * mutant's true unbounded cost would have been. The kill is real and the
+ * property asserted is the right one, "no more fetches than the bound allows",
+ * but the received number is a floor on the mutant rather than its count.
  */
 function installScriptedFetch(script: ScriptStep[]): {
 	fetches: () => number;
