@@ -6,6 +6,7 @@ import {
 	handleChatCompletionsRequest,
 	handleOpenAIModelsRequest,
 	isOpenAIChatCompletionsRequest,
+	isOpenAIGatewayPath,
 } from "../handler";
 
 const ANTHROPIC_MESSAGE = {
@@ -548,5 +549,132 @@ describe("isOpenAIChatCompletionsRequest", () => {
 			false,
 		);
 		expect(isOpenAIChatCompletionsRequest("POST", "/v1/messages")).toBe(false);
+	});
+});
+
+describe("gateway escape", () => {
+	test("isOpenAIGatewayPath covers the whole prefix and nothing else", () => {
+		expect(isOpenAIGatewayPath("/v1/gateways")).toBe(true);
+		expect(isOpenAIGatewayPath("/v1/gateways/")).toBe(true);
+		expect(isOpenAIGatewayPath("/v1/gateways/Work/chat/completions")).toBe(
+			true,
+		);
+		expect(isOpenAIGatewayPath("/v1/gateways/work/models")).toBe(true);
+		expect(isOpenAIGatewayPath("/v1/gatewaysx")).toBe(false);
+		expect(isOpenAIGatewayPath("/v1/chat/completions")).toBe(false);
+		expect(isOpenAIGatewayPath("/v1/messages")).toBe(false);
+	});
+
+	test("an invalid gateway name is a 404 that never reaches handleProxy", async () => {
+		const [proxy, captured] = stubProxy(() => Response.json(ANTHROPIC_MESSAGE));
+		const gateways = { work: { exclude_providers: ["anthropic-oauth"] } };
+		for (const path of [
+			"/v1/gateways/Work/chat/completions",
+			"/v1/gateways/%77ork/chat/completions",
+			"/v1/gateways/_x/chat/completions",
+			"/v1/gateways//chat/completions",
+			"/v1/gateways/",
+			"/v1/gateways",
+		]) {
+			const req = new Request(`http://localhost${path}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(BASIC),
+			});
+			const url = new URL(req.url);
+			expect(isOpenAIGatewayPath(url.pathname)).toBe(true);
+			const match = matchOpenAIGatewayPath(url.pathname);
+			expect(match).toBeNull();
+			const resp = await dispatchOpenAIGatewayRequest(
+				req,
+				url,
+				match,
+				gateways,
+				proxy,
+				{},
+			);
+			expect(resp.status).toBe(404);
+			const body = (await resp.json()) as Record<string, unknown> & {
+				error: { code: string; message: string };
+			};
+			expect(body.error.code).toBe("gateway_not_found");
+			expect(body.type).toBeUndefined();
+		}
+		expect(captured.calls).toBe(0);
+	});
+});
+
+describe("forced account on a gateway", () => {
+	const FORCED = "x-better-ccflare-account-id";
+
+	function forcedChat(): Request {
+		return new Request("http://localhost/v1/chat/completions", {
+			method: "POST",
+			headers: { "content-type": "application/json", [FORCED]: "acct-1" },
+			body: JSON.stringify(BASIC),
+		});
+	}
+
+	function forcedModels(): Request {
+		return new Request("http://localhost/v1/gateways/work/models", {
+			headers: { [FORCED]: "acct-1" },
+		});
+	}
+
+	test("chat with exclusions drops the forced account id", async () => {
+		const [proxy, captured] = stubProxy(() => Response.json(ANTHROPIC_MESSAGE));
+		const req = forcedChat();
+		await handleChatCompletionsRequest(
+			req,
+			new URL(req.url),
+			proxy,
+			{},
+			null,
+			null,
+			{
+				excludeProviders: ["anthropic-oauth"],
+			},
+		);
+		expect(captured.calls).toBe(1);
+		expect(captured.req?.headers.has(FORCED)).toBe(false);
+	});
+
+	test("chat without exclusions keeps the forced account id", async () => {
+		const [proxy, captured] = stubProxy(() => Response.json(ANTHROPIC_MESSAGE));
+		await call(forcedChat(), proxy);
+		expect(captured.req?.headers.get(FORCED)).toBe("acct-1");
+	});
+
+	test("models with exclusions drops the forced account id", async () => {
+		let seen: Request | undefined;
+		const proxy: HandleProxyFn = async (req) => {
+			seen = req;
+			return Response.json({ object: "list", data: [] });
+		};
+		const req = forcedModels();
+		await handleOpenAIModelsRequest(
+			req,
+			new URL(req.url),
+			proxy,
+			{},
+			null,
+			null,
+			{
+				excludeProviders: ["codex"],
+			},
+		);
+		expect(seen).toBeDefined();
+		expect(seen?.headers.has(FORCED)).toBe(false);
+	});
+
+	test("models without exclusions keeps the forced account id", async () => {
+		let seen: Request | undefined;
+		const proxy: HandleProxyFn = async (req) => {
+			seen = req;
+			return Response.json({ object: "list", data: [] });
+		};
+		const req = forcedModels();
+		await handleOpenAIModelsRequest(req, new URL(req.url), proxy, {});
+		expect(seen?.headers.get(FORCED)).toBe("acct-1");
 	});
 });

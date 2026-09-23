@@ -26,6 +26,9 @@ import {
  * dashboard touched an unrelated one. The invalid entry stays on disk, the
  * router keeps skipping it, and GET keeps naming it in `errors`.
  */
+/** Refused beyond this, so a runaway client cannot grow the config file without bound. */
+export const MAX_OPENAI_GATEWAYS = 100;
+
 export function createOpenAIGatewayHandlers(config: Config) {
 	/**
 	 * The stored object, copied so the write is a fresh value. Null when the
@@ -78,6 +81,19 @@ export function createOpenAIGatewayHandlers(config: Config) {
 
 			const stored = readStoredMap();
 			if (stored === null) return notAnObject();
+			// Counted over stored keys, invalid entries included, so the cap
+			// bounds the file rather than the valid subset. Replacing an existing
+			// gateway at the cap still works.
+			if (
+				!Object.hasOwn(stored, name) &&
+				Object.keys(stored).length >= MAX_OPENAI_GATEWAYS
+			) {
+				return errorResponse(
+					BadRequest(
+						`at most ${MAX_OPENAI_GATEWAYS} gateways can be configured; delete one first`,
+					),
+				);
+			}
 			stored[name] = result.value;
 			config.setObjectSetting(OPENAI_GATEWAYS_CONFIG_KEY, stored);
 

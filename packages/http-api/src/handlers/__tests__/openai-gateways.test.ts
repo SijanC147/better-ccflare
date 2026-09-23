@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Config } from "@better-ccflare/config";
 import { OPENAI_GATEWAYS_CONFIG_KEY } from "@better-ccflare/types";
-import { createOpenAIGatewayHandlers } from "../openai-gateways";
+import {
+	createOpenAIGatewayHandlers,
+	MAX_OPENAI_GATEWAYS,
+} from "../openai-gateways";
 
 /**
  * `/api/openai-gateways` (SB23-2720). Every test runs against a real `Config`
@@ -202,6 +205,33 @@ describe("openai gateways API", () => {
 		expect((await handlers.putGateway(put({}), "work")).status).toBe(409);
 		expect(handlers.deleteGateway("work").status).toBe(409);
 		expect(storedGateways(path)).toEqual(["not", "a", "map"]);
+	});
+
+	it("refuses a new gateway at the cap and still updates an existing one", async () => {
+		const full: Record<string, unknown> = {};
+		for (let i = 0; i < MAX_OPENAI_GATEWAYS; i++) full[`g${i}`] = {};
+		const { config, path } = configWithFile({
+			[OPENAI_GATEWAYS_CONFIG_KEY]: full,
+		});
+		const handlers = createOpenAIGatewayHandlers(config);
+
+		const refused = await handlers.putGateway(put({}), "one-more");
+		expect(refused.status).toBe(400);
+		expect(await refused.json()).toEqual({
+			error: `at most ${MAX_OPENAI_GATEWAYS} gateways can be configured; delete one first`,
+		});
+		expect(Object.keys(storedGateways(path) as object)).toHaveLength(
+			MAX_OPENAI_GATEWAYS,
+		);
+
+		const updated = await handlers.putGateway(
+			put({ description: "updated" }),
+			"g0",
+		);
+		expect(updated.status).toBe(200);
+		expect((storedGateways(path) as Record<string, unknown>).g0).toEqual({
+			description: "updated",
+		});
 	});
 
 	// Fails if the handler writes through `config.set` (scalars only, and the

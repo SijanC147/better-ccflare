@@ -58,6 +58,7 @@ import {
 	handleChatCompletionsRequest,
 	handleResponsesRequest,
 	isOpenAIChatCompletionsRequest,
+	isOpenAIGatewayPath,
 } from "@better-ccflare/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
@@ -1885,9 +1886,12 @@ export default async function startServer(options?: {
 							);
 						}
 						// Named OpenAI gateways (SB23-2720): /v1/gateways/<name>/...
-						// Read fresh per request so a config edit applies at once.
-						const gatewayMatch = matchOpenAIGatewayPath(url.pathname);
-						if (gatewayMatch) {
+						// Every path under the prefix is answered here, including an
+						// invalid name, which would otherwise reach handleProxy with
+						// none of the gateway's exclusions. Read fresh per request so
+						// a config edit applies at once.
+						if (isOpenAIGatewayPath(url.pathname)) {
+							const gatewayMatch = matchOpenAIGatewayPath(url.pathname);
 							const { gateways, errors } = parseOpenAIGateways(
 								config.getObjectSetting(OPENAI_GATEWAYS_CONFIG_KEY),
 							);

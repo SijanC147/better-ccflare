@@ -3,6 +3,7 @@ export {
 	handleChatCompletionsRequest,
 	handleOpenAIModelsRequest,
 	isOpenAIChatCompletionsRequest,
+	isOpenAIGatewayPath,
 	type OpenAIGatewayOptions,
 } from "./chat/handler";
 export { handleResponsesRequest } from "./handler";

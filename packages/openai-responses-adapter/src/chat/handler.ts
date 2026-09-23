@@ -72,6 +72,7 @@ export interface OpenAIGatewayOptions {
 }
 
 const EXCLUDE_PROVIDERS_HEADER = "x-better-ccflare-exclude-providers";
+const FORCED_ACCOUNT_HEADER = "x-better-ccflare-account-id";
 
 /**
  * Sets the exclusion header from the gateway's rules, and otherwise removes
@@ -85,6 +86,11 @@ function applyExclusions(
 	const excluded = options?.excludeProviders ?? [];
 	if (excluded.length > 0) {
 		headers.set(EXCLUDE_PROVIDERS_HEADER, excluded.join(","));
+		// account-selector.ts returns a forced account before it reads the
+		// exclusions, so a forced id would route around the gateway's rules.
+		// Only a gateway with rules drops it; on the default gateway it stays
+		// the documented test-routing header.
+		headers.delete(FORCED_ACCOUNT_HEADER);
 	} else {
 		headers.delete(EXCLUDE_PROVIDERS_HEADER);
 	}
@@ -415,19 +421,37 @@ function notFound(message: string, code: string): Response {
 }
 
 /**
- * Serves `/v1/gateways/<name><rest>` once `matchOpenAIGatewayPath` has split
- * it. Pure over its inputs so the routing is testable without the server.
+ * True for every path under the gateway prefix, including ones whose name
+ * fails validation. The server answers all of them in the gateway branch:
+ * letting an invalid name such as `Work` fall through to `handleProxy` would
+ * route it with normal selection and none of the gateway's exclusions.
+ */
+export function isOpenAIGatewayPath(pathname: string): boolean {
+	return pathname === "/v1/gateways" || pathname.startsWith("/v1/gateways/");
+}
+
+/**
+ * Serves a path for which `isOpenAIGatewayPath` is true, given what
+ * `matchOpenAIGatewayPath` made of it. A null match (an invalid or empty name)
+ * is a 404 and never reaches `handleProxy`. Pure over its inputs so the
+ * routing is testable without the server.
  */
 export async function dispatchOpenAIGatewayRequest(
 	req: Request,
 	url: URL,
-	match: { name: string; rest: string },
+	match: { name: string; rest: string } | null,
 	gateways: OpenAIGateways,
 	handleProxy: HandleProxyFn,
 	ctx: unknown,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 ): Promise<Response> {
+	if (!match) {
+		return notFound(
+			"Gateway names are lowercase letters, digits, - and _, starting with a letter or digit.",
+			"gateway_not_found",
+		);
+	}
 	const gateway = Object.hasOwn(gateways, match.name)
 		? gateways[match.name]
 		: undefined;

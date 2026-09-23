@@ -502,6 +502,22 @@ describe("2b. empty user content", () => {
 		expect(error.code).toBe("empty_content");
 	});
 
+	// Review pass 2, mutation D2: dropping `&& turn.content.length === 0`
+	// refused this request while all 138 tests stayed green. A blank user turn
+	// that opens a merged group which the next turn gives content is valid.
+	test("a blank first user turn merged with a following user turn is accepted", () => {
+		const body = translated({
+			model: MODEL,
+			messages: [
+				{ role: "user", content: "" },
+				{ role: "user", content: "hi" },
+			],
+		});
+		expect(body.messages).toHaveLength(1);
+		expect(body.messages[0].role).toBe("user");
+		expect(JSON.stringify(body.messages[0].content)).toContain("hi");
+	});
+
 	test("a whitespace-only string is refused", () => {
 		const error = refused({
 			model: MODEL,
