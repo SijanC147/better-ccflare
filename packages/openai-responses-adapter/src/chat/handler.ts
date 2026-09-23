@@ -207,6 +207,18 @@ function completionAsStream(
 }
 
 /**
+ * True for the default gateway's one route. The server intercepts this before
+ * its `handleProxy` fallthrough; without the intercept the path reaches the
+ * SB23-2570 refusal instead of the gateway.
+ */
+export function isOpenAIChatCompletionsRequest(
+	method: string,
+	pathname: string,
+): boolean {
+	return method === "POST" && pathname === "/v1/chat/completions";
+}
+
+/**
  * Inbound OpenAI Chat Completions gateway (SB23-2720). Translates the request
  * to Anthropic Messages, runs it through `handleProxy` as a synthetic
  * `POST /v1/messages` so combos, failover and every provider in the pool

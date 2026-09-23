@@ -57,6 +57,7 @@ import {
 	dispatchOpenAIGatewayRequest,
 	handleChatCompletionsRequest,
 	handleResponsesRequest,
+	isOpenAIChatCompletionsRequest,
 } from "@better-ccflare/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
@@ -1869,10 +1870,7 @@ export default async function startServer(options?: {
 						// run before the handleProxy fallthrough: forwarded verbatim,
 						// this path reaches Anthropic's OpenAI compatibility layer,
 						// which refuses OAuth credentials (SB23-2570).
-						if (
-							req.method === "POST" &&
-							url.pathname === "/v1/chat/completions"
-						) {
+						if (isOpenAIChatCompletionsRequest(req.method, url.pathname)) {
 							return trackStreamForShutdown(
 								await handleChatCompletionsRequest(
 									req,

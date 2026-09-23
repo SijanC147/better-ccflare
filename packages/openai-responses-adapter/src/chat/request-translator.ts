@@ -129,7 +129,9 @@ function userContent(
 	content: unknown,
 	param: string,
 ): string | Array<AnthropicTextBlock | AnthropicImageBlock> {
-	if (typeof content === "string") return content;
+	// OpenAI accepts blank user text and Anthropic does not, so blank text is
+	// dropped here; a turn left with nothing is refused after merging.
+	if (typeof content === "string") return content.trim() === "" ? [] : content;
 	if (!Array.isArray(content)) {
 		throw new Refusal(
 			param,
@@ -137,20 +139,25 @@ function userContent(
 			`${param} must be a string or an array of content parts.`,
 		);
 	}
-	return content.map((part, j) => {
+	const blocks: Array<AnthropicTextBlock | AnthropicImageBlock> = [];
+	content.forEach((part, j) => {
 		const at = `${param}[${j}]`;
 		if (
 			isRecord(part) &&
 			part.type === "text" &&
 			typeof part.text === "string"
 		) {
-			const text: AnthropicTextBlock = { type: "text", text: part.text };
-			return text;
+			if (part.text.trim() !== "")
+				blocks.push({ type: "text", text: part.text });
+			return;
 		}
-		if (isRecord(part) && part.type === "image_url")
-			return imageBlock(part, at);
+		if (isRecord(part) && part.type === "image_url") {
+			blocks.push(imageBlock(part, at));
+			return;
+		}
 		throw unsupportedPart(at, part);
 	});
+	return blocks;
 }
 
 /**
@@ -252,6 +259,10 @@ function translateMessages(messages: unknown[]): {
 	// A legacy `function_call` has no id, so one is made up here and handed
 	// to the `role: "function"` message that answers it.
 	let pendingLegacyCall: { id: string; name: string } | null = null;
+	// A user turn left empty is fine only if it merges into a neighbour with
+	// content, so it is checked after merging, by the turn object that heads
+	// the merged group.
+	const emptyUserTurns = new Map<AnthropicMessage, string>();
 
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
@@ -266,12 +277,16 @@ function translateMessages(messages: unknown[]): {
 			case "developer":
 				system.push(...textSegments(message.content, `${at}.content`));
 				break;
-			case "user":
-				built.push({
+			case "user": {
+				const turn: AnthropicMessage = {
 					role: "user",
 					content: userContent(message.content, `${at}.content`),
-				});
+				};
+				if (turn.content.length === 0)
+					emptyUserTurns.set(turn, `${at}.content`);
+				built.push(turn);
 				break;
+			}
 			case "assistant": {
 				const blocks: AnthropicRequestBlock[] = textSegments(
 					message.content,
@@ -374,7 +389,18 @@ function translateMessages(messages: unknown[]): {
 		}
 	}
 
-	return { system, messages: mergeAdjacentSameRole(built) };
+	const merged = mergeAdjacentSameRole(built);
+	for (const turn of merged) {
+		const param = emptyUserTurns.get(turn);
+		if (param !== undefined && turn.content.length === 0) {
+			throw new Refusal(
+				param,
+				"empty_content",
+				`${param} is empty; Anthropic requires non-empty user content.`,
+			);
+		}
+	}
+	return { system, messages: merged };
 }
 
 function positiveInteger(value: unknown, param: string): number {

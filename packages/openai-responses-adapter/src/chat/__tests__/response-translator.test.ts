@@ -199,7 +199,8 @@ describe("translateAnthropicMessageToChat", () => {
 		["refusal", "content_filter"],
 		["pause_turn", "stop"],
 		["unheard_of", "stop"],
-		[null, null],
+		// A completed message always carries a finish_reason.
+		[null, "stop"],
 	])("stop_reason %p gives finish_reason %p", (stop, finish) => {
 		const out = translateAnthropicMessageToChat(
 			message({ stop_reason: stop, content: [{ type: "text", text: "x" }] }),

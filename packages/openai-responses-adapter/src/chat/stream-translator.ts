@@ -207,7 +207,9 @@ export function translateAnthropicStreamToChat(
 			}
 			case "message_stop": {
 				state.finished = true;
-				emit(controller, chunk({}, mapStopReason(state.stopReason)));
+				// message_stop means the message completed, so it always carries a
+				// finish_reason even when no message_delta supplied a stop_reason.
+				emit(controller, chunk({}, mapStopReason(state.stopReason) ?? "stop"));
 				if (ctx.includeUsage) {
 					const final: ChatCompletionChunk = {
 						id: ctx.id,

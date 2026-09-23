@@ -437,6 +437,21 @@ describe("translateAnthropicStreamToChat", () => {
 		expect(chunks.every((c) => c.choices.length === 1)).toBe(true);
 	});
 
+	test("message_stop with no stop_reason from any message_delta finishes with stop", async () => {
+		const text = sse([
+			start(),
+			textStart(0),
+			textDelta(0, "done"),
+			blockStop(0),
+			messageStop,
+		]);
+		const { chunks, errors } = await run(upstreamFrom(text));
+		expect(errors).toEqual([]);
+		const last = chunks[chunks.length - 1];
+		expect(last?.choices[0]?.delta).toEqual({});
+		expect(last?.choices[0]?.finish_reason).toBe("stop");
+	});
+
 	test("a final event with no trailing blank line is still handled", async () => {
 		const text = plainText.replace(/\n\n$/, "\n");
 		const { chunks, errors } = await run(upstreamFrom(text));

@@ -5,6 +5,7 @@ import {
 	dispatchOpenAIGatewayRequest,
 	handleChatCompletionsRequest,
 	handleOpenAIModelsRequest,
+	isOpenAIChatCompletionsRequest,
 } from "../handler";
 
 const ANTHROPIC_MESSAGE = {
@@ -499,5 +500,53 @@ describe("dispatchOpenAIGatewayRequest", () => {
 		expect(resp.status).toBe(200);
 		expect(new URL(seen?.url ?? "").pathname).toBe("/v1/models");
 		expect(seen?.headers.get(EXCLUDE)).toBe("anthropic-oauth");
+	});
+});
+
+describe("client disconnect", () => {
+	test("the chat handler hands handleProxy a request carrying the client's signal", async () => {
+		const [proxy, captured] = stubProxy(() => Response.json(ANTHROPIC_MESSAGE));
+		const controller = new AbortController();
+		const req = new Request("http://localhost/v1/chat/completions", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(BASIC),
+			signal: controller.signal,
+		});
+		await call(req, proxy);
+		expect(captured.req?.signal.aborted).toBe(false);
+		controller.abort();
+		expect(captured.req?.signal.aborted).toBe(true);
+	});
+
+	test("the models handler hands handleProxy a request carrying the client's signal", async () => {
+		let seen: Request | undefined;
+		const proxy: HandleProxyFn = async (req) => {
+			seen = req;
+			return Response.json({ object: "list", data: [] });
+		};
+		const controller = new AbortController();
+		const req = new Request("http://localhost/v1/gateways/open/models", {
+			signal: controller.signal,
+		});
+		await handleOpenAIModelsRequest(req, new URL(req.url), proxy, {});
+		expect(seen?.signal.aborted).toBe(false);
+		controller.abort();
+		expect(seen?.signal.aborted).toBe(true);
+	});
+});
+
+describe("isOpenAIChatCompletionsRequest", () => {
+	test("matches POST /v1/chat/completions only", () => {
+		expect(isOpenAIChatCompletionsRequest("POST", "/v1/chat/completions")).toBe(
+			true,
+		);
+		expect(isOpenAIChatCompletionsRequest("GET", "/v1/chat/completions")).toBe(
+			false,
+		);
+		expect(isOpenAIChatCompletionsRequest("POST", "/chat/completions")).toBe(
+			false,
+		);
+		expect(isOpenAIChatCompletionsRequest("POST", "/v1/messages")).toBe(false);
 	});
 });

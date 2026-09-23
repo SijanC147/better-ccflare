@@ -98,7 +98,9 @@ export function translateAnthropicMessageToChat(
 			{
 				index: 0,
 				message,
-				finish_reason: mapStopReason(msg.stop_reason),
+				// A completed message always carries a finish_reason, even when
+				// upstream reported no stop_reason.
+				finish_reason: mapStopReason(msg.stop_reason) ?? "stop",
 				logprobs: null,
 			},
 		],

@@ -479,6 +479,115 @@ describe("5. adjacent same-role messages merge", () => {
 	});
 });
 
+describe("2b. empty user content", () => {
+	test("an empty string is refused", () => {
+		const error = refused({
+			model: MODEL,
+			messages: [
+				HI,
+				{ role: "assistant", content: "ok" },
+				{ role: "user", content: "" },
+			],
+		});
+		expect(error.param).toBe("messages[2].content");
+		expect(error.code).toBe("empty_content");
+	});
+
+	test("an empty text part is refused", () => {
+		const error = refused({
+			model: MODEL,
+			messages: [{ role: "user", content: [{ type: "text", text: "" }] }],
+		});
+		expect(error.param).toBe("messages[0].content");
+		expect(error.code).toBe("empty_content");
+	});
+
+	test("a whitespace-only string is refused", () => {
+		const error = refused({
+			model: MODEL,
+			messages: [{ role: "user", content: " \n\t " }],
+		});
+		expect(error.param).toBe("messages[0].content");
+		expect(error.code).toBe("empty_content");
+	});
+
+	test("an image plus an empty text part keeps the image and drops the text", () => {
+		const body = translated({
+			model: MODEL,
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image_url",
+							image_url: { url: "https://example.com/a.jpg" },
+						},
+						{ type: "text", text: "  " },
+					],
+				},
+			],
+		});
+		expect(body.messages).toEqual([
+			{
+				role: "user",
+				content: [
+					{
+						type: "image",
+						source: { type: "url", url: "https://example.com/a.jpg" },
+					},
+				],
+			},
+		]);
+	});
+
+	test("an empty user turn merging into tool results still produces a valid request", () => {
+		const body = translated({
+			model: MODEL,
+			messages: [
+				HI,
+				{
+					role: "assistant",
+					tool_calls: [
+						{
+							id: "call_a",
+							type: "function",
+							function: { name: "f", arguments: "{}" },
+						},
+					],
+				},
+				{ role: "tool", tool_call_id: "call_a", content: "done" },
+				{ role: "user", content: "" },
+			],
+		});
+		expect(body.messages).toEqual([
+			{ role: "user", content: "hi" },
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "call_a", name: "f", input: {} }],
+			},
+			{
+				role: "user",
+				content: [
+					{ type: "tool_result", tool_use_id: "call_a", content: "done" },
+				],
+			},
+		]);
+	});
+
+	test("two adjacent empty user turns are refused at the first", () => {
+		const error = refused({
+			model: MODEL,
+			messages: [
+				HI,
+				{ role: "assistant", content: "ok" },
+				{ role: "user", content: "" },
+				{ role: "user", content: [] },
+			],
+		});
+		expect(error.param).toBe("messages[2].content");
+	});
+});
+
 describe("6. max_tokens", () => {
 	test("max_completion_tokens wins over max_tokens", () => {
 		expect(
