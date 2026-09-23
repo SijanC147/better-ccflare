@@ -31,7 +31,10 @@ export interface ChatUnsupportedPart {
 	[key: string]: unknown;
 }
 
-export type ChatContentPart = ChatTextPart | ChatImagePart | ChatUnsupportedPart;
+export type ChatContentPart =
+	| ChatTextPart
+	| ChatImagePart
+	| ChatUnsupportedPart;
 
 export interface ChatToolCall {
 	id: string;
