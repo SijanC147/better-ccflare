@@ -2906,6 +2906,25 @@ export class Config extends EventEmitter {
 	}
 
 	/**
+	 * An object-valued setting, returned exactly as stored and unvalidated.
+	 * The caller owns the shape: `openai_gateways` is validated by
+	 * `parseOpenAIGateways` in `@better-ccflare/types` (SB23-2720), which this
+	 * package does not depend on. Never `get(key, default)` for these: `get`
+	 * serves scalars only, and a default passed to it is persisted on a miss.
+	 */
+	getObjectSetting(key: string): unknown {
+		return (this.data as Record<string, unknown>)[key];
+	}
+
+	/** Stores an object-valued setting whole. Validate before calling. */
+	setObjectSetting(key: string, value: Record<string, unknown>): void {
+		const oldValue = (this.data as Record<string, unknown>)[key];
+		(this.data as Record<string, unknown>)[key] = value;
+		this.saveConfig();
+		this.emit("change", { key, oldValue, newValue: value });
+	}
+
+	/**
 	 * Providers currently allowed to edit their model-default overrides:
 	 * "codex" by default, or the exact CCFLARE_MODEL_DEFAULTS_PROVIDERS
 	 * list when that env var is set (comma-separated, trimmed). Never

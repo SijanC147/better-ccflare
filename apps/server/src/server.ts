@@ -53,7 +53,11 @@ import {
 	Logger,
 	setConsoleLogging,
 } from "@better-ccflare/logger";
-import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter";
+import {
+	dispatchOpenAIGatewayRequest,
+	handleChatCompletionsRequest,
+	handleResponsesRequest,
+} from "@better-ccflare/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	CODEX_PING_MODEL,
@@ -109,6 +113,9 @@ import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
 	type LoadBalancingStrategy,
+	matchOpenAIGatewayPath,
+	OPENAI_GATEWAYS_CONFIG_KEY,
+	parseOpenAIGateways,
 	type RetentionStatus,
 	StrategyName,
 	type StrategyStore,
@@ -1215,6 +1222,9 @@ export default async function startServer(options?: {
 
 	const db = dbOps.getAdapter();
 	const log = container.resolve<Logger>(SERVICE_KEYS.Logger);
+	// OpenAI gateway config errors already warned about, so a bad entry is
+	// reported once rather than on every request to /v1/gateways/*.
+	const reportedGatewayConfigErrors = new Set<string>();
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
 
 	// Initialize async DB writer
@@ -1853,6 +1863,55 @@ export default async function startServer(options?: {
 								proxyContext,
 								authResult.apiKeyId,
 								authResult.apiKeyName,
+							);
+						}
+						// Inbound OpenAI Chat Completions gateway (SB23-2720). It must
+						// run before the handleProxy fallthrough: forwarded verbatim,
+						// this path reaches Anthropic's OpenAI compatibility layer,
+						// which refuses OAuth credentials (SB23-2570).
+						if (
+							req.method === "POST" &&
+							url.pathname === "/v1/chat/completions"
+						) {
+							return trackStreamForShutdown(
+								await handleChatCompletionsRequest(
+									req,
+									url,
+									handleProxy as Parameters<
+										typeof handleChatCompletionsRequest
+									>[2],
+									proxyContext,
+									authResult.apiKeyId,
+									authResult.apiKeyName,
+								),
+							);
+						}
+						// Named OpenAI gateways (SB23-2720): /v1/gateways/<name>/...
+						// Read fresh per request so a config edit applies at once.
+						const gatewayMatch = matchOpenAIGatewayPath(url.pathname);
+						if (gatewayMatch) {
+							const { gateways, errors } = parseOpenAIGateways(
+								config.getObjectSetting(OPENAI_GATEWAYS_CONFIG_KEY),
+							);
+							for (const error of errors) {
+								if (!reportedGatewayConfigErrors.has(error)) {
+									reportedGatewayConfigErrors.add(error);
+									log.warn(`Skipping OpenAI gateway config: ${error}`);
+								}
+							}
+							return trackStreamForShutdown(
+								await dispatchOpenAIGatewayRequest(
+									req,
+									url,
+									gatewayMatch,
+									gateways,
+									handleProxy as Parameters<
+										typeof dispatchOpenAIGatewayRequest
+									>[4],
+									proxyContext,
+									authResult.apiKeyId,
+									authResult.apiKeyName,
+								),
 							);
 						}
 						return trackStreamForShutdown(
