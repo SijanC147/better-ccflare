@@ -721,6 +721,27 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "GET",
+		path: "/api/openai-gateways",
+		category: "Config",
+		summary:
+			"Named OpenAI-compatible gateways, each with its /v1/gateways/<name> base path, plus stored entries skipped as invalid.",
+	},
+	{
+		method: "PUT",
+		path: "/api/openai-gateways/:name",
+		category: "Config",
+		summary: "Create or replace one named gateway.",
+		bodyHint: '{"exclude_providers": ["anthropic-oauth"], "description": ""}',
+	},
+	{
+		method: "DELETE",
+		path: "/api/openai-gateways/:name",
+		category: "Config",
+		summary: "Delete one named gateway.",
+		dangerous: true,
+	},
+	{
+		method: "GET",
 		path: "/api/config/model-capacity-routing",
 		category: "Config",
 		summary: "Whether routing considers model capacity.",
