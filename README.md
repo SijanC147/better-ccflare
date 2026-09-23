@@ -459,6 +459,43 @@ Known limitations:
 - Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are silently skipped; only `type: "function"` tools are forwarded to Anthropic
 - Claude OAuth accounts (Claude Pro/Team, `provider=anthropic` with OAuth tokens) are automatically excluded from Codex CLI traffic — Anthropic bans these when used outside Claude CLI. Anthropic API key accounts are fine and will be used normally.
 
+### Using better-ccflare as an OpenAI-compatible provider
+
+Any client that accepts a custom OpenAI-compatible provider can send Chat Completions requests to better-ccflare. The server intercepts `POST /v1/chat/completions`, translates it to an Anthropic `POST /v1/messages` request, routes it through your account pool with the usual combos and failover, and translates the answer back.
+
+- **Base URL:** `http://<host>:8080/v1`. The `/v1` is required, because clients append `/chat/completions` to it. A request to `/chat/completions` without `/v1` is not translated.
+- **API key:** a better-ccflare API key if any are configured, otherwise any non-empty string.
+- **Models:** `GET /v1/models` lists the models the pool can serve.
+
+Translated: text, images (`image_url`, as a data URL or a plain URL), function tools and tool calls, streaming (including `stream_options.include_usage`), and token usage.
+
+Refused with a 400, rather than silently dropped: `n` greater than 1, `logprobs`, tools whose type is not `function`, and audio or file content parts.
+
+`response_format` is best-effort, since Anthropic has no equivalent that guarantees the format. `reasoning_effort` is ignored.
+
+**Claude OAuth accounts are included in this pool, unlike Codex CLI traffic, and that is a deliberate choice with a risk attached.** The Codex section above excludes them because Anthropic has banned OAuth accounts used outside Claude Code. Anthropic has also been seen billing third-party-app traffic on OAuth accounts against the account's extra usage credits and rejecting it with a 400 when extra usage is off; the proxy labels that `extra_usage_exhausted` and fails over. Neither behaviour is guaranteed. If you want these accounts kept out of third-party traffic, use API-key or non-Anthropic accounts for it.
+
+#### Named gateways
+
+The default base URL above applies no rules and can route to every account in the pool. To give an app its own base URL with its own rules, add named gateways to the config file under `openai_gateways`:
+
+```json
+{
+  "openai_gateways": {
+    "no-oauth": {
+      "exclude_providers": ["anthropic-oauth"],
+      "description": "Third-party apps that must not use Claude OAuth accounts"
+    }
+  }
+}
+```
+
+The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and calls `/chat/completions` and `/models` under it. Any other path or method under a gateway answers 404 with `code: "unknown_endpoint"`, and an unconfigured name answers 404 with `code: "gateway_not_found"`. The path stays under `/v1/`, so API-key authentication and API-only keys work exactly as on the default URL.
+
+`exclude_providers` names the accounts a gateway never routes to. `anthropic-oauth` means Anthropic accounts holding a refresh token, which leaves Anthropic API-key accounts eligible. Any other value is matched exactly against an account's `provider`, for example `codex`. A gateway with `anthropic-oauth` excluded is the way to keep Claude OAuth accounts out of an app's traffic while the default URL still includes them.
+
+Gateways are read from the config on every request, so an edit applies without a restart. An invalid entry is skipped with a warning in the log and does not disable the others. `GET /api/openai-gateways` lists the configured gateways.
+
 ### SSL/HTTPS Configuration
 
 To enable HTTPS with better-ccflare, you'll need SSL certificates. Here are your options:

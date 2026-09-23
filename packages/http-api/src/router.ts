@@ -122,6 +122,7 @@ import {
 	createQwenDeviceFlowStatusHandler,
 	createQwenReauthHandler,
 } from "./handlers/oauth";
+import { createOpenAIGatewayHandlers } from "./handlers/openai-gateways";
 import {
 	createProjectCreateHandler,
 	createProjectDeleteHandler,
@@ -339,6 +340,7 @@ export class APIRouter {
 		const githubTokenConfigHandlers = createGithubTokenConfigHandlers(config);
 		const openObserveConfigHandlers = createOpenObserveConfigHandlers(config);
 		const retryConfigHandlers = createRetryConfigHandlers(config);
+		const openAIGatewayHandlers = createOpenAIGatewayHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -598,6 +600,12 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/retry", (req) =>
 			retryConfigHandlers.setRetryConfig(req),
+		);
+		// Named OpenAI-compatible gateways (SB23-2720). PUT and DELETE carry the
+		// name in the path and are dispatched under the /api/openai-gateways/
+		// prefix in handleRequest().
+		this.handlers.set("GET:/api/openai-gateways", () =>
+			openAIGatewayHandlers.listGateways(),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
@@ -1154,6 +1162,29 @@ export class APIRouter {
 			if (parts.length === 4 && method === "DELETE") {
 				const handler = createComboDeleteHandler(this.context.dbOps);
 				return await this.wrapHandler(() => handler(comboId))(req, url);
+			}
+		}
+
+		// Check for dynamic gateway endpoints (/api/openai-gateways/:name)
+		if (path.startsWith("/api/openai-gateways/")) {
+			const parts = path.split("/");
+			const name = decodeURIComponent(parts[3]);
+			const handlers = createOpenAIGatewayHandlers(this.context.config);
+
+			// PUT /api/openai-gateways/:name
+			if (parts.length === 4 && method === "PUT") {
+				return await this.wrapHandler((req) => handlers.putGateway(req, name))(
+					req,
+					url,
+				);
+			}
+
+			// DELETE /api/openai-gateways/:name
+			if (parts.length === 4 && method === "DELETE") {
+				return await this.wrapHandler(() => handlers.deleteGateway(name))(
+					req,
+					url,
+				);
 			}
 		}
 

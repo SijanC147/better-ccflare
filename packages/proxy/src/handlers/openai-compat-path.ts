@@ -3,7 +3,16 @@ import type { Account } from "@better-ccflare/types";
 /**
  * The OpenAI SDK compatibility layer on `api.anthropic.com`.
  *
- * Anthropic documents `https://api.anthropic.com/v1/` as an OpenAI-compatible
+ * Server traffic no longer reaches this guard. `apps/server/src/server.ts`
+ * sends `POST /v1/chat/completions` to the inbound Chat Completions gateway
+ * (`@better-ccflare/openai-responses-adapter`, `chat/handler.ts`, SB23-2720)
+ * before the `handleProxy` fallthrough. The gateway translates the request to
+ * Anthropic Messages and calls `handleProxy` with a synthetic
+ * `POST /v1/messages`, so the path is no longer forwarded verbatim to
+ * `api.anthropic.com`. This guard stays only as defence for a direct
+ * `handleProxy` caller that passes the path through untranslated.
+ *
+ * What follows is why forwarding it verbatim was refused. Anthropic documents `https://api.anthropic.com/v1/` as an OpenAI-compatible
  * base URL, so `POST /v1/chat/completions` IS a real upstream endpoint — but
  * the documentation pairs it with a Claude **API key** only
  * (platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk). It
