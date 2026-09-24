@@ -1,6 +1,6 @@
 $kind: http-request
 description: |-
-  Refused by the request translator before routing, so it reaches no account.
+  Refused by the request translator before routing, so it reaches no account. The `n` check is the only gate on this path: if this test fails, the request may have reached an account, which is why `max_tokens` is 1.
 method: POST
 url: '{{baseUrl}}/v1/chat/completions'
 order: 3000
@@ -18,7 +18,7 @@ body:
           "content": "Reply with the single word: pong"
         }
       ],
-      "max_tokens": 16,
+      "max_tokens": 1,
       "n": 2
     }
 scripts:
@@ -30,4 +30,5 @@ scripts:
         const body = pm.response.json();
         pm.expect(body).to.have.property("error");
         pm.expect(body.error.code).to.eql("unsupported_value");
+        pm.expect(body.error.param).to.eql("n");
       });

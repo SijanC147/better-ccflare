@@ -9,4 +9,8 @@ scripts:
     language: text/javascript
     code: |-
       pm.test("status is 200", () => pm.response.to.have.status(200));
-      pm.test("JSON body", () => pm.expect(pm.response.json()).to.be.an("object"));
+      pm.test("gateways and errors are arrays", () => {
+        const body = pm.response.json();
+        pm.expect(body.gateways).to.be.an("array");
+        pm.expect(body.errors).to.be.an("array");
+      });

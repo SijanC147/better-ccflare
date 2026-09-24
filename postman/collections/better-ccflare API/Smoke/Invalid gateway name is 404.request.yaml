@@ -1,8 +1,8 @@
 $kind: http-request
 description: |-
-  An unknown gateway name must refuse, never fall through to the unrestricted route. Reaches no account.
+  Upper case fails the gateway name pattern, so no configuration can make this name valid. It must refuse, never fall through to the unrestricted route. Reaches no account.
 method: POST
-url: '{{baseUrl}}/v1/gateways/postman-smoke-no-such-gateway/chat/completions'
+url: '{{baseUrl}}/v1/gateways/Postman-Smoke-Invalid/chat/completions'
 order: 4000
 headers:
   - key: 'Content-Type'
