@@ -182,3 +182,14 @@ export function matchOpenAIGatewayPath(
 	const rest = slash === -1 ? "" : remainder.slice(slash);
 	return { name, rest };
 }
+
+/**
+ * Set by the OpenAI gateway on its synthetic `/v1/messages` request. It tells
+ * `forwardToClient` not to alias the response's `model` back to the requested
+ * name, because an OpenAI client should be told which model answered when a
+ * failover lands on another family (SB23-2781). Claude Code traffic never
+ * carries it, so its aliasing is unchanged. A client that sets it only changes
+ * the model label it is shown. Stripped before the request goes upstream.
+ */
+export const REPORT_UPSTREAM_MODEL_HEADER =
+	"x-better-ccflare-report-upstream-model";

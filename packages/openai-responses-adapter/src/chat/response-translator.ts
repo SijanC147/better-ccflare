@@ -93,7 +93,12 @@ export function translateAnthropicMessageToChat(
 		id: ctx.id,
 		object: "chat.completion",
 		created: ctx.created,
-		model: ctx.model,
+		// The model that answered, not the one requested: a failover can land on
+		// another family entirely (SB23-2781).
+		model:
+			typeof msg.model === "string" && msg.model.length > 0
+				? msg.model
+				: ctx.model,
 		choices: [
 			{
 				index: 0,

@@ -124,6 +124,44 @@ function contentOf(chunks: ChatCompletionChunk[]): string {
 }
 
 describe("translateAnthropicStreamToChat", () => {
+	test("every chunk, the usage chunk included, names a substituted model", async () => {
+		const swapped: [string, unknown] = [
+			"message_start",
+			{
+				type: "message_start",
+				message: {
+					id: "msg_1",
+					type: "message",
+					role: "assistant",
+					model: "gpt-5.6-sol",
+					content: [],
+					stop_reason: null,
+					usage: { input_tokens: 3, output_tokens: 1 },
+				},
+			},
+		];
+		const text = sse([
+			swapped,
+			textStart(0),
+			textDelta(0, "hi"),
+			blockStop(0),
+			["message_stop", { type: "message_stop" }],
+		]);
+		const out = translateAnthropicStreamToChat(upstreamFrom(text), {
+			id: "chatcmpl-1",
+			created: 1,
+			model: "claude-opus-5-5",
+			includeUsage: true,
+		});
+		const raw = await new Response(out).text();
+		const models = raw
+			.split("\n\n")
+			.filter((f) => f.startsWith("data: {"))
+			.map((f) => (JSON.parse(f.slice(6)) as ChatCompletionChunk).model);
+		expect(models.length).toBeGreaterThanOrEqual(4);
+		expect(new Set(models)).toEqual(new Set(["gpt-5.6-sol"]));
+	});
+
 	test("plain text", async () => {
 		const { raw, frames, chunks, errors } = await run(upstreamFrom(plainText));
 		expect(errors).toEqual([]);
@@ -135,7 +173,8 @@ describe("translateAnthropicStreamToChat", () => {
 			expect(c.id).toBe("chatcmpl-1");
 			expect(c.object).toBe("chat.completion.chunk");
 			expect(c.created).toBe(1_700_000_000);
-			expect(c.model).toBe("gpt-4o");
+			// message_start names the model that answered (SB23-2781).
+			expect(c.model).toBe("claude-x");
 			expect(c.choices[0]?.index).toBe(0);
 			expect(c.choices[0]?.logprobs).toBeNull();
 		}

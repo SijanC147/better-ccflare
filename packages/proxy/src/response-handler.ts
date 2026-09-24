@@ -5,10 +5,11 @@ import {
 	withSanitizedProxyHeaders,
 } from "@better-ccflare/http-common";
 import { Logger, openObserveShipsPayloads } from "@better-ccflare/logger";
-import type {
-	Account,
-	AgentAttributionSource,
-	ProjectAttributionSource,
+import {
+	type Account,
+	type AgentAttributionSource,
+	type ProjectAttributionSource,
+	REPORT_UPSTREAM_MODEL_HEADER,
 } from "@better-ccflare/types";
 import {
 	ANTHROPIC_TERMINAL_RECOVERY_GRACE_MS,
@@ -501,7 +502,9 @@ export async function forwardToClient(
 		// the client. This alias is wire compatibility, not evidence that the
 		// upstream backend ran that model.
 		const clientBody =
-			isAnthropicMessagesSseResponse && originalModel
+			isAnthropicMessagesSseResponse &&
+			originalModel &&
+			requestHeaders.get(REPORT_UPSTREAM_MODEL_HEADER) !== "1"
 				? rewriteAnthropicMessageSseModel(passthroughBody, originalModel)
 				: passthroughBody;
 
@@ -600,7 +603,9 @@ export async function forwardToClient(
 	// As with SSE above, this transform is downstream of analytics so logs,
 	// pricing and usage retain the provider's real response model.
 	const clientBody =
-		isAnthropicMessagesJsonResponse && originalModel
+		isAnthropicMessagesJsonResponse &&
+		originalModel &&
+		requestHeaders.get(REPORT_UPSTREAM_MODEL_HEADER) !== "1"
 			? rewriteAnthropicMessageJsonModelStream(passthroughBody, originalModel)
 			: passthroughBody;
 

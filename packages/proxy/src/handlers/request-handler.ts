@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import { TIME_CONSTANTS, ValidationError } from "@better-ccflare/core";
 import type { Provider } from "@better-ccflare/providers";
-import type { RequestMeta } from "@better-ccflare/types";
+import {
+	REPORT_UPSTREAM_MODEL_HEADER,
+	type RequestMeta,
+} from "@better-ccflare/types";
 import { chatGptCloudflareCookieJar } from "../chatgpt-cloudflare-cookies";
 import { ERROR_MESSAGES, INTERNAL_PROBE_SECRET_HEADER } from "./proxy-types";
 
@@ -27,6 +30,7 @@ function stripInternalControlHeaders(headers: Headers): void {
 	headers.delete("x-better-ccflare-prompt-cache-breakpoint");
 	headers.delete("x-better-ccflare-codex-path");
 	headers.delete("x-better-ccflare-codex-transport");
+	headers.delete(REPORT_UPSTREAM_MODEL_HEADER);
 }
 
 /**

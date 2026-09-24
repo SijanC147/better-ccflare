@@ -24,6 +24,8 @@ interface State {
 	finished: boolean;
 	/** Frames enqueued so far; `pull` loops until it rises or the stream ends. */
 	emitted: number;
+	/** The model named by `message_start`, else the one the client requested. */
+	model: string;
 }
 
 const encoder = new TextEncoder();
@@ -57,6 +59,7 @@ export function translateAnthropicStreamToChat(
 		toolIndexByBlock: new Map(),
 		finished: false,
 		emitted: 0,
+		model: ctx.model,
 	};
 	let buffer = "";
 
@@ -76,7 +79,7 @@ export function translateAnthropicStreamToChat(
 			id: ctx.id,
 			object: "chat.completion.chunk",
 			created: ctx.created,
-			model: ctx.model,
+			model: state.model,
 			choices: [
 				{ index: 0, delta, finish_reason: finishReason, logprobs: null },
 			],
@@ -123,8 +126,17 @@ export function translateAnthropicStreamToChat(
 		switch (type) {
 			case "message_start": {
 				const message = event.message as
-					| { usage?: Record<string, number | null | undefined> }
+					| {
+							model?: unknown;
+							usage?: Record<string, number | null | undefined>;
+					  }
 					| undefined;
+				// Report the model that answered (SB23-2781). message_start precedes
+				// every chunk this stream emits, so no chunk carries the requested
+				// name once the upstream has named its own.
+				if (typeof message?.model === "string" && message.model.length > 0) {
+					state.model = message.model;
+				}
 				const u = message?.usage ?? {};
 				state.inputTokens = u.input_tokens ?? 0;
 				state.outputTokens = u.output_tokens ?? 0;
@@ -215,7 +227,7 @@ export function translateAnthropicStreamToChat(
 						id: ctx.id,
 						object: "chat.completion.chunk",
 						created: ctx.created,
-						model: ctx.model,
+						model: state.model,
 						choices: [],
 						usage: usage(),
 					};

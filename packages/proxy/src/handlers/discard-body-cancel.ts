@@ -92,3 +92,44 @@ export async function drainBody(
 		reader.releaseLock();
 	}
 }
+
+/** Characters of a discarded body kept for a diagnostic log line. */
+export const DISCARDED_BODY_PREVIEW_CHARS = 400;
+
+/**
+ * Drain a discarded response body like `cancelDiscardedResponseBody`, but
+ * decode the first `DISCARDED_BODY_PREVIEW_CHARS` characters and hand them to
+ * `onPreview`, whitespace collapsed. Reads to the end so the native source is
+ * released exactly as the plain drain does. Fire and forget: nothing awaits it,
+ * and a read error yields no preview rather than a throw.
+ *
+ * Exists for SB23-2781: every Claude OAuth account answered an OpenAI-gateway
+ * request with a windowless 429, and the body that says why was drained unread.
+ */
+export function drainDiscardedBodyWithPreview(
+	response: Response | null | undefined,
+	onPreview: (preview: string) => void,
+): void {
+	if (!response) return;
+	const body = response.body;
+	if (!body || body.locked) return;
+	void (async () => {
+		const reader = body.getReader();
+		const decoder = new TextDecoder();
+		let text = "";
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				if (text.length < DISCARDED_BODY_PREVIEW_CHARS && value) {
+					text += decoder.decode(value, { stream: true });
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+		onPreview(
+			text.slice(0, DISCARDED_BODY_PREVIEW_CHARS).replace(/\s+/g, " ").trim(),
+		);
+	})().catch(() => {});
+}

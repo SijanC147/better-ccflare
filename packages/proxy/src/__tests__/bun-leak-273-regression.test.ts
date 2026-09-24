@@ -118,12 +118,16 @@ describe("issue #273 — Group A: helper contract", () => {
 // before re-issuing. 17 and 18 are the transient-5xx path (500/502/503/504):
 // it discards each superseded retry response and the terminal one when it
 // fails over to the next account.
+//
+// The windowless-429 site now drains through `drainDiscardedBodyWithPreview`,
+// which reads to the end like the plain drain and also logs the start of the
+// body (SB23-2781). It still counts as a drain site, so the total stays 18.
 // ---------------------------------------------------------------------------
 
 const EXPECTED_SITE_COUNT = 18;
 
 describe("issue #273 — Group B: call-site coverage in proxy-operations.ts", () => {
-	it("proxy-operations.ts has exactly 18 cancelDiscardedResponseBody call sites", () => {
+	it("proxy-operations.ts has exactly 18 drain call sites", () => {
 		const source = readFileSync(
 			"packages/proxy/src/handlers/proxy-operations.ts",
 			"utf-8",
@@ -134,7 +138,11 @@ describe("issue #273 — Group B: call-site coverage in proxy-operations.ts", ()
 		const callMatches = source.match(
 			/^\s*cancelDiscardedResponseBody\((?:rawResponse|response)\);/gm,
 		);
-		const count = callMatches?.length ?? 0;
+		const previewMatches = source.match(
+			/^\s*drainDiscardedBodyWithPreview\((?:rawResponse|response),/gm,
+		);
+		const count = (callMatches?.length ?? 0) + (previewMatches?.length ?? 0);
+		expect(previewMatches?.length ?? 0).toBe(1);
 		expect(count).toBe(EXPECTED_SITE_COUNT);
 	});
 
@@ -144,7 +152,7 @@ describe("issue #273 — Group B: call-site coverage in proxy-operations.ts", ()
 			"utf-8",
 		);
 		expect(source).toMatch(
-			/import\s*\{\s*cancelDiscardedResponseBody\s*\}\s*from\s*["']\.\/discard-body-cancel["']/,
+			/import\s*\{[^}]*\bcancelDiscardedResponseBody\b[^}]*\}\s*from\s*["']\.\/discard-body-cancel["']/,
 		);
 	});
 
