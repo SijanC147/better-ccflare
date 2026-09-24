@@ -44,6 +44,7 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			"x-better-ccflare-prompt-cache-breakpoint": "developer",
 			"x-better-ccflare-codex-path": "native_responses",
 			"x-better-ccflare-codex-transport": "sse",
+			"x-better-ccflare-report-upstream-model": "1",
 			authorization: "Bearer token",
 			"content-type": "application/json",
 		});
@@ -74,6 +75,7 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			"x-better-ccflare-prompt-cache-breakpoint",
 			"x-better-ccflare-codex-path",
 			"x-better-ccflare-codex-transport",
+			"x-better-ccflare-report-upstream-model",
 		]) {
 			expect(sentHeaders?.get(header)).toBeNull();
 		}
@@ -98,6 +100,7 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 				"x-better-ccflare-prompt-cache-breakpoint": "developer",
 				"x-better-ccflare-codex-path": "native_responses",
 				"x-better-ccflare-codex-transport": "sse",
+				"x-better-ccflare-report-upstream-model": "1",
 				authorization: "Bearer token",
 			},
 		});
@@ -119,6 +122,7 @@ describe("makeProxyRequest strips internal control headers before provider forwa
 			"x-better-ccflare-prompt-cache-breakpoint",
 			"x-better-ccflare-codex-path",
 			"x-better-ccflare-codex-transport",
+			"x-better-ccflare-report-upstream-model",
 		]) {
 			expect(sentHeaders?.get(header)).toBeNull();
 		}

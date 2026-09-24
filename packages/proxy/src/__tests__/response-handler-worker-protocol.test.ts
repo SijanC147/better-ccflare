@@ -163,6 +163,52 @@ describe("forwardToClient usage-collector protocol", () => {
 		expect((await response.json()).model).toBe("gpt-5.6-sol");
 	});
 
+	// SB23-2792: the SSE arm of the same skip. Streaming is the gateway's main
+	// path, and the JSON case above cannot see a regression here. The control
+	// run without the marker proves the alias is live in this fixture, so the
+	// marker case cannot pass merely because nothing was rewritten.
+	it("reports the upstream model in a stream when the request carries the gateway marker", async () => {
+		createMockCollector();
+		const ctx = createCtx();
+		ctx.provider.isStreamingResponse = () => true;
+		const sse = [
+			`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model: "gpt-5.6-sol", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } })}\n\n`,
+			`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+		].join("");
+		const run = async (marker: boolean) => {
+			const headers = new Headers({ "content-type": "application/json" });
+			if (marker) headers.set("x-better-ccflare-report-upstream-model", "1");
+			const response = await forwardToClient(
+				{
+					requestId: `req-sse-model-${marker}`,
+					method: "POST",
+					path: "/v1/messages",
+					account: null,
+					requestHeaders: headers,
+					requestBody: encodeRequestBody(
+						JSON.stringify({ model: "claude-opus-5-5", messages: [] }),
+					),
+					response: new Response(sse, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+					timestamp: Date.now(),
+					retryAttempt: 0,
+					failoverAttempts: 0,
+					originalModel: "claude-opus-5-5",
+					appliedModel: "claude-opus-5-5",
+				},
+				ctx,
+			);
+			return response.text();
+		};
+		const withMarker = await run(true);
+		expect(withMarker).toContain('"model":"gpt-5.6-sol"');
+		expect(withMarker).not.toContain('"model":"claude-opus-5-5"');
+		const without = await run(false);
+		expect(without).toContain('"model":"claude-opus-5-5"');
+	});
+
 	it("calls handleStart with messageId", async () => {
 		const { starts } = createMockCollector();
 		const ctx = createCtx();
