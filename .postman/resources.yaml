@@ -1,10 +1,11 @@
-workspace:
-  id: ad1e994f-42dd-4af9-96d2-8a99f26974b3
 cloudResources:
   collections:
     ../postman/collections/Chat Requests: 6ab13c266c279416f456f402
     ../postman/collections/OpenAI Models: 631119-9a444245-9fb1-4e65-b8d1-6742b1cc7e7b
+    ../postman/collections/better-ccflare API: 631119-f4486035-40d6-464d-89c2-576a5eeff0c4
   environments:
     ../postman/environments/Default.environment.yaml: 631119-48d286d1-2e34-4428-8869-631256acdebf
   globals:
     ../postman/globals/workspace.globals.yaml: 613ae0d2-9743-4832-8e71-767a166c5be2
+workspace:
+  id: ad1e994f-42dd-4af9-96d2-8a99f26974b3
