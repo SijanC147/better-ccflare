@@ -148,6 +148,10 @@ describe("handleChatCompletionsRequest", () => {
 		expect(captured.req?.headers.get("content-type")).toBe("application/json");
 		expect(captured.req?.headers.get("anthropic-version")).toBe("2023-06-01");
 		expect(captured.req?.headers.get("authorization")).toBe("Bearer test-key");
+		// Tells forwardToClient to report the model that answered (SB23-2781).
+		expect(
+			captured.req?.headers.get("x-better-ccflare-report-upstream-model"),
+		).toBe("1");
 		expect(captured.body?.model).toBe("claude-haiku-4-5");
 		expect(typeof captured.body?.max_tokens).toBe("number");
 		expect(captured.body?.system).toBe("Be brief.");

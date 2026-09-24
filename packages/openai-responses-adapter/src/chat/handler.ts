@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
-import type { OpenAIGateways } from "@better-ccflare/types";
+import {
+	type OpenAIGateways,
+	REPORT_UPSTREAM_MODEL_HEADER,
+} from "@better-ccflare/types";
 import type { HandleProxyFn } from "../types";
 import { translateChatRequestToAnthropic } from "./request-translator";
 import {
@@ -280,6 +283,8 @@ export async function handleChatCompletionsRequest(
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
 	applyExclusions(syntheticHeaders, options);
+	// Report the model that answered, not the requested name (SB23-2781).
+	syntheticHeaders.set(REPORT_UPSTREAM_MODEL_HEADER, "1");
 	const syntheticReq = new Request(messagesUrl.toString(), {
 		method: "POST",
 		headers: syntheticHeaders,

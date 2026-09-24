@@ -122,6 +122,47 @@ describe("forwardToClient usage-collector protocol", () => {
 		).toBe(upstream);
 	});
 
+	// SB23-2781: the OpenAI gateway asks for the model that answered, so a
+	// failover onto another family is visible to the client. Claude Code does not
+	// send the marker, so the alias above still applies to it.
+	it("reports the upstream model when the request carries the gateway marker", async () => {
+		createMockCollector();
+		const ctx = createCtx();
+		const upstream = JSON.stringify({
+			id: "msg_backend",
+			type: "message",
+			role: "assistant",
+			model: "gpt-5.6-sol",
+			content: [{ type: "text", text: "unchanged" }],
+		});
+		const response = await forwardToClient(
+			{
+				requestId: "req-model-report",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-better-ccflare-report-upstream-model": "1",
+				}),
+				requestBody: encodeRequestBody(
+					JSON.stringify({ model: "claude-opus-5-5", messages: [] }),
+				),
+				response: new Response(upstream, {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+				originalModel: "claude-opus-5-5",
+				appliedModel: "claude-opus-5-5",
+			},
+			ctx,
+		);
+		expect((await response.json()).model).toBe("gpt-5.6-sol");
+	});
+
 	it("calls handleStart with messageId", async () => {
 		const { starts } = createMockCollector();
 		const ctx = createCtx();
