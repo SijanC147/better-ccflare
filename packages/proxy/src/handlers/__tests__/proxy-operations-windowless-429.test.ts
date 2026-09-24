@@ -7,6 +7,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import { Logger } from "@better-ccflare/logger";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
@@ -263,6 +264,29 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 		// The audit row must stay correlated with its originating client session,
 		// exactly as the out_of_credits and model_fallback_429 rows do.
 		expect(lastSaveArg(ctx)).toBe("sess-1");
+	});
+
+	// SB23-2781: every OAuth account 429'd an OpenAI-gateway request and the body,
+	// the only statement of why, was drained unread. It is now logged.
+	it("logs the start of the 429 body while draining it", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const warnSpy = spyOn(Logger.prototype, "warn");
+		try {
+			const ctx = makeCtx();
+			const account = makeAccount();
+			const body = makeRequestBody();
+			await runProxy(account, ctx, makeRequest(body), body);
+			let line: string | undefined;
+			for (let i = 0; i < 50 && !line; i++) {
+				line = warnSpy.mock.calls
+					.map((c) => String(c[0]))
+					.find((m) => m.includes("windowless 429 body:"));
+				if (!line) await new Promise((r) => setTimeout(r, 5));
+			}
+			expect(line).toContain('"message":"rate limit exceeded"');
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 
 	// The operational point of not benching: the account is immediately routable

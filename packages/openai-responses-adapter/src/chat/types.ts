@@ -289,7 +289,11 @@ export interface ResponseTranslationContext {
 	id: string;
 	/** Unix seconds. */
 	created: number;
-	/** The model name the client asked for, echoed back. */
+	/**
+	 * The model name the client asked for. Used only when the upstream message
+	 * does not name the model that answered; a fallback can route to another
+	 * model entirely (SB23-2781), and the client is told which one.
+	 */
 	model: string;
 }
 

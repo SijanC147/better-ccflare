@@ -57,7 +57,10 @@ import { peekSseForZai1305 } from "./zai-1305";
 
 const log = new Logger("ProxyOperations");
 
-import { cancelDiscardedResponseBody } from "./discard-body-cancel";
+import {
+	cancelDiscardedResponseBody,
+	drainDiscardedBodyWithPreview,
+} from "./discard-body-cancel";
 
 const SYNTHETIC_RESPONSE_HEADER = "x-better-ccflare-synthetic-response";
 const SYNTHETIC_STATUS_HEADER = "x-better-ccflare-synthetic-status";
@@ -1758,7 +1761,13 @@ export async function proxyWithAccount(
 							gatewayHint.contextCompacted,
 						),
 					);
-					cancelDiscardedResponseBody(rawResponse);
+					// The body is the only statement of why (SB23-2781); log its start
+					// while draining. An Anthropic error body carries no credentials.
+					drainDiscardedBodyWithPreview(rawResponse, (preview) =>
+						log.warn(
+							`Account ${account.name} windowless 429 body: ${preview || "<empty>"}`,
+						),
+					);
 					return null;
 				}
 

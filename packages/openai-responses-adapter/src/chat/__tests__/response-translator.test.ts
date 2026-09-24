@@ -44,7 +44,17 @@ describe("mapStopReason", () => {
 });
 
 describe("translateAnthropicMessageToChat", () => {
-	test("text only, with id, created and model from the context", () => {
+	test("falls back to the requested model when the upstream names none", () => {
+		for (const model of ["", undefined]) {
+			const out = translateAnthropicMessageToChat(
+				message({ model: model as unknown as string }),
+				ctx,
+			);
+			expect(out.model).toBe("gpt-4o");
+		}
+	});
+
+	test("text only, with id and created from the context and model from the upstream", () => {
 		const out = translateAnthropicMessageToChat(
 			message({
 				content: [
@@ -57,7 +67,8 @@ describe("translateAnthropicMessageToChat", () => {
 		expect(out.id).toBe("chatcmpl-test");
 		expect(out.object).toBe("chat.completion");
 		expect(out.created).toBe(1_700_000_000);
-		expect(out.model).toBe("gpt-4o");
+		// The model that answered, never the one requested (SB23-2781).
+		expect(out.model).toBe("claude-upstream-model");
 		expect(out.choices).toHaveLength(1);
 		const choice = out.choices[0];
 		expect(choice.index).toBe(0);
