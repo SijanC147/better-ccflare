@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PUT /api/families/:family'
+description: |-
+  Assign a combo to a model family.
+method: PUT
+url: '{{baseUrl}}/api/families/:family'
+order: 11000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'family'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

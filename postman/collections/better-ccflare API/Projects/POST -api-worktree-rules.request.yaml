@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/worktree-rules'
+description: |-
+  Create a worktree rule.
+method: POST
+url: '{{baseUrl}}/api/worktree-rules'
+order: 8000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

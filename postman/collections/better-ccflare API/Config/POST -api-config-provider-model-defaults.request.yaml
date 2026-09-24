@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/provider-model-defaults'
+description: |-
+  Set per-provider default models.
+method: POST
+url: '{{baseUrl}}/api/config/provider-model-defaults'
+order: 20000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

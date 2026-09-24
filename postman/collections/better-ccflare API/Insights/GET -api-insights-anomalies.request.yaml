@@ -1,0 +1,53 @@
+$kind: http-request
+name: 'GET /api/insights/anomalies'
+description: |-
+  Detected anomalies in traffic or cost.
+method: GET
+url: '{{baseUrl}}/api/insights/anomalies'
+order: 2000
+queryParams:
+  - key: 'range'
+    value: ''
+    disabled: true
+  - key: 'zScoreThreshold'
+    value: ''
+    disabled: true
+  - key: 'minBaselineRequests'
+    value: ''
+    disabled: true
+  - key: 'loopWindowMinutes'
+    value: ''
+    disabled: true
+  - key: 'loopMinRequests'
+    value: ''
+    disabled: true
+  - key: 'loopSimilarityTolerance'
+    value: ''
+    disabled: true
+  - key: 'misroutingMaxTotalTokens'
+    value: ''
+    disabled: true
+  - key: 'misroutingMinOutputRateUsd'
+    value: ''
+    disabled: true
+  - key: 'misroutingMinRequests'
+    value: ''
+    disabled: true
+  - key: 'maxEventsPerDetector'
+    value: ''
+    disabled: true
+  - key: 'accounts'
+    value: ''
+    disabled: true
+  - key: 'models'
+    value: ''
+    disabled: true
+  - key: 'apiKeys'
+    value: ''
+    disabled: true
+  - key: 'status'
+    value: ''
+    disabled: true
+  - key: 'projects'
+    value: ''
+    disabled: true

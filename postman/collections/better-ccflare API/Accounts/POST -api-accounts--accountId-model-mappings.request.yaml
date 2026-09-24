@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/model-mappings'
+description: |-
+  Replace the account's model mappings.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/model-mappings'
+order: 32000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

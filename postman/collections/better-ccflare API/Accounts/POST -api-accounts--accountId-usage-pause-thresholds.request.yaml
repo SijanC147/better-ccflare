@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/usage-pause-thresholds'
+description: |-
+  Set the percentages of the 5-hour and weekly usage windows at which the account pauses itself, each window switchable on its own.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/usage-pause-thresholds'
+order: 34000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

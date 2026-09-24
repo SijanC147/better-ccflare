@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'POST /api/agents/:agentId/preference'
+description: |-
+  Pin a model preference for one agent.
+  
+  Body: { "model": "claude-opus-5" }
+method: POST
+url: '{{baseUrl}}/api/agents/:agentId/preference'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'agentId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

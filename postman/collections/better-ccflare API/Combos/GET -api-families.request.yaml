@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/families'
+description: |-
+  Model families and their combo assignments.
+method: GET
+url: '{{baseUrl}}/api/families'
+order: 10000

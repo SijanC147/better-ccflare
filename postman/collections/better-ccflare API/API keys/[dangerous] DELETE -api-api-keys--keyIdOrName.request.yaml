@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/api-keys/:keyIdOrName'
+description: |-
+  Delete a key permanently.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/api-keys/:keyIdOrName'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'keyIdOrName'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

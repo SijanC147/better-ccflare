@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/combos-enabled'
+description: |-
+  Enable or disable combos.
+method: POST
+url: '{{baseUrl}}/api/config/combos-enabled'
+order: 27000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

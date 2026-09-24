@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/combos/:comboId/slots'
+description: |-
+  Add a slot to a combo.
+method: POST
+url: '{{baseUrl}}/api/combos/:comboId/slots'
+order: 6000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'comboId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

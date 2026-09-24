@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/model-capacity-routing'
+description: |-
+  Toggle model-capacity routing.
+method: POST
+url: '{{baseUrl}}/api/config/model-capacity-routing'
+order: 25000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

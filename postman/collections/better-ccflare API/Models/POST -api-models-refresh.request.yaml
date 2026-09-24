@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/models/refresh'
+description: |-
+  Re-fetch the catalog from every provider.
+method: POST
+url: '{{baseUrl}}/api/models/refresh'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

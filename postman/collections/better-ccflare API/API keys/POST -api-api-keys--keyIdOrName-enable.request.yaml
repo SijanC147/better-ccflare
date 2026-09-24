@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/api-keys/:keyIdOrName/enable'
+description: |-
+  Re-enable a disabled key.
+method: POST
+url: '{{baseUrl}}/api/api-keys/:keyIdOrName/enable'
+order: 6000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'keyIdOrName'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/combos/:comboId'
+description: |-
+  One combo.
+method: GET
+url: '{{baseUrl}}/api/combos/:comboId'
+order: 3000
+pathVariables:
+  - key: 'comboId'
+    value: ''

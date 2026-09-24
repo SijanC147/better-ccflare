@@ -1,0 +1,32 @@
+$kind: http-request
+description: |-
+  Upper case fails the gateway name pattern, so no configuration can make this name valid. It must refuse, never fall through to the unrestricted route. Reaches no account.
+method: POST
+url: '{{baseUrl}}/v1/gateways/Postman-Smoke-Invalid/chat/completions'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {
+      "model": "{{model}}",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply with the single word: pong"
+        }
+      ],
+      "max_tokens": 16
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("status is 404", () => pm.response.to.have.status(404));
+      pm.test("OpenAI-shaped error with code gateway_not_found", () => {
+        const body = pm.response.json();
+        pm.expect(body).to.have.property("error");
+        pm.expect(body.error.code).to.eql("gateway_not_found");
+      });

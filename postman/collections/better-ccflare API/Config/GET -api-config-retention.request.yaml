@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/retention'
+description: |-
+  How long request rows are kept.
+method: GET
+url: '{{baseUrl}}/api/config/retention'
+order: 7000

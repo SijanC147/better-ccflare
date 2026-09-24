@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/usage-throttling'
+description: |-
+  Usage throttling settings.
+method: GET
+url: '{{baseUrl}}/api/config/usage-throttling'
+order: 15000

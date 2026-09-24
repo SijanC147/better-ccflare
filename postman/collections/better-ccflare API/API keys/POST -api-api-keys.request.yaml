@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'POST /api/api-keys'
+description: |-
+  Generate a new API key. The secret is shown once.
+  
+  Body: { "name": "my-key", "role": "admin" | "api-only" }
+method: POST
+url: '{{baseUrl}}/api/api-keys'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

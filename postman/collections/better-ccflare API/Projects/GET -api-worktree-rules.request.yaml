@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/worktree-rules'
+description: |-
+  Rules that map worktree paths to projects.
+method: GET
+url: '{{baseUrl}}/api/worktree-rules'
+order: 7000

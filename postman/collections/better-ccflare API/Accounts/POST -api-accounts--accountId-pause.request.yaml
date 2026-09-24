@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/pause'
+description: |-
+  Stop routing new requests to this account.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/pause'
+order: 19000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

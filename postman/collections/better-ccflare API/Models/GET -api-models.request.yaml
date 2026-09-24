@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'GET /api/models'
+description: |-
+  The model catalog.
+method: GET
+url: '{{baseUrl}}/api/models'
+order: 1000
+queryParams:
+  - key: 'provider'
+    value: ''
+    disabled: true
+  - key: 'refresh'
+    value: ''
+    disabled: true

@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/api-keys'
+description: |-
+  Every API key, without its secret.
+method: GET
+url: '{{baseUrl}}/api/api-keys'
+order: 1000

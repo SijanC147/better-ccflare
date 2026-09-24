@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PATCH /api/agents/:agentId'
+description: |-
+  Update one agent.
+method: PATCH
+url: '{{baseUrl}}/api/agents/:agentId'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'agentId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

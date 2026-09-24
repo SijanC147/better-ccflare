@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/requests/payload/:requestId'
+description: |-
+  Stored request and response payload for one request.
+method: GET
+url: '{{baseUrl}}/api/requests/payload/:requestId'
+order: 3000
+pathVariables:
+  - key: 'requestId'
+    value: ''

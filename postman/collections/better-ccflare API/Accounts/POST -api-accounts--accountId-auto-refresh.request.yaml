@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/auto-refresh'
+description: |-
+  Toggle automatic token refresh.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/auto-refresh'
+order: 30000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/oauth/qwen/status/:sessionId'
+description: |-
+  Poll a Qwen device-flow session. Auth-exempt, read-only.
+method: GET
+url: '{{baseUrl}}/api/oauth/qwen/status/:sessionId'
+order: 5000
+pathVariables:
+  - key: 'sessionId'
+    value: ''

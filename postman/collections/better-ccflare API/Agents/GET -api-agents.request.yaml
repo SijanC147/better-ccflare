@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/agents'
+description: |-
+  Agents from every workspace, global and plugin source.
+method: GET
+url: '{{baseUrl}}/api/agents'
+order: 1000

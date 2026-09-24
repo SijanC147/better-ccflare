@@ -1,0 +1,4 @@
+$kind: collection
+description: |-
+  The OpenAI-compatible endpoint. These requests route to real accounts.
+order: 2000

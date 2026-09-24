@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/minimax'
+description: |-
+  Add a MiniMax account.
+method: POST
+url: '{{baseUrl}}/api/accounts/minimax'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

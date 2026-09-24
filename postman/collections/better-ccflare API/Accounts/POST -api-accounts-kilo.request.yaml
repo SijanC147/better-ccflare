@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/kilo'
+description: |-
+  Add a Kilo account.
+method: POST
+url: '{{baseUrl}}/api/accounts/kilo'
+order: 9000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

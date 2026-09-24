@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/reload'
+description: |-
+  Reload the account's stored configuration.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/reload'
+order: 21000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

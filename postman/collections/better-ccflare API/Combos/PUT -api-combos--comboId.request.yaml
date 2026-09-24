@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PUT /api/combos/:comboId'
+description: |-
+  Replace a combo.
+method: PUT
+url: '{{baseUrl}}/api/combos/:comboId'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'comboId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

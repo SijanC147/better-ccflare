@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/provider-model-defaults'
+description: |-
+  Per-provider default models.
+method: GET
+url: '{{baseUrl}}/api/config/provider-model-defaults'
+order: 19000

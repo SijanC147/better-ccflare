@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/upstream-maintainer'
+description: |-
+  The upstream maintainer App's configuration.
+method: GET
+url: '{{baseUrl}}/api/config/upstream-maintainer'
+order: 34000

@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/bedrock'
+description: |-
+  Add an AWS Bedrock account.
+method: POST
+url: '{{baseUrl}}/api/accounts/bedrock'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

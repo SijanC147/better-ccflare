@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/callback'
+description: |-
+  Exchange an OAuth code for stored tokens.
+method: POST
+url: '{{baseUrl}}/api/oauth/callback'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

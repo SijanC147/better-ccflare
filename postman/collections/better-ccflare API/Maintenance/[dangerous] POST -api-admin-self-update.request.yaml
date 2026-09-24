@@ -1,0 +1,16 @@
+$kind: http-request
+name: '[dangerous] POST /api/admin/self-update'
+description: |-
+  Download and install a new version, then restart.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: POST
+url: '{{baseUrl}}/api/admin/self-update'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

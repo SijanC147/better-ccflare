@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/anthropic-compatible'
+description: |-
+  Add an Anthropic-compatible endpoint.
+method: POST
+url: '{{baseUrl}}/api/accounts/anthropic-compatible'
+order: 12000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

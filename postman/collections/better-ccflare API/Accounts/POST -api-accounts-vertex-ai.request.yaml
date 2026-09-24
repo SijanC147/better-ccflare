@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/vertex-ai'
+description: |-
+  Add a Google Vertex AI account.
+method: POST
+url: '{{baseUrl}}/api/accounts/vertex-ai'
+order: 6000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

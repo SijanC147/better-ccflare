@@ -1,0 +1,11 @@
+$kind: http-request
+name: 'GET /api/insights/alerts'
+description: |-
+  Raised alerts and the unacknowledged count.
+method: GET
+url: '{{baseUrl}}/api/insights/alerts'
+order: 4000
+queryParams:
+  - key: 'limit'
+    value: ''
+    disabled: true

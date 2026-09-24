@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'GET /api/requests/detail'
+description: |-
+  Requests with their full metadata.
+method: GET
+url: '{{baseUrl}}/api/requests/detail'
+order: 2000
+queryParams:
+  - key: 'limit'
+    value: ''
+    disabled: true
+  - key: 'offset'
+    value: ''
+    disabled: true

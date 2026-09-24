@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'POST /api/storage/integrity/check'
+description: |-
+  Run an integrity check over the database.
+  
+  Body: { "kind": "quick" | "full" }
+method: POST
+url: '{{baseUrl}}/api/storage/integrity/check'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

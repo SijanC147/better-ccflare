@@ -1,0 +1,16 @@
+$kind: http-request
+name: '[dangerous] POST /api/stats/reset'
+description: |-
+  Clear all accumulated statistics.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: POST
+url: '{{baseUrl}}/api/stats/reset'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

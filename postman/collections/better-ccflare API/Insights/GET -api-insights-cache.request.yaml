@@ -1,0 +1,29 @@
+$kind: http-request
+name: 'GET /api/insights/cache'
+description: |-
+  Prompt cache hit rates and savings.
+method: GET
+url: '{{baseUrl}}/api/insights/cache'
+order: 1000
+queryParams:
+  - key: 'range'
+    value: ''
+    disabled: true
+  - key: 'threshold'
+    value: ''
+    disabled: true
+  - key: 'accounts'
+    value: ''
+    disabled: true
+  - key: 'models'
+    value: ''
+    disabled: true
+  - key: 'apiKeys'
+    value: ''
+    disabled: true
+  - key: 'status'
+    value: ''
+    disabled: true
+  - key: 'projects'
+    value: ''
+    disabled: true

@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/codex/reauth'
+description: |-
+  Re-authenticate an existing Codex account.
+method: POST
+url: '{{baseUrl}}/api/oauth/codex/reauth'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

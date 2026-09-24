@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PATCH /api/worktree-rules/:ruleId'
+description: |-
+  Update a worktree rule.
+method: PATCH
+url: '{{baseUrl}}/api/worktree-rules/:ruleId'
+order: 10000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'ruleId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

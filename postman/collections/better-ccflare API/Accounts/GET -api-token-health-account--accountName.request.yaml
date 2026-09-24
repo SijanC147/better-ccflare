@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/token-health/account/:accountName'
+description: |-
+  OAuth token health for one account, by name.
+method: GET
+url: '{{baseUrl}}/api/token-health/account/:accountName'
+order: 38000
+pathVariables:
+  - key: 'accountName'
+    value: ''

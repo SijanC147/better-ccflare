@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/api-keys/:keyIdOrName/disable'
+description: |-
+  Disable a key without deleting it.
+method: POST
+url: '{{baseUrl}}/api/api-keys/:keyIdOrName/disable'
+order: 5000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'keyIdOrName'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

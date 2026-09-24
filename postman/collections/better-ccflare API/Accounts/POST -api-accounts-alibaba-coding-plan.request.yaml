@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/alibaba-coding-plan'
+description: |-
+  Add an Alibaba coding-plan account.
+method: POST
+url: '{{baseUrl}}/api/accounts/alibaba-coding-plan'
+order: 8000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

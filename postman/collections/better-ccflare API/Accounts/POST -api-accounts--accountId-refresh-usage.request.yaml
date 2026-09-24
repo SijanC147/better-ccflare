@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/refresh-usage'
+description: |-
+  Force a usage poll and token refresh.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/refresh-usage'
+order: 22000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

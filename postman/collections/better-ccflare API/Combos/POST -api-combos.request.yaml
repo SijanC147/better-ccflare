@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/combos'
+description: |-
+  Create a combo.
+method: POST
+url: '{{baseUrl}}/api/combos'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/meta'
+description: |-
+  Add a Meta account.
+method: POST
+url: '{{baseUrl}}/api/accounts/meta'
+order: 16000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

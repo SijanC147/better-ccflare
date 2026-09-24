@@ -1,0 +1,16 @@
+$kind: http-request
+name: '[dangerous] POST /api/maintenance/cleanup'
+description: |-
+  Delete rows past the retention window.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: POST
+url: '{{baseUrl}}/api/maintenance/cleanup'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

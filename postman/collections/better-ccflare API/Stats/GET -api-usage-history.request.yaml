@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'GET /api/usage-history'
+description: |-
+  Token and cost usage over time.
+method: GET
+url: '{{baseUrl}}/api/usage-history'
+order: 5000
+queryParams:
+  - key: 'range'
+    value: ''
+    disabled: true
+  - key: 'account'
+    value: ''
+    disabled: true
+  - key: 'window'
+    value: ''
+    disabled: true

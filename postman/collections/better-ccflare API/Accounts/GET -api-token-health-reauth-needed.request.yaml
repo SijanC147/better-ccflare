@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/token-health/reauth-needed'
+description: |-
+  Accounts whose tokens need re-authentication.
+method: GET
+url: '{{baseUrl}}/api/token-health/reauth-needed'
+order: 37000

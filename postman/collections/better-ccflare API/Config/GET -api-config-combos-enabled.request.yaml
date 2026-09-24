@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/combos-enabled'
+description: |-
+  Whether combos are enabled.
+method: GET
+url: '{{baseUrl}}/api/config/combos-enabled'
+order: 26000

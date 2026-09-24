@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/routing/observations'
+description: |-
+  What the load balancer observed when routing.
+method: GET
+url: '{{baseUrl}}/api/routing/observations'
+order: 6000

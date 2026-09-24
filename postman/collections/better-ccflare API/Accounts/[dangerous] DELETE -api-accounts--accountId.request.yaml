@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/accounts/:accountId'
+description: |-
+  Remove an account and its stored credentials.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/accounts/:accountId'
+order: 18000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

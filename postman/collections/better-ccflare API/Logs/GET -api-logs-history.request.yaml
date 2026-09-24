@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/logs/history'
+description: |-
+  Buffered recent log lines.
+method: GET
+url: '{{baseUrl}}/api/logs/history'
+order: 1000

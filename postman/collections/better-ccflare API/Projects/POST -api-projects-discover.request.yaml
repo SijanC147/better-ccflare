@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/projects/discover'
+description: |-
+  Scan disk for projects and worktrees.
+method: POST
+url: '{{baseUrl}}/api/projects/discover'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

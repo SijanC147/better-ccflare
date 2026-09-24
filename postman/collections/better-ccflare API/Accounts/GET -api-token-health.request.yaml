@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/token-health'
+description: |-
+  OAuth token expiry across all accounts.
+method: GET
+url: '{{baseUrl}}/api/token-health'
+order: 36000

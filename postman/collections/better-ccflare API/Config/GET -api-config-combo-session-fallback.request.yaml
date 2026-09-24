@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/combo-session-fallback'
+description: |-
+  Combo session fallback behaviour.
+method: GET
+url: '{{baseUrl}}/api/config/combo-session-fallback'
+order: 28000

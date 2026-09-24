@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'POST /api/config/postgres'
+description: |-
+  Set Postgres connection settings.
+  
+  Body: Carries pg_password. The playground never logs a request body — see the PR body.
+method: POST
+url: '{{baseUrl}}/api/config/postgres'
+order: 18000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

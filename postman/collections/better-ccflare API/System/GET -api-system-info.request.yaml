@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/system/info'
+description: |-
+  Host, runtime and build information.
+method: GET
+url: '{{baseUrl}}/api/system/info'
+order: 2000

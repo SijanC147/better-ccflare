@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/postgres'
+description: |-
+  Postgres connection settings. The password is never returned.
+method: GET
+url: '{{baseUrl}}/api/config/postgres'
+order: 17000

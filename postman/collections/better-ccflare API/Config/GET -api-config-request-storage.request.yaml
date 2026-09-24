@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/request-storage'
+description: |-
+  Whether request and response payloads are stored.
+method: GET
+url: '{{baseUrl}}/api/config/request-storage'
+order: 9000

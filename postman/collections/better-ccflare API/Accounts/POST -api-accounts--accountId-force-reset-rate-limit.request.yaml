@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/force-reset-rate-limit'
+description: |-
+  Clear a recorded rate limit before it expires.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/force-reset-rate-limit'
+order: 23000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

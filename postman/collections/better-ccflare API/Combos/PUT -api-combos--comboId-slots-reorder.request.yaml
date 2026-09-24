@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PUT /api/combos/:comboId/slots/reorder'
+description: |-
+  Reorder a combo's slots.
+method: PUT
+url: '{{baseUrl}}/api/combos/:comboId/slots/reorder'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'comboId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

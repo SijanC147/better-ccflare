@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/projects/:projectId'
+description: |-
+  One project.
+method: GET
+url: '{{baseUrl}}/api/projects/:projectId'
+order: 4000
+pathVariables:
+  - key: 'projectId'
+    value: ''

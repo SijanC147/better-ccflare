@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PATCH /api/accounts/:accountId'
+description: |-
+  Update an account's provider settings and subscription renewal day.
+method: PATCH
+url: '{{baseUrl}}/api/accounts/:accountId'
+order: 17000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

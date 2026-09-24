@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/qwen/reauth'
+description: |-
+  Re-authenticate an existing Qwen account.
+method: POST
+url: '{{baseUrl}}/api/oauth/qwen/reauth'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

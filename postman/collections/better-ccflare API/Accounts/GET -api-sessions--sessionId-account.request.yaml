@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/sessions/:sessionId/account'
+description: |-
+  Which account served a session. Auth-exempt, GET only.
+method: GET
+url: '{{baseUrl}}/api/sessions/:sessionId/account'
+order: 39000
+pathVariables:
+  - key: 'sessionId'
+    value: ''

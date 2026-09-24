@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/combos/:comboId'
+description: |-
+  Delete a combo.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/combos/:comboId'
+order: 5000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'comboId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

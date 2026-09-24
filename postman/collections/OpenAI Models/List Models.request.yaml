@@ -1,0 +1,13 @@
+$kind: http-request
+description: 'Generated from cURL: curl -X GET "https://api.openai.com/v1/models" -H "Content-Type: application/json" -H "Authorization: Bearer {{api_key}}"'
+url: http://localhost:8080/v1/models
+method: GET
+headers:
+  Content-Type: application/json
+  Authorization: Bearer {{api_key}}
+auth:
+  type: bearer
+  credentials:
+    token: "{{api_key}}"
+settings: {}
+order: 1000

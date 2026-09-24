@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/request-transformer'
+description: |-
+  Set the account's request transformer.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/request-transformer'
+order: 33000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

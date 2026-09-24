@@ -1,0 +1,32 @@
+$kind: http-request
+name: 'GET /api/analytics'
+description: |-
+  Time-bucketed analytics series.
+method: GET
+url: '{{baseUrl}}/api/analytics'
+order: 3000
+queryParams:
+  - key: 'range'
+    value: ''
+    disabled: true
+  - key: 'mode'
+    value: ''
+    disabled: true
+  - key: 'modelBreakdown'
+    value: ''
+    disabled: true
+  - key: 'accounts'
+    value: ''
+    disabled: true
+  - key: 'models'
+    value: ''
+    disabled: true
+  - key: 'apiKeys'
+    value: ''
+    disabled: true
+  - key: 'status'
+    value: ''
+    disabled: true
+  - key: 'projects'
+    value: ''
+    disabled: true

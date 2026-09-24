@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'PUT /api/openai-gateways/:name'
+description: |-
+  Create or replace one named gateway.
+  
+  Body: {"exclude_providers": ["anthropic-oauth"], "description": ""}
+method: PUT
+url: '{{baseUrl}}/api/openai-gateways/:name'
+order: 22000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'name'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

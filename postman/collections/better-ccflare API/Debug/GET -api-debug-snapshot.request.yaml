@@ -1,0 +1,9 @@
+$kind: http-request
+name: 'GET /api/debug/snapshot'
+description: |-
+  Write a heap snapshot.
+  
+  The response can be very large. The playground shows headers and a size instead of the body.
+method: GET
+url: '{{baseUrl}}/api/debug/snapshot'
+order: 3000
