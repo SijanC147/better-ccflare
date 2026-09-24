@@ -1,0 +1,24 @@
+$kind: llm-request
+description: |-
+  `POST /v1/chat/completions` through the default gateway, with a system prompt. Spends real account quota on 8080.
+url: 'http://localhost:8080/v1'
+config:
+  model: 'claude-opus-5-5'
+  provider: openai-compatible
+settings:
+  streamResponse: false
+  maxToken: 256
+systemPrompts:
+  - id: c8341770-86ed-ac62-5902-e3891d884b9b
+    value: 'Answer in as few words as possible.'
+    timestamp: 1790208000000
+    active: true
+    contentType: text
+userPrompts:
+  - id: 547646b6-85d9-f566-24b9-28f12d3868a1
+    value: 'Reply with the single word: pong'
+    timestamp: 1790208000000
+    active: true
+    contentType: text
+mcpConfig: ""
+order: 1000
