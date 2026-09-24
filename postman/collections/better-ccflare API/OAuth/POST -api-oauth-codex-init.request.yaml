@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/codex/init'
+description: |-
+  Begin the Codex device flow.
+method: POST
+url: '{{baseUrl}}/api/oauth/codex/init'
+order: 6000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

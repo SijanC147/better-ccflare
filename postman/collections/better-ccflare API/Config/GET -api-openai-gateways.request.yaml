@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/openai-gateways'
+description: |-
+  Named OpenAI-compatible gateways, each with its /v1/gateways/<name> base path, plus stored entries skipped as invalid.
+method: GET
+url: '{{baseUrl}}/api/openai-gateways'
+order: 21000

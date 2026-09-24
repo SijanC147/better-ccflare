@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'DELETE /api/worktree-rules/:ruleId'
+description: |-
+  Delete a worktree rule.
+method: DELETE
+url: '{{baseUrl}}/api/worktree-rules/:ruleId'
+order: 11000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'ruleId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

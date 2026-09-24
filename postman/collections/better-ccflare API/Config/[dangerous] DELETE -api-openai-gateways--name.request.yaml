@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/openai-gateways/:name'
+description: |-
+  Delete one named gateway.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/openai-gateways/:name'
+order: 23000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'name'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

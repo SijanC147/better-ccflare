@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/version/check'
+description: |-
+  Latest published version. Auth-exempt, read-only.
+method: GET
+url: '{{baseUrl}}/api/version/check'
+order: 3000

@@ -1,0 +1,35 @@
+$kind: http-request
+name: 'GET /api/insights/context'
+description: |-
+  Context-window pressure across requests.
+method: GET
+url: '{{baseUrl}}/api/insights/context'
+order: 3000
+queryParams:
+  - key: 'range'
+    value: ''
+    disabled: true
+  - key: 'limit'
+    value: ''
+    disabled: true
+  - key: 'topContributors'
+    value: ''
+    disabled: true
+  - key: 'sessionGapMinutes'
+    value: ''
+    disabled: true
+  - key: 'accounts'
+    value: ''
+    disabled: true
+  - key: 'models'
+    value: ''
+    disabled: true
+  - key: 'apiKeys'
+    value: ''
+    disabled: true
+  - key: 'status'
+    value: ''
+    disabled: true
+  - key: 'projects'
+    value: ''
+    disabled: true

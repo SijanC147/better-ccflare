@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/debug/rss'
+description: |-
+  Resident set size of the process.
+method: GET
+url: '{{baseUrl}}/api/debug/rss'
+order: 2000

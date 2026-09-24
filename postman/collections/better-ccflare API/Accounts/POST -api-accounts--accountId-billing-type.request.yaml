@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/billing-type'
+description: |-
+  Set the account's billing type.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/billing-type'
+order: 29000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

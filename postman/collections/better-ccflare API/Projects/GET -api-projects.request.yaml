@@ -1,0 +1,11 @@
+$kind: http-request
+name: 'GET /api/projects'
+description: |-
+  Projects, optionally as a tree.
+method: GET
+url: '{{baseUrl}}/api/projects'
+order: 1000
+queryParams:
+  - key: 'tree'
+    value: ''
+    disabled: true

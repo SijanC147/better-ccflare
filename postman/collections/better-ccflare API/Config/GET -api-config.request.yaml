@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config'
+description: |-
+  The whole runtime configuration.
+method: GET
+url: '{{baseUrl}}/api/config'
+order: 1000

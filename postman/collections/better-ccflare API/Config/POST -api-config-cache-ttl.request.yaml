@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/cache-ttl'
+description: |-
+  Set the prompt cache TTL.
+method: POST
+url: '{{baseUrl}}/api/config/cache-ttl'
+order: 14000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

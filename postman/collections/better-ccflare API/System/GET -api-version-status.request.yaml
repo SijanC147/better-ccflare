@@ -1,0 +1,11 @@
+$kind: http-request
+name: 'GET /api/version/status'
+description: |-
+  This build against upstream and the fork's own releases.
+method: GET
+url: '{{baseUrl}}/api/version/status'
+order: 4000
+queryParams:
+  - key: 'refresh'
+    value: ''
+    disabled: true

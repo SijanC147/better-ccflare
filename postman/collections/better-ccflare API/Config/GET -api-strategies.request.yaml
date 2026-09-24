@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/strategies'
+description: |-
+  Load-balancing strategies available.
+method: GET
+url: '{{baseUrl}}/api/strategies'
+order: 2000

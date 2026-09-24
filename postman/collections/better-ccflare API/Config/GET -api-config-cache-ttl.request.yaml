@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/cache-ttl'
+description: |-
+  Prompt cache TTL.
+method: GET
+url: '{{baseUrl}}/api/config/cache-ttl'
+order: 13000

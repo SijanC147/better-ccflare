@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/oauth/codex/status/:sessionId'
+description: |-
+  Poll a Codex device-flow session. Auth-exempt, read-only.
+method: GET
+url: '{{baseUrl}}/api/oauth/codex/status/:sessionId'
+order: 8000
+pathVariables:
+  - key: 'sessionId'
+    value: ''

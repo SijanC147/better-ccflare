@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/peak-hours-pause'
+description: |-
+  Toggle peak-hours pausing. Z.ai accounts only.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/peak-hours-pause'
+order: 28000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

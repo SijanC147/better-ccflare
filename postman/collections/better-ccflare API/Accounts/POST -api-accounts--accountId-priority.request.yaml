@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/priority'
+description: |-
+  Set the account's routing priority.
+  
+  Body: { "priority": 0 }
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/priority'
+order: 25000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

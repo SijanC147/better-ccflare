@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'PATCH /api/api-keys/:keyIdOrName/role'
+description: |-
+  Change a key's role. Requires an admin key.
+  
+  Body: { "role": "admin" | "api-only" }
+method: PATCH
+url: '{{baseUrl}}/api/api-keys/:keyIdOrName/role'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'keyIdOrName'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

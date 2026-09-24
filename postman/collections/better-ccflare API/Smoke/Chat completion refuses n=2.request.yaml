@@ -1,0 +1,33 @@
+$kind: http-request
+description: |-
+  Refused by the request translator before routing, so it reaches no account.
+method: POST
+url: '{{baseUrl}}/v1/chat/completions'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {
+      "model": "{{model}}",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply with the single word: pong"
+        }
+      ],
+      "max_tokens": 16,
+      "n": 2
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("status is 400", () => pm.response.to.have.status(400));
+      pm.test("OpenAI-shaped error with code unsupported_value", () => {
+        const body = pm.response.json();
+        pm.expect(body).to.have.property("error");
+        pm.expect(body.error.code).to.eql("unsupported_value");
+      });

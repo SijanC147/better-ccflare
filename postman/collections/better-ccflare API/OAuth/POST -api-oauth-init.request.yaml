@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/init'
+description: |-
+  Begin an OAuth flow and get the authorize URL.
+method: POST
+url: '{{baseUrl}}/api/oauth/init'
+order: 1000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

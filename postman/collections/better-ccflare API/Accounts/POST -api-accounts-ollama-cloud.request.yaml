@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/ollama-cloud'
+description: |-
+  Add an Ollama Cloud account.
+method: POST
+url: '{{baseUrl}}/api/accounts/ollama-cloud'
+order: 14000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

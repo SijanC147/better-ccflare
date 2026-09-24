@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/resume'
+description: |-
+  Resume routing to a paused account.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/resume'
+order: 20000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

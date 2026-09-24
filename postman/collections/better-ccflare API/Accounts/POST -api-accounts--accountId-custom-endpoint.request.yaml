@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/custom-endpoint'
+description: |-
+  Point the account at a custom base URL.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/custom-endpoint'
+order: 31000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

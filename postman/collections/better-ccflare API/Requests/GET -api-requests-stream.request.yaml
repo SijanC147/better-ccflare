@@ -1,0 +1,9 @@
+$kind: http-request
+name: 'GET /api/requests/stream'
+description: |-
+  Live request events.
+  
+  Server-Sent Events.
+method: GET
+url: '{{baseUrl}}/api/requests/stream'
+order: 4000

@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/strategy'
+description: |-
+  The active load-balancing strategy.
+method: GET
+url: '{{baseUrl}}/api/config/strategy'
+order: 3000

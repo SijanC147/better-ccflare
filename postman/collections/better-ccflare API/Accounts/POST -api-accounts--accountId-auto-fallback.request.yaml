@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/auto-fallback'
+description: |-
+  Toggle automatic fallback for this account.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/auto-fallback'
+order: 26000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

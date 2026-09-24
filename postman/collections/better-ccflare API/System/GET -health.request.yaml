@@ -1,0 +1,9 @@
+$kind: http-request
+name: 'GET /health'
+description: |-
+  Liveness of the proxy process itself.
+  
+  Not a check of account health. The only statically auth-exempt route.
+method: GET
+url: '{{baseUrl}}/health'
+order: 1000

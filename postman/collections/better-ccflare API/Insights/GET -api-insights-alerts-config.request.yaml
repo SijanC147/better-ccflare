@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/insights/alerts/config'
+description: |-
+  The current alert thresholds.
+method: GET
+url: '{{baseUrl}}/api/insights/alerts/config'
+order: 6000

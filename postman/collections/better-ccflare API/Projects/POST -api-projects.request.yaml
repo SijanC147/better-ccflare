@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/projects'
+description: |-
+  Create a project.
+method: POST
+url: '{{baseUrl}}/api/projects'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

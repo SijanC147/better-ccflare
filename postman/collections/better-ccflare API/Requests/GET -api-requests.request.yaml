@@ -1,0 +1,26 @@
+$kind: http-request
+name: 'GET /api/requests'
+description: |-
+  Recent requests, newest first.
+method: GET
+url: '{{baseUrl}}/api/requests'
+order: 1000
+queryParams:
+  - key: 'limit'
+    value: ''
+    disabled: true
+  - key: 'offset'
+    value: ''
+    disabled: true
+  - key: 'accountId'
+    value: ''
+    disabled: true
+  - key: 'projectId'
+    value: ''
+    disabled: true
+  - key: 'model'
+    value: ''
+    disabled: true
+  - key: 'status'
+    value: ''
+    disabled: true

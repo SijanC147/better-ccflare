@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/combo-session-fallback'
+description: |-
+  Set combo session fallback behaviour.
+method: POST
+url: '{{baseUrl}}/api/config/combo-session-fallback'
+order: 29000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

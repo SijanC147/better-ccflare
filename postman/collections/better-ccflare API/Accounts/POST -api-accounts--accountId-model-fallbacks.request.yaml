@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/model-fallbacks'
+description: |-
+  Replace the account's model fallbacks.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/model-fallbacks'
+order: 35000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

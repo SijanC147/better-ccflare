@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/openai-compatible'
+description: |-
+  Add an OpenAI-compatible endpoint.
+method: POST
+url: '{{baseUrl}}/api/accounts/openai-compatible'
+order: 15000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

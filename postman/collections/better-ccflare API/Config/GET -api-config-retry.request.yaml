@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/retry'
+description: |-
+  Upstream retry settings, the bounds the write enforces, and whether a restart is needed.
+method: GET
+url: '{{baseUrl}}/api/config/retry'
+order: 37000

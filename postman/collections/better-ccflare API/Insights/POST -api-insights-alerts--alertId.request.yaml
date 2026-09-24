@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/insights/alerts/:alertId'
+description: |-
+  Acknowledge one alert by id.
+method: POST
+url: '{{baseUrl}}/api/insights/alerts/:alertId'
+order: 8000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'alertId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

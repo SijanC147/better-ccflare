@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'DELETE /api/combos/:comboId/slots/:slotId'
+description: |-
+  Remove one slot.
+method: DELETE
+url: '{{baseUrl}}/api/combos/:comboId/slots/:slotId'
+order: 9000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'comboId'
+    value: ''
+  - key: 'slotId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

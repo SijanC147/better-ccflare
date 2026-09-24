@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PATCH /api/projects/:projectId'
+description: |-
+  Update a project.
+method: PATCH
+url: '{{baseUrl}}/api/projects/:projectId'
+order: 5000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'projectId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

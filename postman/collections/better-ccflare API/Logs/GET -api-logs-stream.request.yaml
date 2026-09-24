@@ -1,0 +1,9 @@
+$kind: http-request
+name: 'GET /api/logs/stream'
+description: |-
+  Live application logs.
+  
+  Server-Sent Events.
+method: GET
+url: '{{baseUrl}}/api/logs/stream'
+order: 2000

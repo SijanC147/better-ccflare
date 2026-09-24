@@ -21,6 +21,9 @@ CLAUDE.md
 CLAUDE.original.md
 AGENTS.md
 .omc/
+# `postman init` copies Postman's agent skills here; the Postman plugin already ships them
+postman/skills/
+.postman/skills.json
 # Disallow .sh files except in .github/scripts/
 **/*.sh
 !.github/scripts/*.sh

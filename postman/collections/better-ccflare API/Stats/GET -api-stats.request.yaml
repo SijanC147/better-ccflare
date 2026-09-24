@@ -1,0 +1,11 @@
+$kind: http-request
+name: 'GET /api/stats'
+description: |-
+  Aggregate request statistics with per-account rows.
+method: GET
+url: '{{baseUrl}}/api/stats'
+order: 1000
+queryParams:
+  - key: 'errorsSinceHours'
+    value: ''
+    disabled: true

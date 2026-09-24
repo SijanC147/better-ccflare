@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/agents/bulk-preference'
+description: |-
+  Set a model preference across many agents at once.
+method: POST
+url: '{{baseUrl}}/api/agents/bulk-preference'
+order: 5000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

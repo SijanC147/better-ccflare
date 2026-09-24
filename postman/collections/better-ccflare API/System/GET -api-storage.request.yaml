@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/storage'
+description: |-
+  Database and WAL size, plus the last integrity check.
+method: GET
+url: '{{baseUrl}}/api/storage'
+order: 5000

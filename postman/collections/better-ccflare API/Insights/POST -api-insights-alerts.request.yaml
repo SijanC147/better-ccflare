@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/insights/alerts'
+description: |-
+  Update the alert configuration.
+method: POST
+url: '{{baseUrl}}/api/insights/alerts'
+order: 5000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

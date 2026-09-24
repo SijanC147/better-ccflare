@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/nanogpt'
+description: |-
+  Add a NanoGPT account.
+method: POST
+url: '{{baseUrl}}/api/accounts/nanogpt'
+order: 11000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

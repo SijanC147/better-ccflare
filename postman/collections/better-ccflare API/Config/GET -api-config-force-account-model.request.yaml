@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/force-account-model'
+description: |-
+  Whether an account's model overrides the request's.
+method: GET
+url: '{{baseUrl}}/api/config/force-account-model'
+order: 30000

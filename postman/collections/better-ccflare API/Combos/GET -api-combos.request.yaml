@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/combos'
+description: |-
+  Every combo with its slots.
+method: GET
+url: '{{baseUrl}}/api/combos'
+order: 1000

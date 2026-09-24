@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'POST /api/config/strategy'
+description: |-
+  Set the load-balancing strategy.
+  
+  Body: { "strategy": "session" }
+method: POST
+url: '{{baseUrl}}/api/config/strategy'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

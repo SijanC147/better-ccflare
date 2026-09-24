@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'POST /api/config/openobserve'
+description: |-
+  Set OpenObserve settings.
+  
+  Body: Carries openobserve_token. The playground never logs a request body — see the PR body.
+method: POST
+url: '{{baseUrl}}/api/config/openobserve'
+order: 36000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

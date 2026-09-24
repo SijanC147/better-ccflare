@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'POST /api/worktree-rules/test'
+description: |-
+  Test a rule against a path without saving it.
+  
+  Body: { "pattern": "...", "path": "/Users/..." }
+method: POST
+url: '{{baseUrl}}/api/worktree-rules/test'
+order: 9000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

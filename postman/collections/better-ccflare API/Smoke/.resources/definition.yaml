@@ -1,0 +1,4 @@
+$kind: collection
+description: |-
+  Checks that reach no account. Safe to run against 8080.
+order: 1000

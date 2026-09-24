@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/qwen/init'
+description: |-
+  Begin the Qwen device flow.
+method: POST
+url: '{{baseUrl}}/api/oauth/qwen/init'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

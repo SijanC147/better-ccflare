@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/debug/heap'
+description: |-
+  V8 heap statistics.
+method: GET
+url: '{{baseUrl}}/api/debug/heap'
+order: 1000

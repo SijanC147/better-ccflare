@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/accounts'
+description: |-
+  Every configured account with its live state.
+method: GET
+url: '{{baseUrl}}/api/accounts'
+order: 1000

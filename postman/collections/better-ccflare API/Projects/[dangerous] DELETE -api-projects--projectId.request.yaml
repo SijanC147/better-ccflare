@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/projects/:projectId'
+description: |-
+  Delete a project.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/projects/:projectId'
+order: 6000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'projectId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

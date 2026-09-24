@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/keepalive'
+description: |-
+  Cache keep-alive settings.
+method: GET
+url: '{{baseUrl}}/api/config/keepalive'
+order: 11000

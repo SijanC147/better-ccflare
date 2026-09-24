@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'DELETE /api/agents/:agentId/preference'
+description: |-
+  Revert the agent to its frontmatter default.
+method: DELETE
+url: '{{baseUrl}}/api/agents/:agentId/preference'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'agentId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

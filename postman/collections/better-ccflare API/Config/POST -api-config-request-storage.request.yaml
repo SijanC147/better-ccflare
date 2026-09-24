@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/request-storage'
+description: |-
+  Turn payload storage on or off.
+method: POST
+url: '{{baseUrl}}/api/config/request-storage'
+order: 10000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

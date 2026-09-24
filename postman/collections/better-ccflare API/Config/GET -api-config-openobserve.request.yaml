@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/openobserve'
+description: |-
+  OpenObserve settings. The token is never returned.
+method: GET
+url: '{{baseUrl}}/api/config/openobserve'
+order: 35000

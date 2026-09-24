@@ -1,0 +1,16 @@
+$kind: http-request
+name: '[dangerous] POST /api/upstream/sync-dispatch'
+description: |-
+  Trigger an upstream sync run on GitHub.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: POST
+url: '{{baseUrl}}/api/upstream/sync-dispatch'
+order: 4000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

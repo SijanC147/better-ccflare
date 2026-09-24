@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/insights/alerts/acknowledge-all'
+description: |-
+  Acknowledge every outstanding alert.
+method: POST
+url: '{{baseUrl}}/api/insights/alerts/acknowledge-all'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

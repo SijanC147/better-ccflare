@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/model-capacity-routing'
+description: |-
+  Whether routing considers model capacity.
+method: GET
+url: '{{baseUrl}}/api/config/model-capacity-routing'
+order: 24000

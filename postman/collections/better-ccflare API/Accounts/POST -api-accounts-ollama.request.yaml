@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/ollama'
+description: |-
+  Add a local Ollama account.
+method: POST
+url: '{{baseUrl}}/api/accounts/ollama'
+order: 13000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

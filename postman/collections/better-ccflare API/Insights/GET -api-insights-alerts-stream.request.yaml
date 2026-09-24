@@ -1,0 +1,9 @@
+$kind: http-request
+name: 'GET /api/insights/alerts/stream'
+description: |-
+  Live alert events.
+  
+  Server-Sent Events.
+method: GET
+url: '{{baseUrl}}/api/insights/alerts/stream'
+order: 9000

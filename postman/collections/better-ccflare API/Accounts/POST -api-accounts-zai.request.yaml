@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/zai'
+description: |-
+  Add a Z.ai account.
+method: POST
+url: '{{baseUrl}}/api/accounts/zai'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

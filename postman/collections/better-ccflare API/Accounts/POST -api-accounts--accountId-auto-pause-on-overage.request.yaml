@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/auto-pause-on-overage'
+description: |-
+  Toggle auto-pause when the account goes over quota.
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/auto-pause-on-overage'
+order: 27000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'POST /api/accounts/:accountId/rename'
+description: |-
+  Rename an account.
+  
+  Body: { "name": "new-name" }
+method: POST
+url: '{{baseUrl}}/api/accounts/:accountId/rename'
+order: 24000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'accountId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

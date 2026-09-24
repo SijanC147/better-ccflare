@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/models/preview'
+description: |-
+  Preview how a model string resolves, without routing.
+method: POST
+url: '{{baseUrl}}/api/models/preview'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

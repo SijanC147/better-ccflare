@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/keepalive'
+description: |-
+  Change cache keep-alive settings.
+method: POST
+url: '{{baseUrl}}/api/config/keepalive'
+order: 12000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

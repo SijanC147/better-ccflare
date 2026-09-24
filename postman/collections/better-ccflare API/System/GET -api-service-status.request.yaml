@@ -1,0 +1,11 @@
+$kind: http-request
+name: 'GET /api/service-status'
+description: |-
+  Claude service status, filtered to the components this proxy forwards to. Always 200.
+method: GET
+url: '{{baseUrl}}/api/service-status'
+order: 6000
+queryParams:
+  - key: 'refresh'
+    value: ''
+    disabled: true

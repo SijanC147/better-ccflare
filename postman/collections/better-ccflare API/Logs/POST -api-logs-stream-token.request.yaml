@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/logs/stream/token'
+description: |-
+  Mint a short-lived stream token. Handled inline in handleRequest, not via the handlers map.
+method: POST
+url: '{{baseUrl}}/api/logs/stream/token'
+order: 3000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/accounts/openrouter'
+description: |-
+  Add an OpenRouter account.
+method: POST
+url: '{{baseUrl}}/api/accounts/openrouter'
+order: 10000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

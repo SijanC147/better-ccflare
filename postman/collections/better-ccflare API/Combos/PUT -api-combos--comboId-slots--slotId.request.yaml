@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'PUT /api/combos/:comboId/slots/:slotId'
+description: |-
+  Update one slot.
+method: PUT
+url: '{{baseUrl}}/api/combos/:comboId/slots/:slotId'
+order: 8000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'comboId'
+    value: ''
+  - key: 'slotId'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

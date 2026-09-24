@@ -1,0 +1,9 @@
+$kind: http-request
+name: 'GET /api/meta/routes'
+description: |-
+  This catalog, served by the server itself.
+  
+  Dynamic routes are returned with their `:param` placeholders intact, exactly as they appear here.
+method: GET
+url: '{{baseUrl}}/api/meta/routes'
+order: 1000

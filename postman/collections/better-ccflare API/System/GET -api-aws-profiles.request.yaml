@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/aws/profiles'
+description: |-
+  AWS profiles available for Bedrock accounts.
+method: GET
+url: '{{baseUrl}}/api/aws/profiles'
+order: 8000

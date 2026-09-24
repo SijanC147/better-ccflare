@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/workspaces'
+description: |-
+  Agent workspaces discovered on disk.
+method: GET
+url: '{{baseUrl}}/api/workspaces'
+order: 9000

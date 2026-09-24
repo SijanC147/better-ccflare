@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/anthropic/reauth/callback'
+description: |-
+  Complete Anthropic re-authentication.
+method: POST
+url: '{{baseUrl}}/api/oauth/anthropic/reauth/callback'
+order: 10000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}
