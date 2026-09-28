@@ -74,7 +74,13 @@ function isLocalRefusal(status: number, body: string | null): boolean {
 	}
 }
 
-function isZaiPeakHour(ts = Date.now()): boolean {
+/**
+ * Zai peak pricing window: 14:00-18:00 Singapore time (UTC+8), every day.
+ * There is no weekday restriction here — Zai's window runs on weekends too.
+ * See packages/dashboard-web/src/utils/provider-utils.ts (ZAI_PEAK_WINDOW,
+ * SB23-1867) for the same rule and the evidence backing it.
+ */
+export function isZaiPeakHour(ts = Date.now()): boolean {
 	const d = new Date(ts);
 	const sgtHour = (d.getUTCHours() + d.getUTCMinutes() / 60 + 8) % 24;
 	return sgtHour >= 14 && sgtHour < 18;
