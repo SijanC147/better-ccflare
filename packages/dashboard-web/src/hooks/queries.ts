@@ -1,6 +1,7 @@
 import { getModelDisplayName } from "@better-ccflare/core";
 import type {
 	AgentUpdatePayload,
+	ClaudeCodeEndpointConfig,
 	Project,
 	WorktreeRule,
 } from "@better-ccflare/types";
@@ -592,6 +593,39 @@ export const useSetRetryConfig = () => {
 		mutationFn: (settings: RetryConfigUpdate) => api.setRetryConfig(settings),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["retry-config"] });
+		},
+	});
+};
+
+export const useClaudeCodeEndpoints = () => {
+	return useQuery({
+		queryKey: ["claude-code-endpoints"],
+		queryFn: () => api.getClaudeCodeEndpoints(),
+	});
+};
+
+export const useSaveClaudeCodeEndpoint = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			name,
+			config,
+		}: {
+			name: string;
+			config: ClaudeCodeEndpointConfig;
+		}) => api.putClaudeCodeEndpoint(name, config),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["claude-code-endpoints"] });
+		},
+	});
+};
+
+export const useDeleteClaudeCodeEndpoint = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (name: string) => api.deleteClaudeCodeEndpoint(name),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["claude-code-endpoints"] });
 		},
 	});
 };

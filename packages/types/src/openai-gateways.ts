@@ -33,6 +33,26 @@ export interface OpenAIGatewayConfig {
 	exclude_providers?: string[];
 	/** Free text shown in listings. */
 	description?: string;
+	/**
+	 * The gateway's model set. When present, the gateway serves exactly these
+	 * ids: `GET <gateway>/models` lists their names, and a chat request naming
+	 * any other model is refused rather than routed. Absent means the gateway
+	 * passes the client's model through, as before.
+	 */
+	models?: OpenAIGatewayModelEntry[];
+}
+
+/**
+ * One model a gateway exposes. `name` is the id the client sends and sees;
+ * `model` is the upstream id every account is asked for; `combo` optionally
+ * names a combo whose slots are the fallback ladder for this entry, in slot
+ * priority order. Without a combo, the request goes to any account that can
+ * serve `model`, so a GPT id reaches only accounts whose listing carries it.
+ */
+export interface OpenAIGatewayModelEntry {
+	name: string;
+	model: string;
+	combo?: string;
 }
 
 export type OpenAIGateways = Record<string, OpenAIGatewayConfig>;
@@ -43,11 +63,15 @@ export interface OpenAIGatewayListing {
 	base_path: string;
 	exclude_providers: string[];
 	description: string | null;
+	models: OpenAIGatewayModelEntry[];
 }
 
 const PROVIDER_VALUE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
 const MAX_EXCLUDED_PROVIDERS = 32;
 const MAX_DESCRIPTION_LENGTH = 500;
+const MAX_GATEWAY_MODELS = 64;
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/;
+const MAX_COMBO_NAME_LENGTH = 128;
 
 export type OpenAIGatewayValidation =
 	| { ok: true; value: OpenAIGatewayConfig }
@@ -70,7 +94,11 @@ export function validateOpenAIGatewayConfig(
 	}
 	const record = input as Record<string, unknown>;
 	for (const key of Object.keys(record)) {
-		if (key !== "exclude_providers" && key !== "description") {
+		if (
+			key !== "exclude_providers" &&
+			key !== "description" &&
+			key !== "models"
+		) {
 			return { ok: false, error: `unknown gateway field: ${key}` };
 		}
 	}
@@ -114,7 +142,83 @@ export function validateOpenAIGatewayConfig(
 		value.description = record.description;
 	}
 
+	if (record.models !== undefined) {
+		const models = validateGatewayModels(record.models);
+		if (!models.ok) return models;
+		value.models = models.value;
+	}
+
 	return { ok: true, value };
+}
+
+function validateGatewayModels(
+	raw: unknown,
+):
+	| { ok: true; value: OpenAIGatewayModelEntry[] }
+	| { ok: false; error: string } {
+	if (!Array.isArray(raw)) {
+		return { ok: false, error: "models must be an array" };
+	}
+	if (raw.length === 0) {
+		return {
+			ok: false,
+			error:
+				"models must name at least one model; omit it to pass every model through",
+		};
+	}
+	if (raw.length > MAX_GATEWAY_MODELS) {
+		return {
+			ok: false,
+			error: `models holds at most ${MAX_GATEWAY_MODELS} entries`,
+		};
+	}
+	const names = new Set<string>();
+	const entries: OpenAIGatewayModelEntry[] = [];
+	for (const item of raw) {
+		if (item === null || typeof item !== "object" || Array.isArray(item)) {
+			return { ok: false, error: "each models entry must be an object" };
+		}
+		const entry = item as Record<string, unknown>;
+		for (const key of Object.keys(entry)) {
+			if (key !== "name" && key !== "model" && key !== "combo") {
+				return { ok: false, error: `unknown models entry field: ${key}` };
+			}
+		}
+		const name = entry.name;
+		const model = entry.model ?? entry.name;
+		if (typeof name !== "string" || !MODEL_ID_PATTERN.test(name)) {
+			return {
+				ok: false,
+				error: `models entry name must be a model id such as "gpt-5.5"; got ${JSON.stringify(name)}`,
+			};
+		}
+		if (typeof model !== "string" || !MODEL_ID_PATTERN.test(model)) {
+			return {
+				ok: false,
+				error: `models entry ${name}: model must be a model id; got ${JSON.stringify(model)}`,
+			};
+		}
+		if (names.has(name)) {
+			return { ok: false, error: `models entry ${name} is listed twice` };
+		}
+		names.add(name);
+		const value: OpenAIGatewayModelEntry = { name, model };
+		if (entry.combo !== undefined) {
+			if (
+				typeof entry.combo !== "string" ||
+				entry.combo.trim().length === 0 ||
+				entry.combo.length > MAX_COMBO_NAME_LENGTH
+			) {
+				return {
+					ok: false,
+					error: `models entry ${name}: combo must be a combo name`,
+				};
+			}
+			value.combo = entry.combo;
+		}
+		entries.push(value);
+	}
+	return { ok: true, value: entries };
 }
 
 /**
@@ -162,6 +266,7 @@ export function listOpenAIGateways(
 			base_path: openAIGatewayBasePath(name),
 			exclude_providers: gateways[name].exclude_providers ?? [],
 			description: gateways[name].description ?? null,
+			models: gateways[name].models ?? [],
 		}));
 }
 
@@ -170,6 +275,36 @@ export function listOpenAIGateways(
  * client appended to the base URL, such as `/chat/completions` or `/models`.
  * Returns null for anything else, including a name that fails validation.
  */
+/**
+ * First path segments that can never be a gateway alias, because the server
+ * already answers `/<segment>/v1/...` or a dashboard route could grow one.
+ */
+export const RESERVED_GATEWAY_ALIAS_NAMES: ReadonlySet<string> = new Set([
+	"api",
+	"v1",
+	"messages",
+	"assets",
+	"health",
+	"dashboard",
+	"gateways",
+]);
+
+/**
+ * The short form `/<name>/v1/<rest>`, e.g. `/gpt/v1/chat/completions`. It
+ * resolves to the same gateway as `/v1/gateways/<name>/<rest>`. A reserved
+ * first segment is never an alias.
+ */
+export function matchOpenAIGatewayAliasPath(
+	pathname: string,
+): { name: string; rest: string } | null {
+	const match = /^\/([^/]+)\/v1(\/.*)?$/.exec(pathname);
+	if (!match) return null;
+	const name = match[1];
+	if (!isValidOpenAIGatewayName(name)) return null;
+	if (RESERVED_GATEWAY_ALIAS_NAMES.has(name)) return null;
+	return { name, rest: match[2] ?? "" };
+}
+
 export function matchOpenAIGatewayPath(
 	pathname: string,
 ): { name: string; rest: string } | null {
@@ -193,3 +328,19 @@ export function matchOpenAIGatewayPath(
  */
 export const REPORT_UPSTREAM_MODEL_HEADER =
 	"x-better-ccflare-report-upstream-model";
+
+/**
+ * Internal: names the combo whose slots are the fallback ladder for this
+ * request. Set only by the gateway handler from its own config, stripped from
+ * any client request on the gateway path, and removed before the request goes
+ * upstream.
+ */
+export const GATEWAY_COMBO_HEADER = "x-better-ccflare-gateway-combo";
+
+/**
+ * Internal: with value "1", account selection keeps only accounts that can
+ * serve the requested model, so a gateway entry without a combo never sends a
+ * GPT id to an Anthropic account. Same lifecycle as `GATEWAY_COMBO_HEADER`.
+ */
+export const GATEWAY_REQUIRE_MODEL_HEADER =
+	"x-better-ccflare-gateway-require-model";

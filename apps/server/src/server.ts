@@ -56,6 +56,7 @@ import {
 import {
 	dispatchOpenAIGatewayRequest,
 	handleChatCompletionsRequest,
+	handleClaudeCodeEndpointRequest,
 	handleResponsesRequest,
 	isOpenAIChatCompletionsRequest,
 	isOpenAIGatewayPath,
@@ -114,11 +115,17 @@ import {
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
+	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
+	GATEWAY_COMBO_HEADER,
+	GATEWAY_REQUIRE_MODEL_HEADER,
 	type LoadBalancingStrategy,
+	matchOpenAIGatewayAliasPath,
 	matchOpenAIGatewayPath,
 	OPENAI_GATEWAYS_CONFIG_KEY,
+	parseClaudeCodeEndpoints,
 	parseOpenAIGateways,
 	type RetentionStatus,
+	resolveClaudeCodeEndpoint,
 	StrategyName,
 	type StrategyStore,
 } from "@better-ccflare/types";
@@ -1731,6 +1738,30 @@ export default async function startServer(options?: {
 			async fetch(req: Request) {
 				const url = new URL(req.url);
 
+				// The gateway routing headers are internal: only the gateway
+				// handler may set them, on its own synthetic request. A client's
+				// copy is dropped here, before any path can read it, so a direct
+				// /v1/messages or /v1/responses request cannot pick a ladder or
+				// lift the model filter (SB23-3389 review, finding 1).
+				if (
+					req.headers.has(GATEWAY_COMBO_HEADER) ||
+					req.headers.has(GATEWAY_REQUIRE_MODEL_HEADER)
+				) {
+					const headers = new Headers(req.headers);
+					headers.delete(GATEWAY_COMBO_HEADER);
+					headers.delete(GATEWAY_REQUIRE_MODEL_HEADER);
+					req = new Request(req, { headers });
+				}
+
+				// Gateway short form: `/<name>/v1/<rest>` is `/v1/gateways/<name>/<rest>`.
+				// Rewritten here, before the SPA check and the auth layer, so both
+				// classify it by its canonical /v1 path exactly as they classify the
+				// long form, and the gateway branch below serves it unchanged.
+				const gatewayAlias = matchOpenAIGatewayAliasPath(url.pathname);
+				if (gatewayAlias) {
+					url.pathname = `/v1/gateways/${gatewayAlias.name}${gatewayAlias.rest}`;
+				}
+
 				// Serve the dashboard SPA + static assets BEFORE the
 				// authentication-gated API router. The dashboard shell is
 				// public content and the initial browser navigation cannot
@@ -1892,6 +1923,36 @@ export default async function startServer(options?: {
 						// a config edit applies at once.
 						if (isOpenAIGatewayPath(url.pathname)) {
 							const gatewayMatch = matchOpenAIGatewayPath(url.pathname);
+							// Claude Code project endpoints share the `/<name>/v1`
+							// namespace with gateways and are answered by running the
+							// host's `claude` CLI in the endpoint's directory rather
+							// than by an account in the pool. The API refuses a name
+							// that exists in both, so the order here only matters for
+							// a hand-edited config.
+							if (gatewayMatch) {
+								const { endpoints, errors: endpointErrors } =
+									parseClaudeCodeEndpoints(
+										config.getObjectSetting(CLAUDE_CODE_ENDPOINTS_CONFIG_KEY),
+									);
+								for (const error of endpointErrors) {
+									if (!reportedGatewayConfigErrors.has(error)) {
+										reportedGatewayConfigErrors.add(error);
+										log.warn(`Skipping Claude Code endpoint config: ${error}`);
+									}
+								}
+								if (Object.hasOwn(endpoints, gatewayMatch.name)) {
+									return trackStreamForShutdown(
+										await handleClaudeCodeEndpointRequest(
+											req,
+											gatewayMatch.rest,
+											resolveClaudeCodeEndpoint(
+												gatewayMatch.name,
+												endpoints[gatewayMatch.name],
+											),
+										),
+									);
+								}
+							}
 							const { gateways, errors } = parseOpenAIGateways(
 								config.getObjectSetting(OPENAI_GATEWAYS_CONFIG_KEY),
 							);

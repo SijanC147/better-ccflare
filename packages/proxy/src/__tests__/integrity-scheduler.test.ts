@@ -54,7 +54,13 @@ const mockRunIntegrityCheckInWorker = mock(
 // other test files importing @better-ccflare/database later in the same
 // process would lose every other export (DatabaseFactory, DatabaseOperations,
 // etc.) this file doesn't otherwise need to touch.
-const actualDatabase = await import("@better-ccflare/database");
+// A snapshot of the exports, taken before the first mock.module call. The
+// namespace object itself is live-updated by mock.module, so restoring with
+// `() => <namespace>` hands the stub straight back and leaks it into every
+// test file that runs later in the process (SB23-2776).
+const actualDatabase = {
+	...(await import("@better-ccflare/database")),
+};
 
 mock.module("@better-ccflare/database", () => ({
 	...actualDatabase,

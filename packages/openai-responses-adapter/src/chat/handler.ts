@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
 import {
+	GATEWAY_COMBO_HEADER,
+	GATEWAY_REQUIRE_MODEL_HEADER,
+	type OpenAIGatewayModelEntry,
 	type OpenAIGateways,
 	REPORT_UPSTREAM_MODEL_HEADER,
 } from "@better-ccflare/types";
@@ -72,6 +75,57 @@ export interface OpenAIGatewayOptions {
 	 * request-handler.ts strips before anything goes upstream.
 	 */
 	excludeProviders?: string[];
+	/**
+	 * The gateway's model set. When present, a request must name one of these
+	 * entries; the entry decides the upstream model and, through its combo,
+	 * the fallback ladder.
+	 */
+	models?: OpenAIGatewayModelEntry[];
+}
+
+/** The ids a gateway model set exposes, for an error message. */
+function modelSetNames(models: OpenAIGatewayModelEntry[]): string {
+	return models.map((entry) => entry.name).join(", ");
+}
+
+/**
+ * Applies a gateway model set to the request: resolves the client's model to
+ * an entry, rewrites the body's model to the entry's upstream id, and sets the
+ * internal routing headers from the entry alone. Both headers are removed
+ * first on every path, so a client can neither pick a ladder nor lift the
+ * model filter by sending them itself. Returns a refusal when the gateway has
+ * a model set and the request names none of it.
+ */
+function applyModelSet(
+	body: ChatCompletionRequest,
+	headers: Headers,
+	options: OpenAIGatewayOptions | undefined,
+): Response | null {
+	headers.delete(GATEWAY_COMBO_HEADER);
+	headers.delete(GATEWAY_REQUIRE_MODEL_HEADER);
+	const models = options?.models;
+	if (!models) return null;
+	const requested = typeof body.model === "string" ? body.model : "";
+	const entry = models.find((candidate) => candidate.name === requested);
+	if (!entry) {
+		return jsonResponse(404, {
+			error: {
+				message: `The model "${requested}" is not served by this gateway. Use one of: ${modelSetNames(models)}.`,
+				type: "invalid_request_error",
+				param: "model",
+				code: "model_not_found",
+			},
+		});
+	}
+	body.model = entry.model;
+	if (entry.combo) {
+		headers.set(GATEWAY_COMBO_HEADER, entry.combo);
+	} else {
+		headers.set(GATEWAY_REQUIRE_MODEL_HEADER, "1");
+	}
+	// A forced account would route around the entry's ladder and filter.
+	headers.delete(FORCED_ACCOUNT_HEADER);
+	return null;
 }
 
 const EXCLUDE_PROVIDERS_HEADER = "x-better-ccflare-exclude-providers";
@@ -259,7 +313,13 @@ export async function handleChatCompletionsRequest(
 		return invalidRequest(400, "Request body is not valid JSON.");
 	}
 
-	// 2. Translate, or refuse before anything is sent upstream.
+	// 2. Resolve the gateway's model set, then translate, or refuse before
+	// anything is sent upstream. The client's name is kept for the response
+	// id; the answering model is reported separately (SB23-2781).
+	const requestedModel = typeof body.model === "string" ? body.model : null;
+	const syntheticHeaders = new Headers(req.headers);
+	const modelSetRefusal = applyModelSet(body, syntheticHeaders, options);
+	if (modelSetRefusal) return modelSetRefusal;
 	const translated = translateChatRequestToAnthropic(body);
 	if (!translated.ok) {
 		const { status, message, type, param, code } = translated.error;
@@ -275,7 +335,6 @@ export async function handleChatCompletionsRequest(
 	// and its anthropic-oauth exclusion are deliberately not copied.
 	const messagesUrl = new URL(url.toString());
 	messagesUrl.pathname = "/v1/messages";
-	const syntheticHeaders = new Headers(req.headers);
 	syntheticHeaders.set("content-type", "application/json");
 	syntheticHeaders.delete("content-length");
 	syntheticHeaders.delete("content-encoding");
@@ -296,7 +355,7 @@ export async function handleChatCompletionsRequest(
 	const translationCtx: ResponseTranslationContext = {
 		id: `chatcmpl-${crypto.randomBytes(12).toString("hex")}`,
 		created: Math.floor(Date.now() / 1000),
-		model: typeof body.model === "string" ? body.model : anthropicBody.model,
+		model: requestedModel ?? anthropicBody.model,
 	};
 	const includeUsage = body.stream_options?.include_usage === true;
 
@@ -390,6 +449,20 @@ export async function handleOpenAIModelsRequest(
 	apiKeyName?: string | null,
 	options?: OpenAIGatewayOptions,
 ): Promise<Response> {
+	// A gateway with a model set lists exactly that set, whatever the pool
+	// holds, so a client's model picker shows what the gateway will accept.
+	if (options?.models) {
+		const created = Math.floor(Date.now() / 1000);
+		return jsonResponse(200, {
+			object: "list",
+			data: options.models.map((entry) => ({
+				id: entry.name,
+				object: "model",
+				created,
+				owned_by: "better-ccflare",
+			})),
+		});
+	}
 	const modelsUrl = new URL(url.toString());
 	modelsUrl.pathname = "/v1/models";
 	const syntheticHeaders = new Headers(req.headers);
@@ -468,6 +541,7 @@ export async function dispatchOpenAIGatewayRequest(
 	}
 	const options: OpenAIGatewayOptions = {
 		excludeProviders: gateway.exclude_providers ?? [],
+		models: gateway.models,
 	};
 	if (req.method === "POST" && match.rest === "/chat/completions") {
 		return handleChatCompletionsRequest(

@@ -7,6 +7,7 @@ import {
 	NotFound,
 } from "@better-ccflare/http-common";
 import {
+	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
 	isValidOpenAIGatewayName,
 	listOpenAIGateways,
 	OPENAI_GATEWAYS_CONFIG_KEY,
@@ -77,6 +78,23 @@ export function createOpenAIGatewayHandlers(config: Config) {
 			const result = validateOpenAIGatewayConfig(body);
 			if (!result.ok) {
 				return errorResponse(BadRequest(result.error));
+			}
+
+			// `/<name>/v1` also serves Claude Code endpoints; one name, one owner.
+			const endpoints = config.getObjectSetting(
+				CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
+			);
+			if (
+				endpoints !== null &&
+				typeof endpoints === "object" &&
+				!Array.isArray(endpoints) &&
+				Object.hasOwn(endpoints, name)
+			) {
+				return errorResponse(
+					Conflict(
+						`${JSON.stringify(name)} is already a Claude Code endpoint; both are served at /${name}/v1, so the name can belong to only one`,
+					),
+				);
 			}
 
 			const stored = readStoredMap();

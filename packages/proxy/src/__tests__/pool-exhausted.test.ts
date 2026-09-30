@@ -120,14 +120,18 @@ function makeRequest(): Request {
 }
 
 let savedPassthrough: string | undefined;
+let collectorSpy: ReturnType<typeof stubUsageCollector>;
 
 beforeEach(() => {
 	savedPassthrough = process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
 	delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	stubUsageCollector();
+	collectorSpy = stubUsageCollector();
 });
 
 afterEach(() => {
+	// An unrestored spy leaves getUsageCollector stubbed for every test file that
+	// runs later in the process (SB23-2776).
+	collectorSpy.mockRestore();
 	if (savedPassthrough === undefined) {
 		delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
 	} else {

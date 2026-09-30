@@ -10,6 +10,12 @@ export interface ComboSlotInfo {
 	comboName: string | null;
 	/** Ordered list of { accountId, modelOverride } for combo slots, indexed by position in the returned accounts array */
 	slots: Array<{ accountId: string; modelOverride: string }>;
+	/**
+	 * True for a gateway model entry's ladder: the ladder is the whole route,
+	 * so an exhausted or unknown ladder ends in the combo refusal rather than
+	 * falling back to the pool or answering as pool exhaustion.
+	 */
+	gatewayLadder?: boolean;
 }
 
 export interface RequestMeta {
