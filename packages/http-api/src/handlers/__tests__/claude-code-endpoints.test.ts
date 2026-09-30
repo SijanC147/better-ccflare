@@ -13,7 +13,10 @@ import {
 	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
 	OPENAI_GATEWAYS_CONFIG_KEY,
 } from "@better-ccflare/types";
-import { createClaudeCodeEndpointHandlers } from "../claude-code-endpoints";
+import {
+	createClaudeCodeEndpointHandlers,
+	MAX_CLAUDE_CODE_ENDPOINTS,
+} from "../claude-code-endpoints";
 import { createOpenAIGatewayHandlers } from "../openai-gateways";
 
 /**
@@ -291,6 +294,42 @@ describe("claude code endpoints API", () => {
 			directory_exists: boolean;
 		};
 		expect(body.directory_exists).toBe(false);
+	});
+
+	it("caps the stored endpoints, counting invalid entries, but still replaces one at the cap", async () => {
+		const project = makeTmp("cce-project");
+		const seeded: Record<string, unknown> = {};
+		for (let i = 0; i < MAX_CLAUDE_CODE_ENDPOINTS - 1; i++) {
+			seeded[`e${i}`] = { directory: "/srv/seeded" };
+		}
+		seeded.broken = { directory: "relative" };
+		const { config, path } = configWithFile({
+			[CLAUDE_CODE_ENDPOINTS_CONFIG_KEY]: seeded,
+		});
+		const handlers = createClaudeCodeEndpointHandlers(config);
+
+		const refused = await handlers.putEndpoint(
+			put({ directory: project }),
+			"one-too-many",
+		);
+		expect(refused.status).toBe(400);
+		expect(await errorText(refused)).toContain(
+			String(MAX_CLAUDE_CODE_ENDPOINTS),
+		);
+		expect(
+			Object.keys(
+				stored(path, CLAUDE_CODE_ENDPOINTS_CONFIG_KEY) as Record<
+					string,
+					unknown
+				>,
+			),
+		).toHaveLength(MAX_CLAUDE_CODE_ENDPOINTS);
+
+		const replaced = await handlers.putEndpoint(
+			put({ directory: project }),
+			"e0",
+		);
+		expect(replaced.status).toBe(200);
 	});
 
 	it("refuses to overwrite a key that is not an object", async () => {
