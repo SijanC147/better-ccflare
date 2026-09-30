@@ -4,4 +4,4 @@ description: |-
   Whether combos are enabled.
 method: GET
 url: '{{baseUrl}}/api/config/combos-enabled'
-order: 26000
+order: 30000

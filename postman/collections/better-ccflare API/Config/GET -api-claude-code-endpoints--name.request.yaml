@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/claude-code-endpoints/:name'
+description: |-
+  One Claude Code project endpoint with its base path and whether its directory exists.
+method: GET
+url: '{{baseUrl}}/api/claude-code-endpoints/:name'
+order: 25000
+pathVariables:
+  - key: 'name'
+    value: ''

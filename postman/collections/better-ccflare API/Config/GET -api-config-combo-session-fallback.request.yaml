@@ -4,4 +4,4 @@ description: |-
   Combo session fallback behaviour.
 method: GET
 url: '{{baseUrl}}/api/config/combo-session-fallback'
-order: 28000
+order: 32000

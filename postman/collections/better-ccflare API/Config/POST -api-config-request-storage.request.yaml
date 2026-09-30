@@ -1,7 +1,7 @@
 $kind: http-request
 name: 'POST /api/config/request-storage'
 description: |-
-  Turn payload storage on or off.
+  Turn headers-only storage on or off: headers kept, bodies dropped.
 method: POST
 url: '{{baseUrl}}/api/config/request-storage'
 order: 10000

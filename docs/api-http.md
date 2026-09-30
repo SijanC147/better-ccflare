@@ -749,6 +749,25 @@ List all available load balancing strategies.
 curl http://localhost:8080/api/strategies
 ```
 
+#### GET /api/config/request-storage
+
+What each request's `request_payloads` row holds. Reports both switches that decide it and `persists`, the result. Read `persists`, not `headersOnly`, to learn what is stored: before SB23-2572 this endpoint reported `headersOnly` alone, and `headersOnly: true` with `store_payloads` off stored nothing.
+
+**Response:**
+```json
+{
+  "headersOnly": true,
+  "storePayloads": false,
+  "persists": "headers"
+}
+```
+
+`persists` is `full` (headers, bodies and metadata), `headers` (headers and metadata, no bodies; whenever `headersOnly` is on) or `none` (no row; both switches off). Credential header values are stored as `[redacted]`; see `REQUEST_STORAGE_HEADERS_ONLY` in [configuration.md](configuration.md). Stored headers are read back through `GET /api/requests/detail` (`request.headers`, `response.headers`).
+
+#### POST /api/config/request-storage
+
+Turn headers-only storage on or off. Body: `{ "headersOnly": true }`. Returns 204. `store_payloads` is set through `POST /api/config/retention`.
+
 #### GET /api/config/provider-model-defaults
 
 Get the editable override layer sitting between account model mappings and each provider's compiled default model map (see [configuration.md](configuration.md#editable-provider-model-defaults)). Only providers enabled via `CCFLARE_MODEL_DEFAULTS_PROVIDERS` (default: `codex` only) are listed.
