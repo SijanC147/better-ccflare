@@ -313,8 +313,9 @@ export interface RequestPayload {
 		// without request/response bodies. Consumers that need bodies must
 		// re-fetch via GET /api/requests/payload/:id.
 		bodiesOmitted?: boolean;
-		// True when a memory bound released the bodies while the request was
-		// still active; the headers and metadata were kept and written.
+		// True when a memory bound dropped captured body bytes while the request
+		// was still active; the headers and metadata were kept and written.
+		// Absent on a headers-only row, which never held a body.
 		bodiesReleased?: boolean;
 		// Mirror of RequestResponse.rateLimited so the list view can render
 		// the "Rate Limited" badge from a summary-only payload (no body

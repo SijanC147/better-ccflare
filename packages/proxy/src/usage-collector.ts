@@ -79,6 +79,12 @@ interface RequestState {
 	 * drops the header set too and writes no row.
 	 */
 	bodiesReleased: boolean;
+	/**
+	 * A memory bound dropped body bytes that had been captured, or refused ones
+	 * about to be. Drives meta.bodiesReleased, so a headers-only row, which
+	 * never held a body, does not claim one was dropped.
+	 */
+	bodiesDropped: boolean;
 	retainedPayloadBytes: number;
 }
 
@@ -578,6 +584,7 @@ export class UsageCollector {
 			shouldSkipLogging: shouldSkip,
 			payloadReleased: false,
 			bodiesReleased: false,
+			bodiesDropped: false,
 			retainedPayloadBytes: 0,
 		};
 
@@ -680,7 +687,7 @@ export class UsageCollector {
 				log.warn(
 					`Active payload budget exceeded; disabling payload capture for ${msg.requestId} (request_bytes=${requestBodyBytes}, active_payload_bytes=${this.activePayloadBytes})`,
 				);
-				this.releaseRetainedBodies(state);
+				this.releaseRetainedBodies(state, true);
 			} else {
 				state.retainedPayloadBytes = requestBodyBytes;
 				this.activePayloadBytes += requestBodyBytes;
@@ -731,7 +738,7 @@ export class UsageCollector {
 				log.warn(
 					`Active payload budget exceeded; disabling payload capture for ${requestId} (incoming_bytes=${bytesToCapture}, request_payload_bytes=${state.retainedPayloadBytes}, active_payload_bytes=${this.activePayloadBytes})`,
 				);
-				this.releaseRetainedBodies(state);
+				this.releaseRetainedBodies(state, true);
 			} else {
 				if (bytesToCapture > 0) {
 					// Always copy: an incoming view can cover only a few bytes of a much
@@ -1200,18 +1207,32 @@ export class UsageCollector {
 	 * when no row will be written, because it is a few KB and it is the part of
 	 * the row headers-only storage exists to keep. Before SB23-2572 a long
 	 * stream lost its header set here and wrote no row at all.
+	 *
+	 * `dropped` says whether body bytes are actually being lost, which is what
+	 * meta.bodiesReleased reports; the release itself runs either way, because
+	 * it also stops any later capture on the request.
 	 */
-	private releaseRetainedBodies(state: RequestState): void {
+	private releaseRetainedBodies(state: RequestState, dropped: boolean): void {
 		if (!this.persistsHeaders()) {
 			this.releaseRequestPayload(state);
 			return;
 		}
+		if (dropped) state.bodiesDropped = true;
 		this.activePayloadBytes = Math.max(
 			0,
 			this.activePayloadBytes - state.retainedPayloadBytes,
 		);
 		state.retainedPayloadBytes = 0;
 		releaseBodyState(state);
+	}
+
+	/** Whether the state holds any body bytes a release would drop. */
+	private holdsBodies(state: RequestState): boolean {
+		return (
+			state.retainedPayloadBytes > 0 ||
+			state.chunks.length > 0 ||
+			state.startMessage.requestBody !== null
+		);
 	}
 
 	private freeRequestState(state: RequestState): void {
@@ -1303,7 +1324,7 @@ export class UsageCollector {
 			agentAttributionSource: state.agentAttributionSource ?? undefined,
 			// A memory bound dropped the bodies before the request finished, so a
 			// null body here means "not kept", not "empty".
-			bodiesReleased: state.bodiesReleased || undefined,
+			bodiesReleased: state.bodiesDropped || undefined,
 		};
 		const serialize = (withBodies: boolean): string =>
 			JSON.stringify({
@@ -1347,9 +1368,8 @@ export class UsageCollector {
 		requestId: string,
 		payload: PreparedPayload,
 	): void {
-		// The OpenObserve copy has been shipped by the time a row is enqueued, so
-		// its reservation is returned now rather than held for the write.
-		this.releaseShipCopy(payload);
+		// Both reservations return in the finally below; from there the writer's
+		// own enqueuePayload accounting covers the row.
 		const json = payload.json;
 		if (json === null) {
 			this.releasePreparedPayload(payload);
@@ -1410,10 +1430,15 @@ export class UsageCollector {
 				!state.bodiesReleased &&
 				age > REQUEST_PAYLOAD_RETENTION_MS
 			) {
-				log.warn(
-					`Request ${id} is still active after ${Math.round(age / 1000)}s; releasing retained payload fields`,
-				);
-				this.releaseRetainedBodies(state);
+				// A headers-only request never held a body, so there is nothing to
+				// warn about; the release still runs to stop any later capture.
+				const held = this.holdsBodies(state);
+				if (held) {
+					log.warn(
+						`Request ${id} is still active after ${Math.round(age / 1000)}s; releasing retained payload fields`,
+					);
+				}
+				this.releaseRetainedBodies(state, held);
 			}
 		}
 

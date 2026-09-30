@@ -91,6 +91,10 @@ describe("headers-only request storage persists a readable header set (SB23-2572
 			if (href.startsWith(OO_BASE_URL)) return new Response("{}");
 			return new Response("offline", { status: 503 });
 		}) as unknown as typeof fetch;
+		// initialize() only records the path, and getInstance() returns any
+		// instance an earlier file in this process left behind, possibly on a
+		// database that file has since unlinked.
+		DatabaseFactory.reset();
 		DatabaseFactory.initialize(dbPath);
 		dbOps = DatabaseFactory.getInstance();
 		asyncWriter = new AsyncDbWriter();
@@ -168,6 +172,37 @@ describe("headers-only request storage persists a readable header set (SB23-2572
 		};
 		await collector.handleEnd(end);
 		await collector.drain();
+	}
+
+	type Internals = {
+		requests: Map<
+			string,
+			{
+				createdAt: number;
+				retainedPayloadBytes: number;
+				bodiesReleased: boolean;
+				startMessage: StartMessage;
+			}
+		>;
+		activePayloadBytes: number;
+		pendingPayloadBytes: number;
+		pendingPayloadCount: number;
+		cleanupStaleRequests(): void;
+		estimateCostWithDeadline: (...args: unknown[]) => Promise<number>;
+	};
+	const internals = (): Internals => collector as unknown as Internals;
+
+	function withOpenObserveShipping(): void {
+		configureOpenObserve(() => ({
+			baseUrl: OO_BASE_URL,
+			org: "default",
+			user: "user@example.invalid",
+			token: "not-a-real-token",
+			logStream: "better_ccflare_logs",
+			requestStream: OO_REQUEST_STREAM,
+			shipPayloads: true,
+			logMinLevel: "INFO",
+		}));
 	}
 
 	/** The row as `GET /api/requests/detail` returns it, and its raw text. */
@@ -254,22 +289,109 @@ describe("headers-only request storage persists a readable header set (SB23-2572
 	test("a stream still active past the payload retention bound keeps its headers", async () => {
 		const requestId = "sb23-2572-long-stream";
 		collector.handleStart({ ...makeStart(requestId), isStream: true });
-		const internals = collector as unknown as {
-			requests: Map<string, { createdAt: number }>;
-			cleanupStaleRequests(): void;
-		};
-		const state = internals.requests.get(requestId);
+		const state = internals().requests.get(requestId);
 		if (!state) throw new Error("collector did not track the request");
 		// Older than REQUEST_PAYLOAD_RETENTION_MS (2 min), younger than the
 		// stream inactivity timeout, so only the payload bound fires.
 		state.createdAt = Date.now() - 3 * 60 * 1000;
-		internals.cleanupStaleRequests();
+		internals().cleanupStaleRequests();
 		await collector.handleEnd({ type: "end", requestId, success: true });
 		await collector.drain();
 
 		const { row } = await readDetail(requestId);
 		expect(row.request.headers?.["user-agent"]).toBe(USER_AGENT);
 		expect(row.request.headers?.authorization).toBe(REDACTED_HEADER_VALUE);
+		// Headers-only never held a body, so the row must not claim one was
+		// dropped.
+		expect(row.meta.bodiesReleased).toBeUndefined();
+	});
+
+	test("headers-only without shipping holds no request body in memory", () => {
+		const requestId = "sb23-2572-no-body-held";
+		collector.handleStart(makeStart(requestId));
+		const state = internals().requests.get(requestId);
+		if (!state) throw new Error("collector did not track the request");
+		expect(state.startMessage.requestBody).toBeNull();
+		expect(state.retainedPayloadBytes).toBe(0);
+		expect(internals().activePayloadBytes).toBe(0);
+		internals().requests.delete(requestId);
+	});
+
+	test("a request refused by the start-side byte budget still writes its headers, flagged bodiesReleased", async () => {
+		storePayloads = true;
+		headersOnly = false;
+		const requestId = "sb23-2572-start-budget";
+		const nearCap = 100 * 1024 * 1024 - 1;
+		internals().activePayloadBytes = nearCap;
+		try {
+			collector.handleStart(makeStart(requestId));
+			const state = internals().requests.get(requestId);
+			expect(state?.bodiesReleased).toBe(true);
+			expect(state?.startMessage.requestHeaders["user-agent"]).toBe(USER_AGENT);
+		} finally {
+			internals().activePayloadBytes = 0;
+		}
+		await collector.handleEnd({ type: "end", requestId, success: true });
+		await collector.drain();
+
+		const { row } = await readDetail(requestId);
+		expect(row.request.headers?.["user-agent"]).toBe(USER_AGENT);
+		expect(row.request.body).toBeNull();
+		expect(row.meta.bodiesReleased).toBe(true);
+	});
+
+	test("shipping bodies with nothing persisted returns every finalizer reservation", async () => {
+		headersOnly = false;
+		withOpenObserveShipping();
+		try {
+			await runRequest("sb23-2572-ship-only");
+			await flushOpenObserve();
+			expect(await dbOps.getRequestPayload("sb23-2572-ship-only")).toBeNull();
+			expect(internals().pendingPayloadBytes).toBe(0);
+			expect(internals().pendingPayloadCount).toBe(0);
+		} finally {
+			configureOpenObserve(null);
+			await flushOpenObserve();
+		}
+	});
+
+	test("a pricing failure after serialisation returns both reservations", async () => {
+		withOpenObserveShipping();
+		const original = internals().estimateCostWithDeadline;
+		internals().estimateCostWithDeadline = async () => {
+			throw new Error("pricing unavailable");
+		};
+		try {
+			const requestId = "sb23-2572-pricing-throw";
+			collector.handleStart(makeStart(requestId));
+			const usageBody = Buffer.from(
+				JSON.stringify({
+					type: "message",
+					model: "claude-opus-5",
+					usage: { input_tokens: 3, output_tokens: 2 },
+				}),
+			).toString("base64");
+			let threw = false;
+			try {
+				await collector.handleEnd({
+					type: "end",
+					requestId,
+					success: true,
+					responseBody: usageBody,
+				});
+			} catch {
+				threw = true;
+			}
+			// The throw path is the one under test; a run that never reached it
+			// would read 0 for the reason the test is not about.
+			expect(threw).toBe(true);
+			expect(internals().pendingPayloadBytes).toBe(0);
+			expect(internals().pendingPayloadCount).toBe(0);
+		} finally {
+			internals().estimateCostWithDeadline = original;
+			configureOpenObserve(null);
+			await flushOpenObserve();
+		}
 	});
 
 	test("with OpenObserve shipping bodies, the row stays headers-only and the shipped record keeps its bodies", async () => {

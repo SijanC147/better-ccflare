@@ -50,6 +50,10 @@ describe("UsageCollector - RequestPayload.meta includes projectAttributionSource
 
 	afterAll(async () => {
 		collector.dispose();
+		// The factory hands its instance to whichever file asks next; without a
+		// reset, that file inherits a handle on the database unlinked below and
+		// fails with SQLITE_IOERR_VNODE on macOS.
+		DatabaseFactory.reset();
 		try {
 			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
 		} catch (error) {
