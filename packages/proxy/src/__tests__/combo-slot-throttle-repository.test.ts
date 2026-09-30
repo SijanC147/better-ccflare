@@ -40,6 +40,7 @@ const NOW = Date.UTC(2026, 8, 30, 12, 0, 0);
 const HOUR = 60 * 60 * 1000;
 const MODEL = "claude-sonnet-4-5";
 const FAMILY: ComboFamily = "sonnet";
+const COMBO_NAME = "Sonnet ladder";
 
 // Distinct from combo-slot-throttle.test.ts's acc-1/acc-2, so the usage cache
 // entries each file seeds and deletes can never cross files.
@@ -164,7 +165,7 @@ describe("family combo slot thresholds survive the repository read", () => {
 					[id, id, "anthropic", NOW],
 				);
 		}
-		const combo = await dbOps.createCombo("Sonnet ladder");
+		const combo = await dbOps.createCombo(COMBO_NAME);
 		firstSlotId = (await dbOps.addComboSlot(combo.id, FIRST, MODEL, 0)).id;
 		await dbOps.addComboSlot(combo.id, SECOND, MODEL, 1);
 		await dbOps.setFamilyCombo(FAMILY, combo.id, true);
@@ -200,12 +201,21 @@ describe("family combo slot thresholds survive the repository read", () => {
 		};
 	}
 
-	function select(): Promise<string[]> {
-		return withFrozenClock(async () =>
-			(await selectAccountsForRequest(makeMeta(), makeContext(), MODEL)).map(
-				(a) => a.id,
-			),
+	/**
+	 * The selected ids plus the combo that routed them. The combo name is what
+	 * separates "the combo kept this slot" from "every slot was skipped and
+	 * normal routing returned the pool": with the pass-through strategy mock
+	 * both can yield the same ids, and only the combo path stamps `comboName`.
+	 */
+	async function select(): Promise<{
+		ids: string[];
+		comboName: string | null | undefined;
+	}> {
+		const meta = makeMeta();
+		const selected = await withFrozenClock(() =>
+			selectAccountsForRequest(meta, makeContext(), MODEL),
 		);
+		return { ids: selected.map((a) => a.id), comboName: meta.comboName };
 	}
 
 	it("returns both thresholds on the active family combo's slots", async () => {
@@ -226,7 +236,7 @@ describe("family combo slot thresholds survive the repository read", () => {
 		setUsage(FIRST, 90, NOW + 4 * HOUR);
 		setUsage(SECOND, 5, NOW + 4 * HOUR);
 
-		expect(await select()).toEqual([SECOND]);
+		expect(await select()).toEqual({ ids: [SECOND], comboName: COMBO_NAME });
 	});
 
 	it("skips a slot whose reset-only threshold is met", async () => {
@@ -236,7 +246,7 @@ describe("family combo slot thresholds survive the repository read", () => {
 		setUsage(FIRST, 10, NOW + 4 * HOUR);
 		setUsage(SECOND, 5, NOW + 4 * HOUR);
 
-		expect(await select()).toEqual([SECOND]);
+		expect(await select()).toEqual({ ids: [SECOND], comboName: COMBO_NAME });
 	});
 
 	it("keeps the slot when no threshold is stored", async () => {
@@ -245,6 +255,22 @@ describe("family combo slot thresholds survive the repository read", () => {
 		setUsage(FIRST, 90, NOW + 4 * HOUR);
 		setUsage(SECOND, 5, NOW + 4 * HOUR);
 
-		expect(await select()).toEqual([FIRST, SECOND]);
+		expect(await select()).toEqual({
+			ids: [FIRST, SECOND],
+			comboName: COMBO_NAME,
+		});
+	});
+
+	it("keeps a stored 0 threshold as 0, which skips the slot at any utilization", async () => {
+		// 0 means "always skip" (#131). A read that turned a stored 0 into null
+		// would switch a deliberately benched slot back on, and 0% utilization
+		// is the one reading only a real 0 threshold can skip.
+		await dbOps.updateComboSlot(firstSlotId, { max_utilization_percent: 0 });
+		setUsage(FIRST, 0, NOW + 4 * HOUR);
+		setUsage(SECOND, 5, NOW + 4 * HOUR);
+
+		const combo = await dbOps.getActiveComboForFamily(FAMILY);
+		expect(combo?.slots[0].max_utilization_percent).toBe(0);
+		expect(await select()).toEqual({ ids: [SECOND], comboName: COMBO_NAME });
 	});
 });
