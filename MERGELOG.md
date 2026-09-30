@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: e80429271ab6c04cb6a6970e0dab16a25180f134 -->
+<!-- last-sync-sha: 4f3f8b577830c5a0f2cf948284f4dec145d658ac -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-09-30 | main | `e8042927..4f3f8b57` | 3 | 3 files (resolved by the maintainer App; one clean merge corrected, see below) | merge (two-parent) | pass (CI at `7f85ad53`, both required checks) | [#250](https://github.com/SijanC147/better-ccflare/pull/250) |
 | 2026-09-21 | main | `ea0e3320..e8042927` | 114 | 27 files (25 UU, 1 DU, 1 UD) | merge --no-ff | pass (5,614 tests at the probe head, 2 macOS-only fail; final line in the PR) | [#231](https://github.com/SijanC147/better-ccflare/pull/231) |
 | 2026-09-13 | main | `4d27cb22..ea0e3320` | 106 | resolved by the maintainer App | merge (two-parent) | pass (4,275 tests, 2 macOS-only fail) | [#52](https://github.com/SijanC147/better-ccflare/pull/52) |
 | 2026-08-27 | main | `412e6326..4d27cb22` | 624 | 37 files / 72 hunks | merge --no-ff | pass (3967 tests, 11 inherited-upstream fail) | [#41](https://github.com/SijanC147/better-ccflare/pull/41) |
@@ -21,6 +22,15 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+
+## 2026-09-30: `e8042927..4f3f8b57` (3 upstream commits, PR #250)
+
+**Resolver:** the upstream maintainer App (controller run https://github.com/SijanC147/upstream-maintainer/actions/runs/36374648751), corrected by hand before merging.
+
+- **Taken:** `CLAUDE_CLI_VERSION` 2.1.276 → 2.1.283 and `CODEX_VERSION` 0.155.0 → 0.157.1 (user-agent strings). Manifest versions kept at the fork's.
+- **Corrected:** the App rejected upstream's "restrict zai peak-hours pause to weekdays" to preserve the fork's every-day rule (SB23-1867), and reverted the clean scheduler merge to match. Z.ai's own docs say peak is Monday to Friday, 14:00–18:00 SGT, so upstream was right: `7f85ad53` adopts the weekday gate in `auto-refresh-scheduler.ts` and `ZAI_PEAK_WINDOW.weekdaysOnly`, with tests inverted.
+- **Marker:** advanced by hand after the merge, in a follow-up PR, because the App still does not write it and the checklist step was missed at merge time. The dashboard's "behind upstream" widget reads this marker at build time, so v3.31.1 reported 3 commits behind although all three were merged.
 
 ## 2026-09-21 — upstream `ea0e3320..e8042927` (114 commits)
 
