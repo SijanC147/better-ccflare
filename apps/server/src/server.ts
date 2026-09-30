@@ -115,6 +115,7 @@ import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
 	type LoadBalancingStrategy,
+	matchOpenAIGatewayAliasPath,
 	matchOpenAIGatewayPath,
 	OPENAI_GATEWAYS_CONFIG_KEY,
 	parseOpenAIGateways,
@@ -1730,6 +1731,15 @@ export default async function startServer(options?: {
 				: {}),
 			async fetch(req: Request) {
 				const url = new URL(req.url);
+
+				// Gateway short form: `/<name>/v1/<rest>` is `/v1/gateways/<name>/<rest>`.
+				// Rewritten here, before the SPA check and the auth layer, so both
+				// classify it by its canonical /v1 path exactly as they classify the
+				// long form, and the gateway branch below serves it unchanged.
+				const gatewayAlias = matchOpenAIGatewayAliasPath(url.pathname);
+				if (gatewayAlias) {
+					url.pathname = `/v1/gateways/${gatewayAlias.name}${gatewayAlias.rest}`;
+				}
 
 				// Serve the dashboard SPA + static assets BEFORE the
 				// authentication-gated API router. The dashboard shell is

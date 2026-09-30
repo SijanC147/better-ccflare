@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { TIME_CONSTANTS, ValidationError } from "@better-ccflare/core";
 import type { Provider } from "@better-ccflare/providers";
 import {
+	GATEWAY_COMBO_HEADER,
+	GATEWAY_REQUIRE_MODEL_HEADER,
 	REPORT_UPSTREAM_MODEL_HEADER,
 	type RequestMeta,
 } from "@better-ccflare/types";
@@ -31,6 +33,8 @@ function stripInternalControlHeaders(headers: Headers): void {
 	headers.delete("x-better-ccflare-codex-path");
 	headers.delete("x-better-ccflare-codex-transport");
 	headers.delete(REPORT_UPSTREAM_MODEL_HEADER);
+	headers.delete(GATEWAY_COMBO_HEADER);
+	headers.delete(GATEWAY_REQUIRE_MODEL_HEADER);
 }
 
 /**
