@@ -152,21 +152,20 @@ export interface PeakWindow {
 }
 
 /**
- * Zai peak hours: 14:00–18:00 Singapore time, every day.
+ * Zai peak hours: 14:00–18:00 Singapore time, Monday to Friday in Singapore.
  *
  * Singapore has not observed DST since 1935, so this is a constant UTC
  * 06:00–10:00. Stating it as `Asia/Singapore` is behaviour-identical and keeps
  * one shape for both windows.
  *
- * The missing weekday restriction is deliberate and is not the Anthropic bug in
- * a second place: Zai's window may genuinely run every day. Do not align it with
- * the window below without evidence from the vendor (SB23-1867).
+ * Z.ai's own docs, read 2026-09-30: "Peak hours: Monday to Friday, 14:00–18:00 Singapore Standard Time (UTC+8)" (docs.z.ai/devpack/overview, and the 2026-07-30 plan update at docs.z.ai/devpack/notice/usage-revision). That evidence is what SB23-1867 asked for before aligning this
+ * window with the Anthropic one; the earlier every-day rule predates it.
  */
 export const ZAI_PEAK_WINDOW: PeakWindow = {
 	timeZone: "Asia/Singapore",
 	startHour: 14,
 	endHour: 18,
-	weekdaysOnly: false,
+	weekdaysOnly: true,
 };
 
 /** Anthropic OAuth peak hours: 5am–11am PT, weekdays in Los Angeles. */
@@ -185,7 +184,7 @@ function isWithinPeakWindow(window: PeakWindow, ts: number): boolean {
 
 /**
  * Check if a given timestamp (default: now) falls within Zai peak hours.
- * Zai peak hours are 14:00–18:00 Singapore time, every day.
+ * Zai peak hours are 14:00–18:00 Singapore time, Monday to Friday there.
  */
 export function isZaiPeakHour(ts?: number): boolean {
 	return isWithinPeakWindow(ZAI_PEAK_WINDOW, ts ?? Date.now());
