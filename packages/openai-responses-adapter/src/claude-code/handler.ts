@@ -24,9 +24,9 @@ import {
 	systemText,
 } from "./prompt";
 import {
-	getClaudeCodeSession,
 	putClaudeCodeSession,
 	resetClaudeCodeSessions,
+	takeClaudeCodeSession,
 } from "./sessions";
 import {
 	type ClaudeCodeUsage,
@@ -193,16 +193,18 @@ function launch(input: LaunchInput): Launch | Response {
 	let escalate: ReturnType<typeof setTimeout> | undefined;
 	proc.exited.then(() => {
 		exited = true;
-		if (escalate) clearTimeout(escalate);
 	});
 
+	// Signals the whole process group even after `claude` itself has exited:
+	// a command the model started in the background (a dev server, a watcher)
+	// is still in the group, and nothing else would stop it. The escalation
+	// targets the group too, so a grandchild that ignores SIGTERM is killed.
+	// Signalling a group that is already empty is a swallowed ESRCH.
 	const terminate = () => {
-		if (exited) return;
 		killGroup(pid, "SIGTERM");
 		if (!escalate) {
-			escalate = setTimeout(() => {
-				if (!exited) killGroup(pid, "SIGKILL");
-			}, killGraceMs);
+			escalate = setTimeout(() => killGroup(pid, "SIGKILL"), killGraceMs);
+			(escalate as { unref?: () => void }).unref?.();
 		}
 	};
 
@@ -434,6 +436,30 @@ export async function handleClaudeCodeEndpointRequest(
 		);
 	}
 
+	// This endpoint runs commands on the host, so it must not be reachable by
+	// a browser's no-preflight POST: a `text/plain` body is a CORS "simple
+	// request" that any web page can send to localhost, and Bun parses it as
+	// JSON all the same. Requiring the JSON content type forces a preflight,
+	// which this server never approves, and Sec-Fetch-Site catches browsers
+	// that send it anyway (SB23-3407 review, finding 1).
+	const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
+	if (!contentType.trim().startsWith("application/json")) {
+		return invalidRequest(
+			415,
+			"Content-Type must be application/json.",
+			null,
+			"unsupported_media_type",
+		);
+	}
+	if (req.headers.get("sec-fetch-site") === "cross-site") {
+		return invalidRequest(
+			403,
+			"Cross-site browser requests are refused on Claude Code endpoints.",
+			null,
+			"cross_site_refused",
+		);
+	}
+
 	let body: ChatCompletionRequest;
 	try {
 		body = (await req.json()) as ChatCompletionRequest;
@@ -481,10 +507,13 @@ export async function handleClaudeCodeEndpointRequest(
 	// A hit means everything before the last user message is already in a
 	// Claude Code session, so only that message is sent.
 	const history = messages.slice(0, -1);
+	// The directory is part of the scope, so moving an endpoint to another
+	// directory never resumes a session id that project has not seen.
+	const sessionScope = `${endpoint.name}\u0000${endpoint.directory}`;
 	const lastMessage = messages[messages.length - 1] as NormalizedMessage;
 	const resumeId =
 		history.length > 0
-			? getClaudeCodeSession(conversationKey(endpoint.name, history))
+			? takeClaudeCodeSession(conversationKey(sessionScope, history))
 			: null;
 	const sessionId = resumeId ?? (deps.newSessionId ?? crypto.randomUUID)();
 	const prompt = resumeId ? lastMessage.text : flattenConversation(messages);
@@ -520,7 +549,7 @@ export async function handleClaudeCodeEndpointRequest(
 
 	const remember = (id: string, reply: string) => {
 		putClaudeCodeSession(
-			conversationKey(endpoint.name, [
+			conversationKey(sessionScope, [
 				...messages,
 				{ role: "assistant", text: reply },
 			]),

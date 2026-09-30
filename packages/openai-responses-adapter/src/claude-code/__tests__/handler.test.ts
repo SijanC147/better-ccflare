@@ -403,6 +403,94 @@ describe("session resume", () => {
 	});
 });
 
+describe("review round 1", () => {
+	test("a text/plain POST (a browser simple request) is a 415 and never starts the CLI", async () => {
+		const ctx = setup("ok");
+		const res = await handleClaudeCodeEndpointRequest(
+			new Request("http://localhost/proj/v1/chat/completions", {
+				method: "POST",
+				headers: { "content-type": "text/plain" },
+				body: JSON.stringify({
+					model: "opus",
+					messages: [{ role: "user", content: "rm -rf" }],
+				}),
+			}),
+			"/chat/completions",
+			ctx.endpoint,
+			{ bin: ctx.bin },
+		);
+		expect(res.status).toBe(415);
+		expect(fake?.invocations() ?? []).toHaveLength(0);
+	});
+
+	test("a cross-site browser request is a 403 and never starts the CLI", async () => {
+		const ctx = setup("ok");
+		const res = await handleClaudeCodeEndpointRequest(
+			new Request("http://localhost/proj/v1/chat/completions", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"sec-fetch-site": "cross-site",
+				},
+				body: JSON.stringify({
+					model: "opus",
+					messages: [{ role: "user", content: "hi" }],
+				}),
+			}),
+			"/chat/completions",
+			ctx.endpoint,
+			{ bin: ctx.bin },
+		);
+		expect(res.status).toBe(403);
+		expect(fake?.invocations() ?? []).toHaveLength(0);
+	});
+
+	test("a stored conversation state is resumed at most once", async () => {
+		const ctx = setup("ok", {}, { textDeltas: ["r"] });
+		await call(ctx, {
+			model: "opus",
+			messages: [{ role: "user", content: "q1" }],
+		});
+		const turnTwo = {
+			model: "opus",
+			messages: [
+				{ role: "user", content: "q1" },
+				{ role: "assistant", content: "r" },
+				{ role: "user", content: "q2" },
+			],
+		};
+		await call(ctx, turnTwo);
+		// A regenerate resends the same history: it must not resume a session
+		// that already holds the dropped turn.
+		await call(ctx, turnTwo);
+		const [, b, c] = fake?.invocations() ?? [];
+		expect(b?.argv).toContain("--resume");
+		expect(c?.argv).not.toContain("--resume");
+	});
+
+	test("moving an endpoint to another directory never resumes the old session", async () => {
+		const ctx = setup("ok", {}, { textDeltas: ["r"] });
+		await call(ctx, {
+			model: "opus",
+			messages: [{ role: "user", content: "q1" }],
+		});
+		const moved = {
+			...ctx,
+			endpoint: { ...ctx.endpoint, directory: `${ctx.endpoint.directory}/..` },
+		};
+		await call(moved, {
+			model: "opus",
+			messages: [
+				{ role: "user", content: "q1" },
+				{ role: "assistant", content: "r" },
+				{ role: "user", content: "q2" },
+			],
+		});
+		const [, b] = fake?.invocations() ?? [];
+		expect(b?.argv).not.toContain("--resume");
+	});
+});
+
 describe("binary selection", () => {
 	test("BETTER_CCFLARE_CLAUDE_BIN is used when no bin is injected", async () => {
 		const ctx = setup("ok");

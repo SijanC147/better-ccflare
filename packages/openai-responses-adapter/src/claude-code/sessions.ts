@@ -28,6 +28,22 @@ export function getClaudeCodeSession(
 	return entry.sessionId;
 }
 
+/**
+ * Looks a session up and removes it, so one stored conversation state is
+ * resumed at most once. A client that regenerates or edits a turn, or two
+ * concurrent retries of the same request, then start fresh rather than
+ * resuming a session that already holds turns the client dropped, or writing
+ * one session file twice at once (SB23-3407 review, finding 3).
+ */
+export function takeClaudeCodeSession(
+	key: string,
+	now: number = Date.now(),
+): string | null {
+	const id = getClaudeCodeSession(key, now);
+	if (id !== null) sessions.delete(key);
+	return id;
+}
+
 export function putClaudeCodeSession(
 	key: string,
 	sessionId: string,
