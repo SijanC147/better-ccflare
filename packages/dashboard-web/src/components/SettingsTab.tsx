@@ -1,6 +1,7 @@
 import React from "react";
 import { AdvancedSettingsCard } from "./overview/AdvancedSettingsCard";
 import { CacheKeepaliveCard } from "./overview/CacheKeepaliveCard";
+import { ClaudeCodeEndpointsCard } from "./overview/ClaudeCodeEndpointsCard";
 import { DataRetentionCard } from "./overview/DataRetentionCard";
 import { GithubTokenCard } from "./overview/GithubTokenCard";
 import { OpenObserveCard } from "./overview/OpenObserveCard";
@@ -26,6 +27,7 @@ export const SettingsTab = React.memo(() => {
 				<PostgresConfigCard />
 				<GithubTokenCard />
 				<OpenObserveCard />
+				<ClaudeCodeEndpointsCard />
 				<AdvancedSettingsCard />
 			</div>
 		</div>
