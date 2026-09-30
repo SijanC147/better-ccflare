@@ -540,7 +540,7 @@ export async function handleClaudeCodeEndpointRequest(
 				else if (ev.kind === "error") return errorResponseFor(ev);
 				else if (ev.kind === "done") {
 					// The final answer, not the narration between tool calls.
-					const reply = ev.resultText ?? text;
+					const reply = ev.resultText || text;
 					remember(ev.sessionId, reply);
 					const completion: ChatCompletion = {
 						id: completionId,

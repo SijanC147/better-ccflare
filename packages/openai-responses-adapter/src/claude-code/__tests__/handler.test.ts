@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
-import type { ResolvedClaudeCodeEndpoint } from "@better-ccflare/types";
+import {
+	CLAUDE_CODE_BIN_ENV,
+	type ResolvedClaudeCodeEndpoint,
+} from "@better-ccflare/types";
 import {
 	handleClaudeCodeEndpointRequest,
 	resetClaudeCodeRunnerStateForTests,
@@ -400,6 +403,29 @@ describe("session resume", () => {
 	});
 });
 
+describe("binary selection", () => {
+	test("BETTER_CCFLARE_CLAUDE_BIN is used when no bin is injected", async () => {
+		const ctx = setup("ok");
+		const previous = process.env[CLAUDE_CODE_BIN_ENV];
+		process.env[CLAUDE_CODE_BIN_ENV] = ctx.bin;
+		try {
+			const res = await handleClaudeCodeEndpointRequest(
+				chatRequest({
+					model: "opus",
+					messages: [{ role: "user", content: "hi" }],
+				}),
+				"/chat/completions",
+				ctx.endpoint,
+			);
+			expect(res.status).toBe(200);
+			expect(fake?.invocations().length).toBe(1);
+		} finally {
+			if (previous === undefined) delete process.env[CLAUDE_CODE_BIN_ENV];
+			else process.env[CLAUDE_CODE_BIN_ENV] = previous;
+		}
+	});
+});
+
 describe("failures", () => {
 	test("non-zero exit is a 502 carrying the stderr tail", async () => {
 		const ctx = setup("exit3");
@@ -498,6 +524,22 @@ describe("concurrency, timeout and abort", () => {
 		expect(res.status).toBe(504);
 		const body = (await res.json()) as { error: { code: string } };
 		expect(body.error.code).toBe("timeout");
+		const [inv] = fake?.invocations() ?? [];
+		await waitFor(
+			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
+		);
+	});
+
+	test("a process that ignores SIGTERM is killed after the grace period", async () => {
+		const ctx = setup("ignore-term", { timeout_ms: 300 });
+		const started = Date.now();
+		const res = await call(ctx, {
+			model: "opus",
+			messages: [{ role: "user", content: "hi" }],
+		});
+		expect(res.status).toBe(504);
+		// timeout 300ms + killGraceMs 300ms: the answer cannot come earlier.
+		expect(Date.now() - started).toBeGreaterThanOrEqual(550);
 		const [inv] = fake?.invocations() ?? [];
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),

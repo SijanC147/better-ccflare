@@ -7,7 +7,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type FakeMode = "ok" | "hang" | "hang-after-text" | "exit3" | "is-error";
+export type FakeMode =
+	| "ok"
+	| "hang"
+	| "hang-after-text"
+	| "ignore-term"
+	| "exit3"
+	| "is-error";
 
 export interface FakeInvocation {
 	argv: string[];
@@ -55,14 +61,15 @@ const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 
 const sessionId = flag("--resume") ?? flag("--session-id") ?? "no-session";
 const stdin = await Bun.stdin.text();
 let childPid = null;
-if (cfg.mode === "hang" || cfg.mode === "hang-after-text") {
+if (cfg.mode === "hang" || cfg.mode === "hang-after-text" || cfg.mode === "ignore-term") {
   childPid = spawn("sleep", ["300"], { stdio: "ignore" }).pid;
 }
 fs.appendFileSync(cfg.log, JSON.stringify({ argv, cwd: process.cwd(), stdin, pid: process.pid, childPid }) + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 out({ type: "system", subtype: "init", session_id: sessionId });
 if (cfg.mode === "exit3") { process.stderr.write("boom: something broke\\n"); process.exit(3); }
-if (cfg.mode === "hang") { setInterval(() => {}, 1000); await new Promise(() => {}); }
+if (cfg.mode === "ignore-term") { process.on("SIGTERM", () => {}); }
+if (cfg.mode === "hang" || cfg.mode === "ignore-term") { setInterval(() => {}, 1000); await new Promise(() => {}); }
 out({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
 for (const t of cfg.textDeltas) {
   out({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: t } } });
