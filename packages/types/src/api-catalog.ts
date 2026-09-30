@@ -649,13 +649,15 @@ export const API_ROUTES: ApiRoute[] = [
 		method: "GET",
 		path: "/api/config/request-storage",
 		category: "Config",
-		summary: "Whether request and response payloads are stored.",
+		summary:
+			"The headers-only and store_payloads switches, and what each request's payload row persists as a result.",
 	},
 	{
 		method: "POST",
 		path: "/api/config/request-storage",
 		category: "Config",
-		summary: "Turn payload storage on or off.",
+		summary:
+			"Turn headers-only storage on or off: headers kept, bodies dropped.",
 	},
 	{
 		method: "GET",

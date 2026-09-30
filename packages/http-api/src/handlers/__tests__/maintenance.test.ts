@@ -16,11 +16,13 @@ function makeConfig(
 	payloadDays = 3,
 	requestDays = 90,
 	storePayloads?: boolean,
+	headersOnly = false,
 ) {
 	return {
 		getDataRetentionDays: () => payloadDays,
 		getRequestRetentionDays: () => requestDays,
 		getStorePayloads: () => storePayloads ?? true,
+		getRequestStorageHeadersOnly: () => headersOnly,
 	} as unknown as import("@better-ccflare/config").Config;
 }
 
@@ -220,6 +222,24 @@ describe("createCleanupHandler", () => {
 			const [payloadMs] = (dbOps.cleanupOldRequests as ReturnType<typeof mock>)
 				.mock.calls[0];
 			expect(payloadMs).toBe(0);
+		});
+
+		// SB23-2572: headers-only rows are written with store_payloads off, so a
+		// manual cleanup there must honour the retention window rather than
+		// treating "store_payloads off" as "no payloads should exist".
+		it("keeps the retention window when storePayloads=false but headers-only is on", async () => {
+			const dbOps = makeDbOps();
+			const handler = createCleanupHandler(
+				dbOps,
+				makeConfig(3, 90, false, true),
+			);
+			const response = await handler();
+			const body = (await response.json()) as Record<string, unknown>;
+
+			const [payloadMs] = (dbOps.cleanupOldRequests as ReturnType<typeof mock>)
+				.mock.calls[0];
+			expect(payloadMs).toBe(3 * 24 * 60 * 60 * 1000);
+			expect(typeof body.payloadCutoffIso).toBe("string");
 		});
 
 		it("payloadCutoffIso is a valid ISO string when storePayloads=true", async () => {

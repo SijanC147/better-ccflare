@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { sanitizeResponseHeaders } from "./headers";
+import {
+	isCredentialHeaderName,
+	REDACTED_HEADER_VALUE,
+	redactRequestHeadersForStorage,
+	sanitizeRequestHeaders,
+	sanitizeResponseHeaders,
+} from "./headers";
 
 describe("sanitizeResponseHeaders", () => {
 	test("drops credential-bearing response headers", () => {
@@ -42,5 +48,117 @@ describe("sanitizeResponseHeaders", () => {
 		const out = sanitizeResponseHeaders(input);
 		expect(out).not.toBe(input);
 		expect(input["set-cookie"]).toBe("session=abc");
+	});
+});
+
+describe("sanitizeRequestHeaders", () => {
+	test("redacts credential values and keeps the names", () => {
+		const out = Object.fromEntries(
+			sanitizeRequestHeaders(
+				new Headers({
+					authorization: "Bearer sk-ant-oat-secret",
+					"x-api-key": "sk-ant-api-secret",
+					"proxy-authorization": "Basic cHJveHk=",
+					cookie: "session=abc",
+					"cf-access-jwt-assertion": "eyJhbGciOi.jwt.sig",
+					"cf-access-client-secret": "cf-secret",
+					"x-goog-api-key": "goog-secret",
+					"x-auth-token": "auth-secret",
+					"x-better-ccflare-internal-probe-secret": "probe-secret",
+					"user-agent": "claude-cli/2.1.0 (external, cli)",
+					"anthropic-version": "2023-06-01",
+				}),
+			).entries(),
+		);
+		expect(out).toEqual({
+			authorization: REDACTED_HEADER_VALUE,
+			"x-api-key": REDACTED_HEADER_VALUE,
+			"proxy-authorization": REDACTED_HEADER_VALUE,
+			cookie: REDACTED_HEADER_VALUE,
+			"cf-access-jwt-assertion": REDACTED_HEADER_VALUE,
+			"cf-access-client-secret": REDACTED_HEADER_VALUE,
+			"x-goog-api-key": REDACTED_HEADER_VALUE,
+			"x-auth-token": REDACTED_HEADER_VALUE,
+			"x-better-ccflare-internal-probe-secret": REDACTED_HEADER_VALUE,
+			"user-agent": "claude-cli/2.1.0 (external, cli)",
+			"anthropic-version": "2023-06-01",
+		});
+	});
+
+	test("drops hop-by-hop and compression headers", () => {
+		const out = sanitizeRequestHeaders(
+			new Headers({
+				"accept-encoding": "gzip",
+				"content-length": "12",
+				"transfer-encoding": "chunked",
+				"content-encoding": "gzip",
+				accept: "*/*",
+			}),
+		);
+		expect(Object.fromEntries(out.entries())).toEqual({ accept: "*/*" });
+	});
+
+	test("keeps x-better-ccflare control headers the collector reads", () => {
+		const out = sanitizeRequestHeaders(
+			new Headers({ "x-better-ccflare-project": "better-ccflare" }),
+		);
+		expect(out.get("x-better-ccflare-project")).toBe("better-ccflare");
+	});
+});
+
+describe("isCredentialHeaderName", () => {
+	test("matches the named set and the suffix rule, case-insensitively", () => {
+		for (const name of [
+			"Authorization",
+			"X-API-KEY",
+			"api-key",
+			"Cookie",
+			"x-csrf-token",
+			"x-client-secret",
+			"db-password",
+			"token",
+		]) {
+			expect(isCredentialHeaderName(name)).toBe(true);
+		}
+	});
+
+	test("does not match ordinary headers", () => {
+		for (const name of [
+			"user-agent",
+			"anthropic-beta",
+			"x-stainless-os",
+			"x-claude-code-session-id",
+			"keyboard",
+			"tokenizer",
+			"x-better-ccflare-project",
+		]) {
+			expect(isCredentialHeaderName(name)).toBe(false);
+		}
+	});
+});
+
+describe("redactRequestHeadersForStorage", () => {
+	test("redacts credentials and every x-better-ccflare-* header, keeps the rest", () => {
+		const input = {
+			Authorization: "Bearer raw",
+			"x-api-key": "raw-key",
+			"x-better-ccflare-local-control-secret": "local",
+			"X-Better-CCFlare-Project": "p",
+			"user-agent": "curl/8",
+		};
+		expect(redactRequestHeadersForStorage(input)).toEqual({
+			Authorization: REDACTED_HEADER_VALUE,
+			"x-api-key": REDACTED_HEADER_VALUE,
+			"x-better-ccflare-local-control-secret": REDACTED_HEADER_VALUE,
+			"X-Better-CCFlare-Project": REDACTED_HEADER_VALUE,
+			"user-agent": "curl/8",
+		});
+		// A copy: the collector still reads the original set after this runs.
+		expect(input.Authorization).toBe("Bearer raw");
+	});
+
+	test("returns an empty object for a missing header set", () => {
+		expect(redactRequestHeadersForStorage(undefined)).toEqual({});
+		expect(redactRequestHeadersForStorage(null)).toEqual({});
 	});
 });

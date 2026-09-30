@@ -24,6 +24,7 @@ import type {
 	Project,
 	RequestPayload,
 	RequestResponse,
+	RequestStorageGetResponse,
 	RequestTransformer,
 	StatsWithAccounts,
 	UsageHistoryResponse,
@@ -2254,14 +2255,14 @@ class API extends HttpClient {
 		}
 	}
 
-	async getRequestStorage(): Promise<{ headersOnly: boolean }> {
+	async getRequestStorage(): Promise<RequestStorageGetResponse> {
 		const startTime = Date.now();
 		const url = "/api/config/request-storage";
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<{ headersOnly: boolean }>(url);
+			const response = await this.get<RequestStorageGetResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;

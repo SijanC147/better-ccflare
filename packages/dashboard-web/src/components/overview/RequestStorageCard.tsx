@@ -1,3 +1,4 @@
+import type { PayloadPersistence } from "@better-ccflare/types";
 import { useRequestStorage, useSetRequestStorage } from "../../hooks/queries";
 import {
 	Card,
@@ -7,6 +8,12 @@ import {
 	CardTitle,
 } from "../ui/card";
 import { Switch } from "../ui/switch";
+
+const PERSISTS_LABEL: Record<PayloadPersistence, string> = {
+	full: "Headers, bodies and metadata are stored for each request.",
+	headers: "Headers and metadata are stored for each request; bodies are not.",
+	none: "No headers or bodies are stored. Payload storage and headers-only mode are both off.",
+};
 
 export function RequestStorageCard() {
 	const { data, isLoading } = useRequestStorage();
@@ -27,8 +34,9 @@ export function RequestStorageCard() {
 					<div>
 						<p className="text-sm font-medium">Headers-only mode</p>
 						<p className="text-xs text-muted-foreground">
-							When enabled, request/response bodies are excluded from the log.
-							Headers are always stored.
+							When enabled, each request keeps its headers and metadata and
+							drops both bodies, whether or not payload storage is on.
+							Credential headers are stored as [redacted].
 						</p>
 					</div>
 					<Switch
@@ -39,6 +47,12 @@ export function RequestStorageCard() {
 						}
 					/>
 				</div>
+
+				{data?.persists && (
+					<p className="text-xs text-muted-foreground">
+						{PERSISTS_LABEL[data.persists]}
+					</p>
+				)}
 
 				{setRequestStorage.isError && (
 					<p className="text-xs text-destructive">
