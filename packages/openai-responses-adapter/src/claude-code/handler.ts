@@ -5,6 +5,8 @@
  * client; tool activity stays inside the CLI.
  */
 import crypto from "node:crypto";
+import { existsSync } from "node:fs";
+import os from "node:os";
 import {
 	CLAUDE_CODE_BIN_ENV,
 	CLAUDE_CODE_DEFAULT_MODEL_ID,
@@ -113,6 +115,35 @@ interface Launch {
 	events: AsyncGenerator<RunEvent, void, undefined>;
 	/** Idempotent. Kills the process group if it is still running. */
 	dispose: () => void;
+}
+
+/**
+ * Where the `claude` CLI is, for a server that usually runs under launchd,
+ * whose PATH is only /usr/bin:/bin:/usr/sbin:/sbin. Measured 2026-09-30: the
+ * Homebrew service plist sets no PATH, and the official installer puts the
+ * CLI in ~/.local/bin, so a bare "claude" is ENOENT under the service while
+ * working in every terminal. Order: the explicit override, then PATH, then
+ * the installer's and Homebrew's locations, then ~/bin.
+ */
+export function resolveClaudeCodeBin(
+	env: Record<string, string | undefined> = process.env,
+	which: (cmd: string) => string | null = (cmd) => Bun.which(cmd),
+	exists: (path: string) => boolean = existsSync,
+	home: string = os.homedir(),
+): string {
+	const explicit = env[CLAUDE_CODE_BIN_ENV];
+	if (explicit) return explicit;
+	const onPath = which("claude");
+	if (onPath) return onPath;
+	for (const candidate of [
+		`${home}/.local/bin/claude`,
+		"/opt/homebrew/bin/claude",
+		"/usr/local/bin/claude",
+		`${home}/bin/claude`,
+	]) {
+		if (exists(candidate)) return candidate;
+	}
+	return "claude";
 }
 
 function killGroup(pid: number, signal: NodeJS.Signals): void {
@@ -519,7 +550,7 @@ export async function handleClaudeCodeEndpointRequest(
 	const prompt = resumeId ? lastMessage.text : flattenConversation(messages);
 	const system = systemText(messages);
 
-	const bin = deps.bin ?? process.env[CLAUDE_CODE_BIN_ENV] ?? "claude";
+	const bin = deps.bin ?? resolveClaudeCodeBin();
 	const argv = [
 		bin,
 		"-p",
