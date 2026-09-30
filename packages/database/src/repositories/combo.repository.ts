@@ -14,6 +14,17 @@ import {
 } from "@better-ccflare/types";
 import { BaseRepository } from "./base.repository";
 
+/**
+ * Every column `toComboSlot` maps, for every SELECT that feeds it. One list,
+ * because a column missing from a SELECT is not an error: `toComboSlot` maps it
+ * to null, and a null threshold means "no threshold". The family-combo read
+ * listed its own six columns and dropped both thresholds that way, so per-slot
+ * throttles never fired on family routing while every other read showed them
+ * as set (SB23-3390).
+ */
+const COMBO_SLOT_COLUMNS =
+	"id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms";
+
 export class ComboRepository extends BaseRepository<Combo> {
 	// ── Combo CRUD ──────────────────────────────────────────────────────────
 
@@ -107,7 +118,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 			[id, comboId, accountId, model, priority],
 		);
 		const row = await this.get<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms FROM combo_slots WHERE id = ?`,
+			`SELECT ${COMBO_SLOT_COLUMNS} FROM combo_slots WHERE id = ?`,
 			[id],
 		);
 		if (!row) throw new Error(`Failed to create combo slot`);
@@ -162,7 +173,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 		);
 
 		const row = await this.get<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms FROM combo_slots WHERE id = ?`,
+			`SELECT ${COMBO_SLOT_COLUMNS} FROM combo_slots WHERE id = ?`,
 			[slotId],
 		);
 		if (!row) throw new Error(`Combo slot not found: ${slotId}`);
@@ -175,7 +186,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 
 	async getSlots(comboId: string): Promise<ComboSlot[]> {
 		const rows = await this.query<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled, max_utilization_percent, min_reset_remaining_ms
+			`SELECT ${COMBO_SLOT_COLUMNS}
        FROM combo_slots WHERE combo_id = ? ORDER BY priority ASC`,
 			[comboId],
 		);
@@ -249,7 +260,7 @@ export class ComboRepository extends BaseRepository<Combo> {
 		if (!comboRow) return null;
 
 		const slotRows = await this.query<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled
+			`SELECT ${COMBO_SLOT_COLUMNS}
        FROM combo_slots
        WHERE combo_id = ? AND enabled = 1
        ORDER BY priority ASC`,
