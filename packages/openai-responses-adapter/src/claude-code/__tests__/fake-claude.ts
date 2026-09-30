@@ -100,7 +100,10 @@ process.exit(cfg.mode === "is-error" ? 1 : 0);
 				.map((line) => JSON.parse(line) as FakeInvocation);
 		},
 		cleanup() {
-			Bun.spawnSync(["trash", dir]);
+			// `dir` came from mkdtemp above, so removing it cannot touch anything
+			// else. `trash` is macOS-only; the CI runner is Linux.
+			if (Bun.which("trash")) Bun.spawnSync(["trash", dir]);
+			else fs.rmSync(dir, { recursive: true, force: true });
 		},
 	};
 }
