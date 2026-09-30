@@ -56,6 +56,7 @@ import {
 import {
 	dispatchOpenAIGatewayRequest,
 	handleChatCompletionsRequest,
+	handleClaudeCodeEndpointRequest,
 	handleResponsesRequest,
 	isOpenAIChatCompletionsRequest,
 	isOpenAIGatewayPath,
@@ -114,14 +115,17 @@ import {
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
+	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
 	GATEWAY_COMBO_HEADER,
 	GATEWAY_REQUIRE_MODEL_HEADER,
 	type LoadBalancingStrategy,
 	matchOpenAIGatewayAliasPath,
 	matchOpenAIGatewayPath,
 	OPENAI_GATEWAYS_CONFIG_KEY,
+	parseClaudeCodeEndpoints,
 	parseOpenAIGateways,
 	type RetentionStatus,
+	resolveClaudeCodeEndpoint,
 	StrategyName,
 	type StrategyStore,
 } from "@better-ccflare/types";
@@ -1919,6 +1923,36 @@ export default async function startServer(options?: {
 						// a config edit applies at once.
 						if (isOpenAIGatewayPath(url.pathname)) {
 							const gatewayMatch = matchOpenAIGatewayPath(url.pathname);
+							// Claude Code project endpoints share the `/<name>/v1`
+							// namespace with gateways and are answered by running the
+							// host's `claude` CLI in the endpoint's directory rather
+							// than by an account in the pool. The API refuses a name
+							// that exists in both, so the order here only matters for
+							// a hand-edited config.
+							if (gatewayMatch) {
+								const { endpoints, errors: endpointErrors } =
+									parseClaudeCodeEndpoints(
+										config.getObjectSetting(CLAUDE_CODE_ENDPOINTS_CONFIG_KEY),
+									);
+								for (const error of endpointErrors) {
+									if (!reportedGatewayConfigErrors.has(error)) {
+										reportedGatewayConfigErrors.add(error);
+										log.warn(`Skipping Claude Code endpoint config: ${error}`);
+									}
+								}
+								if (Object.hasOwn(endpoints, gatewayMatch.name)) {
+									return trackStreamForShutdown(
+										await handleClaudeCodeEndpointRequest(
+											req,
+											gatewayMatch.rest,
+											resolveClaudeCodeEndpoint(
+												gatewayMatch.name,
+												endpoints[gatewayMatch.name],
+											),
+										),
+									);
+								}
+							}
 							const { gateways, errors } = parseOpenAIGateways(
 								config.getObjectSetting(OPENAI_GATEWAYS_CONFIG_KEY),
 							);

@@ -518,6 +518,31 @@ With a model set, `GET /models` lists exactly those names, and a request naming 
 
 Gateways are read from the config on every request, so an edit applies without a restart. An invalid entry is skipped with a warning in the log and does not disable the others. `GET /api/openai-gateways` lists the configured gateways.
 
+#### Claude Code project endpoints
+
+A Claude Code endpoint answers OpenAI requests by running the host's own `claude` CLI inside a project directory, instead of forwarding to an account in the pool. Add them in the dashboard under **Settings → Claude Code endpoints**, through `PUT /api/claude-code-endpoints/<name>`, or in the config file:
+
+```json
+{
+  "claude_code_endpoints": {
+    "myproject": {
+      "directory": "/Users/me/Code/myproject",
+      "models": ["default", "opus", "sonnet"],
+      "permission_mode": "bypassPermissions"
+    }
+  }
+}
+```
+
+A client then uses `http://<host>:8080/myproject/v1` as its base URL. `GET /models` lists the endpoint's `models`, where `default` means the CLI's own default model. `POST /chat/completions` runs `claude -p --output-format stream-json` in `directory` and translates the output, streaming or not. better-ccflare does not choose credentials for the CLI: it runs as the service user and authenticates however that user's Claude Code is set up.
+
+- **Multi-turn chats resume the Claude session.** The server remembers which session answered a conversation, and the next request with the same history sends only the new message with `--resume`. The mapping is in memory, so after a restart the first request of an old conversation starts a new session with the history flattened into the prompt.
+- **Tools run on the host.** `permission_mode` is passed to `--permission-mode` and defaults to `bypassPermissions`, which lets Claude edit files and run commands in that directory for anyone who can reach the endpoint. Use `plan` or `default` for read-mostly use, or restrict tools with `extra_args` such as `["--allowedTools", "Read,Glob,Grep"]`.
+- `extra_args` are appended to the command line as given, never through a shell. `["--bare"]` skips the user's hooks, plugins and CLAUDE.md discovery.
+- `max_concurrency` (default 2) caps simultaneous `claude` processes per endpoint; the next request gets a 429. `timeout_ms` (default 10 minutes) kills the process group, as does a client disconnect.
+- Client function tools, `n` greater than 1, and image or audio content are refused with a 400.
+- Endpoint names share the `/<name>/v1` namespace with named gateways, so one name cannot be both.
+
 ### SSL/HTTPS Configuration
 
 To enable HTTPS with better-ccflare, you'll need SSL certificates. Here are your options:

@@ -6,6 +6,11 @@ export {
 	isOpenAIGatewayPath,
 	type OpenAIGatewayOptions,
 } from "./chat/handler";
+export {
+	type ClaudeCodeRunnerDeps,
+	handleClaudeCodeEndpointRequest,
+	resetClaudeCodeRunnerStateForTests,
+} from "./claude-code";
 export { handleResponsesRequest } from "./handler";
 export type {
 	HandleProxyFn,

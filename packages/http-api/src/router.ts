@@ -71,6 +71,7 @@ import {
 	createApiKeysStatsHandler,
 	createApiKeyUpdateRoleHandler,
 } from "./handlers/api-keys";
+import { createClaudeCodeEndpointHandlers } from "./handlers/claude-code-endpoints";
 import {
 	createComboCreateHandler,
 	createComboDeleteHandler,
@@ -341,6 +342,7 @@ export class APIRouter {
 		const openObserveConfigHandlers = createOpenObserveConfigHandlers(config);
 		const retryConfigHandlers = createRetryConfigHandlers(config);
 		const openAIGatewayHandlers = createOpenAIGatewayHandlers(config);
+		const claudeCodeEndpointHandlers = createClaudeCodeEndpointHandlers(config);
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -606,6 +608,12 @@ export class APIRouter {
 		// prefix in handleRequest().
 		this.handlers.set("GET:/api/openai-gateways", () =>
 			openAIGatewayHandlers.listGateways(),
+		);
+		// Claude Code project endpoints. GET, PUT and DELETE of one endpoint
+		// carry the name in the path and are dispatched under the
+		// /api/claude-code-endpoints/ prefix in handleRequest().
+		this.handlers.set("GET:/api/claude-code-endpoints", () =>
+			claudeCodeEndpointHandlers.listEndpoints(),
 		);
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
@@ -1182,6 +1190,37 @@ export class APIRouter {
 			// DELETE /api/openai-gateways/:name
 			if (parts.length === 4 && method === "DELETE") {
 				return await this.wrapHandler(() => handlers.deleteGateway(name))(
+					req,
+					url,
+				);
+			}
+		}
+
+		// Check for dynamic Claude Code endpoints (/api/claude-code-endpoints/:name)
+		if (path.startsWith("/api/claude-code-endpoints/")) {
+			const parts = path.split("/");
+			const name = decodeURIComponent(parts[3]);
+			const handlers = createClaudeCodeEndpointHandlers(this.context.config);
+
+			// GET /api/claude-code-endpoints/:name
+			if (parts.length === 4 && method === "GET") {
+				return await this.wrapHandler(() => handlers.getEndpoint(name))(
+					req,
+					url,
+				);
+			}
+
+			// PUT /api/claude-code-endpoints/:name
+			if (parts.length === 4 && method === "PUT") {
+				return await this.wrapHandler((req) => handlers.putEndpoint(req, name))(
+					req,
+					url,
+				);
+			}
+
+			// DELETE /api/claude-code-endpoints/:name
+			if (parts.length === 4 && method === "DELETE") {
+				return await this.wrapHandler(() => handlers.deleteEndpoint(name))(
 					req,
 					url,
 				);

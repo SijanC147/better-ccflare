@@ -742,6 +742,36 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "GET",
+		path: "/api/claude-code-endpoints",
+		category: "Config",
+		summary:
+			"Claude Code project endpoints, each a name mapped to a host directory and served at /<name>/v1, plus stored entries skipped as invalid.",
+	},
+	{
+		method: "GET",
+		path: "/api/claude-code-endpoints/:name",
+		category: "Config",
+		summary:
+			"One Claude Code project endpoint with its base path and whether its directory exists.",
+	},
+	{
+		method: "PUT",
+		path: "/api/claude-code-endpoints/:name",
+		category: "Config",
+		summary:
+			"Create or replace one Claude Code project endpoint. The directory must exist; a name held by an OpenAI gateway is refused with 409.",
+		bodyHint:
+			'{"directory": "/abs/path/to/project", "models": ["default", "sonnet"], "permission_mode": "bypassPermissions", "max_concurrency": 2}',
+	},
+	{
+		method: "DELETE",
+		path: "/api/claude-code-endpoints/:name",
+		category: "Config",
+		summary: "Delete one Claude Code project endpoint.",
+		dangerous: true,
+	},
+	{
+		method: "GET",
 		path: "/api/config/model-capacity-routing",
 		category: "Config",
 		summary: "Whether routing considers model capacity.",
