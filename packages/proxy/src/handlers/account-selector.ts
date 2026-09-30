@@ -913,6 +913,12 @@ export async function selectAccountsForRequest(
 			log.warn(
 				`Gateway combo "${gatewayComboName}" does not exist or is disabled - refusing rather than routing to the whole pool`,
 			);
+			setComboSlotInfo(meta, {
+				comboName: gatewayComboName,
+				slots: [],
+				gatewayLadder: true,
+			});
+			meta.comboName = gatewayComboName;
 			return [];
 		}
 		const { availableAccounts, slotEntries } = await collectAvailableComboSlots(
@@ -925,6 +931,7 @@ export async function selectAccountsForRequest(
 		setComboSlotInfo(meta, {
 			comboName: combo.name,
 			slots: slotEntries.filter((entry) => kept.has(entry.accountId)),
+			gatewayLadder: true,
 		});
 		meta.comboName = combo.name;
 		if (routed.length === 0) {

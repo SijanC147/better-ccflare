@@ -139,6 +139,7 @@ describe("selectAccountsForRequest — gateway combo", () => {
 			{ accountId: "cdx-b", modelOverride: "gpt-5.5" },
 		]);
 		expect(m.comboName).toBe("GptStandard");
+		expect(getComboSlotInfo(m)?.gatewayLadder).toBe(true);
 		expect(getActiveComboForFamily).not.toHaveBeenCalled();
 	});
 
@@ -149,12 +150,13 @@ describe("selectAccountsForRequest — gateway combo", () => {
 				combos,
 				slots: [slot("s1", "cdx-a", "gpt-5.5", 0)],
 			});
-			const selected = await selectAccountsForRequest(
-				meta({ [GATEWAY_COMBO_HEADER]: "GptStandard" }),
-				ctx,
-				"gpt-5.5",
-			);
+			const m = meta({ [GATEWAY_COMBO_HEADER]: "GptStandard" });
+			const selected = await selectAccountsForRequest(m, ctx, "gpt-5.5");
 			expect(selected).toEqual([]);
+			// Marked so proxy.ts answers with the combo refusal, not as pool
+			// exhaustion with a Retry-After that waiting never satisfies.
+			expect(m.comboName).toBe("GptStandard");
+			expect(getComboSlotInfo(m)?.gatewayLadder).toBe(true);
 		}
 	});
 
