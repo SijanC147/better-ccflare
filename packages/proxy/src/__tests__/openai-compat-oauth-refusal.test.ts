@@ -37,11 +37,18 @@ import * as usageCollectorModule from "../usage-collector";
 
 let collectorSpy: { mockRestore(): void } | null = null;
 
+/** The real `fetch`, captured before any test can replace it. */
+const ORIGINAL_FETCH = globalThis.fetch;
+
 // An unrestored spy leaves getUsageCollector stubbed for every test file that
-// runs later in the process (SB23-2776).
+// runs later in the process (SB23-2776). The same holds for the `fetch` stub
+// below, so its restore is checked here rather than trusted.
 afterEach(() => {
 	if (collectorSpy) collectorSpy.mockRestore();
 	collectorSpy = null;
+	const leaked = globalThis.fetch !== ORIGINAL_FETCH;
+	globalThis.fetch = ORIGINAL_FETCH;
+	expect(leaked).toBe(false);
 });
 
 function stubUsageCollector() {
