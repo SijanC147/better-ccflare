@@ -11,6 +11,8 @@ import type {
 	AnalyticsResponse,
 	AnomalyInsightsResponse,
 	CacheInsightsResponse,
+	ClaudeCodeEndpointConfig,
+	ClaudeCodeEndpointListing,
 	Combo,
 	ComboFamilyAssignment,
 	ComboSlot,
@@ -284,6 +286,13 @@ export interface ReauthNeededResponse {
 	data: {
 		accounts: TokenHealthResponse[];
 	};
+}
+
+/** What `GET /api/claude-code-endpoints` returns. */
+export interface ClaudeCodeEndpointsResponse {
+	endpoints: ClaudeCodeEndpointListing[];
+	/** Config entries the server skipped, each with the reason. */
+	errors: string[];
 }
 
 class API extends HttpClient {
@@ -3115,6 +3124,30 @@ class API extends HttpClient {
 		const url = "/api/config/retry";
 		this.logger.debug(`→ POST ${url}`);
 		await this.post(url, settings);
+	}
+
+	// Claude Code project endpoints: an endpoint name mapped to a directory on
+	// the host, answered by running `claude -p` there.
+	async getClaudeCodeEndpoints(): Promise<ClaudeCodeEndpointsResponse> {
+		const url = "/api/claude-code-endpoints";
+		this.logger.debug(`→ GET ${url}`);
+		return await this.get<ClaudeCodeEndpointsResponse>(url);
+	}
+
+	/** Creates the endpoint, or replaces the one with this name. */
+	async putClaudeCodeEndpoint(
+		name: string,
+		config: ClaudeCodeEndpointConfig,
+	): Promise<ClaudeCodeEndpointListing> {
+		const url = `/api/claude-code-endpoints/${encodeURIComponent(name)}`;
+		this.logger.debug(`→ PUT ${url}`);
+		return await this.put<ClaudeCodeEndpointListing>(url, config);
+	}
+
+	async deleteClaudeCodeEndpoint(name: string): Promise<void> {
+		const url = `/api/claude-code-endpoints/${encodeURIComponent(name)}`;
+		this.logger.debug(`→ DELETE ${url}`);
+		await this.delete(url);
 	}
 
 	// PostgreSQL configuration
