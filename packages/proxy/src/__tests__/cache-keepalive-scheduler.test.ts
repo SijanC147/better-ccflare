@@ -50,7 +50,11 @@ const mockRegisterHeartbeat = mock((opts: HeartbeatOpts) => {
 	return mockUnregister;
 });
 
-const actualCore = await import("@better-ccflare/core");
+// A snapshot of the exports, taken before the first mock.module call. The
+// namespace object itself is live-updated by mock.module, so restoring with
+// `() => <namespace>` hands the stub straight back and leaks it into every
+// test file that runs later in the process (SB23-2776).
+const actualCore = { ...(await import("@better-ccflare/core")) };
 
 mock.module("@better-ccflare/core", () => ({
 	...actualCore,

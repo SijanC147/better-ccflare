@@ -1,4 +1,4 @@
-import { describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { Provider } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
@@ -35,10 +35,22 @@ import * as usageCollectorModule from "../usage-collector";
  * it is reachable, or whether its condition is the right one.
  */
 
+let collectorSpy: { mockRestore(): void } | null = null;
+
+// An unrestored spy leaves getUsageCollector stubbed for every test file that
+// runs later in the process (SB23-2776).
+afterEach(() => {
+	if (collectorSpy) collectorSpy.mockRestore();
+	collectorSpy = null;
+});
+
 function stubUsageCollector() {
 	const handleStart = mock((_event: unknown) => {});
 	const handleEnd = mock((_event: unknown) => Promise.resolve());
-	spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue({
+	collectorSpy = spyOn(
+		usageCollectorModule,
+		"getUsageCollector",
+	).mockReturnValue({
 		handleStart,
 		handleChunk: mock(() => {}),
 		handleEnd,
