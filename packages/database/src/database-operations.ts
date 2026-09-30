@@ -2479,7 +2479,13 @@ OAuth tokens will need to be re-authenticated.
 
 	async updateComboSlot(
 		slotId: string,
-		fields: Partial<{ model: string; priority: number; enabled: boolean }>,
+		fields: Partial<{
+			model: string;
+			priority: number;
+			enabled: boolean;
+			max_utilization_percent: number | null;
+			min_reset_remaining_ms: number | null;
+		}>,
 	): Promise<ComboSlot> {
 		return this.combo.updateSlot(slotId, fields);
 	}
