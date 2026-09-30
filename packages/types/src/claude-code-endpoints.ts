@@ -131,15 +131,198 @@ export function claudeCodeEndpointBasePath(name: string): string {
 	return `/${name}/v1`;
 }
 
-/*
- * Implemented by lane A (config + API). Signatures are the contract; bodies
- * are filled in on that lane.
- *
- * validateClaudeCodeEndpointConfig(input: unknown): ClaudeCodeEndpointValidation
- *   Pure: shape and bounds only (directory must be an absolute path string;
- *   existence is checked by the API handler, not here, so config parsing at
- *   boot never touches the filesystem).
- *
- * parseClaudeCodeEndpoints(raw: unknown): { endpoints: ClaudeCodeEndpoints; errors: string[] }
- *   Mirrors parseOpenAIGateways: invalid entries are skipped with an error.
+const MAX_DIRECTORY_LENGTH = 4096;
+const MAX_EXTRA_ARG_LENGTH = 1024;
+const MAX_DESCRIPTION_LENGTH = 500;
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
+/** POSIX absolute, or a Windows drive path. `node:path` stays out of this package: the dashboard bundles it. */
+const ABSOLUTE_PATH_PATTERN = /^(\/|[A-Za-z]:[\\/])/;
+const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
+	"directory",
+	"description",
+	"models",
+	"permission_mode",
+	"extra_args",
+	"max_concurrency",
+	"timeout_ms",
+]);
+
+function refuse(error: string): ClaudeCodeEndpointValidation {
+	return { ok: false, error };
+}
+
+/**
+ * Validates one endpoint's configuration: shape and bounds only. Whether
+ * `directory` exists is the API handler's question, so parsing the config at
+ * boot never touches the filesystem. Unknown keys are refused rather than
+ * dropped, so a typo such as `permission_modes` fails loudly instead of
+ * silently producing an endpoint with the default (permissive) mode.
  */
+export function validateClaudeCodeEndpointConfig(
+	input: unknown,
+): ClaudeCodeEndpointValidation {
+	if (input === null || typeof input !== "object" || Array.isArray(input)) {
+		return refuse("endpoint config must be an object");
+	}
+	const record = input as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		if (!ALLOWED_FIELDS.has(key)) {
+			return refuse(`unknown endpoint field: ${key}`);
+		}
+	}
+
+	const directory = record.directory;
+	if (typeof directory !== "string" || directory.length === 0) {
+		return refuse("directory is required and must be a string");
+	}
+	if (directory.length > MAX_DIRECTORY_LENGTH) {
+		return refuse(`directory holds at most ${MAX_DIRECTORY_LENGTH} characters`);
+	}
+	if (directory.includes("\0")) {
+		return refuse("directory must not contain a NUL character");
+	}
+	if (!ABSOLUTE_PATH_PATTERN.test(directory)) {
+		return refuse(
+			`directory must be an absolute path; got ${JSON.stringify(directory)}`,
+		);
+	}
+	const value: ClaudeCodeEndpointConfig = { directory };
+
+	if (record.description !== undefined) {
+		if (typeof record.description !== "string") {
+			return refuse("description must be a string");
+		}
+		if (record.description.length > MAX_DESCRIPTION_LENGTH) {
+			return refuse(
+				`description holds at most ${MAX_DESCRIPTION_LENGTH} characters`,
+			);
+		}
+		value.description = record.description;
+	}
+
+	if (record.models !== undefined) {
+		const raw = record.models;
+		if (!Array.isArray(raw)) return refuse("models must be an array");
+		if (raw.length === 0) {
+			return refuse(
+				"models must name at least one model; omit it to use the defaults",
+			);
+		}
+		if (raw.length > MAX_CLAUDE_CODE_MODELS) {
+			return refuse(`models holds at most ${MAX_CLAUDE_CODE_MODELS} entries`);
+		}
+		const seen = new Set<string>();
+		for (const entry of raw) {
+			if (typeof entry !== "string" || !MODEL_ID_PATTERN.test(entry)) {
+				return refuse(
+					`models entries must be model ids such as "sonnet"; got ${JSON.stringify(entry)}`,
+				);
+			}
+			if (seen.has(entry)) {
+				return refuse(`models entry ${entry} is listed twice`);
+			}
+			seen.add(entry);
+		}
+		value.models = [...seen];
+	}
+
+	if (record.permission_mode !== undefined) {
+		const mode = record.permission_mode;
+		if (
+			typeof mode !== "string" ||
+			!(CLAUDE_CODE_PERMISSION_MODES as readonly string[]).includes(mode)
+		) {
+			return refuse(
+				`permission_mode must be one of ${CLAUDE_CODE_PERMISSION_MODES.join(", ")}; got ${JSON.stringify(mode)}`,
+			);
+		}
+		value.permission_mode = mode as ClaudeCodePermissionMode;
+	}
+
+	if (record.extra_args !== undefined) {
+		const raw = record.extra_args;
+		if (!Array.isArray(raw)) return refuse("extra_args must be an array");
+		if (raw.length > MAX_CLAUDE_CODE_EXTRA_ARGS) {
+			return refuse(
+				`extra_args holds at most ${MAX_CLAUDE_CODE_EXTRA_ARGS} entries`,
+			);
+		}
+		for (const arg of raw) {
+			if (typeof arg !== "string") {
+				return refuse("extra_args entries must be strings");
+			}
+			if (arg.length > MAX_EXTRA_ARG_LENGTH) {
+				return refuse(
+					`extra_args entries hold at most ${MAX_EXTRA_ARG_LENGTH} characters`,
+				);
+			}
+			if (arg.includes("\0")) {
+				return refuse("extra_args entries must not contain a NUL character");
+			}
+		}
+		value.extra_args = [...(raw as string[])];
+	}
+
+	if (record.max_concurrency !== undefined) {
+		const n = record.max_concurrency;
+		if (
+			typeof n !== "number" ||
+			!Number.isInteger(n) ||
+			n < 1 ||
+			n > MAX_CLAUDE_CODE_CONCURRENCY
+		) {
+			return refuse(
+				`max_concurrency must be an integer from 1 to ${MAX_CLAUDE_CODE_CONCURRENCY}`,
+			);
+		}
+		value.max_concurrency = n;
+	}
+
+	if (record.timeout_ms !== undefined) {
+		const n = record.timeout_ms;
+		if (
+			typeof n !== "number" ||
+			!Number.isInteger(n) ||
+			n < MIN_CLAUDE_CODE_TIMEOUT_MS ||
+			n > MAX_CLAUDE_CODE_TIMEOUT_MS
+		) {
+			return refuse(
+				`timeout_ms must be an integer from ${MIN_CLAUDE_CODE_TIMEOUT_MS} to ${MAX_CLAUDE_CODE_TIMEOUT_MS}`,
+			);
+		}
+		value.timeout_ms = n;
+	}
+
+	return { ok: true, value };
+}
+
+/**
+ * Reads the stored map. An invalid entry is left out and reported in
+ * `errors`, never repaired, so one bad endpoint cannot disable the others and
+ * a caller can say exactly which one was skipped.
+ */
+export function parseClaudeCodeEndpoints(raw: unknown): {
+	endpoints: ClaudeCodeEndpoints;
+	errors: string[];
+} {
+	const endpoints: ClaudeCodeEndpoints = {};
+	const errors: string[] = [];
+	if (raw === undefined || raw === null) return { endpoints, errors };
+	if (typeof raw !== "object" || Array.isArray(raw)) {
+		errors.push(`${CLAUDE_CODE_ENDPOINTS_CONFIG_KEY} must be an object`);
+		return { endpoints, errors };
+	}
+	for (const [name, config] of Object.entries(raw as Record<string, unknown>)) {
+		if (!isValidClaudeCodeEndpointName(name)) {
+			errors.push(`invalid endpoint name ${JSON.stringify(name)}`);
+			continue;
+		}
+		const result = validateClaudeCodeEndpointConfig(config);
+		if (!result.ok) {
+			errors.push(`endpoint ${name}: ${result.error}`);
+			continue;
+		}
+		endpoints[name] = result.value;
+	}
+	return { endpoints, errors };
+}
