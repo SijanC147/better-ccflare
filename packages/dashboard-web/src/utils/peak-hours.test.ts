@@ -16,6 +16,11 @@ import {
 } from "./peak-hours";
 import { ANTHROPIC_PEAK_WINDOW, ZAI_PEAK_WINDOW } from "./provider-utils";
 
+/**
+ * The Zai hours without its weekday rule, so the resolver's every-day path
+ * stays covered now that the real Zai window is Monday to Friday.
+ */
+const EVERY_DAY_WINDOW = { ...ZAI_PEAK_WINDOW, weekdaysOnly: false };
 const MALTA = { timeZone: "Europe/Malta", locale: "en-GB", hour12: false };
 const NEW_YORK = { timeZone: "America/New_York", locale: "en-US" };
 
@@ -63,7 +68,7 @@ describe("resolvePeakOccurrence", () => {
 	});
 
 	it("does not skip the weekend for a window without a weekday rule", () => {
-		const occurrence = resolvePeakOccurrence(ZAI_PEAK_WINDOW, SATURDAY_ZAI);
+		const occurrence = resolvePeakOccurrence(EVERY_DAY_WINDOW, SATURDAY_ZAI);
 		expect(occurrence.active).toBe(true);
 		expect(occurrence.start).toBe(Date.parse("2026-09-12T06:00:00Z"));
 		expect(occurrence.end).toBe(Date.parse("2026-09-12T10:00:00Z"));
@@ -71,9 +76,15 @@ describe("resolvePeakOccurrence", () => {
 
 	it("treats the end of the window as exclusive", () => {
 		// SATURDAY is exactly 10:00 UTC, the Zai window's end boundary.
-		const occurrence = resolvePeakOccurrence(ZAI_PEAK_WINDOW, SATURDAY);
+		const occurrence = resolvePeakOccurrence(EVERY_DAY_WINDOW, SATURDAY);
 		expect(occurrence.active).toBe(false);
 		expect(occurrence.start).toBe(Date.parse("2026-09-13T06:00:00Z"));
+	});
+
+	it("skips Singapore's weekend for the real Zai window (Monday to Friday)", () => {
+		const occurrence = resolvePeakOccurrence(ZAI_PEAK_WINDOW, SATURDAY_ZAI);
+		expect(occurrence.active).toBe(false);
+		expect(occurrence.start).toBe(Date.parse("2026-09-14T06:00:00Z"));
 	});
 });
 
@@ -174,7 +185,7 @@ describe("peakHoursLabel", () => {
 	});
 
 	it("localizes the Zai window too, with no weekend gap", () => {
-		const label = peakHoursLabel(ZAI_PEAK_WINDOW, SATURDAY_ZAI, MALTA);
+		const label = peakHoursLabel(EVERY_DAY_WINDOW, SATURDAY_ZAI, MALTA);
 		expect(label.active).toBe(true);
 		expect(label.text).toBe("Peak hours 8:00–12:00");
 		expect(label.countdown).toBe("ends in 2h");

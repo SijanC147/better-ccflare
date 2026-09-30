@@ -74,9 +74,21 @@ function isLocalRefusal(status: number, body: string | null): boolean {
 	}
 }
 
-function isZaiPeakHour(ts = Date.now()): boolean {
-	const d = new Date(ts);
-	const sgtHour = (d.getUTCHours() + d.getUTCMinutes() / 60 + 8) % 24;
+/**
+ * Zai peak pricing window: 14:00-18:00 Singapore time (UTC+8), Monday to
+ * Friday in Singapore. Z.ai's own docs, read 2026-09-30: "Peak hours: Monday to Friday, 14:00–18:00 Singapore Standard Time (UTC+8)" (docs.z.ai/devpack/overview, and the 2026-07-30 plan update at docs.z.ai/devpack/notice/usage-revision). Weekends are off-peak and billed at 50%, so
+ * pausing an account then wastes the cheapest capacity. This supersedes the
+ * every-day rule of SB23-1867, which predates that announcement. The
+ * dashboard's ZAI_PEAK_WINDOW in packages/dashboard-web/src/utils/provider-utils.ts
+ * states the same rule.
+ */
+export function isZaiPeakHour(ts = Date.now()): boolean {
+	// Singapore has no DST, so shifting by a fixed 8 hours gives its wall
+	// clock, and the weekday is Singapore's own rather than UTC's.
+	const sgt = new Date(ts + 8 * 60 * 60 * 1000);
+	const day = sgt.getUTCDay();
+	if (day === 0 || day === 6) return false;
+	const sgtHour = sgt.getUTCHours() + sgt.getUTCMinutes() / 60;
 	return sgtHour >= 14 && sgtHour < 18;
 }
 

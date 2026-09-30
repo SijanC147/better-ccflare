@@ -52,10 +52,11 @@ describe("isZaiPeakHour", () => {
 		}
 	});
 
-	it("still runs at the weekend, unlike the Anthropic window", () => {
-		// Deliberate asymmetry, not an oversight copied from the fix above: Zai's
-		// window may genuinely run every day (SB23-1867, out of scope).
-		expect(isZaiPeakHour(Date.parse("2026-09-12T08:00:00Z"))).toBe(true);
-		expect(isZaiPeakHour(Date.parse("2026-09-13T08:00:00Z"))).toBe(true);
+	it("is off-peak at the weekend, as Z.ai documents (Monday to Friday)", () => {
+		// Sat 2026-09-12 and Sun 2026-09-13, 16:00 SGT: inside the hours, off-peak days.
+		expect(isZaiPeakHour(Date.parse("2026-09-12T08:00:00Z"))).toBe(false);
+		expect(isZaiPeakHour(Date.parse("2026-09-13T08:00:00Z"))).toBe(false);
+		// Fri 2026-09-11 at the same hour is peak.
+		expect(isZaiPeakHour(Date.parse("2026-09-11T08:00:00Z"))).toBe(true);
 	});
 });
