@@ -114,7 +114,10 @@ import {
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
+	GATEWAY_COMBO_HEADER,
+	GATEWAY_REQUIRE_MODEL_HEADER,
 	type LoadBalancingStrategy,
+	matchOpenAIGatewayAliasPath,
 	matchOpenAIGatewayPath,
 	OPENAI_GATEWAYS_CONFIG_KEY,
 	parseOpenAIGateways,
@@ -1730,6 +1733,30 @@ export default async function startServer(options?: {
 				: {}),
 			async fetch(req: Request) {
 				const url = new URL(req.url);
+
+				// The gateway routing headers are internal: only the gateway
+				// handler may set them, on its own synthetic request. A client's
+				// copy is dropped here, before any path can read it, so a direct
+				// /v1/messages or /v1/responses request cannot pick a ladder or
+				// lift the model filter (SB23-3389 review, finding 1).
+				if (
+					req.headers.has(GATEWAY_COMBO_HEADER) ||
+					req.headers.has(GATEWAY_REQUIRE_MODEL_HEADER)
+				) {
+					const headers = new Headers(req.headers);
+					headers.delete(GATEWAY_COMBO_HEADER);
+					headers.delete(GATEWAY_REQUIRE_MODEL_HEADER);
+					req = new Request(req, { headers });
+				}
+
+				// Gateway short form: `/<name>/v1/<rest>` is `/v1/gateways/<name>/<rest>`.
+				// Rewritten here, before the SPA check and the auth layer, so both
+				// classify it by its canonical /v1 path exactly as they classify the
+				// long form, and the gateway branch below serves it unchanged.
+				const gatewayAlias = matchOpenAIGatewayAliasPath(url.pathname);
+				if (gatewayAlias) {
+					url.pathname = `/v1/gateways/${gatewayAlias.name}${gatewayAlias.rest}`;
+				}
 
 				// Serve the dashboard SPA + static assets BEFORE the
 				// authentication-gated API router. The dashboard shell is

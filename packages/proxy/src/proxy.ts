@@ -612,7 +612,11 @@ async function handleProxyRequest(
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
-		if (requestMeta.comboName && isComboSessionFallbackDisabled(ctx)) {
+		if (
+			requestMeta.comboName &&
+			(isComboSessionFallbackDisabled(ctx) ||
+				getComboSlotInfo(requestMeta)?.gatewayLadder === true)
+		) {
 			return await returnComboSessionFallbackDisabled(requestMeta.comboName, 0);
 		}
 
@@ -1031,7 +1035,11 @@ async function handleProxyRequest(
 	//     fall back to normal SessionStrategy routing (REQ-14)
 	let fallbackAccounts: Account[] | null = null;
 	if (filteredComboInfo?.comboName) {
-		if (isComboSessionFallbackDisabled(ctx)) {
+		// A gateway ladder has no session fallback by design (SB23-3389).
+		if (
+			isComboSessionFallbackDisabled(ctx) ||
+			filteredComboInfo.gatewayLadder === true
+		) {
 			log.warn(
 				`All combo slots failed for combo "${filteredComboInfo.comboName}", session fallback disabled by the Combo Session Fallback setting (Settings → Advanced)`,
 			);

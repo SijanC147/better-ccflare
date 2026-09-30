@@ -16,7 +16,12 @@ import type {
 	ComboFamily,
 	ComboSlot,
 	ComboSlotInfo,
+	ComboWithSlots,
 	RequestMeta,
+} from "@better-ccflare/types";
+import {
+	GATEWAY_COMBO_HEADER,
+	GATEWAY_REQUIRE_MODEL_HEADER,
 } from "@better-ccflare/types";
 import { getKnownCodexModels } from "../codex-model-catalog";
 import {
@@ -546,6 +551,108 @@ export async function getOrderedAccounts(
 }
 
 /**
+ * Walk a combo's slots in priority order and keep the ones that can take this
+ * request now: enabled, account known and available, not throttled by the
+ * slot's own rule, and not capacity-excluded for the slot's model. Shared by
+ * family combos and gateway combos so both apply the same slot rules.
+ */
+async function collectAvailableComboSlots(
+	combo: ComboWithSlots,
+	ctx: ProxyContext,
+	model: string,
+): Promise<{
+	availableAccounts: Account[];
+	slotEntries: Array<{ accountId: string; modelOverride: string }>;
+}> {
+	const allAccounts = await ctx.dbOps.getAllAccounts();
+	const accountMap = new Map<string, Account>();
+	for (const account of allAccounts) {
+		accountMap.set(account.id, account);
+	}
+
+	const availableAccounts: Account[] = [];
+	const slotEntries: Array<{
+		accountId: string;
+		modelOverride: string;
+	}> = [];
+	const capacityRoutingEnabled = isCapacityRoutingEnabled(ctx);
+	const capacityNow = Date.now();
+
+	// Slots are already ordered by priority ASC from the repository
+	for (const slot of combo.slots) {
+		if (!slot.enabled) continue;
+
+		const account = accountMap.get(slot.account_id);
+		if (!account) {
+			log.warn(`Combo slot references unknown account ${slot.account_id}`);
+			continue;
+		}
+
+		const slotUsage = usageSnapshot(account);
+
+		if (!isAccountAvailable(account, Date.now(), slotUsage ?? undefined)) {
+			continue;
+		}
+
+		// Per-slot throttle rule (SB23-1269). Distinct from
+		// getUsageThrottleStatus in usage-throttling.ts: that one is
+		// global, pace-based, runs after selection and 529s the whole
+		// request. This one is per-slot, threshold-based, and advances
+		// to the next slot.
+		if (isSlotThrottled(slot, slotUsage, capacityNow)) {
+			log.info(
+				`Combo slot ${slot.id} skipped by its throttle rule (account ${account.name})`,
+			);
+			continue;
+		}
+
+		// Per-slot capacity check uses the slot's own model override
+		// (not the combo family's request model), since slots can carry
+		// distinct concrete models within the same family.
+		if (
+			capacityRoutingEnabled &&
+			isAccountCapacityExcluded(
+				account,
+				// Passthrough slots (empty model) carry no model of their
+				// own: fall back to the request's model, otherwise
+				// getModelFamily("") returns null and this filter would
+				// silently no-op for those slots.
+				slot.model || model,
+				capacityNow,
+			).excluded
+		) {
+			continue;
+		}
+
+		availableAccounts.push(account);
+		slotEntries.push({
+			accountId: slot.account_id,
+			modelOverride: slot.model,
+		});
+	}
+
+	return { availableAccounts, slotEntries };
+}
+
+/**
+ * The enabled combo called `name`, with its enabled slots in priority order,
+ * or null. Slots come from `getComboSlots`, whose SELECT carries the per-slot
+ * throttle columns.
+ */
+async function findEnabledComboByName(
+	ctx: ProxyContext,
+	name: string,
+): Promise<ComboWithSlots | null> {
+	const combos = await ctx.dbOps.listCombos();
+	const combo = combos.find((c) => c.name === name && c.enabled);
+	if (!combo) return null;
+	const slots = (await ctx.dbOps.getComboSlots(combo.id))
+		.filter((slot) => slot.enabled)
+		.sort((x, y) => x.priority - y.priority);
+	return { ...combo, slots };
+}
+
+/**
  * Selects accounts for a request based on the load balancing strategy.
  * When an active combo exists for the request's model family, returns
  * combo-ordered accounts filtered by availability. Falls back to normal
@@ -783,6 +890,62 @@ export async function selectAccountsForRequest(
 	// off, and when the model is forced: a combo slot exists to send a
 	// different model than the one asked for, which is the one thing that
 	// setting forbids.
+	// A gateway model entry that names a combo: the combo's slots ARE this
+	// request's route. It is looked up by name, applies whatever the model's
+	// family, and is independent of the global family-combo switch, because the
+	// operator configured it for this gateway entry specifically. A name that
+	// matches no enabled combo refuses rather than falling through to the whole
+	// pool, and so does an exhausted ladder: widening a request its operator
+	// scoped to one ladder onto every account is the silent fall-through
+	// `mem:a-null-match-must-not-fall-through` records.
+	const gatewayComboName = meta.headers?.get(GATEWAY_COMBO_HEADER)?.trim();
+	if (model && gatewayComboName) {
+		// proxy.ts re-selects with skipCombo once every slot has failed, to fall
+		// back to SessionStrategy. A gateway ladder has no such fallback.
+		if (options?.skipCombo) {
+			log.warn(
+				`Every slot of gateway combo "${gatewayComboName}" failed - not widening to the pool`,
+			);
+			return [];
+		}
+		const combo = await findEnabledComboByName(ctx, gatewayComboName);
+		if (!combo) {
+			log.warn(
+				`Gateway combo "${gatewayComboName}" does not exist or is disabled - refusing rather than routing to the whole pool`,
+			);
+			setComboSlotInfo(meta, {
+				comboName: gatewayComboName,
+				slots: [],
+				gatewayLadder: true,
+			});
+			meta.comboName = gatewayComboName;
+			return [];
+		}
+		const { availableAccounts, slotEntries } = await collectAvailableComboSlots(
+			combo,
+			ctx,
+			model,
+		);
+		const routed = applyExclusions(availableAccounts);
+		const kept = new Set(routed.map((a) => a.id));
+		setComboSlotInfo(meta, {
+			comboName: combo.name,
+			slots: slotEntries.filter((entry) => kept.has(entry.accountId)),
+			gatewayLadder: true,
+		});
+		meta.comboName = combo.name;
+		if (routed.length === 0) {
+			log.warn(
+				`All ${combo.slots.length} slots of gateway combo ${combo.name} are unavailable`,
+			);
+		} else {
+			log.info(
+				`Gateway combo routing: ${combo.name} (${routed.length}/${combo.slots.length} slots available)`,
+			);
+		}
+		return routed;
+	}
+
 	if (
 		model &&
 		!options?.skipCombo &&
@@ -819,76 +982,8 @@ export async function selectAccountsForRequest(
 						`Combo routing active: ${combo.name} for family ${family} (${combo.slots.length} slots, ${passthroughSlots} passthrough)`,
 					);
 
-					const allAccounts = await ctx.dbOps.getAllAccounts();
-					const accountMap = new Map<string, Account>();
-					for (const account of allAccounts) {
-						accountMap.set(account.id, account);
-					}
-
-					const availableAccounts: Account[] = [];
-					const slotEntries: Array<{
-						accountId: string;
-						modelOverride: string;
-					}> = [];
-					const capacityRoutingEnabled = isCapacityRoutingEnabled(ctx);
-					const capacityNow = Date.now();
-
-					// Slots are already ordered by priority ASC from the repository
-					for (const slot of combo.slots) {
-						if (!slot.enabled) continue;
-
-						const account = accountMap.get(slot.account_id);
-						if (!account) {
-							log.warn(
-								`Combo slot references unknown account ${slot.account_id}`,
-							);
-							continue;
-						}
-
-						const slotUsage = usageSnapshot(account);
-
-						if (
-							!isAccountAvailable(account, Date.now(), slotUsage ?? undefined)
-						) {
-							continue;
-						}
-
-						// Per-slot throttle rule (SB23-1269). Distinct from
-						// getUsageThrottleStatus in usage-throttling.ts: that one is
-						// global, pace-based, runs after selection and 529s the whole
-						// request. This one is per-slot, threshold-based, and advances
-						// to the next slot.
-						if (isSlotThrottled(slot, slotUsage, capacityNow)) {
-							log.info(
-								`Combo slot ${slot.id} skipped by its throttle rule (account ${account.name})`,
-							);
-							continue;
-						}
-
-						// Per-slot capacity check uses the slot's own model override
-						// (not the combo family's request model), since slots can carry
-						// distinct concrete models within the same family.
-						if (
-							capacityRoutingEnabled &&
-							isAccountCapacityExcluded(
-								account,
-								// Passthrough slots (empty model) carry no model of their
-								// own: fall back to the request's model, otherwise
-								// getModelFamily("") returns null and this filter would
-								// silently no-op for those slots.
-								slot.model || model,
-								capacityNow,
-							).excluded
-						) {
-							continue;
-						}
-
-						availableAccounts.push(account);
-						slotEntries.push({
-							accountId: slot.account_id,
-							modelOverride: slot.model,
-						});
-					}
+					const { availableAccounts, slotEntries } =
+						await collectAvailableComboSlots(combo, ctx, model);
 
 					// Apply exclusions first, then stamp combo metadata only when
 					// we will actually combo-route; otherwise the fallback path
@@ -939,7 +1034,11 @@ export async function selectAccountsForRequest(
 	// would need a translation is not a candidate — and if that empties the
 	// list, the request fails rather than being served a model nobody asked
 	// for. Switching accounts is still fine; switching models is not.
-	if (model && isForceAccountModelEnabled(ctx)) {
+	// A gateway entry without a combo asks for the same filter for its own
+	// request only, so a GPT id never walks into an Anthropic account.
+	const gatewayRequiresModel =
+		meta.headers?.get(GATEWAY_REQUIRE_MODEL_HEADER) === "1";
+	if (model && (isForceAccountModelEnabled(ctx) || gatewayRequiresModel)) {
 		const before = orderedAccounts.length;
 		orderedAccounts = orderedAccounts.filter((account) =>
 			accountServesModel(account, model),

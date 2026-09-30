@@ -51,6 +51,24 @@ function put(body: unknown): Request {
 }
 
 describe("openai gateways API", () => {
+	it("stores a model set and lists it back", async () => {
+		const { config, path } = configWithFile({});
+		const handlers = createOpenAIGatewayHandlers(config);
+		const models = [
+			{ name: "gpt-5.5", model: "gpt-5.5" },
+			{ name: "standard", model: "gpt-5.6-terra", combo: "GptStandard" },
+		];
+		const created = await handlers.putGateway(
+			put({ models: [{ name: "gpt-5.5" }, models[1]] }),
+			"gpt",
+		);
+		expect(created.status).toBe(200);
+		expect(((await created.json()) as { models: unknown }).models).toEqual(
+			models,
+		);
+		expect(storedGateways(path)).toEqual({ gpt: { models } });
+	});
+
 	it("round trips PUT, GET, DELETE, then 404", async () => {
 		const { config, path } = configWithFile({});
 		const handlers = createOpenAIGatewayHandlers(config);
@@ -65,6 +83,7 @@ describe("openai gateways API", () => {
 			base_path: "/v1/gateways/work",
 			exclude_providers: ["anthropic-oauth"],
 			description: "work",
+			models: [],
 		});
 
 		const listed = await handlers.listGateways().json();
@@ -75,6 +94,7 @@ describe("openai gateways API", () => {
 					base_path: "/v1/gateways/work",
 					exclude_providers: ["anthropic-oauth"],
 					description: "work",
+					models: [],
 				},
 			],
 			errors: [],

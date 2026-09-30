@@ -494,6 +494,28 @@ The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and 
 
 `exclude_providers` names the accounts a gateway never routes to. `anthropic-oauth` means Anthropic accounts holding a refresh token, which leaves Anthropic API-key accounts eligible. Any other value is matched exactly against an account's `provider`, for example `codex`. A gateway with `anthropic-oauth` excluded is the way to keep Claude OAuth accounts out of an app's traffic while the default URL still includes them.
 
+**Short URL.** `/<name>/v1/...` is the same gateway as `/v1/gateways/<name>/...`, so `http://<host>:8080/gpt/v1` works as a base URL. The server rewrites the short form to the long one before anything else sees it, so authentication treats both alike. `api`, `v1`, `messages`, `assets`, `health`, `dashboard` and `gateways` can never be a short name.
+
+**Model sets and fallback ladders.** A gateway can list the models it serves under `models`. Each entry has a `name` (the id the client sends and sees in `/models`), a `model` (the upstream id, defaulting to `name`) and an optional `combo` naming a combo whose slots are that entry's fallback ladder:
+
+```json
+{
+  "openai_gateways": {
+    "gpt": {
+      "description": "Top-tier OpenAI models on the Codex accounts",
+      "models": [
+        { "name": "gpt-6-luna" },
+        { "name": "gpt-5.6-terra" },
+        { "name": "gpt-5.6-luna" },
+        { "name": "gpt-5.5", "combo": "GptStandard" }
+      ]
+    }
+  }
+}
+```
+
+With a model set, `GET /models` lists exactly those names, and a request naming any other model answers 404 with `code: "model_not_found"` before anything is sent upstream. An entry without a combo goes to any account that can serve its model, so a GPT id never reaches a Claude account. An entry with a combo walks that combo's enabled slots in priority order, each slot's account and model in turn, with the slot throttles applied. The ladder is the whole route: when every slot is unavailable or has failed, the request fails rather than widening to the rest of the pool. A `combo` that names no enabled combo refuses the same way. A gateway ladder applies whatever the global combos switch says, because it was configured for that entry specifically. The response still reports the model that actually answered.
+
 Gateways are read from the config on every request, so an edit applies without a restart. An invalid entry is skipped with a warning in the log and does not disable the others. `GET /api/openai-gateways` lists the configured gateways.
 
 ### SSL/HTTPS Configuration
