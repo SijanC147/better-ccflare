@@ -1,14 +1,13 @@
 /**
  * Tests for the internal isZaiPeakHour() helper in auto-refresh-scheduler.ts.
  *
- * Z.ai's peak pricing window is 14:00-18:00 Singapore time (UTC+8), every
- * day — there is no weekday/weekend restriction. This mirrors the
+ * Z.ai's peak pricing window is 14:00-18:00 Singapore time (UTC+8), Monday to
+ * Friday in Singapore, per Z.ai's docs (read 2026-09-30). This mirrors the
  * ZAI_PEAK_WINDOW rule in packages/dashboard-web/src/utils/provider-utils.ts
- * (weekdaysOnly: false, SB23-1867) and is regression-covered there too, in
- * packages/dashboard-web/src/utils/peak-predicates.test.ts. An earlier
- * version of this file (and of the helper itself) added a weekday gate that
- * incorrectly treated Saturday/Sunday as never-peak; these tests instead pin
- * that weekends are treated the same as weekdays.
+ * (weekdaysOnly: true) and is regression-covered there too, in
+ * packages/dashboard-web/src/utils/peak-predicates.test.ts. The fork's earlier
+ * every-day rule (SB23-1867) predates Z.ai's announcement and is superseded;
+ * these tests pin that weekends in Singapore are off-peak.
  *
  * isZaiPeakHour is exported solely for testability; it is not otherwise part
  * of the module's public surface and has no other callers outside this
@@ -42,16 +41,21 @@ describe("isZaiPeakHour", () => {
 		expect(isZaiPeakHour(ts)).toBe(false);
 	});
 
-	it("returns true on Saturday at an hour inside the peak window (Sat 15:00 SGT) — no weekday gate", () => {
+	it("returns false on Saturday at an hour inside the peak hours (Sat 15:00 SGT)", () => {
 		// Sat 2026-09-26, 15:00 SGT = 07:00 UTC.
 		const ts = Date.UTC(2026, 8, 26, 7, 0);
-		expect(isZaiPeakHour(ts)).toBe(true);
+		expect(isZaiPeakHour(ts)).toBe(false);
 	});
 
-	it("returns true on Sunday at an hour inside the peak window (Sun 15:00 SGT) — no weekday gate", () => {
+	it("returns false on Sunday at an hour inside the peak hours (Sun 15:00 SGT)", () => {
 		// Sun 2026-09-27, 15:00 SGT = 07:00 UTC.
 		const ts = Date.UTC(2026, 8, 27, 7, 0);
-		expect(isZaiPeakHour(ts)).toBe(true);
+		expect(isZaiPeakHour(ts)).toBe(false);
+	});
+
+	it("returns true on Friday at the same hour (Fri 15:00 SGT)", () => {
+		// Fri 2026-09-25, 15:00 SGT = 07:00 UTC.
+		expect(isZaiPeakHour(Date.UTC(2026, 8, 25, 7, 0))).toBe(true);
 	});
 
 	it("returns true at the lower boundary, 14:00 SGT (window is inclusive of 14:00)", () => {
