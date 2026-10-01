@@ -60,7 +60,7 @@ async function dispatch(
 	const req = new Request(`http://localhost${path}`, {
 		method,
 		headers: { "content-type": "application/json", ...headers },
-		body: body === undefined ? undefined : JSON.stringify(body),
+		body: body === undefined ? null : JSON.stringify(body),
 	});
 	const url = new URL(req.url);
 	const match = matchOpenAIGatewayPath(url.pathname);

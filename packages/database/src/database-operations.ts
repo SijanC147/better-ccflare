@@ -78,7 +78,7 @@ export interface DatabaseConfig {
 	/** Synchronous mode: OFF, NORMAL, FULL */
 	synchronous?: "OFF" | "NORMAL" | "FULL";
 	/** Memory-mapped I/O size in bytes */
-	mmapSize?: number;
+	mmapSize?: number | undefined;
 	/** Retry configuration for database operations */
 	retry?: DatabaseRetryConfig;
 	/** Page size in bytes - default 2048 (2KB), recommend 4096 (4KB) for better memory efficiency */

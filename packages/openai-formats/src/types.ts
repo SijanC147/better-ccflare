@@ -28,7 +28,7 @@ export interface OpenAITool {
 	type: "function";
 	function: {
 		name: string;
-		description?: string;
+		description?: string | undefined;
 		parameters?: Record<string, unknown>;
 	};
 }
@@ -152,7 +152,7 @@ export interface TransformStreamContext {
 	buffer: string;
 	hasStarted: boolean;
 	extractedModel: string;
-	contextWindowSize?: number;
+	contextWindowSize?: number | undefined;
 	hasSentStart: boolean;
 	hasSentContentBlockStart: boolean;
 	hasSentThinkingBlockStart: boolean;
@@ -198,7 +198,7 @@ export interface OpenAIStreamDelta {
 export interface OpenAIResponse {
 	id?: string;
 	object?: string;
-	model?: string;
+	model?: string | undefined;
 	choices?: Array<{
 		message?: {
 			content?: string | null;
@@ -219,12 +219,12 @@ export interface OpenAIResponse {
 
 export interface AnthropicResponse {
 	type: "message" | "error";
-	id?: string;
-	role?: string;
-	content?: AnthropicContentBlock[];
-	model?: string;
-	stop_reason?: string;
-	stop_sequence?: string;
+	id?: string | undefined;
+	role?: string | undefined;
+	content?: AnthropicContentBlock[] | undefined;
+	model?: string | undefined;
+	stop_reason?: string | undefined;
+	stop_sequence?: string | undefined;
 	usage?: {
 		input_tokens: number;
 		output_tokens: number;

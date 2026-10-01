@@ -1,9 +1,9 @@
 export type Role = "user" | "assistant" | "system";
 
 export interface ToolUse {
-	id?: string;
+	id?: string | undefined;
 	name: string;
-	input?: Record<string, unknown>;
+	input?: Record<string, unknown> | undefined;
 }
 
 export interface ToolResult {
@@ -21,12 +21,12 @@ export enum ContentBlockType {
 export interface ContentBlock {
 	type: ContentBlockType;
 	text?: string;
-	thinking?: string;
-	id?: string;
-	name?: string;
-	input?: Record<string, unknown>;
-	tool_use_id?: string;
-	content?: string;
+	thinking?: string | undefined;
+	id?: string | undefined;
+	name?: string | undefined;
+	input?: Record<string, unknown> | undefined;
+	tool_use_id?: string | undefined;
+	content?: string | undefined;
 }
 
 export interface MessageData {

@@ -123,7 +123,7 @@ export class HttpClient {
 		return this.request<T>(url, {
 			...options,
 			method: "POST",
-			body: body ? JSON.stringify(body) : undefined,
+			body: body ? JSON.stringify(body) : null,
 			headers: {
 				"Content-Type": "application/json",
 				...options?.headers,
@@ -139,7 +139,7 @@ export class HttpClient {
 		return this.request<T>(url, {
 			...options,
 			method: "PUT",
-			body: body ? JSON.stringify(body) : undefined,
+			body: body ? JSON.stringify(body) : null,
 			headers: {
 				"Content-Type": "application/json",
 				...options?.headers,
@@ -155,7 +155,7 @@ export class HttpClient {
 		return this.request<T>(url, {
 			...options,
 			method: "PATCH",
-			body: body ? JSON.stringify(body) : undefined,
+			body: body ? JSON.stringify(body) : null,
 			headers: {
 				"Content-Type": "application/json",
 				...options?.headers,

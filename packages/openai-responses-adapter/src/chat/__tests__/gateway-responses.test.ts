@@ -107,7 +107,7 @@ async function dispatch(
 	const req = new Request(`http://localhost${path}`, {
 		method,
 		headers: { "content-type": "application/json", ...headers },
-		body: method === "POST" ? JSON.stringify(body) : undefined,
+		body: method === "POST" ? JSON.stringify(body) : null,
 	});
 	const url = new URL(req.url);
 	// server.ts rewrites the short form to the long one before dispatching.

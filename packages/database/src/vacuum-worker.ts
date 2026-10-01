@@ -11,7 +11,7 @@ type VacuumResult =
 			walBusy: number;
 			walLog: number;
 			walCheckpointed: number;
-			walTruncateBusy?: number;
+			walTruncateBusy?: number | undefined;
 	  }
 	| {
 			ok: false;
@@ -19,7 +19,7 @@ type VacuumResult =
 			walBusy?: number;
 			walLog?: number;
 			walCheckpointed?: number;
-			walTruncateBusy?: number;
+			walTruncateBusy?: number | undefined;
 	  };
 
 self.onmessage = (event: MessageEvent<VacuumRequest>) => {
