@@ -142,6 +142,7 @@ export {
 	type UsagePauseWindow,
 	type UsageResets,
 	type UsageUtilization,
+	unreportedWindowRefusal,
 	usagePauseWindowsForProvider,
 } from "./usage-threshold";
 export { levenshteinDistance } from "./utils";

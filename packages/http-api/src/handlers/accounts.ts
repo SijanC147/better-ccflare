@@ -11,6 +11,7 @@ import {
 	sanitizers,
 	supportsUsagePauseThreshold,
 	type UsagePauseSetting,
+	unreportedWindowRefusal,
 	validateAndSanitizeModelMappings,
 	validateNumber,
 	validatePriority,
@@ -3270,6 +3271,10 @@ export function createAccountUsagePauseThresholdsHandler(
 			})();
 			if (parsed instanceof Response) return parsed;
 			const { fiveHour, weekly } = parsed;
+			// A window this provider never reports would be stored as in force
+			// and then dropped by the poller on every snapshot (SB23-3686).
+			const refusal = unreportedWindowRefusal(account.provider, parsed);
+			if (refusal !== null) return errorResponse(BadRequest(refusal));
 
 			await dbOps.setUsagePauseThresholds(accountId, fiveHour, weekly);
 

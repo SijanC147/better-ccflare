@@ -11,6 +11,7 @@ import {
 	restrictToReportedWindows,
 	supportsUsagePauseThreshold,
 	USAGE_THRESHOLD_PAUSE_REASON,
+	unreportedWindowRefusal,
 	usagePauseWindowsForProvider,
 } from "./usage-threshold";
 
@@ -1117,6 +1118,34 @@ describe("restrictToReportedWindows (SB23-3686)", () => {
 				thresholds: restrictToReportedWindows(both, "xai"),
 			}),
 		).toStrictEqual({ action: "resume" });
+	});
+});
+
+describe("unreportedWindowRefusal (SB23-3686)", () => {
+	it("refuses an xAI 5-hour window that is switched on", () => {
+		expect(
+			unreportedWindowRefusal("xai", { fiveHour: on(80), weekly: off }),
+		).toBe(
+			"Provider 'xai' does not report a 5-hour usage window, so it cannot be switched on; its one window, Grok credits, is the weekly slot",
+		);
+	});
+
+	it("accepts an xAI 5-hour window that is off, numbers and all", () => {
+		expect(
+			unreportedWindowRefusal("xai", {
+				fiveHour: { ...on(80), enabled: false },
+				weekly: on(90),
+			}),
+		).toBeNull();
+	});
+
+	it("accepts both windows on for a provider that reports both", () => {
+		expect(
+			unreportedWindowRefusal("anthropic", {
+				fiveHour: on(80),
+				weekly: on(90),
+			}),
+		).toBeNull();
 	});
 });
 

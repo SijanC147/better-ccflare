@@ -146,6 +146,32 @@ export function restrictToReportedWindows(
 }
 
 /**
+ * The refusal for a write that switches on a window the provider cannot
+ * report, or null when every switched-on window can be read. The API handler
+ * and the CLI both refuse such a write rather than store a setting the poller
+ * would silently drop (SB23-3686): an xAI 5-hour window would otherwise read
+ * as in force on the card while never pausing anything.
+ */
+export function unreportedWindowRefusal(
+	provider: string | null | undefined,
+	thresholds: UsagePauseThresholds,
+): string | null {
+	const reported = usagePauseWindowsForProvider(provider);
+	const refused = WINDOWS.filter(
+		({ window, key }) => thresholds[key].enabled && !reported.includes(window),
+	);
+	if (refused.length === 0) return null;
+	const names = refused
+		.map(({ window }) => (window === "five_hour" ? "5-hour" : "weekly"))
+		.join(" and ");
+	const hint =
+		provider === "xai"
+			? "; its one window, Grok credits, is the weekly slot"
+			: "";
+	return `Provider '${provider}' does not report a ${names} usage window, so it cannot be switched on${hint}`;
+}
+
+/**
  * Utilization for the two windows as of the latest poll, 0–100. `null` means
  * the usage API did not report that window on this snapshot — distinct from 0,
  * which is a genuine reading of a freshly reset window.

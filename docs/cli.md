@@ -277,6 +277,7 @@ bun run cli --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off> [<5h-hou
 - A threshold pause is recorded with `pause_reason = usage_threshold`, and is lifted by the poller once every configured window reads back below its threshold. It is deliberately not one of the load balancer's auto-unpause reasons: those resume on a single stored window reset, which could return an account to rotation while another configured window is still over
 - Accounts you paused by hand, or that were paused for overage or refresh failures, are never touched by this rule
 - Both windows are written on every call: pass `off` for the one you do not want. Switching a window off keeps the percentage already stored for it, so turning it back on does not mean typing the number again
+- On an xAI account the weekly arguments set its one window, Grok Build credits. xAI reports no 5-hour window, so a 5-hour percentage or hours value is refused: pass `off` for both 5-hour arguments
 
 **Example:**
 ```bash
