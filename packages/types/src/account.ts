@@ -381,7 +381,9 @@ export interface AnthropicUsageData {
 // declarations compile cleanly while they drift apart (SB23-2453). Types is
 // the source because it cannot import providers, and `FullUsageData` below
 // needs every member. `packages/providers/src/__tests__/usage-type-identity.test.ts`
-// fails the providers typecheck if a fetcher ever declares its own copy again.
+// fails the providers typecheck if a fetcher declares its own copy again and
+// that copy differs from this one in any field. An identical copy passes it,
+// so do not take green as proof that no second declaration exists.
 
 // Usage data types for NanoGPT accounts
 export interface NanoGPTUsageWindow {
