@@ -74,6 +74,10 @@ function makeCtx(opts: {
 	const ctx = {
 		provider: {
 			name: "anthropic",
+			// Not read by processProxyResponse today, measured (SB23-2536). Kept on
+			// purpose: it is what makes `isStream: true` mean something if a
+			// `!isStream` guard (issue #114) ever comes back, and deleting it would
+			// let that regression pass every streaming case below.
 			isStreamingResponse: () => opts.isStream,
 			parseRateLimit: () => ({
 				isRateLimited: opts.rateLimited,
@@ -81,8 +85,6 @@ function makeCtx(opts: {
 				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
 				remaining: undefined,
 			}),
-			parseUsage: undefined,
-			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: (
@@ -134,6 +136,10 @@ function makeCtxWithReason(opts: {
 	const ctx = {
 		provider: {
 			name: "anthropic",
+			// Not read by processProxyResponse today, measured (SB23-2536). Kept on
+			// purpose: it is what makes `isStream: true` mean something if a
+			// `!isStream` guard (issue #114) ever comes back, and deleting it would
+			// let that regression pass every streaming case below.
 			isStreamingResponse: () => opts.isStream,
 			parseRateLimit: () => ({
 				isRateLimited: opts.rateLimited,
@@ -141,8 +147,6 @@ function makeCtxWithReason(opts: {
 				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
 				remaining: undefined,
 			}),
-			parseUsage: undefined,
-			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: (

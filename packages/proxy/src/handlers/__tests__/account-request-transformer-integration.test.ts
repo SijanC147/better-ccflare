@@ -94,10 +94,7 @@ function makeProxyContext(): ProxyContext {
 			})),
 		} as never,
 		runtime: { port: 8080, clientId: "test" } as never,
-		provider: {
-			name: "unused-context-provider",
-			canHandle: () => false,
-		} as never,
+		provider: { name: "unused-context-provider" } as never,
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) } as never,
 		config: { getStorePayloads: () => true } as never,

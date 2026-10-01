@@ -121,9 +121,7 @@ function makeProxyContext(
 			buildUrl: () => "https://upstream.invalid/v1/messages",
 			prepareHeaders: () => new Headers(),
 			transformRequestBody: null,
-			processResponse: async (r: Response) => r,
 			parseRateLimit,
-			isStreamingResponse: () => false,
 		} as never,
 		refreshInFlight: new Map(),
 		asyncWriter: {

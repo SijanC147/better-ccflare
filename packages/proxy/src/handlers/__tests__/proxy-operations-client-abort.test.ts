@@ -14,7 +14,11 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
 		id: "acc-abort",
 		name: "abort-test",
-		provider: "openai-compatible",
+		// A name the provider registry does not know. proxyWithAccount resolves
+		// `getProvider(account.provider) || ctx.provider`, so with a registered
+		// name the injected `transformRequestBody` below never ran and the
+		// signal-dropping case tested the real provider instead (SB23-2536).
+		provider: "stub-signal-dropping",
 		api_key: "test-key",
 		refresh_token: "",
 		access_token: null,
@@ -103,7 +107,7 @@ function makeProxyContext(
 		} as never,
 		runtime: { port: 8080, clientId: "test" } as never,
 		provider: {
-			name: "openai-compatible",
+			name: "stub-signal-dropping",
 			canHandle: () => true,
 			buildUrl: () => "https://openrouter.ai/api/v1/messages",
 			prepareHeaders: () => new Headers(),
