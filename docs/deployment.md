@@ -308,7 +308,7 @@ EXPOSE 8080
 VOLUME ["/data", "/config"]
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/better-ccflare-server", "health"] || exit 1
+  CMD curl -f http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/better-ccflare", "--serve"]
 ```
@@ -1188,7 +1188,7 @@ healthcheck:
 
 ```bash
 # Daily: Check recent logs
-better-ccflare --logs 100 | grep ERROR
+tail -n 100 "${BETTER_CCFLARE_LOG_DIR:-${TMPDIR:-/tmp}/better-ccflare-logs}/app.log" | grep ERROR
 
 # Weekly: Database maintenance
 # Linux/macOS:

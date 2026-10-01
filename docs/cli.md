@@ -89,7 +89,6 @@ Usage: better-ccflare [options]
 Options:
   --serve              Start API server with dashboard
   --port <number>      Server port (default: 8080, or PORT env var)
-  --logs [N]           Stream latest N lines then follow
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
     --mode <claude-oauth|console>  Account mode (default: claude-oauth)
@@ -438,25 +437,16 @@ bun run cli --serve [--port <number>]
 - API endpoint: `http://localhost:8080`
 - Dashboard: `http://localhost:8080/dashboard`
 
-#### `--logs [N]`
+#### Logs
 
-Stream request logs in real-time.
+The CLI has no log command; an unknown flag such as `--logs` exits 1. The server writes its log to
+`$BETTER_CCFLARE_LOG_DIR/app.log`, which defaults to `better-ccflare-logs/app.log` under the system
+temp directory. Under `brew services` it lands in `$(brew --prefix)/var/log/better-ccflare/`
+instead (see `docs/release.md`). The dashboard's Logs tab streams the same records live.
 
-**Syntax:**
 ```bash
-bun run cli --logs [N]
-```
-
-**Options:**
-- `N`: Number of historical lines to display before streaming (optional)
-
-**Examples:**
-```bash
-# Stream live logs only
-bun run cli --logs
-
-# Show last 50 lines then stream
-bun run cli --logs 50
+# Last 50 lines, then follow
+tail -n 50 -f "${BETTER_CCFLARE_LOG_DIR:-${TMPDIR:-/tmp}/better-ccflare-logs}/app.log"
 ```
 
 ## Usage Examples
@@ -494,11 +484,8 @@ bun start
 # Start server on custom port
 bun run cli --serve --port 3000
 
-# Stream logs
-bun run cli --logs
-
-# View last 100 lines then stream
-bun run cli --logs 100
+# View the last 100 log lines, then follow
+tail -n 100 -f "${BETTER_CCFLARE_LOG_DIR:-${TMPDIR:-/tmp}/better-ccflare-logs}/app.log"
 ```
 
 ### Managing Rate Limits
@@ -706,8 +693,8 @@ export LOG_LEVEL=DEBUG
 # Run with verbose output
 bun run cli --list
 
-# Stream debug logs
-bun run cli --logs
+# Follow the debug log
+tail -f "${BETTER_CCFLARE_LOG_DIR:-${TMPDIR:-/tmp}/better-ccflare-logs}/app.log"
 ```
 
 ### Getting Support
@@ -738,7 +725,7 @@ bun run cli --logs
    - Protect configuration directory permissions
    - Don't share OAuth tokens or session data
    - Rotate accounts periodically
-   - Monitor logs with `bun run cli --logs` for suspicious activity
+   - Monitor the server log (`$BETTER_CCFLARE_LOG_DIR/app.log`) or the dashboard's Logs tab for suspicious activity
 
 4. **Performance**
    - Use accounts with higher rate limits for heavy workloads

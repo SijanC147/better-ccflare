@@ -749,11 +749,13 @@ grep "\[Server\]" /tmp/better-ccflare-logs/app.log
 - Expired access token
 - Invalid OAuth credentials
 - No active accounts available
+- From better-ccflare itself: no API key was sent, or the key matches no active key
 
 #### 403 Forbidden
 **Common Causes**:
 - Account doesn't have required permissions
 - OAuth app restrictions
+- From better-ccflare itself: a valid API key without admin access asked for a dashboard path (`/api/*`). Use an admin key (`better-ccflare --generate-api-key <name> --admin`). Releases up to v3.37.0 answered this with 401
 
 #### 429 Too Many Requests
 **Common Causes**:

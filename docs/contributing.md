@@ -740,7 +740,7 @@ bun run cli --clear-history
 bun run cli --stats
 
 # Stream logs
-bun run cli --logs [N]  # Show N lines of history then follow
+tail -n 50 -f "${BETTER_CCFLARE_LOG_DIR:-${TMPDIR:-/tmp}/better-ccflare-logs}/app.log"  # Show 50 lines of history then follow
 
 # Analyze database performance
 bun run cli --analyze

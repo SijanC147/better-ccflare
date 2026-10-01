@@ -33,6 +33,7 @@ import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { NotificationsProvider } from "./contexts/notifications-context";
 import { ThemeProvider } from "./contexts/theme-context";
+import { runAuthProbe } from "./lib/auth-probe";
 import { cn } from "./lib/utils";
 import "./index.css";
 
@@ -221,8 +222,13 @@ export function App() {
 						refetchInterval: REFRESH_INTERVALS.default,
 						staleTime: QUERY_CONFIG.staleTime,
 						retry: (failureCount, error) => {
-							// Don't retry on 401 errors
-							if (error instanceof HttpError && error.status === 401) {
+							// Don't retry a refusal: 401 (no valid key) or 403 (a valid
+							// key, or a request, the server will not allow). Retrying
+							// cannot change either answer (SB23-3746).
+							if (
+								error instanceof HttpError &&
+								(error.status === 401 || error.status === 403)
+							) {
 								return false;
 							}
 							return failureCount < 2;
@@ -270,19 +276,15 @@ export function App() {
 			// Always verify with a test request, even if we have a stored key
 			// The stored key might be invalid, deleted, or expired
 			try {
-				await api.getStats();
-				// If successful, we're authenticated (either no auth required, or valid key)
-				setIsAuthenticated(true);
-				// Auth is required only if we got here with a stored key
-				setAuthRequired(!!api.getApiKey());
-			} catch (error) {
-				// If we get a 401, auth is required
-				if (error instanceof HttpError && error.status === 401) {
-					// Clear any invalid stored key
-					api.clearApiKey();
-					setAuthRequired(true);
-					setShowAuthDialog(true);
-				}
+				await runAuthProbe({
+					probe: () => api.getStats(),
+					hasStoredKey: () => !!api.getApiKey(),
+					clearApiKey: () => api.clearApiKey(),
+					setIsAuthenticated,
+					setAuthRequired,
+					setAuthError,
+					setShowAuthDialog,
+				});
 			} finally {
 				setIsCheckingAuth(false);
 			}

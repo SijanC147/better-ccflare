@@ -327,15 +327,32 @@ describe("fetchOverview", () => {
 		});
 	});
 
-	it("403 says the key lacks admin access", async () => {
+	// The /api router's body for this refusal since SB23-3746: 403 with the
+	// reason as a plain string.
+	it("403 says the key lacks admin access, with the server's reason", async () => {
 		const result = await fetchOverview(url, "k-api-only", {
-			fetch: json(403, { error: { message: "no dashboard access" } }),
+			fetch: json(403, {
+				error: "Unauthorized: This API key does not have dashboard access",
+			}),
 		});
-		expect(result.ok).toBe(false);
-		if (!result.ok) {
-			expect(result.kind).toBe("forbidden");
-			expect(result.message).toContain("lacks admin access");
-		}
+		expect(result).toEqual({
+			ok: false,
+			kind: "forbidden",
+			message:
+				"This API key lacks admin access (Unauthorized: This API key does not have dashboard access); /api/accounts needs an admin key (better-ccflare --generate-api-key <name> --admin).",
+		});
+	});
+
+	it("403 without a readable reason still names the admin requirement", async () => {
+		const result = await fetchOverview(url, "k-api-only", {
+			fetch: async () => new Response("denied", { status: 403 }),
+		});
+		expect(result).toEqual({
+			ok: false,
+			kind: "forbidden",
+			message:
+				"This API key lacks admin access; /api/accounts needs an admin key (better-ccflare --generate-api-key <name> --admin).",
+		});
 	});
 
 	it("names the URL when nothing is listening", async () => {
