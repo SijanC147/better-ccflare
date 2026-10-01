@@ -39,6 +39,7 @@ import { forwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { applyAccountRequestTransformer } from "./account-request-transformer";
 import { getXaiConvId } from "./account-selector";
+import { noteWindowlessOAuthRefusal } from "./gateway-oauth-skip";
 import { markFamilyExhausted } from "./model-capacity";
 import { forwardObservedUpstream } from "./observed-upstream";
 import {
@@ -1739,6 +1740,13 @@ export async function proxyWithAccount(
 						}x-should-retry with no rate-limit window) — request-scoped, ` +
 							`NOT benching account; failing over to next account`,
 					);
+					// A gateway request refused this way by an OAuth account is refused
+					// by every OAuth account; proxy.ts skips the rest (SB23-2781).
+					if (noteWindowlessOAuthRefusal(requestMeta, account, req.headers)) {
+						log.warn(
+							`Account ${account.name}: OpenAI-gateway request refused with a windowless 429, skipping the remaining Anthropic OAuth accounts for this request`,
+						);
+					}
 					const responseTime = Date.now() - requestMeta.timestamp;
 					const modelRewrite = isModelRewrite(
 						requestMeta.originalModel,

@@ -50,6 +50,7 @@ import {
 	setXaiConvId,
 	validateProviderPath,
 } from "./handlers";
+import { isSkippedAfterOAuthRefusal } from "./handlers/gateway-oauth-skip";
 import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
@@ -924,6 +925,14 @@ async function handleProxyRequest(
 	let anyAccountAttempted = false;
 
 	for (let i = 0; i < accounts.length; i++) {
+		// An OAuth account already refused this gateway request with a windowless
+		// 429; the rest would refuse it too (SB23-2781). Not benched, not counted.
+		if (isSkippedAfterOAuthRefusal(requestMeta, accounts[i])) {
+			log.info(
+				`Skipping ${filteredComboInfo ? `combo slot ${i} on ` : ""}account ${accounts[i].name}: an Anthropic OAuth account already refused this OpenAI-gateway request`,
+			);
+			continue;
+		}
 		// For combo routing: enrich metadata with slot index and look up model override
 		let modelOverride: string | null = null;
 		if (filteredComboInfo?.slots[i]) {
@@ -957,7 +966,11 @@ async function handleProxyRequest(
 		// whether any of them would still be attempted after this one.
 		const isLastAttemptedCandidate = accounts
 			.slice(i + 1)
-			.every((candidate) => wouldSuppressProbe(candidate));
+			.every(
+				(candidate) =>
+					wouldSuppressProbe(candidate) ||
+					isSkippedAfterOAuthRefusal(requestMeta, candidate),
+			);
 		try {
 			response = await proxyWithAccount(
 				req,
@@ -1093,6 +1106,15 @@ async function handleProxyRequest(
 			);
 			let anyFallbackAttempted = false;
 			for (let i = 0; i < fallbackAccounts.length; i++) {
+				// Same skip as the main loop. The re-selection above already drops
+				// OAuth accounts once the flag is set; this covers a refusal from
+				// a candidate inside this loop.
+				if (isSkippedAfterOAuthRefusal(requestMeta, fallbackAccounts[i])) {
+					log.info(
+						`Skipping fallback account ${fallbackAccounts[i].name}: an Anthropic OAuth account already refused this OpenAI-gateway request`,
+					);
+					continue;
+				}
 				const probeAdmission = getRateLimitProbeAdmission(fallbackAccounts[i]);
 				if (probeAdmission === "suppressed") {
 					continue;
@@ -1104,7 +1126,11 @@ async function handleProxyRequest(
 				// not necessarily the last one actually attempted.
 				const isLastAttemptedFallback = fallbackAccounts
 					.slice(i + 1)
-					.every((candidate) => wouldSuppressProbe(candidate));
+					.every(
+						(candidate) =>
+							wouldSuppressProbe(candidate) ||
+							isSkippedAfterOAuthRefusal(requestMeta, candidate),
+					);
 				try {
 					response = await proxyWithAccount(
 						req,

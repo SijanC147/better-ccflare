@@ -24,6 +24,7 @@ import {
 	GATEWAY_REQUIRE_MODEL_HEADER,
 } from "@better-ccflare/types";
 import { getKnownCodexModels } from "../codex-model-catalog";
+import { isSkippedAfterOAuthRefusal } from "./gateway-oauth-skip";
 import {
 	type FamilyExhaustionOrigin,
 	getFamilyExhaustionOrigin,
@@ -861,7 +862,20 @@ export async function selectAccountsForRequest(
 			.map((p) => p.trim())
 			.filter(Boolean) ?? [];
 
-	const applyExclusions = (accounts: Account[]): Account[] => {
+	const applyExclusions = (candidates: Account[]): Account[] => {
+		let accounts = candidates;
+		// Set once an OAuth account refused this OpenAI-gateway request with a
+		// windowless 429; proxy.ts's step-10 re-selection then never offers
+		// another OAuth account for it (SB23-2781).
+		if (meta.gatewayOAuthRefused === true) {
+			const kept = accounts.filter((a) => !isSkippedAfterOAuthRefusal(meta, a));
+			if (kept.length < accounts.length) {
+				log.info(
+					`Skipping ${accounts.length - kept.length} Anthropic OAuth account(s): one already refused this OpenAI-gateway request`,
+				);
+			}
+			accounts = kept;
+		}
 		if (excludeProviders.length === 0) return accounts;
 		const filtered = accounts.filter((a) => {
 			for (const ex of excludeProviders) {
