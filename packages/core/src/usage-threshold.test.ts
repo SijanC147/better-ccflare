@@ -493,8 +493,8 @@ describe("readUsageUtilization", () => {
 		// the provider check.
 		it("leaves a Codex payload that carries a credits balance on the flat windows", () => {
 			const codex = {
-				five_hour: { utilization: 12, resets_at: null },
-				seven_day: { utilization: 91, resets_at: null },
+				five_hour: { utilization: 12, resets_at: "2026-10-01T15:00:00.000Z" },
+				seven_day: { utilization: 91, resets_at: "2026-10-06T00:00:00.000Z" },
 				credits: { has_credits: true, unlimited: false, balance: "4.20" },
 			};
 			expect(readUsageUtilization(codex, "codex")).toStrictEqual({
@@ -502,8 +502,8 @@ describe("readUsageUtilization", () => {
 				weekly: 91,
 			});
 			expect(readUsageResets(codex, "codex")).toStrictEqual({
-				fiveHour: null,
-				weekly: null,
+				fiveHour: Date.parse("2026-10-01T15:00:00.000Z"),
+				weekly: Date.parse("2026-10-06T00:00:00.000Z"),
 			});
 		});
 	});
