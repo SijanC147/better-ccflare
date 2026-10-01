@@ -314,6 +314,8 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 				"x-claude-code-prev-tool-durations": "[12,34]",
 				"x-claude-code-compaction": "auto",
 				"x-claude-code-context-compacted": "true",
+				"x-better-ccflare-inbound-format": "openai-chat",
+				"x-better-ccflare-inbound-gateway": "work",
 			},
 		});
 
@@ -339,6 +341,13 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 		expect(args[24]).toBe("[12,34]");
 		expect(args[25]).toBe("auto");
 		expect(args[26]).toBe("true");
+		// 0-indexed 29 and 30 are the inbound marker (SB23-2727), after
+		// projectId and worktreePath, which this audit path does not resolve.
+		expect(args[27]).toBeUndefined();
+		expect(args[28]).toBeUndefined();
+		expect(args[29]).toBe("openai-chat");
+		expect(args[30]).toBe("work");
+		expect(args).toHaveLength(31);
 	});
 
 	it("persists null gateway hint fields when the request carries none of the headers", async () => {
@@ -368,5 +377,7 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 		expect(args[24]).toBeNull();
 		expect(args[25]).toBeNull();
 		expect(args[26]).toBeNull();
+		expect(args[29]).toBeNull();
+		expect(args[30]).toBeNull();
 	});
 });

@@ -246,9 +246,10 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 		expect(args[6]).toBe("org_permission_denied");
 		expect(args[9]).toEqual({ model: "claude-sonnet-4-5" });
 		// The tail arguments are easy to drop when copying a sibling branch.
-		// clientSessionId sits six from the end — the five gatewayHint* fields
-		// (all null here, since the request carries none of those headers) follow it.
-		expect(args[args.length - 6]).toBe("sess-1");
+		// clientSessionId sits ten from the end: the five gatewayHint* fields
+		// (all null here, since the request carries none of those headers),
+		// projectId, worktreePath and the two inbound marker fields follow it.
+		expect(args[args.length - 10]).toBe("sess-1");
 	});
 
 	it("matches on error.type, not on the message wording", async () => {
