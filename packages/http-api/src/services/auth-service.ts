@@ -46,8 +46,10 @@ const INTERNAL_PROBE_SECRET_HEADER = "x-better-ccflare-internal-probe-secret";
  * CLI to notify its own locally-running server of DB-side changes (token
  * reload, force-reset-rate-limit) when API-key auth is enabled. Unlike the
  * internal-probe secret (minted fresh per server process), this secret is
- * persisted in the config file so the separate, short-lived CLI process can
- * read it too. See packages/config Config#getLocalControlSecret. */
+ * persisted in the config file, and published by the server to
+ * `<config>.local-control`, so the separate, short-lived CLI process can read
+ * it too, including while the config's saves are refused (SB23-3809). See
+ * packages/config Config#getLocalControlSecret and #publishLocalControlSecret. */
 const LOCAL_CONTROL_SECRET_HEADER = "x-better-ccflare-local-control-secret";
 
 /** Paths where a valid local-control-secret is honored. Intentionally a small,
