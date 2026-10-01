@@ -89,6 +89,10 @@ function difference(a: Iterable<string>, b: Iterable<string>): string[] {
 // ---------------------------------------------------------------------------
 // Source gate
 // ---------------------------------------------------------------------------
+//
+// The ALTER pattern tolerates any whitespace, so an ALTER split across lines
+// is still seen. It also matches an ALTER quoted inside a comment, which
+// would read as a column ALTERed at that position; none exists today.
 
 type Rebuild = {
 	/** Offset of `CREATE TABLE accounts_new (` inside runMigrations. */
@@ -163,7 +167,7 @@ function parseSource(known: Set<string>): {
 	const body = source.slice(start, end);
 
 	const alters = [
-		...body.matchAll(/ALTER TABLE accounts ADD COLUMN (\w+)/g),
+		...body.matchAll(/ALTER\s+TABLE\s+accounts\s+ADD\s+COLUMN\s+(\w+)/g),
 	].map((m) => ({ name: m[1] as string, at: m.index as number }));
 	const altered = new Set(alters.map((a) => a.name));
 	// Columns the oldest accounts table already had, which no ALTER adds.

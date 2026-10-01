@@ -56,7 +56,7 @@ Every migration added to `packages/database/src/migrations.ts` MUST also be port
 4. `columnsToAdd` array in `runMigrationsPg()` (PG ALTER TABLE for existing DBs)
 5. Mirror any SQLite backfill as an `adapter.unsafe(UPDATE ...)` in `runMigrationsPg()`
 
-**An `accounts` column needs two more places, for seven in total:**
+**An `accounts` column needs two more schema places, for seven, plus the three read-side SELECT lists (`AccountRepository.findAll`, `findById`, the accounts list handler), for ten in total:**
 6. The refresh_token NOT NULL rebuild in `runMigrations`: its `CREATE TABLE accounts_new` and
    its positional `INSERT INTO accounts_new SELECT`
 7. The canonical rebuild (the `account_tier` removal and CTAS repair): its `CREATE TABLE
