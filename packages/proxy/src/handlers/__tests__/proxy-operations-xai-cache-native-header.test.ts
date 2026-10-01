@@ -141,9 +141,6 @@ function makeContext(provider: XaiProvider | CodexProvider): ProxyContext {
 			),
 			saveRequest: mock(() => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			// Absent on the old literal, which answered undefined for both.
-			getAccount: undefined,
-			resolverManager: undefined,
 		},
 		runtime: { clientId: "test" },
 		provider,

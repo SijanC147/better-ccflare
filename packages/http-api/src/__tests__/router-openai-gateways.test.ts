@@ -65,7 +65,7 @@ describe("APIRouter — /api/openai-gateways/:name dispatch", () => {
 		const req = new Request(url, {
 			method,
 			headers: { "Content-Type": "application/json" },
-			body: body === undefined ? undefined : JSON.stringify(body),
+			body: body === undefined ? null : JSON.stringify(body),
 		});
 		return router.handleRequest(url, req);
 	};

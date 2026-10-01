@@ -127,7 +127,7 @@ type Hook = "prepareRequest" | "buildUrl" | "processResponse";
 interface Seen {
 	hook: Hook;
 	context: ProviderRequestContext | undefined;
-	requestModel?: string | null;
+	requestModel?: string | null | undefined;
 }
 
 function makeContext(provider: Partial<Provider>): ProxyContext {
@@ -138,7 +138,6 @@ function makeContext(provider: Partial<Provider>): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			resolverManager: undefined,
 		},
 		runtime: { clientId: "test" },
 		provider: {

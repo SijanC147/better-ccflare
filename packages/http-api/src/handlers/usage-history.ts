@@ -35,7 +35,7 @@ export function createUsageHistoryHandler(context: APIContext) {
 		try {
 			const rows = await context.dbOps.getUsageHistory({
 				accountId,
-				windowKey,
+				...(windowKey !== undefined ? { windowKey } : {}),
 				since: startMs,
 			});
 

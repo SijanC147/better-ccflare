@@ -99,11 +99,11 @@ function makeContext(
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getCombosEnabled: undefined,
-			getModelScopedCapacityRouting: undefined,
-			getStorePayloads: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getCombosEnabled: () => true,
+			getModelScopedCapacityRouting: () => "off",
+			getStorePayloads: () => true,
 		},
 		provider: {
 			name: "codex",

@@ -37,7 +37,7 @@ function stubFetch(routes: Array<[string, StubRoute]>) {
 				if (route.throws) throw new Error(route.throws);
 				return new Response(JSON.stringify(route.body ?? {}), {
 					status: route.status ?? 200,
-					headers: route.headers,
+					headers: route.headers ?? {},
 				});
 			}
 		}

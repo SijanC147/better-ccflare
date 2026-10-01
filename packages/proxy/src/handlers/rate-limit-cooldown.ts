@@ -255,7 +255,7 @@ export function applyRateLimitCooldown(
 	account: Account,
 	rateLimitInfo: {
 		resetTime?: number;
-		remaining?: number;
+		remaining?: number | undefined;
 		reason?: RateLimitReason;
 	},
 	ctx: ProxyContext,

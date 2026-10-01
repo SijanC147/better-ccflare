@@ -100,11 +100,11 @@ function makeContext(account: Account): ProxyContext {
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getCombosEnabled: undefined,
-			getModelScopedCapacityRouting: undefined,
-			getStorePayloads: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getCombosEnabled: () => true,
+			getModelScopedCapacityRouting: () => "off",
+			getStorePayloads: () => true,
 		},
 		provider: {
 			name: "test-provider",
@@ -257,11 +257,11 @@ describe("handleProxy — multi-account all-suppressed pool forwards a terminal 
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
 					getAgentFrontmatterModelFallback: () => false,
-					// Absent in production means the default; undefined keeps the path the old literal took.
-					getForceAccountModel: undefined,
-					getCombosEnabled: undefined,
-					getModelScopedCapacityRouting: undefined,
-					getStorePayloads: undefined,
+					// Required on Config: each returns its read site's fallback, so the default branch runs.
+					getForceAccountModel: () => false,
+					getCombosEnabled: () => true,
+					getModelScopedCapacityRouting: () => "off",
+					getStorePayloads: () => true,
 				},
 				provider: {
 					name: "test-provider",
@@ -422,12 +422,12 @@ describe("handleProxy — combo-fallback pool all-suppressed retries ungated (de
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
 					getAgentFrontmatterModelFallback: () => false,
-					// Absent in production means the default; undefined keeps the path the old literal took.
-					getForceAccountModel: undefined,
-					getCombosEnabled: undefined,
-					getComboSessionFallback: undefined,
-					getModelScopedCapacityRouting: undefined,
-					getStorePayloads: undefined,
+					// Required on Config: each returns its read site's fallback, so the default branch runs.
+					getForceAccountModel: () => false,
+					getCombosEnabled: () => true,
+					getComboSessionFallback: () => true,
+					getModelScopedCapacityRouting: () => "off",
+					getStorePayloads: () => true,
 				},
 				provider: {
 					name: "test-provider",
@@ -546,11 +546,11 @@ describe("handleProxy — front candidate attempted, later candidate suppressed 
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
 					getAgentFrontmatterModelFallback: () => false,
-					// Absent in production means the default; undefined keeps the path the old literal took.
-					getForceAccountModel: undefined,
-					getCombosEnabled: undefined,
-					getModelScopedCapacityRouting: undefined,
-					getStorePayloads: undefined,
+					// Required on Config: each returns its read site's fallback, so the default branch runs.
+					getForceAccountModel: () => false,
+					getCombosEnabled: () => true,
+					getModelScopedCapacityRouting: () => "off",
+					getStorePayloads: () => true,
 				},
 				provider: {
 					name: "test-provider",

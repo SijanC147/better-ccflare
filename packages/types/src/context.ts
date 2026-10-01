@@ -70,7 +70,7 @@ export interface APIContext {
 			fetchedAt: number;
 			source: "live" | "fallback";
 		}>;
-		refresh: () => Promise<{ success: boolean; error?: string }>;
+		refresh: () => Promise<{ success: boolean; error?: string | undefined }>;
 		/**
 		 * Models one account can actually call, from the provider's own
 		 * per-account listing. Null when the account is unknown, is not of a

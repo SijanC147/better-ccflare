@@ -95,8 +95,8 @@ function makeCtx(opts: {
 		config: {
 			getForceAccountModel: () => opts.forceAccountModel,
 			getCombosEnabled: () => true,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getModelScopedCapacityRouting: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getModelScopedCapacityRouting: () => "off",
 		},
 		internalProbeSecret: opts.internalProbeSecret,
 	});
