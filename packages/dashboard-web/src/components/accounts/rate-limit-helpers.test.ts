@@ -496,6 +496,19 @@ describe("resolveExtraUsageDisplay", () => {
 		}
 	});
 
+	it("never defaults a missing exponent: the money object is unusable", () => {
+		// The Overage row this replaced read `exponent ?? 2`, inventing a unit.
+		// With nothing to fall back to, the reading has no figures at all.
+		expect(
+			resolveExtraUsageDisplay({
+				spend: {
+					enabled: true,
+					used: { amount_minor: 150, currency: "USD" } as never,
+				},
+			}),
+		).toMatchObject({ kind: "on", used: null, unit: null });
+	});
+
 	it("prefers a complete extra_usage reading over a spend reading missing its limit", () => {
 		const d = resolveExtraUsageDisplay({
 			...extra({
