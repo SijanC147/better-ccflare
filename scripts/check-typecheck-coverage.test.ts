@@ -317,15 +317,27 @@ describe("ci-changed-paths treats TypeScript as relevant wherever it sits", () =
 		git(dir, "add", "--", file);
 		git(dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "change");
 		const head = git(dir, "rev-parse", "HEAD").trim();
-		// GITHUB_OUTPUT is deliberately absent, so the result goes to stdout and a run inside CI
-		// never appends to the real step's output file.
+		// The verdict is read from GITHUB_OUTPUT pointed at a fixture file, the channel CI reads,
+		// and never from the script's `/dev/stdout` fallback. Measured on Linux CI at `c05e8117`:
+		// with stdout captured by Bun, the `>> /dev/stdout` line came back empty in all nine rows
+		// while passing on darwin. Pointing it here also keeps a run inside CI from appending to
+		// the real `Test` step's output file.
+		const output = path.join(dir, "github-output");
+		writeFileSync(output, "");
 		const result = Bun.spawnSync(["bash", changedPaths, job], {
 			cwd: dir,
-			env: { PATH: process.env.PATH ?? "", HOME: dir, BASE_SHA: base, HEAD_SHA: head },
+			env: {
+				PATH: process.env.PATH ?? "",
+				HOME: dir,
+				BASE_SHA: base,
+				HEAD_SHA: head,
+				GITHUB_OUTPUT: output,
+			},
 		});
 		expect(result.exitCode).toBe(0);
-		const line = result.stdout.toString().split("\n").find((l) => l.startsWith("relevant="));
-		return line ?? "";
+		const lines = readFileSync(output, "utf8").split("\n").filter(Boolean);
+		expect(lines.length).toBe(1);
+		return lines[0] ?? "";
 	}
 
 	test.each([
