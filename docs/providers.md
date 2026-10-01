@@ -821,7 +821,18 @@ export interface Provider {
   
   // Request routing
   canHandle(path: string): boolean;
-  buildUrl(path: string, query: string): string;
+  buildUrl(
+    path: string,
+    query: string,
+    account?: Account,
+    context?: ProviderRequestContext,
+  ): string;
+  prepareRequest?(
+    request: Request,
+    body: ArrayBuffer | null,
+    account: Account,
+    context: ProviderRequestContext,
+  ): void;
   
   // Authentication
   refreshToken(account: Account, clientId: string): Promise<TokenRefreshResult>;
@@ -831,7 +842,13 @@ export interface Provider {
   parseRateLimit(response: Response): RateLimitInfo;
   
   // Response processing
-  processResponse(response: Response, account: Account | null): Promise<Response>;
+  processResponse(
+    response: Response,
+    account: Account | null,
+    requestHeaders?: Headers,
+    drainAbort?: AbortController,
+    context?: ProviderRequestContext,
+  ): Promise<Response>;
   
   // Optional features
   extractTierInfo?(response: Response): Promise<number | null>;
@@ -839,6 +856,14 @@ export interface Provider {
   isStreamingResponse?(response: Response): boolean;
 }
 ```
+
+`packages/providers/src/types.ts` is the full definition; this is a sketch.
+
+### Per-request state
+
+The proxy creates one `ProviderRequestContext` per upstream attempt and passes that same object to `prepareRequest`, `buildUrl` and every `processResponse` call of the attempt, in-place retries included. A failover to another account gets a new one. A provider that derives a value in one hook and needs it in a later one keys it on that object, for example in a module-private `WeakMap<ProviderRequestContext, T>`, as `vertex-ai` does for the model it puts in the URL and restores into the response.
+
+Never write per-request state onto the `Account` or onto the provider instance. Both outlive the request, and two concurrent requests handed one account object would read each other's values (`SB23-2457`, `SB23-2508`). `context.requestModel` is set by the proxy before `processResponse` and holds the model actually sent upstream.
 
 ### BaseProvider Class
 

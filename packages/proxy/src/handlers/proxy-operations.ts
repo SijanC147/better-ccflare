@@ -2363,8 +2363,10 @@ export async function proxyWithAccount(
 				statusText: retryRaw.statusText,
 				headers: retryTaggedHeaders,
 			});
-			// Read at retry time, as before: a recovery may have changed the
-			// model since the first response.
+			// Re-read at retry time, as the literal this replaced was. Every
+			// recovery that changes the model runs before the first response, so
+			// today this equals the value set there; it is re-read so a recovery
+			// added after that point cannot hand a retry a stale model.
 			providerContext.requestModel = outgoing.model || null;
 			return provider.processResponse(
 				retryTaggedRaw,
