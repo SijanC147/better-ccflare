@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "ccflare",
+      "name": "better-ccflare",
       "devDependencies": {
         "@biomejs/biome": "2.4.10",
         "@types/bun": "1.3.14",

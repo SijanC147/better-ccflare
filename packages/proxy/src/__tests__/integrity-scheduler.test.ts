@@ -11,7 +11,10 @@
  * `runIntegrityCheckInWorker` is mocked via `mock.module` so we can verify
  * routing without spawning real `bun:sqlite` workers. Tests with
  * `dbPath: undefined` exercise the PG/fallback branch (no worker); tests
- * with `dbPath: "/tmp/anything"` exercise the worker branch.
+ * with `dbPath: "/nonexistent/..."` exercise the worker branch. That path
+ * is never opened, because the size, the worker and the path lookup are
+ * all mocks, so it is a non-temp sentinel rather than a fixed file under
+ * the shared $TMPDIR (SB23-3844).
  */
 import {
 	afterAll,
@@ -265,7 +268,9 @@ describe("runIntegrityCheckOnDemand", () => {
 		// froze the proxy event loop for ~30 s on a multi-GiB DB (bun:sqlite
 		// is synchronous), resetting downstream sockets. It now goes through
 		// the same worker as the full check.
-		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		const dbOps = makeDbOps({
+			dbPath: "/nonexistent/integrity-scheduler-test.db",
+		});
 		workerResultByKind.quick = { ok: true };
 		const out = await runIntegrityCheckOnDemand(dbOps, "quick");
 		expect(out.ok).toBe(true);
@@ -273,7 +278,7 @@ describe("runIntegrityCheckOnDemand", () => {
 		expect(mockRunIntegrityCheckInWorker).toHaveBeenCalledTimes(1);
 		const [calledPath, calledOpts] =
 			mockRunIntegrityCheckInWorker.mock.calls[0];
-		expect(calledPath).toBe("/tmp/test.db");
+		expect(calledPath).toBe("/nonexistent/integrity-scheduler-test.db");
 		expect(calledOpts).toEqual({ kind: "quick" });
 		// Critical: the synchronous main-thread fallback MUST NOT have been
 		// invoked when a SQLite path exists.
@@ -281,7 +286,9 @@ describe("runIntegrityCheckOnDemand", () => {
 	});
 
 	it("quick worker corrupt result is recorded with the worker's error message", async () => {
-		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		const dbOps = makeDbOps({
+			dbPath: "/nonexistent/integrity-scheduler-test.db",
+		});
 		workerResultByKind.quick = { ok: false, error: "*** in database main" };
 		const out = await runIntegrityCheckOnDemand(dbOps, "quick");
 		expect(out.ok).toBe(true);
@@ -306,7 +313,9 @@ describe("runIntegrityCheckOnDemand", () => {
 	});
 
 	it("full routes through the worker when a SQLite path is resolvable", async () => {
-		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		const dbOps = makeDbOps({
+			dbPath: "/nonexistent/integrity-scheduler-test.db",
+		});
 		workerResultByKind.full = { ok: true };
 		const out = await runIntegrityCheckOnDemand(dbOps, "full");
 		expect(out.ok).toBe(true);
@@ -322,7 +331,7 @@ describe("runIntegrityCheckOnDemand", () => {
 		// would time out, so it's recorded as skipped (not corrupt) and a
 		// quick_check is run in its place.
 		const dbOps = makeDbOps({
-			dbPath: "/tmp/test.db",
+			dbPath: "/nonexistent/integrity-scheduler-test.db",
 			dbSizeBytes: 20 * 1024 * 1024 * 1024,
 		});
 		workerResultByKind.quick = { ok: true };
@@ -346,7 +355,9 @@ describe("runIntegrityCheckOnDemand", () => {
 	});
 
 	it("a worker TIMEOUT is recorded as skipped, not corrupt", async () => {
-		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		const dbOps = makeDbOps({
+			dbPath: "/nonexistent/integrity-scheduler-test.db",
+		});
 		workerResultByKind.full = {
 			ok: false,
 			error: "worker timed out after 600000ms — bun:sqlite call likely hung",
