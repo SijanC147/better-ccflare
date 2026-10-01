@@ -98,6 +98,7 @@ describe("openai gateways API", () => {
 				},
 			],
 			errors: [],
+			invalid: [],
 		});
 		expect(storedGateways(path)).toEqual({
 			work: { exclude_providers: ["anthropic-oauth"], description: "work" },
@@ -194,9 +195,19 @@ describe("openai gateways API", () => {
 		const listed = (await handlers.listGateways().json()) as {
 			gateways: Array<{ name: string }>;
 			errors: string[];
+			invalid: Array<{ name: string; error: string }>;
 		};
 		expect(listed.gateways.map((g) => g.name)).toEqual(["home"]);
-		expect(listed.errors).toHaveLength(2);
+		// Each skipped entry by its stored key, the one DELETE takes, with the
+		// same message as its `errors` line.
+		expect(listed.invalid).toEqual([
+			{
+				name: "typo",
+				error: "gateway typo: unknown gateway field: exclude_provider",
+			},
+			{ name: "Bad Name", error: 'invalid gateway name "Bad Name"' },
+		]);
+		expect(listed.errors).toEqual(listed.invalid.map((i) => i.error));
 
 		await handlers.putGateway(put({}), "work");
 		expect(handlers.deleteGateway("home").status).toBe(204);

@@ -13,6 +13,7 @@
  * direction.
  */
 import {
+	type InvalidConfigEntry,
 	isValidOpenAIGatewayName,
 	RESERVED_GATEWAY_ALIAS_NAMES,
 } from "./openai-gateways";
@@ -397,32 +398,40 @@ export function validateClaudeCodeEndpointConfig(
 /**
  * Reads the stored map. An invalid entry is left out and reported in
  * `errors`, never repaired, so one bad endpoint cannot disable the others and
- * a caller can say exactly which one was skipped.
+ * a caller can say exactly which one was skipped. `invalid` names each skipped
+ * entry by its stored key, with the same message as its `errors` line; an
+ * error that belongs to no entry is in `errors` only.
  */
 export function parseClaudeCodeEndpoints(raw: unknown): {
 	endpoints: ClaudeCodeEndpoints;
 	errors: string[];
+	invalid: InvalidConfigEntry[];
 } {
 	const endpoints: ClaudeCodeEndpoints = {};
 	const errors: string[] = [];
-	if (raw === undefined || raw === null) return { endpoints, errors };
+	const invalid: InvalidConfigEntry[] = [];
+	if (raw === undefined || raw === null) return { endpoints, errors, invalid };
 	if (typeof raw !== "object" || Array.isArray(raw)) {
 		errors.push(`${CLAUDE_CODE_ENDPOINTS_CONFIG_KEY} must be an object`);
-		return { endpoints, errors };
+		return { endpoints, errors, invalid };
 	}
+	const skip = (name: string, error: string) => {
+		errors.push(error);
+		invalid.push({ name, error });
+	};
 	for (const [name, config] of Object.entries(raw as Record<string, unknown>)) {
 		if (!isValidClaudeCodeEndpointName(name)) {
-			errors.push(`invalid endpoint name ${JSON.stringify(name)}`);
+			skip(name, `invalid endpoint name ${JSON.stringify(name)}`);
 			continue;
 		}
 		const result = validateClaudeCodeEndpointConfig(config);
 		if (!result.ok) {
-			errors.push(`endpoint ${name}: ${result.error}`);
+			skip(name, `endpoint ${name}: ${result.error}`);
 			continue;
 		}
 		endpoints[name] = result.value;
 	}
-	return { endpoints, errors };
+	return { endpoints, errors, invalid };
 }
 
 // ── Host allowlist (SB23-3408, item 6) ───────────────────────────────────

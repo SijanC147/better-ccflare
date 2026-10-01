@@ -328,7 +328,7 @@ Name: ${result.name}
 Role: ${role}
 Key: ${result.apiKey}  Save this key now - it won't be shown again
 Prefix: ${result.prefixLast8}
-Created: ${new Date(result.createdAt).toLocaleString()}
+Created: ${new Date(result.createdAt).toLocaleString(undefined, { hourCycle: "h23" })}
 
 Usage:
   Include this key in your requests using the 'x-api-key' header:

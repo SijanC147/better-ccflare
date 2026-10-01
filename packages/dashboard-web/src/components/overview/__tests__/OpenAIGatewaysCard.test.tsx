@@ -330,6 +330,7 @@ interface Call {
 interface Backend {
 	gateways?: OpenAIGatewayListing[];
 	errors?: string[];
+	invalid?: { name: string; error: string }[];
 	accounts?: { provider: string }[];
 	combos?: { name: string; enabled: boolean }[];
 	/** Answers PUT; the default echoes a listing for the body. */
@@ -358,51 +359,24 @@ async function waitFor(predicate: () => boolean, what: string): Promise<void> {
 }
 
 /**
- * Sets a controlled field the way a user would, so React sees a change.
- *
- * A `<select>` takes a plain `change` event. A text input does not, in this
- * harness: `src/test/dom.ts` imports `react-dom/client`, and an ES module's
- * imports evaluate before its body, so react-dom loads before happy-dom is
- * registered. It then reads `canUseDOM` as false, sets `isInputEventSupported`
- * to false at load, and handles text inputs with its old IE polyfill, which
- * ignores `input` events and instead watches the focused element (`focusin`,
- * then `keyup`), calling the IE-only `attachEvent` on it. Measured: an `input`
- * event alone, with the value set through the prototype setter, fired no
- * `onChange`.
- *
- * So this sends both shapes. Whichever path react-dom took, exactly one of
- * `input` and `keyup` produces the change, measured as one `onChange` call per
- * `typeInto`. The `attachEvent` and `detachEvent` stubs exist only so the
- * polyfill does not throw on a DOM that never had them.
+ * Sets a controlled field the way a user would, so React sees a change: the
+ * value through the prototype setter, which React's value tracker reads, then
+ * `change` for a `<select>` and `input` for a text input.
  */
 async function typeInto(element: Element, text: string): Promise<void> {
-	if (element instanceof HTMLSelectElement) {
-		const setter = must(
-			Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value"),
-			"select value descriptor",
-		).set;
-		await act(async () => {
-			must(setter, "select value setter").call(element, text);
-			element.dispatchEvent(new Event("change", { bubbles: true }));
-		});
-		return;
-	}
+	const isSelect = element instanceof HTMLSelectElement;
+	const prototype = isSelect
+		? HTMLSelectElement.prototype
+		: HTMLInputElement.prototype;
 	const setter = must(
-		Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value"),
-		"input value descriptor",
+		Object.getOwnPropertyDescriptor(prototype, "value"),
+		"value descriptor",
 	).set;
-	const legacy = element as Element & {
-		attachEvent?: () => void;
-		detachEvent?: () => void;
-	};
-	legacy.attachEvent = () => {};
-	legacy.detachEvent = () => {};
 	await act(async () => {
-		element.dispatchEvent(new Event("focusin", { bubbles: true }));
-		must(setter, "input value setter").call(element, text);
-		element.dispatchEvent(new Event("input", { bubbles: true }));
-		element.dispatchEvent(new Event("keyup", { bubbles: true }));
-		element.dispatchEvent(new Event("focusout", { bubbles: true }));
+		must(setter, "value setter").call(element, text);
+		element.dispatchEvent(
+			new Event(isSelect ? "change" : "input", { bubbles: true }),
+		);
 	});
 }
 
@@ -450,6 +424,7 @@ async function withCard(
 			return json({
 				gateways: backend.gateways ?? [],
 				errors: backend.errors ?? [],
+				invalid: backend.invalid ?? [],
 			});
 		}
 		if (method === "GET" && url === "/api/accounts") {
@@ -672,6 +647,45 @@ describe("OpenAIGatewaysCard", () => {
 			expect(sent.length).toBe(1);
 			expect(sent[0].url).toBe("/api/openai-gateways/work");
 		});
+	});
+
+	// SB23-3557. The name has a space, which PUT would refuse, so the URL also
+	// pins the encoding the router decodes.
+	it("deletes a skipped entry from the card by its stored key", async () => {
+		const broken = 'invalid gateway name "Bad Name"';
+		const other = "openai_gateways must be an object";
+		await withCard(
+			{
+				gateways: [listing()],
+				errors: [broken, other],
+				invalid: [{ name: "Bad Name", error: broken }],
+			},
+			async (calls) => {
+				// The entry's line is shown once, beside its control, and the
+				// line that belongs to no entry has no control.
+				const text = document.body.textContent ?? "";
+				expect(text.split(broken).length - 1).toBe(1);
+				expect(text).toContain(other);
+				expect(
+					all('button[aria-label^="Delete skipped gateway"]').map((b) =>
+						b.getAttribute("aria-label"),
+					),
+				).toEqual(["Delete skipped gateway Bad Name"]);
+
+				await click(buttonByLabel("Delete skipped gateway Bad Name"));
+				expect(document.body.textContent ?? "").toContain(
+					"Remove the skipped entry Bad Name from the config file?",
+				);
+				expect(deletes(calls).length).toBe(0);
+
+				await click(onlyButton("Delete"));
+				await waitFor(() => deletes(calls).length > 0, "the DELETE");
+				await settle();
+				const sent = deletes(calls);
+				expect(sent.length).toBe(1);
+				expect(sent[0].url).toBe("/api/openai-gateways/Bad%20Name");
+			},
+		);
 	});
 
 	it("sends nothing when the delete is cancelled", async () => {

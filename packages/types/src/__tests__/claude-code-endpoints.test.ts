@@ -245,21 +245,39 @@ describe("parseClaudeCodeEndpoints", () => {
 			"endpoint typo: unknown endpoint field: permission_modes",
 			'endpoint relative: directory must be an absolute path; got "rel"',
 		]);
+		// By stored key, so a client can DELETE it, with its `errors` line.
+		expect(parsed.invalid).toEqual([
+			{ name: "Bad Name", error: 'invalid endpoint name "Bad Name"' },
+			{ name: "api", error: 'invalid endpoint name "api"' },
+			{
+				name: "typo",
+				error: "endpoint typo: unknown endpoint field: permission_modes",
+			},
+			{
+				name: "relative",
+				error:
+					'endpoint relative: directory must be an absolute path; got "rel"',
+			},
+		]);
 	});
 
 	it("treats an absent key as empty and a non-object as one error", () => {
 		expect(parseClaudeCodeEndpoints(undefined)).toEqual({
 			endpoints: {},
 			errors: [],
+			invalid: [],
 		});
 		expect(parseClaudeCodeEndpoints(null)).toEqual({
 			endpoints: {},
 			errors: [],
+			invalid: [],
 		});
+		// Belongs to no entry, so there is nothing to name for DELETE.
 		for (const raw of [[], "x", 3]) {
 			expect(parseClaudeCodeEndpoints(raw)).toEqual({
 				endpoints: {},
 				errors: [`${CLAUDE_CODE_ENDPOINTS_CONFIG_KEY} must be an object`],
+				invalid: [],
 			});
 		}
 	});

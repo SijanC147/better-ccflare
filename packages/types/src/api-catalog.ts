@@ -726,7 +726,7 @@ export const API_ROUTES: ApiRoute[] = [
 		path: "/api/openai-gateways",
 		category: "Config",
 		summary:
-			"Named OpenAI-compatible gateways, each with its /v1/gateways/<name> base path, plus stored entries skipped as invalid.",
+			"Named OpenAI-compatible gateways, each with its /v1/gateways/<name> base path, plus stored entries skipped as invalid: `errors` as messages and `invalid` as { name, error } by the stored key DELETE takes.",
 	},
 	{
 		method: "PUT",
@@ -747,7 +747,7 @@ export const API_ROUTES: ApiRoute[] = [
 		path: "/api/claude-code-endpoints",
 		category: "Config",
 		summary:
-			"Claude Code project endpoints, each a name mapped to a host directory and served at /<name>/v1, plus stored entries skipped as invalid.",
+			"Claude Code project endpoints, each a name mapped to a host directory and served at /<name>/v1, plus stored entries skipped as invalid: `errors` as messages and `invalid` as { name, error } by the stored key DELETE takes.",
 	},
 	{
 		method: "GET",
