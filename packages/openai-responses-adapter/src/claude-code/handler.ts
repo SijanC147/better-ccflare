@@ -63,7 +63,19 @@ export interface ClaudeCodeRunnerDeps {
 	firstEventWaitMs?: number;
 	/** Streaming only: interval of SSE keep-alive comments. Default 15000. */
 	keepAliveMs?: number;
+	/**
+	 * Arms the endpoint's `timeout_ms` timer at spawn and returns its cancel.
+	 * Default `setTimeout`. A test passes its own to fire the timeout at a
+	 * chosen point, such as after the first text, which a wall-clock timer
+	 * cannot promise on a loaded machine (SB23-3785).
+	 */
+	armTimeout?: (fire: () => void, ms: number) => () => void;
 }
+
+const armTimeoutWithTimer = (fire: () => void, ms: number): (() => void) => {
+	const timer = setTimeout(fire, ms);
+	return () => clearTimeout(timer);
+};
 
 const log = new Logger("claude-code-endpoints");
 
@@ -202,10 +214,11 @@ interface LaunchInput {
 	sessionId: string;
 	signal: AbortSignal;
 	killGraceMs: number;
+	armTimeout: (fire: () => void, ms: number) => () => void;
 }
 
 function launch(input: LaunchInput): Launch | RunError {
-	const { endpoint, argv, prompt, signal, killGraceMs } = input;
+	const { endpoint, argv, prompt, signal, killGraceMs, armTimeout } = input;
 
 	const running = activeByEndpoint.get(endpoint.name) ?? 0;
 	if (running >= endpoint.max_concurrency) {
@@ -268,7 +281,7 @@ function launch(input: LaunchInput): Launch | RunError {
 		}
 	};
 
-	const timeoutTimer = setTimeout(() => {
+	const cancelTimeout = armTimeout(() => {
 		timedOut = true;
 		terminate();
 	}, endpoint.timeout_ms);
@@ -282,7 +295,7 @@ function launch(input: LaunchInput): Launch | RunError {
 	const dispose = () => {
 		if (disposed) return;
 		disposed = true;
-		clearTimeout(timeoutTimer);
+		cancelTimeout();
 		signal.removeEventListener("abort", onAbort);
 		const left = (activeByEndpoint.get(endpoint.name) ?? 1) - 1;
 		if (left <= 0) activeByEndpoint.delete(endpoint.name);
@@ -635,6 +648,7 @@ export async function handleClaudeCodeEndpointRequest(
 	const system = systemText(messages);
 	const bin = deps.bin ?? resolveClaudeCodeBin();
 	const killGraceMs = deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+	const armTimeout = deps.armTimeout ?? armTimeoutWithTimer;
 
 	// The system prompt goes through a 0600 file in a private directory, never
 	// argv, where `ps` shows it and Linux caps one argument at 128 KiB
@@ -692,6 +706,7 @@ export async function handleClaudeCodeEndpointRequest(
 			sessionId,
 			signal: req.signal,
 			killGraceMs,
+			armTimeout,
 		});
 	};
 

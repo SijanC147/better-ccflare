@@ -744,21 +744,80 @@ describe("concurrency, timeout and abort", () => {
 	});
 
 	test("stream: a timeout after text ends the stream with an error frame", async () => {
+		// The timeout fires when the test says, after the text has arrived. A
+		// real 500 ms timer runs from spawn, and on a loaded machine the fake
+		// had not printed "Hello" by then, so the answer was a 504 with no text
+		// (SB23-3785: failed at 2066.92 ms with two other suites running).
 		const ctx = setup("hang-after-text", { timeout_ms: 500 });
-		const res = await call(ctx, {
-			model: "opus",
-			stream: true,
-			messages: [{ role: "user", content: "hi" }],
-		});
+		const armed: number[] = [];
+		let fireTimeout: (() => void) | null = null;
+		const res = await call(
+			ctx,
+			{
+				model: "opus",
+				stream: true,
+				messages: [{ role: "user", content: "hi" }],
+			},
+			undefined,
+			{
+				armTimeout: (fire, ms) => {
+					armed.push(ms);
+					fireTimeout = fire;
+					return () => {
+						fireTimeout = null;
+					};
+				},
+			},
+		);
 		expect(res.status).toBe(200);
-		const raw = await res.text();
-		expect(raw).toContain('"content":"Hello"');
+		expect(armed).toEqual([500]);
+		const reader = res.body?.getReader();
+		if (!reader) throw new Error("streaming response has no body");
+		const decoder = new TextDecoder();
+		let raw = "";
+		while (!raw.includes('"content":"Hello"')) {
+			const { done, value } = await reader.read();
+			if (done) throw new Error(`stream ended before the text: ${raw}`);
+			raw += decoder.decode(value, { stream: true });
+		}
+		// Nothing has timed out yet: the error frame is the timeout's own.
+		expect(raw).not.toContain('"code":"timeout"');
+		const fire = fireTimeout as (() => void) | null;
+		if (!fire) throw new Error("the timeout was cancelled before it fired");
+		fire();
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			raw += decoder.decode(value, { stream: true });
+		}
 		expect(raw).toContain('"code":"timeout"');
 		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
 		const [inv] = fake?.invocations() ?? [];
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
+	}, 10_000);
+
+	test("a finished run cancels its timeout", async () => {
+		const ctx = setup("ok");
+		const armed: number[] = [];
+		let cancels = 0;
+		const res = await call(
+			ctx,
+			{ model: "opus", messages: [{ role: "user", content: "hi" }] },
+			undefined,
+			{
+				armTimeout: (_fire, ms) => {
+					armed.push(ms);
+					return () => {
+						cancels++;
+					};
+				},
+			},
+		);
+		expect(res.status).toBe(200);
+		expect(armed).toEqual([30_000]);
+		expect(cancels).toBe(1);
 	});
 
 	test("stream: cancelling the response body kills the process group", async () => {
