@@ -62,7 +62,7 @@ describe("network guard: installed by bunfig.toml", () => {
 	});
 
 	// The half that matters most. Production code catches a failed fetch and
-	// carries on: 40 of the 45 attempts measured on SB23-3493 failed no test
+	// carries on: 39 of the 44 attempts measured on SB23-3493 failed no test
 	// when the fetch alone was blocked. The guard's global afterEach must fail
 	// the test anyway, so the fixture's test, which catches the rejection and
 	// asserts that it did, has to fail.

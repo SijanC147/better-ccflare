@@ -18,10 +18,13 @@
  *   to `nano-gpt.com` and `models.dev`, made by `estimateCostUSD` and friends
  *   in `packages/core/src/pricing.ts` whenever a test touched a cost.
  *
- * Only 5 of those 45 attempts failed a test when blocked. Production code
- * catches a failed fetch and carries on (the proxy fails the account, pricing
- * falls back to bundled data), so a guard that only rejected the fetch would
- * be silent for 40 of them. Hence the two halves below: the fetch rejects the
+ * - `outbound-proxy.test.ts`: 2 requests to a `.invalid` host, which go to a
+ *   loopback proxy and are allowed (below).
+ *
+ * That is 44 attempts in 9 files, and only 5 of them failed a test when
+ * blocked. Production code catches a failed fetch and carries on (the proxy
+ * fails the account, pricing falls back to bundled data), so a guard that only
+ * rejected the fetch would be silent for 39 of them. Hence the two halves below: the fetch rejects the
  * way a real fetch does, AND a global `afterEach` fails the test that made
  * the attempt, whatever the code under test did with the rejection.
  *
@@ -70,7 +73,9 @@ import net from "node:net";
 import { relative } from "node:path";
 import tls from "node:tls";
 
-process.env.CF_PRICING_OFFLINE ??= "1";
+// Unconditional, so a developer's exported CF_PRICING_OFFLINE=0 cannot turn
+// live pricing fetches back on for the whole suite.
+process.env.CF_PRICING_OFFLINE = "1";
 
 const GUARD_FILE = import.meta.path;
 
