@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -907,10 +907,10 @@ describe("check-optional-chain-silent-skip", () => {
 		expect(stdout).toContain("0 offences");
 		expect(result.exitCode).toBe(0);
 
-		// This is also where the whole-tree scanned-nothing invariant is exercised, and it is
-		// the only place it can be: that stricter branch needs `roots.length === 0`, so no
-		// fixture can reach it. Break the walker, the parser or the guard recogniser and this
-		// run exits 2 rather than 0.
+		// This run exercises the whole-tree scanned-nothing invariant on the real tree: break
+		// the walker, the parser or the guard recogniser and it exits 2 rather than 0. It can
+		// only show the floor passing, never firing, so the copied fixture repository below is
+		// what proves the floor fires (SB23-3925).
 		//
 		// It is NOT what kills a `process.exit(2)` to `exit(0)` mutation, and an earlier
 		// version of this comment claimed it was. On a healthy tree this run never reaches
@@ -939,5 +939,107 @@ describe("check-optional-chain-silent-skip", () => {
 		for (const raw of [counts[1], counts[2], counts[3]]) {
 			expect(Number(raw)).toBeGreaterThan(0);
 		}
-	}, 30_000);
+
+		// Both gates walk the same tree, so they must read the same number of test files. This
+		// one skipped the root `__tests__` directory and read 501 where the database-path gate
+		// read 502 at 3a6668af (SB23-3925). Equality, not a number, so it holds as files are
+		// added; the timeout covers a second whole-tree spawn.
+		const sibling = Bun.spawnSync(["bun", "run", path.join(repoRoot, "scripts", "check-shared-tmp-db-path.ts")], {
+			cwd: repoRoot,
+		});
+		const siblingFiles = sibling.stdout.toString().match(/(\d+) test files scanned/);
+		if (!siblingFiles) throw new Error(`check-shared-tmp-db-path summary not found: ${sibling.stdout}`);
+		expect(Number(counts[1])).toBe(Number(siblingFiles[1]));
+	}, 60_000);
+
+	/**
+	 * The whole-tree floor is unreachable from a fixture root, because any root argument selects
+	 * the scoped branch, and on a healthy repository it never fires. Mutating `scannedNothing` to
+	 * `false` left this file at 153 pass / 0 fail (SB23-3925, audit of 880e0797..88ba0fcf). So the
+	 * gate and its matcher table are copied into a fixture repository of their own, where
+	 * `repoRoot` is the fixture and a run with no arguments walks the fixture's default roots,
+	 * the same approach `check-shared-tmp-db-path.test.ts` takes for its floor (#295).
+	 */
+	describe("the whole-tree floor, in a copied fixture repository", () => {
+		// A presence assertion and an optional chain on DIFFERENT subjects: both counts are
+		// non-zero and there is no offence, so the file count is the only thing that can fail.
+		const CLEAN = [
+			'import { expect, test } from "bun:test";',
+			'test("clean", () => {',
+			"\tconst a: number | undefined = 1;",
+			"\tconst b: { c: () => number } | undefined = { c: () => 1 };",
+			"\texpect(a).toBeDefined();",
+			"\tb?.c();",
+			"});",
+			"",
+		].join("\n");
+
+		function makeFixtureRepo(files: Array<{ dir: string; count: number; body?: string }>): string {
+			const dir = makeFixtureDir();
+			mkdirSync(path.join(dir, "scripts"));
+			for (const name of ["check-optional-chain-silent-skip.ts", "silent-skip-matchers.ts"]) {
+				writeFileSync(path.join(dir, "scripts", name), readFileSync(path.join(repoRoot, "scripts", name), "utf8"));
+			}
+			symlinkSync(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"));
+			for (const { dir: sub, count, body } of files) {
+				mkdirSync(path.join(dir, sub), { recursive: true });
+				for (let i = 0; i < count; i++) writeFileSync(path.join(dir, sub, `f${i}.test.ts`), body ?? CLEAN);
+			}
+			return dir;
+		}
+
+		function runCopiedGate(dir: string) {
+			const result = Bun.spawnSync(["bun", "run", path.join(dir, "scripts", "check-optional-chain-silent-skip.ts")], {
+				cwd: dir,
+			});
+			return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+		}
+
+		test("299 clean test files exits 2 in whole-tree mode", () => {
+			const { exitCode, stdout, stderr } = runCopiedGate(makeFixtureRepo([{ dir: "packages/p", count: 299 }]));
+			expect(stdout).toContain("whole-tree mode");
+			expect(stdout).toContain("299 test files scanned");
+			expect(stderr).toContain("floor 300 files");
+			expect(exitCode).toBe(2);
+		}, 30_000);
+
+		test("300 clean test files exits 0, so the 299 case fails on the floor alone", () => {
+			const { exitCode, stdout, stderr } = runCopiedGate(makeFixtureRepo([{ dir: "packages/p", count: 300 }]));
+			expect(stderr).toBe("");
+			expect(stdout).toContain("whole-tree mode, 300 test files scanned, 300 optional chains examined, 300 presence assertions found");
+			expect(exitCode).toBe(0);
+		}, 30_000);
+
+		test("300 test files with no optional chain exits 2", () => {
+			const { exitCode, stdout, stderr } = runCopiedGate(
+				makeFixtureRepo([{ dir: "packages/p", count: 300, body: 'import { expect, test } from "bun:test";\ntest("x", () => expect(1).toBeDefined());\n' }]),
+			);
+			expect(stdout).toContain("300 test files scanned, 0 optional chains examined");
+			expect(stderr).toContain("scanned too little");
+			expect(exitCode).toBe(2);
+		}, 30_000);
+
+		test("300 test files with no presence assertion exits 2", () => {
+			const { exitCode, stdout, stderr } = runCopiedGate(
+				makeFixtureRepo([{ dir: "packages/p", count: 300, body: "const b: { c: () => number } | undefined = undefined;\nb?.c();\n" }]),
+			);
+			expect(stdout).toContain("0 presence assertions found");
+			expect(stderr).toContain("scanned too little");
+			expect(exitCode).toBe(2);
+		}, 30_000);
+
+		test("the root __tests__ directory is walked by default", () => {
+			// 299 under packages plus 1 under the root `__tests__` reaches the floor only if the
+			// walker reads `__tests__`; dropping it from the default roots makes this 299 and exit 2.
+			const { exitCode, stdout, stderr } = runCopiedGate(
+				makeFixtureRepo([
+					{ dir: "packages/p", count: 299 },
+					{ dir: "__tests__", count: 1 },
+				]),
+			);
+			expect(stderr).toBe("");
+			expect(stdout).toContain("300 test files scanned");
+			expect(exitCode).toBe(0);
+		}, 30_000);
+	});
 });
