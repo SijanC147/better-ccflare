@@ -7,12 +7,10 @@ import {
 	type OpenAIGateways,
 } from "@better-ccflare/types";
 import { dropClientGatewayHeaders } from "../../gateway";
+import { dispatchOpenAIGatewayRequest } from "../../gateway-dispatch";
 import { handleResponsesRequest } from "../../handler";
 import type { HandleProxyFn } from "../../types";
-import {
-	dispatchOpenAIGatewayRequest,
-	handleChatCompletionsRequest,
-} from "../handler";
+import { handleChatCompletionsRequest } from "../handler";
 
 // SB23-2727. Every translated request is labelled with the API it arrived on
 // and the gateway it came through, for its history row, whatever the client

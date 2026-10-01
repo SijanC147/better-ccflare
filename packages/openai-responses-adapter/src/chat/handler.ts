@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
 import {
-	type OpenAIGateways,
+	type InboundFormat,
 	REPORT_UPSTREAM_MODEL_HEADER,
 	UPSTREAM_CONTENT_TYPE_HEADER,
 } from "@better-ccflare/types";
@@ -11,7 +11,6 @@ import {
 	resolveGatewayModel,
 	setInboundMarker,
 } from "../gateway";
-import { handleResponsesRequest } from "../handler";
 import {
 	anthropicMessageStartModel,
 	modelSubstitution,
@@ -42,7 +41,7 @@ const SSE_HEADERS = {
 	connection: "keep-alive",
 };
 
-function jsonResponse(
+export function jsonResponse(
 	status: number,
 	body: unknown,
 	extraHeaders?: Record<string, string>,
@@ -245,8 +244,28 @@ export async function handleChatCompletionsRequest(
 	apiKeyName?: string | null,
 	options?: OpenAIGatewayOptions,
 ): Promise<Response> {
-	// 1. Parse the body.
-	let body: ChatCompletionRequest;
+	const parsed = await readJsonObject(req);
+	if (parsed instanceof Response) return parsed;
+	return runChatCompletion(
+		parsed as ChatCompletionRequest,
+		req,
+		url,
+		handleProxy,
+		ctx,
+		apiKeyId,
+		apiKeyName,
+		options,
+		CHAT_COMPLETIONS_SHAPE,
+	);
+}
+
+/**
+ * The request body as a JSON object, or the OpenAI-shaped 400 that refuses
+ * it. Shared by every inbound OpenAI handler that reads a JSON body.
+ */
+export async function readJsonObject(
+	req: Request,
+): Promise<Record<string, unknown> | Response> {
 	try {
 		const parsed: unknown = await req.json();
 		if (
@@ -256,11 +275,44 @@ export async function handleChatCompletionsRequest(
 		) {
 			return invalidRequest(400, "Request body must be a JSON object.");
 		}
-		body = parsed as ChatCompletionRequest;
+		return parsed as Record<string, unknown>;
 	} catch {
 		return invalidRequest(400, "Request body is not valid JSON.");
 	}
+}
 
+/**
+ * What differs between the APIs served through the chat core: the label on
+ * the request's history row and the prefix of the completion id.
+ */
+export interface ChatCoreShape {
+	format: InboundFormat;
+	idPrefix: string;
+}
+
+const CHAT_COMPLETIONS_SHAPE: ChatCoreShape = {
+	format: "openai-chat",
+	idPrefix: "chatcmpl-",
+};
+
+/**
+ * The Chat Completions pipeline from an already-parsed body: model set,
+ * translation, the synthetic `/v1/messages` request through `handleProxy`,
+ * and the answer in the Chat Completions shape. The legacy Completions
+ * handler (SB23-1970) runs this same core and reshapes what it returns, so
+ * the Anthropic translation exists once.
+ */
+export async function runChatCompletion(
+	body: ChatCompletionRequest,
+	req: Request,
+	url: URL,
+	handleProxy: HandleProxyFn,
+	ctx: unknown,
+	apiKeyId: string | null | undefined,
+	apiKeyName: string | null | undefined,
+	options: OpenAIGatewayOptions | undefined,
+	shape: ChatCoreShape,
+): Promise<Response> {
 	// 2. Resolve the gateway's model set, then translate, or refuse before
 	// anything is sent upstream. The client's name is kept for the response
 	// id; the answering model is reported separately (SB23-2781).
@@ -290,7 +342,7 @@ export async function handleChatCompletionsRequest(
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
 	applyGatewayExclusions(syntheticHeaders, options);
-	setInboundMarker(syntheticHeaders, "openai-chat", options);
+	setInboundMarker(syntheticHeaders, shape.format, options);
 	// Report the model that answered, not the requested name (SB23-2781).
 	syntheticHeaders.set(REPORT_UPSTREAM_MODEL_HEADER, "1");
 	const syntheticReq = new Request(messagesUrl.toString(), {
@@ -302,7 +354,7 @@ export async function handleChatCompletionsRequest(
 	});
 
 	const translationCtx: ResponseTranslationContext = {
-		id: `chatcmpl-${crypto.randomBytes(12).toString("hex")}`,
+		id: `${shape.idPrefix}${crypto.randomBytes(12).toString("hex")}`,
 		created: Math.floor(Date.now() / 1000),
 		model: requestedModel ?? anthropicBody.model,
 	};
@@ -462,12 +514,6 @@ export async function handleOpenAIModelsRequest(
 	return upstream;
 }
 
-function notFound(message: string, code: string): Response {
-	return jsonResponse(404, {
-		error: { message, type: "invalid_request_error", param: null, code },
-	});
-}
-
 /**
  * True for every path under the gateway prefix, including ones whose name
  * fails validation. The server answers all of them in the gateway branch:
@@ -476,98 +522,4 @@ function notFound(message: string, code: string): Response {
  */
 export function isOpenAIGatewayPath(pathname: string): boolean {
 	return pathname === "/v1/gateways" || pathname.startsWith("/v1/gateways/");
-}
-
-/**
- * Serves a path for which `isOpenAIGatewayPath` is true, given what
- * `matchOpenAIGatewayPath` made of it. A null match (an invalid or empty name)
- * is a 404 and never reaches `handleProxy`. Pure over its inputs so the
- * routing is testable without the server.
- */
-export async function dispatchOpenAIGatewayRequest(
-	req: Request,
-	url: URL,
-	match: { name: string; rest: string } | null,
-	gateways: OpenAIGateways,
-	handleProxy: HandleProxyFn,
-	ctx: unknown,
-	apiKeyId?: string | null,
-	apiKeyName?: string | null,
-): Promise<Response> {
-	if (!match) {
-		return notFound(
-			"Gateway names are lowercase letters, digits, - and _, starting with a letter or digit.",
-			"gateway_not_found",
-		);
-	}
-	const gateway = Object.hasOwn(gateways, match.name)
-		? gateways[match.name]
-		: undefined;
-	if (!gateway) {
-		return notFound(
-			`No OpenAI gateway named "${match.name}" is configured.`,
-			"gateway_not_found",
-		);
-	}
-	const options: OpenAIGatewayOptions = {
-		name: match.name,
-		excludeProviders: gateway.exclude_providers ?? [],
-		models: gateway.models,
-	};
-	const isResponsesPath =
-		match.rest === "/responses" || match.rest === "/responses/compact";
-	// Codex tries WebSocket transport first. Refused exactly as on the plain
-	// /v1/responses path (server.ts), so the client falls back to HTTPS.
-	if (
-		isResponsesPath &&
-		req.headers.get("upgrade")?.toLowerCase() === "websocket"
-	) {
-		return jsonResponse(503, {
-			type: "error",
-			error: {
-				type: "not_supported_error",
-				message:
-					"WebSocket transport is not supported. Codex will retry over HTTPS automatically.",
-			},
-		});
-	}
-	// The Responses API, which is all Codex speaks (SB23-3469). Compact is
-	// served by the same handler, as on the plain path.
-	if (req.method === "POST" && isResponsesPath) {
-		return handleResponsesRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	if (req.method === "POST" && match.rest === "/chat/completions") {
-		return handleChatCompletionsRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	if (req.method === "GET" && match.rest === "/models") {
-		return handleOpenAIModelsRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	return notFound(
-		`${req.method} ${match.rest || "/"} is not served by gateway "${match.name}". Use POST /chat/completions, POST /responses, POST /responses/compact or GET /models.`,
-		"unknown_endpoint",
-	);
 }

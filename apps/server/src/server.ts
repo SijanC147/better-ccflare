@@ -62,8 +62,10 @@ import {
 	dropClientGatewayHeaders,
 	handleChatCompletionsRequest,
 	handleClaudeCodeEndpointRequest,
+	handleCompletionsRequest,
 	handleResponsesRequest,
 	isOpenAIChatCompletionsRequest,
+	isOpenAICompletionsRequest,
 	isOpenAIGatewayPath,
 } from "@better-ccflare/openai-responses-adapter";
 import {
@@ -1948,6 +1950,20 @@ export default async function startServer(options?: {
 									handleProxy as Parameters<
 										typeof handleChatCompletionsRequest
 									>[2],
+									proxyContext,
+									authResult.apiKeyId,
+									authResult.apiKeyName,
+								),
+							);
+						}
+						// Legacy OpenAI Completions (SB23-1970), translated onto the
+						// same chat core and intercepted for the same reason.
+						if (isOpenAICompletionsRequest(req.method, url.pathname)) {
+							return trackStreamForShutdown(
+								await handleCompletionsRequest(
+									req,
+									url,
+									handleProxy as Parameters<typeof handleCompletionsRequest>[2],
 									proxyContext,
 									authResult.apiKeyId,
 									authResult.apiKeyName,

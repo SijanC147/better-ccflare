@@ -11,10 +11,8 @@ import {
 	matchOpenAIGatewayPath,
 	type OpenAIGateways,
 } from "@better-ccflare/types";
-import {
-	dispatchOpenAIGatewayRequest,
-	handleChatCompletionsRequest,
-} from "../chat/handler";
+import { handleChatCompletionsRequest } from "../chat/handler";
+import { dispatchOpenAIGatewayRequest } from "../gateway-dispatch";
 import { handleResponsesRequest } from "../handler";
 import {
 	anthropicMessageStartModel,

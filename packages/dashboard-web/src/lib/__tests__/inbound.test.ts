@@ -6,6 +6,13 @@ describe("inboundLabel", () => {
 		expect(inboundLabel("openai-chat")).toBe("OpenAI chat");
 	});
 
+	it("names the legacy Completions endpoint", () => {
+		expect(inboundLabel("openai-completions")).toBe("OpenAI completions");
+		expect(inboundLabel("openai-completions", "work")).toBe(
+			"OpenAI completions · work",
+		);
+	});
+
 	it("names the plain Responses endpoint", () => {
 		expect(inboundLabel("openai-responses", null)).toBe("OpenAI responses");
 	});
@@ -29,6 +36,10 @@ describe("inboundPath", () => {
 		expect(inboundPath("openai-chat")).toBe("/v1/chat/completions");
 		expect(inboundPath("openai-responses")).toBe(
 			"/v1/responses or /v1/responses/compact",
+		);
+		expect(inboundPath("openai-completions")).toBe("/v1/completions");
+		expect(inboundPath("openai-completions", "work")).toBe(
+			"/v1/gateways/work/completions",
 		);
 		expect(inboundPath("openai-chat", "work")).toBe(
 			"/v1/gateways/work/chat/completions",

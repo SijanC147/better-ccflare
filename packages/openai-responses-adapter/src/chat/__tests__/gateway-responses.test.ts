@@ -8,9 +8,9 @@ import {
 	type OpenAIGateways,
 	REPORT_UPSTREAM_MODEL_HEADER,
 } from "@better-ccflare/types";
+import { dispatchOpenAIGatewayRequest } from "../../gateway-dispatch";
 import { handleResponsesRequest } from "../../handler";
 import type { HandleProxyFn } from "../../types";
-import { dispatchOpenAIGatewayRequest } from "../handler";
 
 // SB23-3469: named gateways serve POST /responses and /responses/compact.
 // Every test stubs handleProxy, so no request leaves the process.

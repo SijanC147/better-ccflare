@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { matchOpenAIGatewayPath } from "@better-ccflare/types";
+import { dispatchOpenAIGatewayRequest } from "../../gateway-dispatch";
 import type { HandleProxyFn } from "../../types";
 import {
-	dispatchOpenAIGatewayRequest,
 	handleChatCompletionsRequest,
 	handleOpenAIModelsRequest,
 	isOpenAIChatCompletionsRequest,

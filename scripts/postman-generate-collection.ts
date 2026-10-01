@@ -4,12 +4,14 @@
  * under `postman/collections/`, from the route catalog in
  * `packages/types/src/api-catalog.ts`, plus two hand-written folders:
  *
- * - `Smoke`: checks that reach no account (the catalog, the gateway list, two
+ * - `Smoke`: checks that reach no account (the catalog, the gateway list, three
  *   refusals the OpenAI gateway answers before routing). Safe against 8080
- *   on v3.28.0 or later; before v3.28.0 the two POSTs fall through to accounts.
- * - `OpenAI gateway`: `/v1/models` and `/v1/chat/completions`, plain and
- *   named-gateway, plus a named gateway's `/responses`. These route to real
- *   accounts on a real server.
+ *   on v3.28.0 or later; before v3.28.0 the two chat POSTs fall through to
+ *   accounts, and the legacy completion refusal needs the release that
+ *   carries SB23-1970.
+ * - `OpenAI gateway`: `/v1/models`, `/v1/chat/completions` and the legacy
+ *   `/v1/completions`, plain and named-gateway, plus a named gateway's
+ *   `/responses`. These route to real accounts on a real server.
  *
  * Regenerate after any catalog change, then `postman workspace push`:
  *
@@ -139,6 +141,18 @@ const chatBody = (extra: Record<string, unknown> = {}) =>
 		2,
 	);
 
+const completionBody = (extra: Record<string, unknown> = {}) =>
+	JSON.stringify(
+		{
+			model: "{{model}}",
+			prompt: "Reply with the single word: pong",
+			max_tokens: 16,
+			...extra,
+		},
+		null,
+		2,
+	);
+
 const statusTest = (code: number) =>
 	`pm.test("status is ${code}", () => pm.response.to.have.status(${code}));`;
 
@@ -160,6 +174,25 @@ const chatCompletionTest = [
 	'  pm.expect(body.object).to.eql("chat.completion");',
 	'  pm.expect(body.choices[0].message.role).to.eql("assistant");',
 	'  pm.expect(body.choices[0].message.content).to.be.a("string").and.not.empty;',
+	"});",
+].join("\n");
+
+const completionTest = [
+	statusTest(200),
+	'pm.test("text_completion with choices[].text", () => {',
+	"  const body = pm.response.json();",
+	'  pm.expect(body.object).to.eql("text_completion");',
+	'  pm.expect(body.choices[0].text).to.be.a("string").and.not.empty;',
+	'  pm.expect(body.choices[0]).to.not.have.property("message");',
+	"});",
+].join("\n");
+
+const completionStreamTest = [
+	statusTest(200),
+	'pm.test("text_completion chunks ending in [DONE]", () => {',
+	"  const text = pm.response.text();",
+	'  pm.expect(text).to.include(\'"object":"text_completion"\');',
+	'  pm.expect(text.trim().endsWith("data: [DONE]")).to.be.true;',
 	"});",
 ].join("\n");
 
@@ -244,6 +277,17 @@ const smoke: RequestSpec[] = [
 		body: chatBody(),
 		tests: openAIErrorTest(404, "gateway_not_found"),
 	},
+	{
+		name: "Completion refuses an array prompt",
+		method: "POST",
+		url: "{{baseUrl}}/v1/completions",
+		order: 5000,
+		description:
+			"Refused by the legacy Completions translator before routing, so it reaches no account (SB23-1970). Every array `prompt` is refused, one element included. On a release without that translator the request falls through to `handleProxy`, which is why `max_tokens` is 1.",
+		headers: JSON_HEADER,
+		body: completionBody({ prompt: ["pong"], max_tokens: 1 }),
+		tests: openAIErrorTest(400, "unsupported_value", "prompt"),
+	},
 ];
 
 const gateway: RequestSpec[] = [
@@ -299,6 +343,38 @@ const gateway: RequestSpec[] = [
 		headers: JSON_HEADER,
 		body: responsesBody(),
 		tests: responseTest,
+	},
+	{
+		name: "Completion (legacy)",
+		method: "POST",
+		url: "{{baseUrl}}/v1/completions",
+		order: 6000,
+		description:
+			"The legacy text completion API (SB23-1970). Routes to a real account on a real server. The prompt is sent as one user turn, so a chat-tuned model answers it rather than continuing it. Set `model` first.",
+		headers: JSON_HEADER,
+		body: completionBody(),
+		tests: completionTest,
+	},
+	{
+		name: "Completion (legacy, stream)",
+		method: "POST",
+		url: "{{baseUrl}}/v1/completions",
+		order: 7000,
+		description: "Routes to a real account on a real server.",
+		headers: JSON_HEADER,
+		body: completionBody({ stream: true }),
+		tests: completionStreamTest,
+	},
+	{
+		name: "Completion via named gateway",
+		method: "POST",
+		url: "{{baseUrl}}/v1/gateways/{{gateway}}/completions",
+		order: 8000,
+		description:
+			"Set `gateway` to a name from `GET /api/openai-gateways`. The gateway's `exclude_providers` and model set apply.",
+		headers: JSON_HEADER,
+		body: completionBody(),
+		tests: completionTest,
 	},
 ];
 

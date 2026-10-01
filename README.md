@@ -473,11 +473,13 @@ Translated: text, images (`image_url`, as a data URL or a plain URL), function t
 
 A base64 data URL may carry parameters before `;base64` (`data:image/png;charset=binary;base64,...`) and a payload wrapped across lines; both are normalised before the image goes upstream. Tool calls and tool results in the history of a request that defines no `tools` are sent as text, because Anthropic refuses `tool_use` and `tool_result` blocks without tool definitions. The same two rules apply to `/v1/responses`.
 
-In the request history, a translated request is shown with its path as `/v1/messages`, the request actually routed, plus a badge naming the API it arrived on (**OpenAI chat** or **OpenAI responses**) and the named gateway, if any. The same values are on `GET /api/requests` as `inboundFormat` and `inboundGateway`.
+In the request history, a translated request is shown with its path as `/v1/messages`, the request actually routed, plus a badge naming the API it arrived on (**OpenAI chat**, **OpenAI completions** or **OpenAI responses**) and the named gateway, if any. The same values are on `GET /api/requests` as `inboundFormat` and `inboundGateway`.
 
 Refused with a 400, rather than silently dropped: `n` greater than 1, `logprobs`, tools whose type is not `function`, and audio or file content parts.
 
 `response_format` is best-effort, since Anthropic has no equivalent that guarantees the format. `reasoning_effort` is ignored.
+
+**Legacy text completions.** `POST /v1/completions` is served too, for clients still on OpenAI's deprecated Completions API. The `prompt` is sent upstream as the single user turn of a chat request, which runs through the same translation, pool and accounting as `/v1/chat/completions`, and the answer comes back as `object: "text_completion"` with the text in `choices[].text`, streamed or not. **This wrapping is lossy**: a chat-tuned model given a prompt as a user turn answers it as a message rather than continuing the text, so the same prompt does not produce what a true completion model would. `max_tokens` defaults to 16 when absent, the legacy API's own default. `echo: true` prepends the prompt to the text. Refused with a 400, although OpenAI accepts some of them: a `prompt` that is an array (of strings or of tokens, one element included), an absent or empty prompt (OpenAI completes from the start of a document; Anthropic refuses an empty turn), `max_tokens` of 0, a non-empty `suffix`, `best_of` above 1, any `logprobs` value, and everything the chat path refuses.
 
 **Claude OAuth accounts are included in this pool, unlike Codex CLI traffic, and that is a deliberate choice with a risk attached.** The Codex section above excludes them because Anthropic has banned OAuth accounts used outside Claude Code. Anthropic has also been seen billing third-party-app traffic on OAuth accounts against the account's extra usage credits and rejecting it with a 400 when extra usage is off; the proxy labels that `extra_usage_exhausted` and fails over. Neither behaviour is guaranteed. If you want these accounts kept out of third-party traffic, use API-key or non-Anthropic accounts for it.
 
@@ -500,7 +502,7 @@ The default base URL above applies no rules and can route to every account in th
 }
 ```
 
-The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and calls `/chat/completions`, `/responses`, `/responses/compact` and `/models` under it. Any other path or method under a gateway answers 404 with `code: "unknown_endpoint"`, and an unconfigured name answers 404 with `code: "gateway_not_found"`. The path stays under `/v1/`, so API-key authentication and API-only keys work exactly as on the default URL.
+The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and calls `/chat/completions`, `/completions`, `/responses`, `/responses/compact` and `/models` under it. Any other path or method under a gateway answers 404 with `code: "unknown_endpoint"`, and an unconfigured name answers 404 with `code: "gateway_not_found"`. The path stays under `/v1/`, so API-key authentication and API-only keys work exactly as on the default URL.
 
 `exclude_providers` names the accounts a gateway never routes to. `anthropic-oauth` means Anthropic accounts holding a refresh token, which leaves Anthropic API-key accounts eligible. Any other value is matched exactly against an account's `provider`, for example `codex`. A gateway with `anthropic-oauth` excluded is the way to keep Claude OAuth accounts out of an app's traffic while the default URL still includes them.
 
