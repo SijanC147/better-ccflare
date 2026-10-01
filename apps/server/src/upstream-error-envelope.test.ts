@@ -186,10 +186,10 @@ function makeHarness(accounts: Account[]): Harness {
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getModelScopedCapacityRouting: undefined,
-			getCombosEnabled: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getModelScopedCapacityRouting: () => "off",
+			getCombosEnabled: () => true,
 			getStorePayloads: () => true,
 		},
 		provider: {

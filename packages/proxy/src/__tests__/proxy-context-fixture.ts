@@ -58,24 +58,38 @@
  *
  * Some members are optional in practice: production checks for them and takes
  * a default branch when they are missing. A literal that did not name one
- * answered `undefined` and took that branch; the stub throws instead. Name the
- * member as `undefined` to keep the old branch, never a function returning a
- * guessed default. Measured while migrating sixty-four files (SB23-2483):
+ * answered `undefined` and took that branch; the stub throws instead. Measured
+ * while migrating sixty-four files (SB23-2483):
  *
- * - `config.getModelScopedCapacityRouting`, `getCombosEnabled`,
- *   `getForceAccountModel`, `getComboSessionFallback` (account-selector.ts,
- *   all `?.()`), `getStorePayloads` (response-handler.ts, `?.()`).
  * - `provider.isStreamingResponse` (`?.()`), `extractUsageInfo` and
  *   `prepareRequest` (`if (provider.x)`), `observeRequest` (proxy.ts picks
- *   the codex observer when it is absent), `observeUpstream` (`?.()`).
+ *   the codex observer when it is absent), `observeUpstream` (`?.()`). These
+ *   are optional on `Provider`, so absence is a real production state: name
+ *   the member as `undefined` to keep that branch, never a function returning
+ *   a guessed default.
+ * - `config.getModelScopedCapacityRouting`, `getCombosEnabled`,
+ *   `getForceAccountModel`, `getComboSessionFallback` (account-selector.ts,
+ *   all `?.()`), `getStorePayloads` (response-handler.ts, `?.()`). These are
+ *   REQUIRED methods on `Config`, so a production context never lacks them and
+ *   an explicit `undefined` is the `Partial<T>` lie `exactOptionalPropertyTypes`
+ *   exists to refuse (SB23-2456). Name each as a function returning exactly its
+ *   read site's fallback: `() => true` for `getCombosEnabled`,
+ *   `getStorePayloads` and `getComboSessionFallback` (`?? true`),
+ *   `() => false` for `getForceAccountModel` (`?? false`), `() => "off"` for
+ *   `getModelScopedCapacityRouting` (the read is `=== "exhausted"`). That is
+ *   the branch `undefined` took, with no guessed value. SB23-3983 converted 104
+ *   such members across 33 files.
  *
  * That is why the four fields and `dbOps` are typed `MockOf<T>` rather than
- * `Partial<T>`. Under `exactOptionalPropertyTypes` (SB23-3983) `Partial<T>`
- * refuses an explicit `undefined`, and here an explicit `undefined` differs from
- * leaving the member out: the stub serves an own key holding
- * `undefined` and throws for a key the mock does not name. `Config`,
- * `Provider` and `DatabaseOperations` are not widened; only what this file
- * accepts is.
+ * `Partial<T>`. `MockOf<T>` admits an explicit `undefined` only on a member
+ * whose type already includes it (an optional member such as
+ * `Provider.observeRequest`), because there an own key holding `undefined`
+ * differs from leaving the member out: the stub serves the first and throws for
+ * the second. On a required member it refuses `undefined`, as `Partial<T>` does
+ * under the flag. A required `dbOps` member a test does not need is left out:
+ * production reads `resolverManager`, `getAccount` and `updateRequestUsage`
+ * without `?.`, so the stub's throw lands in the same `catch` an `undefined`'s
+ * `TypeError` did.
  *
  * One exception: a member production tests with `in`, such as
  * `"parseRateLimitFromBody" in provider` (handlers/response-processor.ts),
@@ -146,11 +160,14 @@ import type { LoadBalancingStrategy } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers/proxy-types";
 
 /**
- * A partial mock of `T` whose members may also be named as `undefined`. See
- * "Members production tests for presence" above: an own key holding
- * `undefined` is served as `undefined`, while a key that is not named throws.
+ * A partial mock of `T`. A member whose type already includes `undefined` may
+ * be named as `undefined`; a required member may not. See "Members production
+ * tests for presence" above: an own key holding `undefined` is served as
+ * `undefined`, while a key that is not named throws.
  */
-export type MockOf<T> = { [K in keyof T]?: T[K] | undefined };
+export type MockOf<T> = {
+	[K in keyof T]?: undefined extends T[K] ? T[K] | undefined : T[K];
+};
 
 /**
  * Property names a runtime probes on an arbitrary object without the code

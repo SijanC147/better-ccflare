@@ -118,8 +118,7 @@ export interface EndMessage {
 		| "error"
 		| "truncated"
 		| "client_cancelled"
-		| null
-		| undefined;
+		| null;
 }
 
 export interface ControlMessage {

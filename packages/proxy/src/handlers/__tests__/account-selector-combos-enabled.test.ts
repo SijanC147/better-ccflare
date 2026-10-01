@@ -128,9 +128,9 @@ function makeCtx(opts: {
 		...overrides,
 		config: {
 			getCombosEnabled: () => combosEnabled,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getModelScopedCapacityRouting: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getModelScopedCapacityRouting: () => "off",
 		},
 	});
 	return { ctx, getActiveComboForFamily };

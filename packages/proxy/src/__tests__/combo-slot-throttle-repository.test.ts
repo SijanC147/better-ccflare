@@ -197,9 +197,9 @@ describe("family combo slot thresholds survive the repository read", () => {
 				getSystemPromptCacheTtl1h: () => false,
 				getAgentFrontmatterModelFallback: () => false,
 				getModelScopedCapacityRouting: () => "off",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
 			},
 			provider: { name: "anthropic" },
 			asyncWriter: { enqueue: mock(() => {}) },

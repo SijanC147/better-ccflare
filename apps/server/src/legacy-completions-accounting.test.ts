@@ -172,9 +172,9 @@ function makeContext(): ProxyContext {
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-			getForceAccountModel: undefined,
-			getModelScopedCapacityRouting: undefined,
-			getCombosEnabled: undefined,
+			getForceAccountModel: () => false,
+			getModelScopedCapacityRouting: () => "off",
+			getCombosEnabled: () => true,
 			getStorePayloads: () => false,
 		},
 		provider: {

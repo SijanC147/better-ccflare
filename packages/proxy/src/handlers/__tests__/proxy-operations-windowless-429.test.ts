@@ -171,9 +171,6 @@ function makeCtx(): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			// Absent on the old literal, which answered undefined for both.
-			resolverManager: undefined,
-			updateRequestUsage: undefined,
 		},
 		runtime: { clientId: "test" },
 		// NOTE: getProvider("anthropic") from the registry wins over this, by

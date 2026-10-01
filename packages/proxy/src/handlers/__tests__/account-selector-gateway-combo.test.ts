@@ -118,9 +118,9 @@ function makeCtx(opts: {
 		asyncWriter: { enqueue: mock(() => {}) },
 		config: {
 			getCombosEnabled: () => opts.combosEnabled ?? true,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getModelScopedCapacityRouting: undefined,
-			getForceAccountModel: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getModelScopedCapacityRouting: () => "off",
+			getForceAccountModel: () => false,
 		},
 	});
 	return { ctx, getActiveComboForFamily };

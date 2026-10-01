@@ -138,7 +138,6 @@ function makeContext(provider: Partial<Provider>): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			resolverManager: undefined,
 		},
 		runtime: { clientId: "test" },
 		provider: {
