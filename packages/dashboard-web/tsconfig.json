@@ -37,6 +37,11 @@
 			"@better-ccflare/dashboard-web/dist/*": ["../dashboard-web/dist/*"]
 		}
 	},
-	"include": ["src/**/*"],
+	// `build.ts` and `embed.ts` are the package's own build scripts and sat
+	// outside every program until SB23-3689. Listed here rather than in a
+	// new target because `typecheck:dashboard` is already in the root chain.
+	// Measured: `bun run build:dashboard` output is byte-identical with and
+	// without these two entries, 23 files, 20,161,626 bytes.
+	"include": ["src/**/*", "build.ts", "embed.ts"],
 	"exclude": ["dist", "node_modules"]
 }

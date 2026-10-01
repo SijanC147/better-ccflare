@@ -90,9 +90,7 @@ interface Measurement {
  * Bun exposes `Bun.gc(true)` for forcing a blocking GC cycle.
  */
 function gc(): void {
-	// @ts-expect-error — Bun global; not typed in TS lib but exists at runtime
 	if (typeof Bun !== "undefined" && typeof Bun.gc === "function") {
-		// @ts-expect-error — see above
 		Bun.gc(true);
 	}
 }
