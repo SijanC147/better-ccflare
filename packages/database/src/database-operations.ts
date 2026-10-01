@@ -903,7 +903,9 @@ DATABASE RECOVERY INSTRUCTIONS
 If your database is corrupted, follow these steps:
 
 1. STOP THE SERVER
-   bun run cli --stop
+   brew services stop better-ccflare      (Homebrew)
+   sudo systemctl stop better-ccflare     (systemd)
+   or Ctrl-C in the terminal running it
 
 2. BACKUP CORRUPTED DATABASE
    cp ${dbPath} ${dbPath}.corrupted.backup

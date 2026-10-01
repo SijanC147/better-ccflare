@@ -46,8 +46,10 @@ export async function checkReauthNeeded(
 		console.log(`  bun run cli --reauthenticate "${account.name}"`);
 	});
 
-	console.log("\n💡 Or run the health check for detailed information:");
-	console.log("  bun run cli --token-health");
+	console.log(
+		"\n💡 Or read the detailed health report from the running server:",
+	);
+	console.log("  GET /api/token-health");
 }
 
 /**

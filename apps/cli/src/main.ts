@@ -119,6 +119,10 @@ import { Logger } from "@better-ccflare/logger";
 import { parseBedrockConfig } from "@better-ccflare/providers";
 // Import server
 import startServer from "@better-ccflare/server";
+import {
+	SUGGESTION_MAX_DISTANCE,
+	unknownArgumentLines,
+} from "./unknown-argument";
 
 interface ParsedArgs {
 	version: boolean;
@@ -262,8 +266,7 @@ function getModeSuggestions(input: string, validModes: string[]): string[] {
 
 		// Check for simple typos using edit distance
 		const distance = levenshteinDistance(input, mode);
-		if (distance <= 2) {
-			// Allow up to 2 character differences
+		if (distance <= SUGGESTION_MAX_DISTANCE) {
 			suggestions.push(mode);
 		}
 	}
@@ -605,6 +608,13 @@ function parseArgs(args: string[]): ParsedArgs {
 				break;
 			case "--serve":
 				parsed.serve = true;
+				break;
+			case "--smol":
+				// Bun's low-memory flag, accepted and ignored. docs/systemd.md
+				// ships `ExecStart=/usr/bin/better-ccflare --smol --serve`, and a
+				// `bun build --compile` binary passes it through to argv
+				// (measured on Bun 1.4.2), so refusing it would stop every unit
+				// written from that page (SB23-3729).
 				break;
 			case "--port":
 				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
@@ -988,6 +998,12 @@ function parseArgs(args: string[]): ParsedArgs {
 			case "--show-config":
 				parsed.showConfig = true;
 				break;
+			default:
+				// Every option value is consumed above with `++i`, so only an
+				// argument no case claims reaches here. Falling through to the
+				// no-argument path would start the server (SB23-3729).
+				for (const line of unknownArgumentLines(arg)) console.error(line);
+				fastExit(1);
 		}
 	}
 

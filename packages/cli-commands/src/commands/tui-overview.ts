@@ -111,10 +111,10 @@ export async function fetchOverview(
 				message: `${detail ?? API_KEY_REQUIRED_SENTENCE}. Pass --api-key <key> or set BETTER_CCFLARE_API_KEY.`,
 			};
 		}
-		// The /api router answers a valid key without admin access with 401,
-		// not 403 (`Unauthorized(authzResult.reason)` in router.ts), so a
-		// refused key is reported the same way whether it is wrong or merely
-		// not an admin key, with the server's own reason.
+		// A current server answers 401 only for a key it does not recognise
+		// and 403 for a valid key without admin access (SB23-3746). A server
+		// before that answered 401 for both, so the server's own reason is
+		// what tells the two apart here, and the advice fits either.
 		return {
 			ok: false,
 			kind: "unauthorized",
@@ -122,11 +122,11 @@ export async function fetchOverview(
 		};
 	}
 	if (response.status === 403) {
+		const detail = await serverErrorMessage(response);
 		return {
 			ok: false,
 			kind: "forbidden",
-			message:
-				"This API key lacks admin access; /api/accounts needs an admin key (better-ccflare --generate-api-key <name> --admin).",
+			message: `This API key lacks admin access${detail ? ` (${detail})` : ""}; /api/accounts needs an admin key (better-ccflare --generate-api-key <name> --admin).`,
 		};
 	}
 	if (!response.ok) {

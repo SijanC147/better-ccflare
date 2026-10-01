@@ -38,7 +38,7 @@ export function createTokenHealthService(): TokenHealthService {
 					log.warn(`  - ${account.name} (${account.provider})`);
 				});
 				log.warn(
-					"Run 'bun run cli --reauth-needed' to see details and get re-authentication commands.",
+					"GET /api/token-health/reauth-needed lists them; re-authenticate each with: better-ccflare --reauthenticate <name>",
 				);
 			}
 
