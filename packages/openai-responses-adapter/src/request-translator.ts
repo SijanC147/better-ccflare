@@ -14,9 +14,9 @@ import type {
 	AnthropicTextContent,
 	AnthropicTool,
 	AnthropicToolChoice,
-	ResponseItem,
 	ResponsesRequest,
 	ResponsesTool,
+	TranslatableRequest,
 } from "./types";
 
 const logger = new Logger("openai-responses-adapter");
@@ -165,7 +165,7 @@ function mergeConsecutiveSameRole(
 }
 
 export function translateRequestToAnthropic(
-	req: ResponsesRequest & { input: ResponseItem[] },
+	req: TranslatableRequest,
 ): AnthropicRequest {
 	const messages: AnthropicMessage[] = [];
 	const developerBlocks: string[] = [];

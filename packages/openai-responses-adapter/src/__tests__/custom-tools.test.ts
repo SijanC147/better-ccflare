@@ -6,14 +6,14 @@ import {
 } from "../custom-tools";
 import { translateRequestToAnthropic } from "../request-translator";
 import { translateAnthropicResponseToResponses } from "../response-translator";
-import type { ResponseItem, ResponsesRequest } from "../types";
+import type { ResponsesRequest, TranslatableRequest } from "../types";
 
 /**
  * `translateRequestToAnthropic` takes a request whose `input` has already been
  * normalised from the wire type's `string | ResponseItem[]` to an item array,
- * so these fixtures declare that narrowed shape rather than `ResponsesRequest`.
+ * so these fixtures declare that narrowed shape, `TranslatableRequest`, rather
+ * than `ResponsesRequest`.
  */
-type TranslatableRequest = ResponsesRequest & { input: ResponseItem[] };
 
 describe("Responses Lite tool declarations", () => {
 	test("extracts additional_tools namespaces and round-trips calls with their identities", () => {

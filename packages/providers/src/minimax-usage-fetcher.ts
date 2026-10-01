@@ -1,4 +1,13 @@
 import { Logger } from "@better-ccflare/logger";
+import type {
+	MinimaxUsageData,
+	MinimaxUsageWindow,
+} from "@better-ccflare/types";
+
+export type {
+	MinimaxUsageData,
+	MinimaxUsageWindow,
+} from "@better-ccflare/types";
 
 const log = new Logger("MinimaxUsageFetcher");
 
@@ -95,24 +104,6 @@ interface MinimaxBaseResponse {
 interface MinimaxRawResponse {
 	base_resp?: MinimaxBaseResponse;
 	model_remains?: MinimaxModelRemains[];
-}
-
-export interface MinimaxUsageWindow {
-	/** Utilization percent (0-100). 0 = fully available, 100 = exhausted. */
-	utilization: number;
-	/** Remaining percent (0-100) straight from the API. */
-	remainingPercent: number;
-	/** Reset time as epoch milliseconds. */
-	resetAt: number | null;
-	/** Window length in ms, derived from end_time - start_time per entry. */
-	intervalMs: number | null;
-}
-
-export interface MinimaxUsageData {
-	/** 5h-style per-model-class window derived from the `general` entry. */
-	five_hour: MinimaxUsageWindow | null;
-	/** 7d weekly window derived from the same `general` entry. */
-	seven_day: MinimaxUsageWindow | null;
 }
 
 function isFiniteNumber(value: unknown): value is number {

@@ -52,16 +52,37 @@ function makeOpenAIRequest(
 	};
 }
 
+/**
+ * Widens the two conversion hooks to public so these tests can drive them
+ * directly. Both are `protected` on `OpenAICompatibleProvider` and on
+ * `QwenProvider`'s overrides; until SB23-2454 the overrides dropped the
+ * modifier and were public by accident. `super` is called unchanged, so the
+ * behaviour under test is `QwenProvider`'s own, and a signature change in the
+ * hook fails this file's typecheck rather than being cast past.
+ */
+class TestQwenProvider extends QwenProvider {
+	public override beforeConvert(
+		body: Record<string, unknown>,
+		account?: Account,
+	): Account | undefined {
+		return super.beforeConvert(body, account);
+	}
+
+	public override afterConvert(body: OpenAIRequest): void {
+		super.afterConvert(body);
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe("QwenProvider", () => {
-	let provider: QwenProvider;
+	let provider: TestQwenProvider;
 
 	// Use a fresh instance per test group — beforeEach not strictly needed
 	// since QwenProvider has no mutable state, but it mirrors other test files.
-	provider = new QwenProvider();
+	provider = new TestQwenProvider();
 
 	// -------------------------------------------------------------------------
 	// 1. name

@@ -799,9 +799,10 @@ export function createAccountsListHandler(
 					reauthDeadlineStatus: reauthDeadline?.status ?? null,
 					daysUntilReauthRequired: reauthDeadline?.daysUntilDeadline ?? null,
 					hoursUntilReauthRequired: reauthDeadline?.hoursUntilDeadline ?? null,
-					// This list handler builds its own response object rather than
-					// calling toAccountResponse, so every field has to be added in
-					// both places or GET /api/accounts never carries it.
+					// This object is the only builder of an account response: an
+					// AccountResponse field not set here never reaches GET
+					// /api/accounts. (A second builder, toAccountResponse in
+					// @better-ccflare/types, had no caller and was deleted in SB23-2280.)
 					renewalDay: renewalDayValue,
 					nextRenewalAt: renewal?.nextRenewalAt ?? null,
 					daysUntilRenewal: renewal?.daysUntilRenewal ?? null,

@@ -343,8 +343,11 @@ describe("dashboard 24-hour clock", () => {
 			);
 
 			expect(offences).toEqual([]);
-			// 28 when this was written; fewer means the scan stopped matching.
-			expect(pinned).toBeGreaterThanOrEqual(28);
+			// 28 when this was written. 27 measured after SB23-2280 deleted the two
+			// pinned sites in the uncalled toAccountResponse and toAccountDisplay
+			// (the count had grown past the old floor in between). Fewer means the
+			// scan stopped matching.
+			expect(pinned).toBeGreaterThanOrEqual(27);
 		},
 		SCAN_TIMEOUT_MS,
 	);
@@ -398,9 +401,10 @@ describe("server and CLI 24-hour clock", () => {
 					.program.getRootFileNames()
 					.some((f) => path.resolve(f).startsWith(appsServer)),
 			).toBe(true);
-			// 5 when this was written, the two SB23-3614 sites among them; fewer
-			// means the scan stopped matching.
-			expect(pinned).toBeGreaterThanOrEqual(5);
+			// 5 when this was written, the two SB23-3614 sites among them, and 3
+			// after SB23-2280 deleted the two in the uncalled toAccountResponse and
+			// toAccountDisplay; fewer means the scan stopped matching.
+			expect(pinned).toBeGreaterThanOrEqual(3);
 		},
 		SCAN_TIMEOUT_MS,
 	);

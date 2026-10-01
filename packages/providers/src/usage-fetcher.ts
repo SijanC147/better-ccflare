@@ -3,7 +3,12 @@ import {
 	CLAUDE_CLI_VERSION,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
-import { PROVIDER_NAMES, supportsUsageTracking } from "@better-ccflare/types";
+import {
+	PROVIDER_NAMES,
+	supportsUsageTracking,
+	type UsageSpend as TypesUsageSpend,
+	type UsageLimit,
+} from "@better-ccflare/types";
 import {
 	type AlibabaCodingPlanUsageData,
 	fetchAlibabaCodingPlanUsageData,
@@ -72,32 +77,18 @@ export interface ExtraUsage {
 	spend_limit_reached?: boolean;
 }
 
-// Anthropic's generic per-limit representation (2026 usage API). Session and
-// all-models weekly come as kind "session" / "weekly_all"; per-model weekly caps
-// (Fable/Opus/Sonnet) come ONLY as kind "weekly_scoped" with scope.model.
-export interface UsageLimit {
-	kind: string; // "session" | "weekly_all" | "weekly_scoped" | ...
-	group?: string; // "session" | "weekly"
-	percent: number | null;
-	severity?: "normal" | "warning" | "critical" | string;
-	resets_at: string | null;
-	scope?: {
-		model?: { id: string | null; display_name: string } | null;
-		surface?: string | null;
-	} | null;
-	is_active?: boolean;
-}
+// Anthropic's generic per-limit representation (2026 usage API), declared once
+// in `@better-ccflare/types` (SB23-2453).
+export type { UsageLimit } from "@better-ccflare/types";
 
 // Overage / pay-as-you-go credit spend block from the usage payload.
-export interface UsageSpend {
-	used?: { amount_minor: number; currency: string; exponent: number } | null;
-	limit?: unknown;
-	percent?: number | null;
-	severity?: string;
-	enabled?: boolean;
-	currency?: string | null;
-	disabled_reason?: string | null;
-}
+//
+// Derived from the `@better-ccflare/types` declaration rather than declared
+// again, so every field but one cannot drift from it. The one difference is
+// deliberate: `limit` stays `unknown` here because nothing on this side reads
+// or validates it, while the types copy narrows it for the dashboard, which
+// does (SB23-3266).
+export type UsageSpend = Omit<TypesUsageSpend, "limit"> & { limit?: unknown };
 
 /**
  * Codex credit balance, from the `x-codex-credits-*` response headers.

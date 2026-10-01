@@ -147,7 +147,7 @@ export class XaiProvider extends OpenAICompatibleProvider {
 		return true;
 	}
 
-	override beforeConvert(
+	protected override beforeConvert(
 		_body: Record<string, unknown>,
 		account?: Account,
 	): Account | undefined {
@@ -160,7 +160,7 @@ export class XaiProvider extends OpenAICompatibleProvider {
 		};
 	}
 
-	override afterConvert(body: OpenAIRequest): void {
+	protected override afterConvert(body: OpenAIRequest): void {
 		// Ask OpenAI-compatible streaming APIs to include a final usage chunk when
 		// supported. xAI accepts this OpenAI field and it improves request accounting
 		// when the downstream client streams responses.

@@ -1,22 +1,9 @@
 import { Logger } from "@better-ccflare/logger";
+import type { ZaiUsageData, ZaiUsageWindow } from "@better-ccflare/types";
+
+export type { ZaiUsageData, ZaiUsageWindow } from "@better-ccflare/types";
 
 const log = new Logger("ZaiUsageFetcher");
-
-export interface ZaiUsageWindow {
-	used: number;
-	remaining: number;
-	percentage: number; // 0-100 from API
-	resetAt: number | null; // Unix timestamp in milliseconds
-	type: string;
-}
-
-export interface ZaiUsageData {
-	time_limit: ZaiUsageWindow | null;
-	/** Short token window (5-hour on current plans) — the nearest reset. */
-	tokens_limit: ZaiUsageWindow | null;
-	/** Long token window (weekly on current plans), null on single-window plans. */
-	tokens_limit_weekly: ZaiUsageWindow | null;
-}
 
 /**
  * Fetch usage data from Zai's monitoring usage endpoint
