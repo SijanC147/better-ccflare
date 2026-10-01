@@ -79,6 +79,7 @@ import {
 	analyzePerformance,
 	clearRequestHistory,
 	compactDatabase,
+	defaultTuiDeps,
 	deleteApiKey,
 	disableApiKey,
 	enableApiKey,
@@ -90,14 +91,17 @@ import {
 	getApiKeyStats,
 	handleRepairCommand,
 	listApiKeys,
+	parseTuiArgs,
 	pauseAccount,
 	reauthenticateAccount,
 	removeAccount,
 	resetAllStats,
 	resumeAccount,
 	runDoctor,
+	runTui,
 	setAccountPriority,
 	setUsagePauseThresholds,
+	type TuiOptions,
 } from "@better-ccflare/cli-commands";
 import { Config } from "@better-ccflare/config";
 import {
@@ -175,6 +179,8 @@ interface ParsedArgs {
 	forceResetRateLimit: string | null;
 	showConfig: boolean;
 	admin: boolean;
+	/** `tui [dashboard] ...`: set only when `tui` is the first argument. */
+	tui: TuiOptions | null;
 }
 
 // When the long-running server starts, its own SIGINT/SIGTERM handlers
@@ -183,6 +189,11 @@ interface ParsedArgs {
 // races the server's drain, disposes the same resources concurrently, and
 // its process.exit() severs active streams mid-response.
 let serverOwnsShutdown = false;
+
+// `tui` in live mode owns its own exit for the same reason: its SIGINT and
+// SIGTERM handlers restore the terminal (raw mode, alternate screen) before
+// the process ends, and exitGracefully() racing them could exit first.
+let tuiOwnsShutdown = false;
 
 /**
  * Helper function to start server with unified environment variable handling
@@ -564,7 +575,21 @@ function parseArgs(args: string[]): ParsedArgs {
 		forceResetRateLimit: null,
 		showConfig: false,
 		admin: false,
+		tui: null,
 	};
+
+	// `tui` is the one positional subcommand. Everything after it belongs to
+	// parseTuiArgs, so `tui overview --port 8081` names the server to read
+	// rather than a port to bind, and nothing below sees those arguments.
+	if (args[0] === "tui") {
+		const result = parseTuiArgs(args.slice(1));
+		if (!result.ok) {
+			console.error(`❌ ${result.message}`);
+			fastExit(1);
+		}
+		parsed.tui = result.options;
+		return parsed;
+	}
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -979,6 +1004,20 @@ async function main() {
 		return;
 	}
 
+	// `tui` reads the running server over HTTP. It returns here, before the
+	// first Config, database or server code: falling through would start a
+	// server on top of the one it is meant to watch.
+	if (parsed.tui) {
+		const code = await runTui(parsed.tui, {
+			...defaultTuiDeps(),
+			onLiveStart: () => {
+				tuiOwnsShutdown = true;
+			},
+		});
+		fastExit(code === 0 ? 0 : 1);
+		return;
+	}
+
 	// Handle show-config - check before full DI initialization but after config
 	if (parsed.showConfig) {
 		const config = new Config();
@@ -1055,6 +1094,18 @@ Debugging:
   --show-config              Show all configuration variables with their sources
   --help, -h                 Show this help message
 
+Terminal dashboard (reads the running server; never starts one):
+  tui [overview]             Every account's 5-hour, weekly and per-model weekly usage
+    --url <url>              Server to read (default: http://127.0.0.1:<PORT or 8080>)
+    --port <number>          Port of a server on 127.0.0.1
+    --api-key <key>          Admin API key (default: BETTER_CCFLARE_API_KEY)
+    --once                   Print once and exit (default when stdout is not a terminal)
+    --interval <seconds>     Seconds between repaints (default: 5)
+    --no-panel               Stay in this window (default in kitty: a right-edge panel)
+    --panel                  Require the kitty panel
+    --panel-edge <edge>      right, left, top or bottom (default: right)
+  better-ccflare tui --help  Full tui options
+
 Examples:
   better-ccflare --serve                # Start server
   better-ccflare --serve --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem  # Start server with HTTPS
@@ -1069,6 +1120,8 @@ Examples:
   better-ccflare --generate-api-key "Admin Key" --admin  # Generate admin key
   better-ccflare --list-api-keys               # List all API keys
   better-ccflare --disable-api-key "My App"    # Disable an API key
+  better-ccflare tui                    # Live usage overview in the terminal
+  better-ccflare tui overview --once | cat  # One plain print
 `);
 		fastExit(0);
 		return;
@@ -1604,11 +1657,11 @@ main().catch(async (error) => {
 // Handle process termination. When the server is running it owns shutdown
 // (see serverOwnsShutdown); these handlers cover short-lived CLI commands.
 process.on("SIGINT", async () => {
-	if (serverOwnsShutdown) return;
+	if (serverOwnsShutdown || tuiOwnsShutdown) return;
 	await exitGracefully(0);
 });
 
 process.on("SIGTERM", async () => {
-	if (serverOwnsShutdown) return;
+	if (serverOwnsShutdown || tuiOwnsShutdown) return;
 	await exitGracefully(0);
 });

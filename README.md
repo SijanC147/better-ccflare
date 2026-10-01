@@ -191,7 +191,7 @@ bun install
 # Build dashboard (required before first run)
 bun run build
 
-# Start better-ccflare (TUI + Server)
+# Start better-ccflare (server and web dashboard)
 bun run better-ccflare
 ```
 Continue to [Configure Claude SDK](#configure-claude-sdk).
@@ -749,6 +749,43 @@ No `NODE_OPTIONS` needed - Traefik provides trusted certificates automatically!
    curl -k https://yourhostname:8080/health
    ```
 
+### Terminal dashboard (`tui`)
+
+`better-ccflare tui overview` (or just `better-ccflare tui`) shows every account's usage
+windows in the terminal: the 5-hour window, the weekly window and each per-model weekly cap
+(Fable among them), with percent, severity and time to reset. It reads `GET /api/accounts`
+from the running server and builds its rows with the same code as the web dashboard, so the
+two always agree. It never opens the database and never starts a server.
+
+```bash
+better-ccflare tui                         # live view, repaints every 5s; q or Ctrl-C quits
+better-ccflare tui overview --once | cat   # one plain print, no colour or escape codes
+better-ccflare tui --port 8081             # read a server on another port
+better-ccflare tui --url https://ccflare.example:8443 --api-key <admin-key>
+```
+
+- The server is `--url`, else `http://127.0.0.1:<--port, PORT or 8080>`.
+- When API keys are configured, `/api/accounts` needs an **admin** key: `--api-key`, or
+  `BETTER_CCFLARE_API_KEY`. A missing key, a refused key and an unreachable server each exit 1
+  with the reason.
+- Live when stdout is a terminal, once otherwise; `--once` forces one print, `--interval`
+  sets the repaint period in seconds. Colour is off under `NO_COLOR`.
+
+**Kitty panel.** In a kitty window with `kitten` on `PATH`, the live view opens in a panel
+pinned to the right edge of the screen and the command returns, printing the panel's socket
+and the command that closes it:
+
+```bash
+kitten @ --to unix:<socket> close-window
+```
+
+Running it again while the panel is open reports the existing one rather than opening a
+second. `--no-panel` or `BETTER_CCFLARE_TUI_PANEL=0` keeps the view in the current window;
+`--panel` requires the panel and exits 1 naming what is missing; `--panel-edge` or
+`BETTER_CCFLARE_TUI_PANEL_EDGE` picks `right`, `left`, `top` or `bottom`. Over SSH, in another
+terminal, or when piped, it runs in the current window. Verified on macOS; the same command
+on Linux is untested.
+
 ## Windows Troubleshooting
 
 ### Issue: "Command is misspelled or could not be found" after npm install
@@ -850,6 +887,7 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 ### 🛠️ Developer Tools
 - Powerful CLI (`better-ccflare`)
 - Web dashboard (`http://localhost:8080/dashboard`)
+- Terminal dashboard: `better-ccflare tui overview`, with a kitty panel mode
 - CLI for account management
 - REST API for automation
 - `--doctor` command for database integrity checks and telemetry
