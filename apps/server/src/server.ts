@@ -20,6 +20,7 @@ import {
 	readUsageUtilization,
 	registerCleanup,
 	registerDisposable,
+	restrictToReportedWindows,
 	setForceAccountModel,
 	setPricingLogger,
 	shutdown,
@@ -336,20 +337,26 @@ export async function applyUsagePauseThresholds(
 		const account = await dbOps.getAccount(accountId);
 		if (!account) return;
 
-		const thresholds = {
-			fiveHour: {
-				enabled: account.usage_pause_five_hour_enabled,
-				percent: account.usage_pause_five_hour_threshold ?? null,
-				minResetRemainingMs:
-					account.usage_pause_five_hour_min_reset_remaining_ms ?? null,
+		// A window the provider never reports is dropped here rather than left
+		// to read `unknown` on every poll, which would block the resume of an
+		// account its other window paused (SB23-3686: an xAI 5-hour setting).
+		const thresholds = restrictToReportedWindows(
+			{
+				fiveHour: {
+					enabled: account.usage_pause_five_hour_enabled,
+					percent: account.usage_pause_five_hour_threshold ?? null,
+					minResetRemainingMs:
+						account.usage_pause_five_hour_min_reset_remaining_ms ?? null,
+				},
+				weekly: {
+					enabled: account.usage_pause_weekly_enabled,
+					percent: account.usage_pause_weekly_threshold ?? null,
+					minResetRemainingMs:
+						account.usage_pause_weekly_min_reset_remaining_ms ?? null,
+				},
 			},
-			weekly: {
-				enabled: account.usage_pause_weekly_enabled,
-				percent: account.usage_pause_weekly_threshold ?? null,
-				minResetRemainingMs:
-					account.usage_pause_weekly_min_reset_remaining_ms ?? null,
-			},
-		};
+			account.provider,
+		);
 		// Nothing in force and nothing of ours to lift — the common case, and not
 		// worth a read of the payload. "In force" is either condition, not the
 		// percent alone: a window with only a reset minimum is configured too.

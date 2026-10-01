@@ -105,6 +105,47 @@ export function isUsagePauseWindowConfigured(
 }
 
 /**
+ * The pause windows a provider's usage payload can report at all.
+ *
+ * xAI reports one window, Grok Build credits, which {@link readUsageUtilization}
+ * puts in the weekly slot (SB23-3686), so it has no 5-hour window to pause on.
+ * Every other provider either reports both or reports each one sometimes, which
+ * a snapshot's own nulls already express.
+ *
+ * Keyed on the provider, never on the payload: a Codex payload carries a
+ * `credits` key too (SB23-2462), and reading it as xAI's is the mistake
+ * `isXaiData` in the dashboard was rewritten to stop making.
+ */
+export function usagePauseWindowsForProvider(
+	provider: string | null | undefined,
+): ReadonlyArray<UsagePauseWindow> {
+	if (provider === "xai") return ["weekly"];
+	return ["five_hour", "weekly"];
+}
+
+/**
+ * The thresholds with every window the provider cannot report switched off.
+ *
+ * A window that can never be read evaluates as `unknown` on every snapshot, and
+ * an `unknown` window blocks a resume, so a stale setting on such a window (an
+ * xAI 5-hour window switched on before SB23-3686, or by a raw API call) would
+ * keep an account benched forever once its real window had paused it. Switching
+ * it off here keeps its numbers in the database and drops it from the decision.
+ */
+export function restrictToReportedWindows(
+	thresholds: UsagePauseThresholds,
+	provider: string | null | undefined,
+): UsagePauseThresholds {
+	const reported = usagePauseWindowsForProvider(provider);
+	const keep = (window: UsagePauseWindow, setting: UsagePauseSetting) =>
+		reported.includes(window) ? setting : { ...setting, enabled: false };
+	return {
+		fiveHour: keep("five_hour", thresholds.fiveHour),
+		weekly: keep("weekly", thresholds.weekly),
+	};
+}
+
+/**
  * Utilization for the two windows as of the latest poll, 0–100. `null` means
  * the usage API did not report that window on this snapshot — distinct from 0,
  * which is a genuine reading of a freshly reset window.
@@ -337,15 +378,34 @@ function readNanoGptUtilization(
 }
 
 /**
+ * xai payload shape: `{ credits: { utilization, resets_at } }`
+ * (`XaiUsageData`), one window for Grok Build credits. It fills the weekly
+ * slot, the long one, because it is plainly not a 5-hour window: the fetcher
+ * takes the reset from a protobuf timestamp and decodes no period field, and
+ * the only resets on record are days ahead (SB23-3686). What the code does
+ * not establish is the exact period, so the dashboard labels the slot "Grok
+ * credits" rather than "Weekly". The 5-hour slot reads null because xAI has no
+ * such window, and {@link usagePauseWindowsForProvider} keeps it out of the
+ * decision.
+ */
+function readXaiUtilization(data: Record<string, unknown>): UsageUtilization {
+	return {
+		fiveHour: null,
+		weekly: readNestedNumber(data, "credits", "utilization"),
+	};
+}
+
+/**
  * Read the 5-hour and weekly utilization out of a usage payload.
  *
- * `provider` selects the payload shape to parse. Anthropic, codex, xai,
- * minimax and any unrecognized/omitted provider all fall through to the
- * Anthropic-shaped parsing below — codex and xai already report in that
- * shape, and minimax's fetcher (`parseMinimaxTokenPlanResponse`) normalizes
- * its response to the same `five_hour`/`seven_day` flat fields before it
- * reaches this function, so no dedicated branch is needed for any of them.
- * zai and nanogpt have their own payload shapes and get dedicated parsing.
+ * `provider` selects the payload shape to parse. Anthropic, codex, minimax and
+ * any unrecognized/omitted provider all fall through to the Anthropic-shaped
+ * parsing below: codex reports in that shape, and minimax's fetcher
+ * (`parseMinimaxTokenPlanResponse`) normalizes its response to the same
+ * `five_hour`/`seven_day` flat fields before it reaches this function. zai,
+ * nanogpt and xai have their own payload shapes and get dedicated parsing.
+ * xai is chosen by the provider, never by the presence of a `credits` key,
+ * which a Codex payload carries too.
  *
  * Anthropic is moving the flat `five_hour` / `seven_day` fields into a generic
  * `limits[]` array, and a payload can carry either shape (or both, mid
@@ -369,6 +429,7 @@ export function readUsageUtilization(
 
 	if (provider === "zai") return readZaiUtilization(data);
 	if (provider === "nanogpt") return readNanoGptUtilization(data);
+	if (provider === "xai") return readXaiUtilization(data);
 
 	const flat = (key: string): number | null => {
 		const window = data[key];
@@ -425,7 +486,7 @@ function readWindowReset(window: unknown): number | null {
  * `getRepresentativeUsageSnapshotForProvider` exists to prevent, so the two
  * readers share their key choices line for line: zai `tokens_limit` and
  * `tokens_limit_weekly` (never `time_limit`), nanogpt `daily` and `monthly`,
- * and otherwise the flat `five_hour` / `seven_day` with `limits[]` kinds
+ * xai `credits` for the weekly window only, and otherwise the flat `five_hour` / `seven_day` with `limits[]` kinds
  * `session` / `weekly_all` filling in what they leave out.
  *
  * The flat-or-limits choice is made per window by where the UTILIZATION came
@@ -453,6 +514,9 @@ export function readUsageResets(
 			fiveHour: readWindowReset(data.daily),
 			weekly: readWindowReset(data.monthly),
 		};
+	}
+	if (provider === "xai") {
+		return { fiveHour: null, weekly: readWindowReset(data.credits) };
 	}
 
 	const hasFlatUtilization = (key: string): boolean => {
@@ -540,11 +604,12 @@ export function parseUsagePauseThreshold(value: unknown): number | null {
  * (`applyUsagePauseThresholds` in apps/server/src/server.ts, wired into
  * `startUsagePollingWithRefresh`'s `onSnapshot` callback).
  *
- * `readUsageUtilization` now understands anthropic, codex and xai (the
- * shared flat `five_hour`/`seven_day`/`limits[]` shape), zai and nanogpt
- * (their own dedicated payload shapes), and minimax (whose fetcher already
- * normalizes its response to the same flat shape before it reaches
- * `readUsageUtilization`, so it rides the anthropic/codex/xai path with no
+ * `readUsageUtilization` now understands anthropic and codex (the shared
+ * flat `five_hour`/`seven_day`/`limits[]` shape), zai, nanogpt and xai (their
+ * own dedicated payload shapes; xai's single `credits` window is the weekly
+ * slot, see {@link usagePauseWindowsForProvider}), and minimax (whose fetcher
+ * already normalizes its response to the same flat shape before it reaches
+ * `readUsageUtilization`, so it rides the anthropic/codex path with no
  * dedicated branch).
  *
  * Two providers remain excluded, for different reasons:

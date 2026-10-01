@@ -132,6 +132,7 @@ export {
 	parseUsagePauseThreshold,
 	readUsageResets,
 	readUsageUtilization,
+	restrictToReportedWindows,
 	supportsUsagePauseThreshold,
 	USAGE_THRESHOLD_PAUSE_REASON,
 	type UsagePauseDecision,
@@ -141,6 +142,7 @@ export {
 	type UsagePauseWindow,
 	type UsageResets,
 	type UsageUtilization,
+	usagePauseWindowsForProvider,
 } from "./usage-threshold";
 export { levenshteinDistance } from "./utils";
 export {

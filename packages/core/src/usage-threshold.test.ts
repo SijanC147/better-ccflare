@@ -8,8 +8,10 @@ import {
 	parseUsagePauseThreshold,
 	readUsageResets,
 	readUsageUtilization,
+	restrictToReportedWindows,
 	supportsUsagePauseThreshold,
 	USAGE_THRESHOLD_PAUSE_REASON,
+	usagePauseWindowsForProvider,
 } from "./usage-threshold";
 
 const off = { enabled: false, percent: null, minResetRemainingMs: null };
@@ -434,7 +436,7 @@ describe("readUsageUtilization", () => {
 		).toStrictEqual({ fiveHour: 55, weekly: 12 });
 	});
 
-	it("uses the Anthropic-shaped fallback for codex and xai (unchanged payload shape)", () => {
+	it("uses the Anthropic-shaped fallback for codex", () => {
 		const payload = {
 			five_hour: { utilization: 33, resets_at: null },
 			seven_day: { utilization: 66, resets_at: null },
@@ -443,9 +445,66 @@ describe("readUsageUtilization", () => {
 			fiveHour: 33,
 			weekly: 66,
 		});
-		expect(readUsageUtilization(payload, "xai")).toStrictEqual({
-			fiveHour: 33,
-			weekly: 66,
+	});
+
+	// SB23-3686: xAI reports `{ credits: { utilization, resets_at } }`, never the
+	// flat windows. Before the dedicated branch both slots read null, so a
+	// threshold on an xAI account could never fire.
+	describe("xai payload shape (SB23-3686)", () => {
+		it("reads the Grok credits window into the weekly slot and nothing into the 5-hour one", () => {
+			expect(
+				readUsageUtilization(
+					{
+						credits: {
+							utilization: 87.5,
+							resets_at: "2026-10-05T00:00:00.000Z",
+						},
+					},
+					"xai",
+				),
+			).toStrictEqual({ fiveHour: null, weekly: 87.5 });
+		});
+
+		it("ignores flat windows on an xAI account: its payload is the credits window alone", () => {
+			expect(
+				readUsageUtilization(
+					{
+						five_hour: { utilization: 33, resets_at: null },
+						seven_day: { utilization: 66, resets_at: null },
+					},
+					"xai",
+				),
+			).toStrictEqual({ fiveHour: null, weekly: null });
+		});
+
+		it("reads null when the credits window is missing or not numeric", () => {
+			expect(readUsageUtilization({}, "xai")).toStrictEqual({
+				fiveHour: null,
+				weekly: null,
+			});
+			expect(
+				readUsageUtilization({ credits: { utilization: "87" } }, "xai"),
+			).toStrictEqual({ fiveHour: null, weekly: null });
+		});
+
+		// The provider decides, never the key: a Codex payload carries `credits`
+		// too (CodexCreditsData, SB23-2462), and reading it as xAI's would drop
+		// the Codex windows on the floor. Kills a `"credits" in data` mutation of
+		// the provider check.
+		it("leaves a Codex payload that carries a credits balance on the flat windows", () => {
+			const codex = {
+				five_hour: { utilization: 12, resets_at: null },
+				seven_day: { utilization: 91, resets_at: null },
+				credits: { has_credits: true, unlimited: false, balance: "4.20" },
+			};
+			expect(readUsageUtilization(codex, "codex")).toStrictEqual({
+				fiveHour: 12,
+				weekly: 91,
+			});
+			expect(readUsageResets(codex, "codex")).toStrictEqual({
+				fiveHour: null,
+				weekly: null,
+			});
 		});
 	});
 
@@ -963,6 +1022,101 @@ describe("readUsageResets", () => {
 				"anthropic",
 			),
 		).toStrictEqual({ fiveHour: null, weekly: null });
+	});
+});
+
+describe("readUsageResets — xai (SB23-3686)", () => {
+	it("reads the credits reset into the weekly slot, the same key its utilization comes from", () => {
+		expect(
+			readUsageResets(
+				{
+					credits: {
+						utilization: 40,
+						resets_at: "2026-10-05T00:00:00.000Z",
+					},
+				},
+				"xai",
+			),
+		).toStrictEqual({
+			fiveHour: null,
+			weekly: Date.parse("2026-10-05T00:00:00.000Z"),
+		});
+	});
+
+	it("reads null for a credits window with no reset, and for flat windows on an xAI account", () => {
+		expect(
+			readUsageResets({ credits: { utilization: 40, resets_at: null } }, "xai"),
+		).toStrictEqual({ fiveHour: null, weekly: null });
+		expect(
+			readUsageResets(
+				{ seven_day: { utilization: 40, resets_at: "2026-10-05T00:00:00Z" } },
+				"xai",
+			),
+		).toStrictEqual({ fiveHour: null, weekly: null });
+	});
+});
+
+describe("usagePauseWindowsForProvider (SB23-3686)", () => {
+	it("gives xAI the weekly window only", () => {
+		expect(usagePauseWindowsForProvider("xai")).toStrictEqual(["weekly"]);
+	});
+
+	it("gives every other provider both windows", () => {
+		for (const provider of [
+			"anthropic",
+			"codex",
+			"zai",
+			"nanogpt",
+			"minimax",
+			null,
+			undefined,
+		]) {
+			expect(usagePauseWindowsForProvider(provider)).toStrictEqual([
+				"five_hour",
+				"weekly",
+			]);
+		}
+	});
+});
+
+describe("restrictToReportedWindows (SB23-3686)", () => {
+	const both = { fiveHour: on(80), weekly: on(90) };
+
+	it("switches off the 5-hour window on xAI and keeps its numbers", () => {
+		expect(restrictToReportedWindows(both, "xai")).toStrictEqual({
+			fiveHour: { enabled: false, percent: 80, minResetRemainingMs: null },
+			weekly: on(90),
+		});
+	});
+
+	it("leaves both windows alone for a provider that reports both", () => {
+		expect(restrictToReportedWindows(both, "anthropic")).toStrictEqual(both);
+		expect(restrictToReportedWindows(both, "codex")).toStrictEqual(both);
+	});
+
+	// The defect it exists for: a stale 5-hour setting on xAI reads `unknown` on
+	// every poll, and an `unknown` window blocks the resume of an account the
+	// credits window paused.
+	it("lets an xAI account its credits window paused resume although a stale 5-hour window is on", () => {
+		const input = {
+			utilization: readUsageUtilization(
+				{ credits: { utilization: 3, resets_at: null } },
+				"xai",
+			),
+			resets: NO_RESETS,
+			paused: true,
+			pauseReason: USAGE_THRESHOLD_PAUSE_REASON,
+			now: NOW,
+		};
+		expect(evaluateUsagePause({ ...input, thresholds: both })).toStrictEqual({
+			action: "none",
+		});
+		expect(
+			evaluateUsagePause({
+				...input,
+				thresholds: restrictToReportedWindows(both, "xai"),
+			}),
+		).toStrictEqual({ action: "resume" });
 	});
 });
 
