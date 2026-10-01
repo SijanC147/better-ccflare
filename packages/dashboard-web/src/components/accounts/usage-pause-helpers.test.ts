@@ -9,6 +9,7 @@ import {
 	describeUsagePauseWindow,
 	draftFromSetting,
 	getThresholdLabels,
+	initialDialogDrafts,
 	MAX_RESET_HOURS,
 	parsePauseResetHoursField,
 	reportableWindowSettings,
@@ -208,6 +209,25 @@ describe("xAI windows in the dashboard (SB23-3686)", () => {
 			fiveHour: { enabled: false, percent: 50, minResetRemainingMs: null },
 			weekly: storedWindowSettings(xai).weekly,
 		});
+	});
+
+	// What Save sends for a stale 5-hour row: off, numbers kept, so the API's
+	// refusal of an unreported window switched on is never reached.
+	it("opens the dialog with the xAI 5-hour draft off and saves it that way", () => {
+		const drafts = initialDialogDrafts(xai);
+		expect(drafts.fiveHour).toStrictEqual({
+			enabled: false,
+			percent: "50",
+			minResetHours: "",
+		});
+		expect(settingFromDraft(drafts.fiveHour)).toStrictEqual({
+			enabled: false,
+			percent: 50,
+			minResetRemainingMs: null,
+		});
+		expect(settingFromDraft(drafts.weekly)).toStrictEqual(
+			storedWindowSettings(xai).weekly,
+		);
 	});
 
 	it("names only the credits window in the card menu summary", () => {

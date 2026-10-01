@@ -15,9 +15,9 @@ import { Switch } from "../ui/switch";
 import {
 	draftFromSetting,
 	getThresholdLabels,
+	initialDialogDrafts,
 	MAX_RESET_HOURS,
 	reportableWindowSetting,
-	reportableWindowSettings,
 	settingFromDraft,
 	type UsagePauseWindowDraft,
 	type UsagePauseWindowSetting,
@@ -58,11 +58,11 @@ export function AccountUsageThresholdsDialog({
 	// Seeded from the windows this provider reports: a window it cannot report
 	// starts switched off (numbers kept) and is saved that way, which clears a
 	// stale setting the poller would ignore anyway (SB23-3686).
-	const [fiveHour, setFiveHour] = useState<UsagePauseWindowDraft>(() =>
-		draftFromSetting(reportableWindowSettings(account).fiveHour),
+	const [fiveHour, setFiveHour] = useState<UsagePauseWindowDraft>(
+		() => initialDialogDrafts(account).fiveHour,
 	);
-	const [weekly, setWeekly] = useState<UsagePauseWindowDraft>(() =>
-		draftFromSetting(reportableWindowSettings(account).weekly),
+	const [weekly, setWeekly] = useState<UsagePauseWindowDraft>(
+		() => initialDialogDrafts(account).weekly,
 	);
 	const [isUpdating, setIsUpdating] = useState(false);
 	const { fiveHourLabel, weeklyLabel } = getThresholdLabels(account);

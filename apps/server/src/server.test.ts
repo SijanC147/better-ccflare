@@ -1793,6 +1793,25 @@ describe("applyUsagePauseThresholds", () => {
 });
 
 describe("describeUsagePause (SB23-2575)", () => {
+	// SB23-3686: the log names xAI's window the way the dashboard does, not by
+	// a period the code does not know.
+	it("names xAI's weekly slot as its Grok credits window", () => {
+		const decision = {
+			action: "pause" as const,
+			window: "weekly" as const,
+			utilization: 84,
+			threshold: 80,
+			resetRemainingMs: null,
+			minResetRemainingMs: null,
+		};
+		expect(describeUsagePause(decision, "xai")).toBe(
+			"Grok credits window usage at 84% reached the configured 80% threshold",
+		);
+		expect(describeUsagePause(decision, "anthropic")).toBe(
+			"weekly window usage at 84% reached the configured 80% threshold",
+		);
+	});
+
 	it("names only the configured clauses", () => {
 		expect(
 			describeUsagePause({

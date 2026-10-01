@@ -294,12 +294,21 @@ export function createUsageSnapshotRecorder(
  * has configured: a reset-only pause has no utilization figure to quote, and
  * printing "null% reached null%" for it would say nothing.
  *
+ * xAI's weekly slot is its Grok credits window, whose period the code does
+ * not know, so the line names the window the dashboard names (SB23-3686).
+ *
  * Exported for tests.
  */
 export function describeUsagePause(
 	decision: Extract<UsagePauseDecision, { action: "pause" }>,
+	provider?: string | null,
 ): string {
-	const window = decision.window === "five_hour" ? "5-hour" : "weekly";
+	const window =
+		decision.window === "five_hour"
+			? "5-hour"
+			: provider === "xai"
+				? "Grok credits"
+				: "weekly";
 	const clauses: string[] = [];
 	if (decision.threshold !== null) {
 		clauses.push(
@@ -383,7 +392,7 @@ export async function applyUsagePauseThresholds(
 		// or cleared outright (resume).
 		if (decision.action === "pause") {
 			logger.info(
-				`Pausing account '${account.name}' (${accountId}): ${describeUsagePause(decision)}`,
+				`Pausing account '${account.name}' (${accountId}): ${describeUsagePause(decision, account.provider)}`,
 			);
 			await dbOps.pauseAccountForUsageThreshold(
 				accountId,

@@ -145,6 +145,26 @@ describe("AccountListItem — usage pause conditions reach the usage bar (SB23-3
 		expect(html).not.toContain("Pauses while the reset");
 	});
 
+	it("passes a reset-only weekly condition to the weekly bar", () => {
+		const html = renderAccount({
+			...baseAccount,
+			paused: false,
+			pauseReason: null,
+			usageData: {
+				seven_day: {
+					utilization: 40,
+					resets_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+				},
+			},
+			usageUtilization: 40,
+			usageWindow: "seven_day",
+			usagePauseWeeklyEnabled: true,
+			usagePauseWeeklyMinResetRemainingMs: 36 * 60 * 60 * 1000,
+		});
+
+		expect(html).toContain("Pauses while the reset is at least 36h away");
+	});
+
 	it("marks an xAI account's Grok credits bar at its weekly threshold", () => {
 		const html = renderAccount({
 			...baseAccount,

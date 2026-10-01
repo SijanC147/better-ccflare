@@ -208,6 +208,28 @@ export function reportableWindowSettings(account: Account | null): {
 	};
 }
 
+/**
+ * The drafts the dialog opens with: the stored settings with every window the
+ * provider cannot report switched off, numbers kept, so Save sends it off and
+ * the API does not refuse it (SB23-3686).
+ *
+ * Named and exported rather than inline in the dialog because the dialog is a
+ * Radix portal that no test mounts: `@radix-ui/react-use-layout-effect`
+ * chooses a no-op hook at module load when no `document` exists, so a portal
+ * test passes alone and renders nothing after any earlier file in the same
+ * process has loaded Radix (measured in the PR #279 review round).
+ */
+export function initialDialogDrafts(account: Account | null): {
+	fiveHour: UsagePauseWindowDraft;
+	weekly: UsagePauseWindowDraft;
+} {
+	const { fiveHour, weekly } = reportableWindowSettings(account);
+	return {
+		fiveHour: draftFromSetting(fiveHour),
+		weekly: draftFromSetting(weekly),
+	};
+}
+
 /** One window's setting, switched off when the provider cannot report it. */
 export function reportableWindowSetting(
 	provider: string | null | undefined,
