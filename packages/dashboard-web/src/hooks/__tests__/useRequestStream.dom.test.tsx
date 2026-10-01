@@ -10,12 +10,22 @@ import { mount } from "../../test/dom";
 import { cleanupRequestStream, useRequestStream } from "../useRequestStream";
 
 /**
- * SB23-3995: the live Requests tab never showed the "Rate Limited" badge for a
- * request that completed over the stream. The start event carries status 0,
- * so the placeholder row reads `rateLimited: false`, and the summary handler
- * only refreshed the flag when the payload carried a `rateLimited` key, which
- * the stream summary never did. These tests drive the real hook with a fake
- * `EventSource` and read the row back out of the query cache.
+ * SB23-3995: where the live Requests row's "Rate Limited" flag comes from.
+ *
+ * The issue said the badge never showed on the live tab because the start
+ * event carries status 0. That is not true of real traffic: response-handler.ts
+ * emits the start event once the upstream has answered, with its status, so
+ * the placeholder already read `rateLimited: true` for a 429. The one emitter
+ * of status 0 is the auto-refresh probe, which never gets a summary. Measured
+ * by this PR's reviewer: with a start event carrying 429, the pre-fix hook
+ * already set the flag.
+ *
+ * What was true is that the flag rested on the start event alone, because the
+ * stream summary carried no `rateLimited` and the hook kept the placeholder's
+ * value when the key was absent. The summary now carries it, and the hook
+ * derives it from the summary's status when it is absent. These tests drive
+ * the real hook with a fake `EventSource` and read the row back out of the
+ * query cache.
  */
 
 type Listener = (ev: { data: string }) => void;
@@ -66,7 +76,12 @@ type RequestsCache = {
 
 const restores: Array<() => void> = [];
 
-afterEach(() => {
+const unmounts: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+	// Unmount first and wait for it: the unmount runs inside React's `act`,
+	// and a still-running one would overlap the next test's mount.
+	while (unmounts.length > 0) await unmounts.pop()?.();
 	cleanupRequestStream();
 	while (restores.length > 0) restores.pop()?.();
 	FakeEventSource.instances = [];
@@ -111,9 +126,7 @@ async function mountStream(limit: number) {
 			<Harness limit={limit} />
 		</QueryClientProvider>,
 	);
-	restores.push(() => {
-		void mounted.unmount();
-	});
+	unmounts.push(mounted.unmount);
 	// connect() awaits the token before constructing the EventSource.
 	for (
 		let turn = 0;
@@ -136,7 +149,12 @@ async function mountStream(limit: number) {
 	return { es, row };
 }
 
-function startEvent(id: string) {
+/**
+ * A start event as response-handler.ts emits it: after the upstream answered,
+ * carrying its status. Pass 0 for a start event that carried none, which is
+ * the case where only the summary can decide the flag.
+ */
+function startEvent(id: string, statusCode: number) {
 	return {
 		type: "start",
 		id,
@@ -144,18 +162,15 @@ function startEvent(id: string) {
 		path: "/v1/messages",
 		timestamp: Date.now(),
 		accountId: null,
-		// The start event is emitted before the upstream answers, so its
-		// status is always 0. That is why the placeholder cannot know.
-		statusCode: 0,
+		statusCode,
 		agentUsed: null,
 	};
 }
 
 /**
- * The summary exactly as the collector emitted it before this fix: no
- * `rateLimited` key. A payload carrying `rateLimited: true` would pass on the
- * old code through its `!== undefined` branch, so it cannot be the case that
- * proves the bug.
+ * The summary as the collector emitted it before SB23-3995: no `rateLimited`
+ * key. A payload carrying `rateLimited: true` passes on the old hook through
+ * its `!== undefined` branch, so it cannot show what the hook does on its own.
  */
 function summaryWithoutFlag(id: string, statusCode: number): RequestResponse {
 	return {
@@ -173,10 +188,12 @@ function summaryWithoutFlag(id: string, statusCode: number): RequestResponse {
 }
 
 describe("useRequestStream: the Rate Limited flag from a stream summary", () => {
-	test("a 429 summary without a rateLimited key marks the row rate limited", async () => {
+	test("a 429 summary decides the flag when the start event carried no status", async () => {
+		// Fails on the pre-fix hook (Expected: true, Received: false): with no
+		// key in the summary it kept the placeholder's value.
 		const { es, row } = await mountStream(901);
 
-		await act(async () => es.emit(startEvent("req-429")));
+		await act(async () => es.emit(startEvent("req-429", 0)));
 		expect(row("req-429").meta.pending).toBe(true);
 		expect(row("req-429").meta.rateLimited).toBe(false);
 
@@ -188,10 +205,28 @@ describe("useRequestStream: the Rate Limited flag from a stream summary", () => 
 		expect(row("req-429").meta.rateLimited).toBe(true);
 	});
 
+	test("a 429 start event, as the proxy emits it, then a 429 summary stays rate limited", async () => {
+		const { es, row } = await mountStream(904);
+
+		await act(async () => es.emit(startEvent("req-429-real", 429)));
+		expect(row("req-429-real").meta.rateLimited).toBe(true);
+		await act(async () =>
+			es.emit({
+				type: "summary",
+				payload: {
+					...summaryWithoutFlag("req-429-real", 429),
+					rateLimited: true,
+				},
+			}),
+		);
+		expect(row("req-429-real").meta.pending).toBe(false);
+		expect(row("req-429-real").meta.rateLimited).toBe(true);
+	});
+
 	test("a 200 summary leaves the row not rate limited", async () => {
 		const { es, row } = await mountStream(902);
 
-		await act(async () => es.emit(startEvent("req-200")));
+		await act(async () => es.emit(startEvent("req-200", 200)));
 		await act(async () =>
 			es.emit({ type: "summary", payload: summaryWithoutFlag("req-200", 200) }),
 		);
@@ -204,7 +239,7 @@ describe("useRequestStream: the Rate Limited flag from a stream summary", () => 
 		// cannot disagree in practice. Pinned so the fallback stays a fallback.
 		const { es, row } = await mountStream(903);
 
-		await act(async () => es.emit(startEvent("req-flag")));
+		await act(async () => es.emit(startEvent("req-flag", 200)));
 		await act(async () =>
 			es.emit({
 				type: "summary",
@@ -212,5 +247,24 @@ describe("useRequestStream: the Rate Limited flag from a stream summary", () => 
 			}),
 		);
 		expect(row("req-flag").meta.rateLimited).toBe(true);
+	});
+
+	test("an explicit rateLimited: false from the server is kept on a 429", async () => {
+		// The negative of the case above: only an absent key falls back to the
+		// status. `||` in place of `??` would turn this row rate limited.
+		const { es, row } = await mountStream(905);
+
+		await act(async () => es.emit(startEvent("req-false", 0)));
+		await act(async () =>
+			es.emit({
+				type: "summary",
+				payload: {
+					...summaryWithoutFlag("req-false", 429),
+					rateLimited: false,
+				},
+			}),
+		);
+		expect(row("req-false").meta.pending).toBe(false);
+		expect(row("req-false").meta.rateLimited).toBe(false);
 	});
 });
