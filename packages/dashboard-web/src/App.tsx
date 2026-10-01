@@ -6,7 +6,13 @@ import {
 	QueryClientProvider,
 } from "@tanstack/react-query";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import {
+	Navigate,
+	Route,
+	Routes,
+	useLocation,
+	useNavigate,
+} from "react-router-dom";
 import { api } from "./api";
 import { AccountsTab } from "./components/AccountsTab";
 import { AgentsTab } from "./components/AgentsTab";
@@ -17,12 +23,15 @@ import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { KioskTab } from "./components/KioskTab";
 import { LogsTab } from "./components/LogsTab";
+import { NotificationsTab } from "./components/NotificationsTab";
 import { Navigation } from "./components/navigation";
+import { NotificationWatcher } from "./components/notifications/NotificationWatcher";
 import { OverviewTab } from "./components/OverviewTab";
 import { ProjectsTab } from "./components/ProjectsTab";
 import { RequestsTab } from "./components/RequestsTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
+import { NotificationsProvider } from "./contexts/notifications-context";
 import { ThemeProvider } from "./contexts/theme-context";
 import { cn } from "./lib/utils";
 import "./index.css";
@@ -69,6 +78,7 @@ const LoadingSkeleton = () => (
 
 export function App() {
 	const location = useLocation();
+	const navigate = useNavigate();
 	const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
 		localStorage.getItem("ccflare-sidebar-collapsed") === "true",
 	);
@@ -154,6 +164,13 @@ export function App() {
 				title: "API Playground",
 				subtitle:
 					"Call any endpoint this server serves and inspect the response",
+			},
+			{
+				path: "/notifications",
+				element: <NotificationsTab />,
+				title: "Notifications",
+				subtitle:
+					"Desktop notifications for outages, rate limits, account health and error bursts",
 			},
 			{
 				path: "/settings",
@@ -375,53 +392,58 @@ export function App() {
 	return (
 		<QueryClientProvider client={queryClient}>
 			<ThemeProvider>
-				<div className="min-h-screen bg-background">
-					<Navigation
-						onLogout={authRequired ? handleLogout : undefined}
-						isCollapsed={isSidebarCollapsed}
-						onToggleCollapse={handleToggleSidebarCollapse}
-					/>
+				<NotificationsProvider onNavigate={navigate}>
+					<div className="min-h-screen bg-background">
+						<Navigation
+							onLogout={authRequired ? handleLogout : undefined}
+							isCollapsed={isSidebarCollapsed}
+							onToggleCollapse={handleToggleSidebarCollapse}
+						/>
 
-					{/* Main Content */}
-					<main
-						className={cn(
-							"transition-all duration-300",
-							isSidebarCollapsed ? "lg:pl-16" : "lg:pl-64",
-						)}
-					>
-						{/* Mobile spacer */}
-						<div className="h-16 lg:hidden" />
-
-						{/* Page Content */}
-						<div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
-							{/* Page Header */}
-							<div className="mb-8">
-								<h1 className="text-3xl font-bold gradient-text">
-									{currentRoute.title}
-								</h1>
-								<p className="text-muted-foreground mt-2">
-									{currentRoute.subtitle}
-								</p>
-							</div>
-
-							{/* Tab Content - Only render if auth check is complete and user is authenticated */}
-							{!isCheckingAuth && isAuthenticated && (
-								<div className="animate-in fade-in-0 duration-200">
-									<Routes>
-										{routes.map((route) => (
-											<Route
-												key={route.path}
-												path={route.path}
-												element={route.element}
-											/>
-										))}
-										<Route path="*" element={<Navigate to="/" replace />} />
-									</Routes>
-								</div>
+						{/* Main Content */}
+						<main
+							className={cn(
+								"transition-all duration-300",
+								isSidebarCollapsed ? "lg:pl-16" : "lg:pl-64",
 							)}
-						</div>
-					</main>
-				</div>
+						>
+							{/* Mobile spacer */}
+							<div className="h-16 lg:hidden" />
+
+							{/* Page Content */}
+							<div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
+								{/* Page Header */}
+								<div className="mb-8">
+									<h1 className="text-3xl font-bold gradient-text">
+										{currentRoute.title}
+									</h1>
+									<p className="text-muted-foreground mt-2">
+										{currentRoute.subtitle}
+									</p>
+								</div>
+
+								{/* Tab Content - Only render if auth check is complete and user is authenticated */}
+								{!isCheckingAuth && isAuthenticated && (
+									<div className="animate-in fade-in-0 duration-200">
+										<Routes>
+											{routes.map((route) => (
+												<Route
+													key={route.path}
+													path={route.path}
+													element={route.element}
+												/>
+											))}
+											<Route path="*" element={<Navigate to="/" replace />} />
+										</Routes>
+									</div>
+								)}
+							</div>
+						</main>
+					</div>
+					{/* Notification sources poll only once the API answers: before
+				    that they would 401 and reopen the auth dialog in a loop. */}
+					{isAuthenticated && <NotificationWatcher />}
+				</NotificationsProvider>
 				<DebugPanel />
 
 				{/* API Key Authentication Dialog */}

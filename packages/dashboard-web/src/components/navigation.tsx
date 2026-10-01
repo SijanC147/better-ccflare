@@ -1,6 +1,7 @@
 import {
 	Activity,
 	BarChart3,
+	Bell,
 	Bot,
 	FileText,
 	FolderOpen,
@@ -94,6 +95,7 @@ export function Navigation({
 				icon: TerminalSquare,
 				path: "/api-playground",
 			},
+			{ label: "Notifications", icon: Bell, path: "/notifications" },
 			{ label: "Settings", icon: Settings, path: "/settings" },
 		);
 
