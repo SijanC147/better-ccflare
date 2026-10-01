@@ -7,7 +7,7 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { byText, click, mount } from "../../../test/dom";
+import { byText, click, type Mounted, mount } from "../../../test/dom";
 import {
 	SlotSettingsForm,
 	SlotSettingsFormView,
@@ -173,13 +173,21 @@ describe("SlotSettingsFormView, the hours bound", () => {
 		}
 	});
 
-	it("names the hours field's message in its own aria-describedby", () => {
-		const html = render({ minResetRemainingHours: "-1" });
-		expect(tagWithId(html, "slot-min-reset-slot-1")).toContain(
+	// The field always points at its hint id; what changes with validity is
+	// whether an element carrying that id exists. So the id is asserted
+	// present when invalid and absent when valid, not the attribute alone.
+	it("renders the hours message under the id the field describes itself by", () => {
+		const invalid = render({ minResetRemainingHours: "-1" });
+		expect(tagWithId(invalid, "slot-min-reset-slot-1")).toContain(
 			'aria-describedby="slot-min-reset-hint-slot-1"',
 		);
-		expect(html).toContain('id="slot-min-reset-hint-slot-1"');
-		expect(html).not.toContain(INVALID_PERCENT);
+		expect(tagWithId(invalid, "slot-min-reset-hint-slot-1")).toContain(
+			"text-destructive",
+		);
+		expect(invalid).not.toContain(INVALID_PERCENT);
+
+		const valid = render({ minResetRemainingHours: "2" });
+		expect(valid).not.toContain('id="slot-min-reset-hint-slot-1"');
 	});
 });
 
@@ -345,22 +353,25 @@ async function withForm(
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
 	});
-	const mounted = await mount(
-		<QueryClientProvider client={client}>
-			<SlotSettingsForm
-				slot={seeded}
-				comboId="combo-1"
-				onSaved={() => {
-					savedCount += 1;
-				}}
-			/>
-		</QueryClientProvider>,
-	);
+	// Mounted inside the try, so a throw from mount still restores fetch for
+	// every later file in the process.
+	let mounted: Mounted | undefined;
 	try {
+		mounted = await mount(
+			<QueryClientProvider client={client}>
+				<SlotSettingsForm
+					slot={seeded}
+					comboId="combo-1"
+					onSaved={() => {
+						savedCount += 1;
+					}}
+				/>
+			</QueryClientProvider>,
+		);
 		await run(calls, () => savedCount);
 		expect(unexpected).toEqual([]);
 	} finally {
-		await mounted.unmount();
+		if (mounted !== undefined) await mounted.unmount();
 		client.clear();
 		globalThis.fetch = original;
 	}
@@ -466,7 +477,7 @@ describe("SlotSettingsForm, mounted", () => {
 		});
 	});
 
-	it("announces a refused save and does not report it as saved", async () => {
+	it("announces the server's refusal and does not report it as saved", async () => {
 		await withForm(
 			slot(),
 			async (calls, saved) => {
@@ -476,6 +487,14 @@ describe("SlotSettingsForm, mounted", () => {
 					() => document.body.querySelector('[role="alert"]') !== null,
 					"the alert",
 				);
+				const alert = must(
+					document.body.querySelector('[role="alert"]'),
+					"the alert",
+				);
+				// The server's own words, not the generic fallback: the error
+				// the mutation carries is what reaches the view.
+				expect(alert.textContent).toContain("slot refused");
+				expect(alert.textContent).not.toBe("Could not save the slot.");
 				expect(saved()).toBe(0);
 				expect(calls.length).toBe(1);
 			},

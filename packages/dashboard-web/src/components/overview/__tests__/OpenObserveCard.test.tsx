@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { OpenObserveConfig } from "../../../api";
-import { byText, click, mount } from "../../../test/dom";
+import { byText, click, type Mounted, mount } from "../../../test/dom";
 import {
 	buildOpenObserveClearToken,
 	buildOpenObserveSave,
@@ -408,11 +408,24 @@ function onlyButton(text: string): Element {
 
 const posts = (calls: Call[]) => calls.filter((c) => c.method === "POST");
 
+interface CardOptions {
+	/** The POST's status. 200 answers success. */
+	postStatus?: number;
+	/** When set, the POST answers only once this resolves. */
+	holdPost?: Promise<void>;
+}
+
+/**
+ * Mounts the live card. `server` is what the GET answers; `null` makes the
+ * GET fail with a 400, which settles the query with no data, so the card is
+ * idle and Save is enabled before any read has landed.
+ */
 async function withCard(
-	server: OpenObserveConfig,
+	server: OpenObserveConfig | null,
 	run: (calls: Call[]) => Promise<void>,
-	postStatus = 200,
+	options: CardOptions = {},
 ): Promise<void> {
+	const { postStatus = 200, holdPost } = options;
 	const calls: Call[] = [];
 	const unexpected: string[] = [];
 	const original = globalThis.fetch;
@@ -428,9 +441,12 @@ async function withCard(
 			typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
 		calls.push({ method, url, body });
 		if (url === "/api/config/openobserve" && method === "GET") {
-			return json(server);
+			return server === null
+				? json({ error: "read refused" }, 400)
+				: json(server);
 		}
 		if (url === "/api/config/openobserve" && method === "POST") {
+			if (holdPost !== undefined) await holdPost;
 			return postStatus === 200
 				? json({ success: true })
 				: json({ error: "refused" }, postStatus);
@@ -443,12 +459,15 @@ async function withCard(
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
 	});
-	const mounted = await mount(
-		<QueryClientProvider client={client}>
-			<OpenObserveCard />
-		</QueryClientProvider>,
-	);
+	// Mounted inside the try, so a throw from mount still restores fetch for
+	// every later file in the process.
+	let mounted: Mounted | undefined;
 	try {
+		mounted = await mount(
+			<QueryClientProvider client={client}>
+				<OpenObserveCard />
+			</QueryClientProvider>,
+		);
 		await waitFor(
 			() =>
 				!client.isFetching() &&
@@ -458,14 +477,22 @@ async function withCard(
 		// react-query notifies React on a 0ms timer, so one more tick lets the
 		// card render the data and its effect seed the form.
 		await settle();
-		await waitFor(
-			() => input("oo-url").value === server.url,
-			"the form to seed from the read",
-		);
+		if (server !== null) {
+			const seededUrl = server.url;
+			await waitFor(
+				() => input("oo-url").value === seededUrl,
+				"the form to seed from the read",
+			);
+		} else {
+			await waitFor(
+				() => !onlyButton("Save").hasAttribute("disabled"),
+				"Save to enable after the failed read",
+			);
+		}
 		await run(calls);
 		expect(unexpected).toEqual([]);
 	} finally {
-		await mounted.unmount();
+		if (mounted !== undefined) await mounted.unmount();
 		client.clear();
 		globalThis.fetch = original;
 	}
@@ -546,7 +573,47 @@ describe("OpenObserveCard, mounted", () => {
 				expect(input("oo-token").value).toBe("s3cret");
 				expect(posts(calls).length).toBe(1);
 			},
-			400,
+			{ postStatus: 400 },
+		);
+	});
+	// #305 at the call site, not only in the builder: a read that failed
+	// leaves the card idle with no data, so Save is live, and a save from
+	// there must not overwrite a configured metrics stream with the
+	// placeholder or send a level nobody read.
+	it("sends the placeholder fields and no metrics stream or level when the read failed", async () => {
+		await withCard(null, async (calls) => {
+			const post = await save(calls);
+			expect(post.body).toEqual({
+				url: "",
+				org: "default",
+				user: "",
+				logStream: "better_ccflare_logs",
+				requestStream: "better_ccflare_requests",
+				shipPayloads: false,
+			});
+			expect("metricsStream" in (post.body as object)).toBe(false);
+			expect("logMinLevel" in (post.body as object)).toBe(false);
+		});
+	});
+
+	it("disables every field and Save while a save is in flight", async () => {
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await withCard(
+			config(),
+			async (calls) => {
+				expect(input("oo-url").disabled).toBe(false);
+				await click(onlyButton("Save"));
+				await waitFor(() => posts(calls).length === 1, "the POST");
+				await waitFor(() => input("oo-url").disabled, "the pending state");
+				expect(input("oo-metrics-stream").disabled).toBe(true);
+				expect(onlyButton("Save").hasAttribute("disabled")).toBe(true);
+				release();
+				await waitFor(() => !input("oo-url").disabled, "the save to land");
+			},
+			{ holdPost: held },
 		);
 	});
 });
