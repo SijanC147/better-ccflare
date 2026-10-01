@@ -46,7 +46,7 @@ describe("makeProxyRequest strips the internal gateway headers", () => {
 	});
 
 	it("names all four headers in the shared list", () => {
-		expect([...GATEWAY_INTERNAL_HEADERS].sort()).toEqual(
+		expect([...GATEWAY_INTERNAL_HEADERS].sort() as string[]).toEqual(
 			Object.keys(internal).sort(),
 		);
 	});
