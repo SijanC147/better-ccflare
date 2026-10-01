@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { sanitizeRequestHeaders } from "@better-ccflare/http-common";
 import {
 	GATEWAY_INTERNAL_HEADERS,
 	INBOUND_FORMAT_HEADER,
@@ -37,6 +38,12 @@ describe("makeProxyRequest strips the internal gateway headers", () => {
 		[INBOUND_FORMAT_HEADER]: "openai-chat",
 		[INBOUND_GATEWAY_HEADER]: "work",
 	};
+
+	it("sanitizeRequestHeaders keeps the inbound marker for the history row", () => {
+		const kept = sanitizeRequestHeaders(new Headers(internal));
+		expect(kept.get(INBOUND_FORMAT_HEADER)).toBe("openai-chat");
+		expect(kept.get(INBOUND_GATEWAY_HEADER)).toBe("work");
+	});
 
 	it("names all four headers in the shared list", () => {
 		expect([...GATEWAY_INTERNAL_HEADERS].sort()).toEqual(
