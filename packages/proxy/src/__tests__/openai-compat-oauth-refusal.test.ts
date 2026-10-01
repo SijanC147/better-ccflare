@@ -37,7 +37,10 @@ import * as usageCollectorModule from "../usage-collector";
 
 let collectorSpy: { mockRestore(): void } | null = null;
 
-/** The real `fetch`, captured before any test can replace it. */
+/**
+ * The process `fetch`, captured before any test can replace it. Under a root
+ * `bun test` that is the network guard's (`scripts/test-network-guard.ts`).
+ */
 const ORIGINAL_FETCH = globalThis.fetch;
 
 // An unrestored spy leaves getUsageCollector stubbed for every test file that
@@ -257,7 +260,11 @@ const UPSTREAM_BLOCKED = "hermetic stub: upstream is never contacted";
  * Run `fn` with `globalThis.fetch` replaced by a stub that records each URL
  * and throws, and hand back what it recorded.
  *
- * This is the only thing standing between these tests and the network. An
+ * This used to be the only thing standing between these tests and the
+ * network. The repo-wide preload `scripts/test-network-guard.ts` now fails any
+ * test that reaches a non-loopback host whatever the code under test does with
+ * the error (SB23-3493), so the safety net is there and this stub's remaining
+ * job is the count below: how many upstream calls the attempt loop made. An
  * earlier version stubbed `ctx.provider.buildUrl` instead, and called that
  * hermetic. **It was dead code for every account here**:
  * `proxy-operations.ts` resolves `getProvider(account.provider) ||

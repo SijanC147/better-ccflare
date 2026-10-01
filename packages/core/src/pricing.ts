@@ -763,6 +763,14 @@ export async function getCachedNanoGPTPricing(
 ): Promise<ApiResponse | null> {
 	const cacheDurationMs = NANOGPT_CACHE_DURATION_MS; // 24 hours in milliseconds
 
+	// CF_PRICING_OFFLINE is documented as disabling online pricing updates, and
+	// until SB23-3493 it stopped only the models.dev fetch: NanoGPT was still
+	// fetched on every cost estimate. Offline returns whatever is cached,
+	// usually null, without logging a failure that is not one.
+	if (process.env.CF_PRICING_OFFLINE === "1") {
+		return nanogptPricingCache;
+	}
+
 	// Check if we have cached data and it's still fresh
 	if (
 		nanogptPricingCache &&

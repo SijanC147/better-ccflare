@@ -1,0 +1,3 @@
+[test]
+# Refuses every non-loopback connection a test makes. See the file.
+preload = ["./scripts/test-network-guard.ts"]
