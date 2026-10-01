@@ -61,6 +61,10 @@ Commands:
     Quick check for accounts that need re-authentication
     Shows only accounts that require immediate attention
 
+  tui [overview] [--url <url>] [--port <number>] [--api-key <key>] [--once] [--interval <seconds>]
+    Terminal dashboard of every account's 5-hour, weekly and per-model weekly usage
+    Reads GET /api/accounts from the running server; never opens the database or starts a server
+
   help
     Show this help message
 
