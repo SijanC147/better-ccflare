@@ -1,7 +1,7 @@
 $kind: http-request
 name: 'GET /api/claude-code-endpoints'
 description: |-
-  Claude Code project endpoints, each a name mapped to a host directory and served at /<name>/v1, plus stored entries skipped as invalid.
+  Claude Code project endpoints, each a name mapped to a host directory and served at /<name>/v1, plus stored entries skipped as invalid: `errors` as messages and `invalid` as { name, error } by the stored key DELETE takes.
 method: GET
 url: '{{baseUrl}}/api/claude-code-endpoints'
 order: 24000
