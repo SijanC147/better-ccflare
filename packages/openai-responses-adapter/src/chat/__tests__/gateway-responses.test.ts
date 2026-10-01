@@ -324,6 +324,36 @@ describe("gateway answer label fallback", () => {
 		// The client's alias, as the chat path reports it, not the entry's id.
 		expect(body.model).toBe("standard");
 	});
+
+	test("a streamed answer whose message_start names no model is labelled with the client's name", async () => {
+		const stream = ANTHROPIC_STREAM.replace(
+			`"model":"${ANSWERING_MODEL}",`,
+			"",
+		);
+		expect(stream).not.toContain(ANSWERING_MODEL);
+		const proxy: HandleProxyFn = async () =>
+			new Response(stream, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		const resp = await dispatch(
+			"/v1/gateways/gpt/responses",
+			proxy,
+			responsesBody("standard", { stream: true }),
+		);
+		const text = await resp.text();
+		const created = text
+			.split("\n\n")
+			.find((frame) => frame.startsWith("event: response.created"));
+		expect(created).toBeDefined();
+		const data = JSON.parse(
+			(created ?? "")
+				.split("\n")
+				.find((l) => l.startsWith("data: "))
+				?.slice(6) ?? "{}",
+		) as { response: { model: string } };
+		expect(data.response.model).toBe("standard");
+	});
 });
 
 describe("gateway POST /responses without a model set", () => {
