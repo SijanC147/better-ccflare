@@ -337,7 +337,7 @@ describe("x-codex-turn-state on the native /v1/responses path (SB23-2370)", () =
 });
 
 describe("x-codex-turn-state from a refused request (SB23-2370)", () => {
-	it("is not filed: only a 2xx response's token is, as the Codex client reads it only from a stream", async () => {
+	it("is not filed from a 429: the failover never reaches processResponse", async () => {
 		const turnId = newTurn();
 		route = ["a", "b"];
 		queued.set("a", [
@@ -358,6 +358,33 @@ describe("x-codex-turn-state from a refused request (SB23-2370)", () => {
 		expect(seen.map((s) => [s.account, s.turnState])).toEqual([
 			["a", null],
 			["b", null],
+			["a", null],
+		]);
+	});
+
+	it("is not filed from a 400 that reaches processResponse: only a 2xx token is, as the Codex client reads it only from a stream", async () => {
+		const turnId = newTurn();
+		route = ["a"];
+		queued.set("a", [
+			() =>
+				new Response(
+					JSON.stringify({
+						error: { message: "bad input", type: "invalid_request_error" },
+					}),
+					{
+						status: 400,
+						headers: {
+							"content-type": "application/json",
+							[TURN_STATE]: "ts-a-refused",
+						},
+					},
+				),
+		]);
+		const first = await codexCli({ turnId });
+		expect(first.status).toBe(400);
+		await codexCli({ turnId });
+		expect(seen.map((s) => [s.account, s.turnState])).toEqual([
+			["a", null],
 			["a", null],
 		]);
 	});
