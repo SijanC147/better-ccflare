@@ -3659,53 +3659,69 @@ describe("CodexProvider native Responses preservation", () => {
 		expect(next.input).toEqual([inputItem("second")]);
 	});
 
-	it("invalidates continuation when SSE event and data terminal types conflict", async () => {
-		for (const [eventName, dataType, status] of [
-			["response.failed", "response.completed", "completed"],
-			["response.completed", "response.failed", "failed"],
-			["response.completed", "response.created", "completed"],
-		] as const) {
-			const provider = new CodexProvider();
-			const base = [inputItem(`${eventName}:${dataType}`)];
-			const requestId = `request-conflict-${eventName}-${dataType}`;
-			await transformContinuationTurn(provider, {
-				requestId,
-				input: base,
-			});
-			const response = await provider.processResponse(
-				// `eventLine` returns the event's lines; it must go through
-				// `sseBody` to become a stream. Passing the array straight to
-				// `Response` stringified it by concatenation with no separator
-				// at all ("event: response.completeddata: {...}"), which is a
-				// single unterminated line that the SSE parser cannot read, so
-				// this case asserted "no checkpoint advanced" against a body
-				// that carried no event rather than against the conflict guard.
-				new Response(
-					sseBody(
-						eventLine(eventName, {
-							type: dataType,
-							response: { id: "resp_conflict", status, output: [] },
-						}),
-					),
-					{
-						status: 200,
-						headers: {
-							"content-type": "text/event-stream",
-							"x-better-ccflare-native-responses": "true",
-							"x-better-ccflare-request-id": requestId,
-						},
-					},
+	// One case per tuple, so a mutation run names the tuple that survives
+	// instead of stopping at the first that fails (SB23-2461). Measured on
+	// darwin by disabling checks in `observeNativeTerminalEvent`:
+	//
+	// | disabled                              | red tuples |
+	// | event/data conflict guard             | 3, 4       |
+	// | failure-terminal check                | none       |
+	// | conflict guard + failure check        | 1, 3, 4    |
+	// | those two + `status !== "completed"`  | 1, 2, 3, 4 |
+	//
+	// So tuples 3 and 4 are the ones that prove the conflict guard, one for
+	// each side claiming completion. Tuple 4 was added for that: before it,
+	// tuple 3 was the only assertion that could fail if the guard broke.
+	// Tuples 1 and 2 carry a failure type, so the failure check also rejects
+	// them, and tuple 2's `failed` status is rejected a third time by the
+	// status check. They prove that mixed failure signals never advance a
+	// checkpoint, which is worth keeping, not that the conflict guard works.
+	it.each([
+		["response.failed", "response.completed", "completed"],
+		["response.completed", "response.failed", "failed"],
+		["response.completed", "response.created", "completed"],
+		["response.in_progress", "response.completed", "completed"],
+	] as const)("invalidates continuation when SSE event %s conflicts with data type %s", async (eventName, dataType, status) => {
+		const provider = new CodexProvider();
+		const base = [inputItem(`${eventName}:${dataType}`)];
+		const requestId = `request-conflict-${eventName}-${dataType}`;
+		await transformContinuationTurn(provider, {
+			requestId,
+			input: base,
+		});
+		const response = await provider.processResponse(
+			// `eventLine` returns the event's lines; it must go through
+			// `sseBody` to become a stream. Passing the array straight to
+			// `Response` stringified it by concatenation with no separator
+			// at all ("event: response.completeddata: {...}"), which is a
+			// single unterminated line that the SSE parser cannot read, so
+			// this case asserted "no checkpoint advanced" against a body
+			// that carried no event rather than against the conflict guard.
+			new Response(
+				sseBody(
+					eventLine(eventName, {
+						type: dataType,
+						response: { id: "resp_conflict", status, output: [] },
+					}),
 				),
-				null,
-			);
-			await response.text();
-			const next = await transformContinuationTurn(provider, {
-				requestId: `${requestId}-next`,
-				input: [...base, inputItem("tail")],
-			});
-			expect(next.previous_response_id).toBeUndefined();
-			expect(next.input).toHaveLength(2);
-		}
+				{
+					status: 200,
+					headers: {
+						"content-type": "text/event-stream",
+						"x-better-ccflare-native-responses": "true",
+						"x-better-ccflare-request-id": requestId,
+					},
+				},
+			),
+			null,
+		);
+		await response.text();
+		const next = await transformContinuationTurn(provider, {
+			requestId: `${requestId}-next`,
+			input: [...base, inputItem("tail")],
+		});
+		expect(next.previous_response_id).toBeUndefined();
+		expect(next.input).toHaveLength(2);
 	});
 
 	it("advances only after a realistic native lifecycle reaches clean EOF", async () => {

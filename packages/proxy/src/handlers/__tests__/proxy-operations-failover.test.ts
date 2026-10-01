@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import type { AsyncDbWriter } from "@better-ccflare/database";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -74,9 +76,10 @@ function makeRequestBody(model = "claude-sonnet-4-5") {
 	return new TextEncoder().encode(body).buffer;
 }
 
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(
+	asyncWriter: Partial<AsyncDbWriter> = { enqueue: mock(() => {}) },
+): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(
 				(_accountId: string, _until: number, _reason: string) =>
@@ -84,22 +87,19 @@ function makeProxyContext(): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+			// Absent on the old literal; the attribution read sits in a try, so undefined takes its catch as before.
+			resolverManager: undefined,
+		},
+		runtime: { clientId: "test" },
 		// Only `name` is supplied. proxyWithAccount resolves
 		// `getProvider(account.provider) || ctx.provider`, and every account here
 		// names a provider the registry knows, so a method stubbed on this object
 		// never runs (SB23-2536). Drive the real provider through what it reads.
-		provider: { name: "openai-compatible" } as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => true } as never,
+		provider: { name: "openai-compatible" },
+		asyncWriter,
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -152,7 +152,7 @@ describe("proxyWithAccount — 429 failover", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeContext(),
 		);
 
 		expect(result).toBeNull();
@@ -214,7 +214,7 @@ describe("proxyWithAccount — 429 failover", () => {
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(),
+				makeContext(),
 			);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -256,7 +256,7 @@ describe("proxyWithAccount — 429 failover", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeContext(),
 		);
 
 		expect(result).toBeNull();
@@ -318,7 +318,7 @@ describe("proxyWithAccount — 429 failover", () => {
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(),
+				makeContext(),
 			);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -364,7 +364,7 @@ describe("proxyWithAccount — 429 failover", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeContext(),
 		);
 
 		expect(result).toBeNull();
@@ -372,15 +372,11 @@ describe("proxyWithAccount — 429 failover", () => {
 });
 
 function makeProxyContextWithAsyncExec(): ProxyContext {
-	const ctx = makeProxyContext();
-	return {
-		...ctx,
-		asyncWriter: {
-			enqueue: mock(async (job: () => void | Promise<void>) => {
-				await job();
-			}),
-		} as never,
-	};
+	return makeContext({
+		enqueue: mock(async (job: () => void | Promise<void>) => {
+			await job();
+		}),
+	});
 }
 
 describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
@@ -848,7 +844,7 @@ describe("proxyWithAccount — 529 failover", () => {
 
 		// Override the proxy context to have a provider that treats 529 as rate-limited
 		// (matching the Anthropic provider's parseRateLimit behaviour for 529).
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		(ctx as { provider: typeof ctx.provider }).provider = {
 			...ctx.provider,
 			parseRateLimit: (r: Response) => ({
@@ -891,7 +887,7 @@ describe("proxyWithAccount — 529 failover", () => {
 
 		const bodyBuffer = makeRequestBody();
 		const req = makeRequest(bodyBuffer);
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		// proxyWithAccount reaches forwardToClient on the final-attempt passthrough,
 		// which requires UsageCollector initialization (not wired in unit tests).
 		// Catch that specific error while still verifying the passthrough path
@@ -984,7 +980,7 @@ describe("proxyWithAccount — 529 in-place retry", () => {
 	});
 
 	function make529NoResetCtx() {
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		(ctx as { provider: typeof ctx.provider }).provider = {
 			...ctx.provider,
 			parseRateLimit: (r: Response) => ({
@@ -1179,7 +1175,7 @@ describe("proxyWithAccount — 401 failover", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeContext(),
 		);
 
 		expect(result).toBeNull();
@@ -1217,7 +1213,7 @@ describe("proxyWithAccount — 401 failover", () => {
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(),
+				makeContext(),
 			);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);

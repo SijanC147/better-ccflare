@@ -23,6 +23,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { resetAutoRefreshPromptPoolForTests } from "../auto-refresh-prompt-pool";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { makeProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -57,14 +58,6 @@ function makeDb(rateLimitRows: RateLimitRow[] = [], throwOnSelect = false) {
 	};
 }
 
-function makeProxyContext() {
-	return {
-		runtime: { port: 8080, clientId: "test-client" },
-		refreshInFlight: new Map(),
-		internalProbeSecret: "secret",
-	};
-}
-
 type SendDummyMessageArg = {
 	id: string;
 	name: string;
@@ -92,7 +85,7 @@ async function makeScheduler(
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
-		makeProxyContext() as never,
+		makeProxyContext({ internalProbeSecret: "secret" }),
 	) as unknown as TestableScheduler;
 }
 

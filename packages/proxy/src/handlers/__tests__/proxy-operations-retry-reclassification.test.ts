@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { clearFamilyExhaustionCache } from "../model-capacity";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -93,9 +94,8 @@ function makeRequestBody() {
 	return new TextEncoder().encode(body).buffer;
 }
 
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(
 				(_accountId: string, _until: number, _reason: string) =>
@@ -106,26 +106,24 @@ function makeProxyContext(): ProxyContext {
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+			// Absent on the old literal, which answered undefined for both.
+			resolverManager: undefined,
+			updateRequestUsage: undefined,
+		},
+		runtime: { clientId: "test" },
 		// Only `name` is supplied. proxyWithAccount resolves
 		// `getProvider(account.provider) || ctx.provider`, and every account here
 		// names a provider the registry knows, so a method stubbed on this object
 		// never runs (SB23-2536). Drive the real provider through what it reads.
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
+		provider: { name: "anthropic" },
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -302,7 +300,7 @@ async function runSequence(responses: Array<() => Response>) {
 		return factory();
 	});
 
-	const ctx = makeProxyContext();
+	const ctx = makeContext();
 	const account = makeAccount();
 	const bodyBuffer = makeRequestBody();
 	const { result, forwarded } = await runProxy(
@@ -473,7 +471,7 @@ describe("proxyWithAccount — a retried response is classified like a first res
 				: orgPermissionDenied403();
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const req = new Request("https://proxy.local/v1/messages", {

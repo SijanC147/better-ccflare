@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -91,14 +92,13 @@ function makeRequestBody() {
 	return new TextEncoder().encode(body).buffer;
 }
 
-function makeProxyContext(
+function makeContext(
 	parseRateLimit: () => {
 		isRateLimited: boolean;
 		resetTime: number | undefined;
 	},
 ): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(
 				(_accountId: string, _until: number, _reason: string) =>
@@ -109,29 +109,27 @@ function makeProxyContext(
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		provider: {
 			name: "stub-provider-429",
 			canHandle: () => true,
 			buildUrl: () => "https://upstream.invalid/v1/messages",
 			prepareHeaders: () => new Headers(),
-			transformRequestBody: null,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			transformRequestBody: undefined,
+			prepareRequest: undefined,
+			observeUpstream: undefined,
 			parseRateLimit,
-		} as never,
-		refreshInFlight: new Map(),
+		},
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -219,7 +217,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 				}),
 		);
 
-		const ctx = makeProxyContext(() => ({
+		const ctx = makeContext(() => ({
 			isRateLimited: true,
 			resetTime,
 		}));
@@ -247,7 +245,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 				}),
 		);
 
-		const ctx = makeProxyContext(() => ({
+		const ctx = makeContext(() => ({
 			isRateLimited: false,
 			resetTime: undefined,
 		}));

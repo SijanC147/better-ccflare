@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
 import { ensureSchema, runMigrations } from "@better-ccflare/database";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 describe("AutoRefreshScheduler requires_reauth eligibility", () => {
 	it("excludes accounts that require manual authentication from probes", async () => {
@@ -22,10 +23,7 @@ describe("AutoRefreshScheduler requires_reauth eligibility", () => {
 		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 		const scheduler = new AutoRefreshScheduler(
 			schedulerDb as never,
-			{
-				runtime: { port: 8080, clientId: "test-client" },
-				refreshInFlight: new Map(),
-			} as never,
+			makeProxyContext(),
 		) as unknown as { checkAndRefresh(): Promise<void> };
 
 		await scheduler.checkAndRefresh();

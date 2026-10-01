@@ -4,11 +4,11 @@ import {
 	GATEWAY_COMBO_HEADER,
 	GATEWAY_REQUIRE_MODEL_HEADER,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	getComboSlotInfo,
 	selectAccountsForRequest,
 } from "../account-selector";
-import type { ProxyContext } from "../proxy-types";
 
 // The combos switch decides whether combo routing runs at all. These tests
 // pin the switch to routing; dashboard visibility is deliberately independent.
@@ -105,7 +105,7 @@ function makeCtx(opts: {
 	combosEnabled?: boolean;
 }) {
 	const getActiveComboForFamily = mock(async () => null);
-	const ctx = {
+	const ctx = makeProxyContext({
 		strategy: {
 			select: mock((_all: Account[], _meta: RequestMeta) => opts.accounts),
 		},
@@ -115,10 +115,14 @@ function makeCtx(opts: {
 			listCombos: mock(async () => opts.combos ?? [COMBO]),
 			getComboSlots: mock(async () => opts.slots ?? []),
 		},
-		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
-		config: { getCombosEnabled: () => opts.combosEnabled ?? true },
-	} as unknown as ProxyContext;
+		config: {
+			getCombosEnabled: () => opts.combosEnabled ?? true,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getModelScopedCapacityRouting: undefined,
+			getForceAccountModel: undefined,
+		},
+	});
 	return { ctx, getActiveComboForFamily };
 }
 

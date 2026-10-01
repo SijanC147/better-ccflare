@@ -12,6 +12,7 @@ import {
 	getOpenAICompatibleModels,
 } from "../openai-compatible-model-catalog";
 import { fetchSlot } from "./fetch-slot";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * The per-account model list for openai-compatible accounts, read from that
@@ -39,11 +40,11 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 function makeCtx(account: Account | null): ProxyContext {
-	return {
+	return makeProxyContext({
 		dbOps: {
 			getAccount: async () => account,
 		},
-	} as unknown as ProxyContext;
+	});
 }
 
 const LIVE_BODY = {

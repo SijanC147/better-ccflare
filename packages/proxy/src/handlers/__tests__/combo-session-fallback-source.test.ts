@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { isComboSessionFallbackDisabled } from "../account-selector";
 import type { ProxyContext } from "../proxy-types";
 
@@ -7,11 +8,18 @@ import type { ProxyContext } from "../proxy-types";
 // answer instead of one opinion among two — these pin exactly that.
 
 function ctxWith(fallbackAllowed?: boolean): ProxyContext {
-	return (fallbackAllowed === undefined
-		? {}
-		: {
-				config: { getComboSessionFallback: () => fallbackAllowed },
-			}) as unknown as ProxyContext;
+	if (fallbackAllowed === undefined) {
+		// Kept as an assertion on purpose: this case pins the `ctx.config?.`
+		// guard for a context built with no config at all, and makeProxyContext()
+		// always supplies one, so the missing field cannot be expressed through it.
+		return {
+			...makeProxyContext(),
+			config: undefined,
+		} as unknown as ProxyContext;
+	}
+	return makeProxyContext({
+		config: { getComboSessionFallback: () => fallbackAllowed },
+	});
 }
 
 afterEach(() => {

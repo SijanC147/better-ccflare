@@ -5,6 +5,7 @@ import type {
 	ComboWithSlots,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	getComboSlotInfo,
 	getModelFamilyExhaustionInfo,
@@ -98,7 +99,7 @@ function makeCtx(
 	} = {},
 ): ProxyContext {
 	const accounts = opts.accounts ?? [makeAccount()];
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: mock((_all: Account[], _meta: RequestMeta) => accounts),
 		},
@@ -106,12 +107,14 @@ function makeCtx(
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => opts.activeCombo ?? null),
 		},
-		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
 		config: {
 			getModelScopedCapacityRouting: () => opts.capacityRoutingMode ?? "off",
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getCombosEnabled: undefined,
+			getForceAccountModel: undefined,
 		},
-	} as unknown as ProxyContext;
+	});
 }
 
 // A weekly_scoped usage payload with a fully exhausted cap for `displayName`'s
@@ -400,16 +403,21 @@ describe("selectAccountsForRequest — model-scoped capacity filter (combo routi
 				min_reset_remaining_ms: null,
 			},
 		]);
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [fallbackAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [comboAcc, fallbackAcc]),
 				getActiveComboForFamily: mock(async () => combo),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getModelScopedCapacityRouting: () => "exhausted" },
-		} as unknown as ProxyContext;
+			config: {
+				getModelScopedCapacityRouting: () => "exhausted",
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+				getComboSessionFallback: undefined,
+			},
+		});
 		const meta = makeRequestMeta();
 
 		const result = await selectAccountsForRequest(
@@ -458,14 +466,19 @@ describe("selectAccountsForRequest — model-scoped capacity filter (switch off)
 	it("does not filter when ctx.config is absent (defensive default)", async () => {
 		const acc = makeAccount({ id: "acc-exhausted" });
 		usageCache.set(acc.id, exhaustedUsage("Fable", Date.now()));
+		// Kept as an assertion on purpose: this case pins the `ctx.config?.`
+		// guard for a context built with no config at all, and makeProxyContext()
+		// always supplies one, so the missing field cannot be expressed through it.
 		const ctx = {
-			strategy: { select: mock(() => [acc]) },
-			dbOps: {
-				getAllAccounts: mock(async () => [acc]),
-				getActiveComboForFamily: mock(async () => null),
-			},
-			refreshInFlight: new Map(),
-			asyncWriter: { enqueue: mock(() => {}) },
+			...makeProxyContext({
+				strategy: { select: mock(() => [acc]) },
+				dbOps: {
+					getAllAccounts: mock(async () => [acc]),
+					getActiveComboForFamily: mock(async () => null),
+				},
+				asyncWriter: { enqueue: mock(() => {}) },
+			}),
+			config: undefined,
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta();
 
@@ -785,16 +798,20 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			id: "acc-cooldown",
 			rate_limited_until: now + 90_000,
 		});
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [exhaustedAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [exhaustedAcc, cooldownAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getModelScopedCapacityRouting: () => "exhausted" },
-		} as unknown as ProxyContext;
+			config: {
+				getModelScopedCapacityRouting: () => "exhausted",
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+			},
+		});
 		const meta = makeRequestMeta();
 
 		const result = await selectAccountsForRequest(meta, ctx, "claude-fable-5");
@@ -814,16 +831,20 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			rate_limited_until: now + 90_000,
 		});
 		usageCache.set(cooldownAcc.id, exhaustedUsage("Fable", now));
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [exhaustedAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [exhaustedAcc, cooldownAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getModelScopedCapacityRouting: () => "exhausted" },
-		} as unknown as ProxyContext;
+			config: {
+				getModelScopedCapacityRouting: () => "exhausted",
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+			},
+		});
 		const meta = makeRequestMeta();
 
 		const result = await selectAccountsForRequest(meta, ctx, "claude-fable-5");
@@ -849,16 +870,20 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			paused: true,
 			rate_limited_until: now + 90_000,
 		});
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [exhaustedAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [exhaustedAcc, pausedAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getModelScopedCapacityRouting: () => "exhausted" },
-		} as unknown as ProxyContext;
+			config: {
+				getModelScopedCapacityRouting: () => "exhausted",
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+			},
+		});
 		const meta = makeRequestMeta();
 
 		const result = await selectAccountsForRequest(meta, ctx, "claude-fable-5");
@@ -881,7 +906,7 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			id: "acc-cooldown-earlier",
 			rate_limited_until: now + 30_000,
 		});
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [exhaustedAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [
@@ -891,10 +916,14 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 				]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getModelScopedCapacityRouting: () => "exhausted" },
-		} as unknown as ProxyContext;
+			config: {
+				getModelScopedCapacityRouting: () => "exhausted",
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+			},
+		});
 		const meta = makeRequestMeta();
 
 		const result = await selectAccountsForRequest(meta, ctx, "claude-fable-5");
@@ -934,16 +963,20 @@ describe("selectAccountsForRequest — cooldown-masked sweep respects exclude-pr
 			id: "acc-excluded-cooldown",
 			rate_limited_until: now + 90_000,
 		});
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [exhaustedAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [exhaustedAcc, excludedCooldownAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getModelScopedCapacityRouting: () => "exhausted" },
-		} as unknown as ProxyContext;
+			config: {
+				getModelScopedCapacityRouting: () => "exhausted",
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+			},
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({
 				"x-better-ccflare-exclude-providers": "anthropic-oauth",

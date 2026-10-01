@@ -11,6 +11,7 @@ import { Logger } from "@better-ccflare/logger";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import * as usageCollectorModule from "../../usage-collector";
 import { clearFamilyExhaustionCache } from "../model-capacity";
 import { proxyWithAccount } from "../proxy-operations";
@@ -162,8 +163,7 @@ function ok200(): Response {
 }
 
 function makeCtx(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(
 				(_id: string, _until: number, _reason: string) =>
@@ -171,24 +171,22 @@ function makeCtx(): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+			// Absent on the old literal, which answered undefined for both.
+			resolverManager: undefined,
+			updateRequestUsage: undefined,
+		},
+		runtime: { clientId: "test" },
 		// NOTE: getProvider("anthropic") from the registry wins over this, by
 		// design — the real parser and processResponse run.
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
+		provider: { name: "anthropic" },
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 async function runProxy(

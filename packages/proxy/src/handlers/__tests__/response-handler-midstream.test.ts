@@ -10,6 +10,7 @@
  */
 import { describe, expect, it, spyOn } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { forwardToClient } from "../../response-handler";
 import * as usageCollectorModule from "../../usage-collector";
 import type { ProxyContext } from "../proxy-types";
@@ -87,7 +88,7 @@ function makeCtxWithReason() {
 		enqueueCount: 0,
 	};
 
-	const ctx = {
+	const ctx = makeProxyContext({
 		// No provider methods: handleRateLimitResponse takes the rate-limit info
 		// as an argument and never reads ctx.provider, so the stub that stood
 		// here never ran (SB23-2536).
@@ -101,12 +102,6 @@ function makeCtxWithReason() {
 				calls.markRateLimited.push({ accountId, resetTime, reason });
 				return Promise.resolve({ consecutiveRateLimits: 1, applied: true });
 			},
-			updateAccountUsage: () => {},
-			updateAccountRateLimitMeta: () => {},
-			getAdapter: () => ({
-				get: async () => ({ rate_limited_until: null }),
-				run: async () => {},
-			}),
 			updateRequestUsage: async () => {},
 		},
 		asyncWriter: {
@@ -115,7 +110,7 @@ function makeCtxWithReason() {
 				void job();
 			},
 		},
-	} as unknown as ProxyContext;
+	});
 
 	return { ctx, calls };
 }
@@ -216,7 +211,7 @@ describe("production sniffer integration — overloaded_error mid-stream", () =>
 // that runs the real call form.
 describe("forwardToClient — real mid-stream sniffer call form", () => {
 	function createStreamingCtx(): ProxyContext {
-		return {
+		return makeProxyContext({
 			provider: { name: "anthropic", isStreamingResponse: () => true },
 			config: { getStorePayloads: () => true },
 			dbOps: {
@@ -228,7 +223,7 @@ describe("forwardToClient — real mid-stream sniffer call form", () => {
 					void job();
 				},
 			},
-		} as unknown as ProxyContext;
+		});
 	}
 
 	function mockCollector() {
@@ -353,7 +348,7 @@ describe("forwardToClient — mid-stream keepalive exemption", () => {
 	const KEEPALIVE_SECRET = "test-secret";
 
 	function createKeepaliveCtx(): ProxyContext {
-		return {
+		return makeProxyContext({
 			provider: { name: "anthropic", isStreamingResponse: () => true },
 			config: { getStorePayloads: () => true },
 			dbOps: {
@@ -366,7 +361,7 @@ describe("forwardToClient — mid-stream keepalive exemption", () => {
 				},
 			},
 			internalProbeSecret: KEEPALIVE_SECRET,
-		} as unknown as ProxyContext;
+		});
 	}
 
 	function keepaliveMockCollector() {

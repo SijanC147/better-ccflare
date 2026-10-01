@@ -45,6 +45,7 @@ import type { ProxyContext } from "../handlers";
 import { applyRateLimitCooldown } from "../handlers/rate-limit-cooldown";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /** Local process type shim — matches circuit-breaker.test.ts. */
 declare const process: { env: Record<string, string | undefined> };
@@ -112,25 +113,35 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 function makeContext(account: Account): ProxyContext {
-	return {
-		strategy: { select: (accounts: Account[]) => accounts } as never,
+	return makeProxyContext({
+		strategy: { select: (accounts: Account[]) => accounts },
 		dbOps: {
 			getAllAccounts: mock(async () => [account]),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+			getStorePayloads: undefined,
+		},
 		provider: {
 			name: "test-provider",
 			canHandle: () => true,
 			buildUrl: () => "https://fake.local/v1/messages",
 			prepareHeaders: () => new Headers(),
 			transformRequestBody: undefined,
+			// Optional members production checks for; undefined keeps the path the old literal took.
+			extractUsageInfo: undefined,
+			observeRequest: undefined,
+			observeUpstream: undefined,
+			prepareRequest: undefined,
 			processResponse: async (r: Response) => r,
 			parseRateLimit: () => ({
 				isRateLimited: false,
@@ -139,10 +150,9 @@ function makeContext(account: Account): ProxyContext {
 				remaining: undefined,
 			}),
 			isStreamingResponse: () => false,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 function makeRequest(headers: Record<string, string> = {}): Request {
@@ -275,9 +285,7 @@ describe("circuit-recovery keepalive asymmetry (PR #349 fix A test ii)", () => {
 			// Stub the provider's ctx with the secret plumbed in, and
 			// stamp the keepalive header onto the request.
 			const ctx = makeContext(account);
-			(
-				ctx as ProxyContext & { internalProbeSecret?: string }
-			).internalProbeSecret = secret;
+			ctx.internalProbeSecret = secret;
 
 			const request = makeRequest({
 				"x-better-ccflare-internal-probe-secret": secret,

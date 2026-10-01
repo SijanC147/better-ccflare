@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { selectAccountsForRequest } from "../account-selector";
 import { createPoolExhaustedResponse } from "../proxy-operations";
 
@@ -60,15 +61,14 @@ describe("requires_reauth routing", () => {
 			rate_limited_until: Date.now() + 3_600_000,
 		});
 		const healthy = makeAccount({ id: "healthy", name: "Healthy" });
-		const ctx = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [healthy]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [flagged, healthy]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-		};
+		});
 		const meta = {
 			id: "request-1",
 			method: "POST",
@@ -80,7 +80,7 @@ describe("requires_reauth routing", () => {
 			}),
 		} as RequestMeta;
 
-		const selected = await selectAccountsForRequest(meta, ctx as never);
+		const selected = await selectAccountsForRequest(meta, ctx);
 
 		expect(selected.map((candidate) => candidate.id)).toEqual(["healthy"]);
 	});

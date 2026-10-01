@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -170,9 +171,8 @@ function thinkingAndCacheControlBody() {
 	});
 }
 
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(
 				(_accountId: string, _until: number, _reason: string) =>
@@ -183,33 +183,27 @@ function makeProxyContext(): ProxyContext {
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
+		},
 		// The fork reads the in-place retry budget from ctx.runtime.retry rather
 		// than from a hardcoded 2. Pinned to upstream's documented numbers so the
 		// attempt arithmetic below holds unchanged; delayMs 0 keeps the loop fast.
 		runtime: {
-			port: 8080,
 			clientId: "test",
 			retry: { attempts: 2, delayMs: 0, backoff: 2 },
-		} as never,
+		},
 		// Only `name` is supplied. proxyWithAccount resolves
 		// `getProvider(account.provider) || ctx.provider`, and every account here
 		// names a provider the registry knows, so a method stubbed on this object
 		// never runs (SB23-2536). Drive the real provider through what it reads.
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
+		provider: { name: "anthropic" },
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -296,7 +290,7 @@ function scriptUpstream(responses: Array<() => Response>) {
 }
 
 async function runProxy(account: Account, bodyBuffer: ArrayBuffer) {
-	const ctx = makeProxyContext();
+	const ctx = makeContext();
 	let result: Response | null = null;
 	let forwarded = false;
 	try {

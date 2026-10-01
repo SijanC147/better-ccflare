@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import { fetchSlot } from "./fetch-slot";
+import { makeProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
 const originalFetch = global.fetch;
@@ -25,10 +26,7 @@ describe("AutoRefreshScheduler 401 probe handling", () => {
 		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 		const scheduler = new AutoRefreshScheduler(
 			db as never,
-			{
-				runtime: { port: 8080, clientId: "test-client" },
-				refreshInFlight: new Map(),
-			} as never,
+			makeProxyContext(),
 		) as unknown as PublicSurface<AutoRefreshScheduler> & {
 			sendDummyMessage(account: {
 				id: string;

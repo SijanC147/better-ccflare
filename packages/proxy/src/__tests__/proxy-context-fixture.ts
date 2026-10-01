@@ -27,11 +27,65 @@
  * - `internalProbeSecret`, absent unless supplied, which is what the six
  *   suites had. It is the one optional field on the type.
  *
- * Throwing stubs, because no test in this directory constructs one and a
- * silent `undefined` is the defect this file exists to remove:
+ * Throwing stubs, because a silent `undefined` is the defect this file exists
+ * to remove:
  *
- * - `strategy`, `config`, `provider`, `asyncWriter`, and any `dbOps` method
- *   the caller did not supply.
+ * - `strategy`, `config`, `provider` and `asyncWriter` when the caller does not
+ *   supply them, and any `dbOps` method the caller did not supply.
+ *
+ * ## Supplying `strategy`, `config`, `provider` or `asyncWriter` (SB23-2483)
+ *
+ * Nineteen more files, then sixty-four once the handler and server suites were
+ * counted by shape, built the whole context inline because the fixture could
+ * not take these four. Each accepts either of two things, and the two are told
+ * apart by prototype rather than by anything the caller declares:
+ *
+ * - **A plain object literal** (prototype `Object.prototype` or `null`) is a
+ *   partial mock. It is wrapped exactly like `dbOps`: the methods it names are
+ *   served, live, so a later write to the caller's object is seen; every other
+ *   property throws naming itself. `{ select: ... }` for `strategy` is the
+ *   common case.
+ * - **Anything else** is a real instance, for example `new AnthropicProvider()`
+ *   or `getProvider("anthropic")`, and is returned unchanged. Wrapping one would
+ *   hide its prototype methods behind the stub, since the stub serves only own
+ *   properties.
+ *
+ * A plain object that happens to implement the whole interface is still
+ * wrapped. That costs nothing and keeps one rule: a literal in a test is a
+ * mock, and a mock answers only for what it names.
+ *
+ * ## Members production tests for presence
+ *
+ * Some members are optional in practice: production checks for them and takes
+ * a default branch when they are missing. A literal that did not name one
+ * answered `undefined` and took that branch; the stub throws instead. Name the
+ * member as `undefined` to keep the old branch, never a function returning a
+ * guessed default. Measured while migrating sixty-four files (SB23-2483):
+ *
+ * - `config.getModelScopedCapacityRouting`, `getCombosEnabled`,
+ *   `getForceAccountModel`, `getComboSessionFallback` (account-selector.ts,
+ *   all `?.()`), `getStorePayloads` (response-handler.ts, `?.()`).
+ * - `provider.isStreamingResponse` (`?.()`), `extractUsageInfo` and
+ *   `prepareRequest` (`if (provider.x)`), `observeRequest` (proxy.ts picks
+ *   the codex observer when it is absent), `observeUpstream` (`?.()`).
+ *
+ * One exception: a member production tests with `in`, such as
+ * `"parseRateLimitFromBody" in provider` (handlers/response-processor.ts),
+ * must be OMITTED, not named as `undefined`. The `has` trap answers true for
+ * a named member, so `in` takes the present branch and calls `undefined`.
+ *
+ * ## Spy on the object you passed, never on `ctx.<field>`
+ *
+ * `spyOn(ctx.config, "getX")` does not throw and does nothing: Bun's `spyOn`
+ * writes past the `Proxy` traps, so later reads still return the original and
+ * the spy records no calls. Reads are live, so spying on the object handed to
+ * `makeProxyContext()` works. Measured on Bun 1.4.2 by the PR #294 reviewer.
+ *
+ * **Several of those reads sit inside a `catch` that logs and carries on**, so
+ * a stub throw there changes the branch with every test still green and the
+ * same `expect()` count. A test-name diff cannot see it. A preload that wraps
+ * `Proxy` and prints every throw carrying this file's message, swallowed or
+ * not, can; that is how `observeRequest` and `observeUpstream` were found.
  *
  * Reaching one throws naming the field and the property, so a test that grows
  * into a new code path gets told which field to supply instead of
@@ -111,6 +165,7 @@ const RUNTIME_PROBE_KEYS = new Set([
 function throwingStub<T extends object>(
 	field: string,
 	known: Record<string, unknown> = {},
+	callerSupplied = false,
 ): T {
 	return new Proxy({} as T, {
 		get(_target, property) {
@@ -119,9 +174,19 @@ function throwingStub<T extends object>(
 			if (RUNTIME_PROBE_KEYS.has(property)) return undefined;
 			throw new Error(
 				`ProxyContext.${field}.${property} was read by a test that did not supply it. ` +
-					`makeProxyContext() stubs ${field} because no test in packages/proxy/src/__tests__ builds a real one. ` +
-					`Pass { ${field}: { ${property}: ... } } to makeProxyContext(), or build the real object if the test needs one.`,
+					(callerSupplied
+						? `The ${field} passed to makeProxyContext() is a partial mock that does not name ${property}. Add ${property} to it, or pass a real instance.`
+						: `makeProxyContext() stubs ${field} when the caller passes none. ` +
+							`Pass { ${field}: { ${property}: ... } } to makeProxyContext(), or a real instance if the test needs one.`),
 			);
+		},
+		// A write through the context lands on the caller's object, which is
+		// what a test that assigns a mock after construction expects: the inline
+		// literals these contexts replace were that object.
+		set(_target, property, value) {
+			if (typeof property === "symbol") return false;
+			known[property] = value;
+			return true;
 		},
 		has(_target, property) {
 			return typeof property === "string" && Object.hasOwn(known, property);
@@ -136,6 +201,35 @@ function throwingStub<T extends object>(
 			return undefined;
 		},
 	});
+}
+
+/**
+ * True for an object literal, the shape a test writes when it mocks a field;
+ * false for a class instance, which is a real implementation to pass through.
+ */
+function isPlainObject(value: object): boolean {
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * The value for one of the four fields that are either a partial mock or a
+ * real instance. See "Supplying `strategy`, ..." in the header.
+ *
+ * The single assertion here is the passthrough arm: `Partial<T>` is the
+ * declared type, and an instance that is not a plain object is taken to be the
+ * whole `T` it was constructed as. That is the same claim every call site used
+ * to make with `as never`, made once, behind a runtime check.
+ */
+function suppliedOrStub<T extends object>(
+	field: string,
+	supplied: Partial<T> | undefined,
+): T {
+	if (supplied === undefined) return throwingStub<T>(field);
+	if (isPlainObject(supplied)) {
+		return throwingStub<T>(field, supplied as Record<string, unknown>, true);
+	}
+	return supplied as T;
 }
 
 /**
@@ -162,6 +256,17 @@ export interface ProxyContextOverrides {
 	refreshInFlight?: Map<string, Promise<string>>;
 	/** Absent by default, matching the six helpers this fixture replaces. */
 	internalProbeSecret?: string;
+	/**
+	 * A plain object is a partial mock: its methods are served and any other
+	 * property throws. A class instance passes through unchanged.
+	 */
+	strategy?: Partial<LoadBalancingStrategy>;
+	/** As `strategy`. */
+	config?: Partial<Config>;
+	/** As `strategy`. A real provider instance passes through. */
+	provider?: Partial<Provider>;
+	/** As `strategy`. */
+	asyncWriter?: Partial<AsyncDbWriter>;
 }
 
 /**
@@ -179,11 +284,18 @@ export function makeProxyContext(
 		dbOps: throwingStub<DatabaseOperations>(
 			"dbOps",
 			(overrides.dbOps ?? {}) as Record<string, unknown>,
+			overrides.dbOps !== undefined,
 		),
-		strategy: throwingStub<LoadBalancingStrategy>("strategy"),
-		config: throwingStub<Config>("config"),
-		provider: throwingStub<Provider>("provider"),
-		asyncWriter: throwingStub<AsyncDbWriter>("asyncWriter"),
+		strategy: suppliedOrStub<LoadBalancingStrategy>(
+			"strategy",
+			overrides.strategy,
+		),
+		config: suppliedOrStub<Config>("config", overrides.config),
+		provider: suppliedOrStub<Provider>("provider", overrides.provider),
+		asyncWriter: suppliedOrStub<AsyncDbWriter>(
+			"asyncWriter",
+			overrides.asyncWriter,
+		),
 	};
 	if (overrides.internalProbeSecret !== undefined) {
 		context.internalProbeSecret = overrides.internalProbeSecret;

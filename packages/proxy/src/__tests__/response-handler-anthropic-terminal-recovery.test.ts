@@ -2,12 +2,13 @@ import { describe, expect, it, mock, spyOn } from "bun:test";
 import { ANTHROPIC_MESSAGE_STOP_FRAME } from "../anthropic-terminal-recovery";
 import type { ProxyContext } from "../handlers";
 import type { UsageCollector } from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 // The source worktree intentionally excludes generated database worker bundles.
 // ResponseHandler only reaches DatabaseOperations/AsyncDbWriter construction
 // through UsageCollector's getUsageCollector() fallback, which this filtered
-// probe path never initializes or calls: every ProxyContext below passes
-// hand-rolled dbOps: {} / asyncWriter: {} fakes, and getUsageCollector itself
+// probe path never initializes or calls: every ProxyContext below comes from
+// makeProxyContext, whose dbOps and asyncWriter are stubs, and getUsageCollector itself
 // is spied/replaced per-test where needed. So @better-ccflare/database's real
 // exports are never touched here — do NOT add a
 // mock.module("@better-ccflare/database", ...) stub for
@@ -47,19 +48,14 @@ function immediateStream(chunk: Uint8Array): ReadableStream<Uint8Array> {
 }
 
 function nativeAnthropicCtx(providerName = "anthropic"): ProxyContext {
-	return {
-		strategy: {},
-		dbOps: {},
-		runtime: { port: 8080, tlsEnabled: false },
+	return makeProxyContext({
 		config: { getStorePayloads: () => true },
 		provider: {
 			name: providerName,
 			isStreamingResponse: () => true,
 		},
-		refreshInFlight: new Map<string, Promise<string>>(),
-		asyncWriter: {},
 		internalProbeSecret: "test-secret",
-	} as unknown as ProxyContext;
+	});
 }
 
 async function forwardClosedStream({

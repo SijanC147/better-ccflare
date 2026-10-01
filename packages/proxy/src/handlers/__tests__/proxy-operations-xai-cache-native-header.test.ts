@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import { CodexProvider, XaiProvider } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import * as usageCollectorModule from "../../usage-collector";
 import { setXaiConvId } from "../account-selector";
 import { proxyWithAccount } from "../proxy-operations";
@@ -132,26 +133,23 @@ function makeRequestMeta(path = "/v1/messages"): RequestMeta {
 	};
 }
 
-function makeProxyContext(provider: XaiProvider | CodexProvider): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(provider: XaiProvider | CodexProvider): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 			),
 			saveRequest: mock(() => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
-		provider: provider as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => true } as never,
-	};
+			// Absent on the old literal, which answered undefined for both.
+			getAccount: undefined,
+			resolverManager: undefined,
+		},
+		runtime: { clientId: "test" },
+		provider,
+		asyncWriter: { enqueue: mock(() => {}) },
+		config: { getStorePayloads: () => true },
+	});
 }
 
 function makeMessagesRequest(body: ArrayBuffer) {
@@ -214,7 +212,7 @@ describe("proxyWithAccount — xAI cache-native conv-id header attachment", () =
 		if (convId) {
 			setXaiConvId(requestMeta, convId);
 		}
-		const ctx = makeProxyContext(new XaiProvider());
+		const ctx = makeContext(new XaiProvider());
 		const incomingRequest = requestHeaders
 			? new Request("https://proxy.local/v1/messages", {
 					method: "POST",
@@ -275,7 +273,7 @@ describe("proxyWithAccount — xAI cache-native conv-id header attachment", () =
 		).buffer;
 		const requestMeta = makeRequestMeta();
 		setXaiConvId(requestMeta, "ccflare-xai-test-conv");
-		const ctx = makeProxyContext(new CodexProvider());
+		const ctx = makeContext(new CodexProvider());
 		const result = await proxyWithAccount(
 			makeMessagesRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages"),

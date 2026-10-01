@@ -17,6 +17,7 @@ import {
 } from "bun:test";
 import type { Account } from "@better-ccflare/types";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -150,14 +151,14 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 
 		const account = makeAccount();
 
-		const ctx = {
+		const ctx = makeProxyContext({
 			provider: {
 				name: "anthropic",
 				isStreamingResponse: () => false,
-			} as never,
-			config: { getStorePayloads: () => false } as never,
+			},
+			config: { getStorePayloads: () => false },
 			internalProbeSecret: "test-secret",
-		};
+		});
 
 		const response = new Response(JSON.stringify({ type: "message" }), {
 			status: 200,
@@ -182,7 +183,7 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 				retryAttempt: 0,
 				failoverAttempts: 0,
 			},
-			ctx as never,
+			ctx,
 		);
 
 		expect(handleStart).not.toHaveBeenCalled();
@@ -194,13 +195,13 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 
 		const account = makeAccount();
 
-		const ctx = {
+		const ctx = makeProxyContext({
 			provider: {
 				name: "anthropic",
 				isStreamingResponse: () => false,
-			} as never,
-			config: { getStorePayloads: () => false } as never,
-		};
+			},
+			config: { getStorePayloads: () => false },
+		});
 
 		const response = new Response(JSON.stringify({ type: "message" }), {
 			status: 200,
@@ -223,7 +224,7 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 				retryAttempt: 0,
 				failoverAttempts: 0,
 			},
-			ctx as never,
+			ctx,
 		);
 
 		// At minimum a "start" call should have happened
@@ -268,29 +269,34 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 		const { handleStart, handleEnd } = createMockCollector();
 		const { handleProxy } = await import("../proxy");
 
-		const ctx = {
+		const ctx = makeProxyContext({
 			strategy: {
 				select: () => [],
-			} as never,
+			},
 			dbOps: {
 				getAllAccounts: mock(async () => []),
 				getActiveComboForFamily: mock(async () => null),
-			} as never,
-			runtime: { port: 8080, clientId: "test" } as never,
+			},
+			runtime: { clientId: "test" },
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,
 				getAgentFrontmatterModelFallback: () => false,
-			} as never,
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getForceAccountModel: undefined,
+				getModelScopedCapacityRouting: undefined,
+				getCombosEnabled: undefined,
+			},
 			provider: {
 				name: "anthropic",
 				canHandle: () => true,
-			} as never,
-			refreshInFlight: new Map(),
-			asyncWriter: { enqueue: mock(() => {}) } as never,
+				// Optional member production checks for; undefined keeps the path the old literal took.
+				observeRequest: undefined,
+			},
+			asyncWriter: { enqueue: mock(() => {}) },
 			internalProbeSecret: "test-secret",
-		};
+		});
 
 		const probeRequest = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
@@ -309,7 +315,7 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 		const response = await handleProxy(
 			probeRequest,
 			new URL("https://proxy.local/v1/messages"),
-			ctx as never,
+			ctx,
 		);
 
 		// Should still return 503
@@ -324,28 +330,33 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 		const { handleStart } = createMockCollector();
 		const { handleProxy } = await import("../proxy");
 
-		const ctx = {
+		const ctx = makeProxyContext({
 			strategy: {
 				select: () => [],
-			} as never,
+			},
 			dbOps: {
 				getAllAccounts: mock(async () => []),
 				getActiveComboForFamily: mock(async () => null),
-			} as never,
-			runtime: { port: 8080, clientId: "test" } as never,
+			},
+			runtime: { clientId: "test" },
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,
 				getAgentFrontmatterModelFallback: () => false,
-			} as never,
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getForceAccountModel: undefined,
+				getModelScopedCapacityRouting: undefined,
+				getCombosEnabled: undefined,
+			},
 			provider: {
 				name: "anthropic",
 				canHandle: () => true,
-			} as never,
-			refreshInFlight: new Map(),
-			asyncWriter: { enqueue: mock(() => {}) } as never,
-		};
+				// Optional member production checks for; undefined keeps the path the old literal took.
+				observeRequest: undefined,
+			},
+			asyncWriter: { enqueue: mock(() => {}) },
+		});
 
 		const normalRequest = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
@@ -360,7 +371,7 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 		const response = await handleProxy(
 			normalRequest,
 			new URL("https://proxy.local/v1/messages"),
-			ctx as never,
+			ctx,
 		);
 
 		expect(response.status).toBe(503);

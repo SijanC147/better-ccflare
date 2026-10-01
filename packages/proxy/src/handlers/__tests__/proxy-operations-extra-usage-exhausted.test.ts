@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -79,31 +80,25 @@ function makeProxyContextWithAsyncExec(): ProxyContext {
 			Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 	);
 	const saveRequest = mock((..._args: unknown[]) => Promise.resolve());
-	return {
-		strategy: { getNextAccount: () => null } as never,
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited,
 			saveRequest,
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		// Only `name` is supplied. proxyWithAccount resolves
 		// `getProvider(account.provider) || ctx.provider`, and every account here
 		// names a provider the registry knows, so a method stubbed on this object
 		// never runs (SB23-2536). Drive the real provider through what it reads.
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
+		provider: { name: "anthropic" },
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
-	};
+		},
+		config: { getStorePayloads: () => true },
+	});
 }
 
 function makeRequest(body: ArrayBuffer) {
