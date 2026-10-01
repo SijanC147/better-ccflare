@@ -4,15 +4,17 @@ import { Button } from "../ui/button";
 
 /**
  * The `errors` lines that belong to no stored entry, such as the config key
- * not holding an object. An entry's own line is shown beside its delete
- * control instead; the server sends it byte-identical in both lists.
+ * not holding an object, each once. An entry's own line is shown beside its
+ * delete control instead; the server sends it byte-identical in both lists.
+ * A repeated line (two identical bad allowed-hosts values) is shown once, so
+ * the message is a unique React key.
  */
 export function unattachedErrors(
 	errors: readonly string[],
 	invalid: readonly InvalidConfigEntry[],
 ): string[] {
 	const owned = new Set(invalid.map((entry) => entry.error));
-	return errors.filter((message) => !owned.has(message));
+	return [...new Set(errors.filter((message) => !owned.has(message)))];
 }
 
 /**

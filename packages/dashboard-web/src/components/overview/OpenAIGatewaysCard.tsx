@@ -786,9 +786,11 @@ export function OpenAIGatewaysCard() {
 					<DialogHeader>
 						<DialogTitle>Delete gateway</DialogTitle>
 						<DialogDescription>
-							{pendingDelete?.basePath
-								? `Remove ${pendingDelete.name}? Clients using ${pendingDelete.basePath} or /${pendingDelete.name}/v1 will get an error.`
-								: `Remove the skipped entry ${pendingDelete?.name} from the config file? It is not being served now.`}
+							{/* Null while the dialog fades out after a delete. */}
+							{pendingDelete &&
+								(pendingDelete.basePath
+									? `Remove ${pendingDelete.name}? Clients using ${pendingDelete.basePath} or /${pendingDelete.name}/v1 will get an error.`
+									: `Remove the skipped entry ${pendingDelete.name} from the config file? It is not being served now.`)}
 						</DialogDescription>
 					</DialogHeader>
 					{remove.isError && (

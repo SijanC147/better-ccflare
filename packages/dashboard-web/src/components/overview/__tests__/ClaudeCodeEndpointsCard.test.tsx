@@ -21,6 +21,7 @@ import {
 	formToEndpointConfig,
 	listingToForm,
 } from "../ClaudeCodeEndpointsCard";
+import { unattachedErrors } from "../SkippedConfigEntries";
 
 function form(overrides: Partial<EndpointFormState> = {}): EndpointFormState {
 	return {
@@ -414,5 +415,17 @@ describe("ClaudeCodeEndpointsCard skipped entries", () => {
 				]);
 			},
 		);
+	});
+});
+
+describe("unattachedErrors", () => {
+	it("drops each entry's own line and shows a repeated line once", () => {
+		const bad = 'claude_code_allowed_hosts entry "x:1" is not a host name';
+		expect(
+			unattachedErrors(
+				["endpoint a: broken", bad, bad, "roots problem"],
+				[{ name: "a", error: "endpoint a: broken" }],
+			),
+		).toEqual([bad, "roots problem"]);
 	});
 });

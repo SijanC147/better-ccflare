@@ -389,6 +389,15 @@ describe("server and CLI 24-hour clock", () => {
 			);
 
 			expect(offences).toEqual([]);
+			// Every pinned site today is under packages/, so the floor alone
+			// would not notice apps/ dropping out of the program.
+			const appsServer =
+				path.join(REPO_DIR, "apps", "server", "src") + path.sep;
+			expect(
+				program(ROOT_TSCONFIG)
+					.program.getRootFileNames()
+					.some((f) => path.resolve(f).startsWith(appsServer)),
+			).toBe(true);
 			// 5 when this was written, the two SB23-3614 sites among them; fewer
 			// means the scan stopped matching.
 			expect(pinned).toBeGreaterThanOrEqual(5);

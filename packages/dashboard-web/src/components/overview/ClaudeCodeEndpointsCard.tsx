@@ -679,9 +679,11 @@ export function ClaudeCodeEndpointsCard() {
 					<DialogHeader>
 						<DialogTitle>Delete endpoint</DialogTitle>
 						<DialogDescription>
-							{pendingDelete?.basePath
-								? `Remove ${pendingDelete.name}? Clients using ${pendingDelete.basePath} will get an error. The directory is not touched.`
-								: `Remove the skipped entry ${pendingDelete?.name} from the config file? It is not being served now. The directory is not touched.`}
+							{/* Null while the dialog fades out after a delete. */}
+							{pendingDelete &&
+								(pendingDelete.basePath
+									? `Remove ${pendingDelete.name}? Clients using ${pendingDelete.basePath} will get an error. The directory is not touched.`
+									: `Remove the skipped entry ${pendingDelete.name} from the config file? It is not being served now. The directory is not touched.`)}
 						</DialogDescription>
 					</DialogHeader>
 					{remove.isError && (
