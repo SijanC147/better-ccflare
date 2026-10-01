@@ -93,7 +93,7 @@ export function isOpenAICompatCompletionPath(pathname: string): boolean {
  *
  * The clauses, in `getValidAccessToken`'s own order:
  */
-function sendsOAuthBearer(account: Account): boolean {
+export function sendsOAuthBearer(account: Account): boolean {
 	// Not an Anthropic-provider row: `claude-console-api` and the other API-key
 	// providers return their key at token-manager.ts:1002 and never mint a
 	// bearer. They also reach their own upstreams, so this guard must never

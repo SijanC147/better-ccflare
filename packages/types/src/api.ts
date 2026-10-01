@@ -41,6 +41,14 @@ export interface RequestMeta {
 	originalModel?: string | null;
 	/** Model actually forwarded upstream after an agent-preference rewrite (equal to originalModel when none occurred). */
 	appliedModel?: string | null;
+	/**
+	 * Set when an Anthropic OAuth account refused this request with a windowless
+	 * (request-scoped) 429 and the request was translated by the OpenAI gateway.
+	 * Every remaining OAuth candidate is then skipped for this request, because
+	 * the refusal is about the request and the next account refuses it too
+	 * (SB23-2781). Never set for Claude Code traffic.
+	 */
+	gatewayOAuthRefused?: boolean;
 }
 
 export interface AgentUpdatePayload {
