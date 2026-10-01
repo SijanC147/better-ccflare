@@ -728,6 +728,8 @@ grep "\[Server\]" /tmp/better-ccflare-logs/app.log
 2. Check for trailing commas or missing quotes
 3. Reset to defaults by deleting config file
 
+Until the file is fixed, no setting is saved and every save logs `Config not saved`. For that and the other refusals, warnings and permission rules, see [Config File Permissions and Trust](configuration.md#config-file-permissions-and-trust).
+
 #### "Invalid strategy: [name]"
 **Meaning**: Unknown load balancing strategy specified
 
