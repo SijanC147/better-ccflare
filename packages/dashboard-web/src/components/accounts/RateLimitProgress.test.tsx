@@ -770,7 +770,7 @@ describe("RateLimitProgress — xAI credits row carries the weekly pause (SB23-3
 	it("does not mark a credits row from any other provider", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
-				resetIso={null}
+				resetIso={new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()}
 				usageUtilization={70}
 				usageWindow="credits"
 				usageData={null}
@@ -782,6 +782,10 @@ describe("RateLimitProgress — xAI credits row carries the weekly pause (SB23-3
 			/>,
 		);
 
+		// The row is there (the fallback renders the "credits" window by name),
+		// so the absence of a marker below is a decision, not an empty render.
+		expect(html).toContain("Usage (Grok credits)");
+		expect(html).toContain("70%");
 		expect(html).not.toContain("Pause threshold ·");
 		expect(html).not.toContain("Pauses while the reset");
 	});

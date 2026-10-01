@@ -140,6 +140,8 @@ describe("AccountListItem — usage pause conditions reach the usage bar (SB23-3
 			usagePauseFiveHourMinResetRemainingMs: 2 * 60 * 60 * 1000,
 		});
 
+		// The bar is rendered, so the missing line is a decision, not an empty card.
+		expect(html).toContain("Usage (5-hour)");
 		expect(html).not.toContain("Pauses while the reset");
 	});
 
