@@ -481,6 +481,10 @@ Refused with a 400, rather than silently dropped: `n` greater than 1, `logprobs`
 
 **Claude OAuth accounts are included in this pool, unlike Codex CLI traffic, and that is a deliberate choice with a risk attached.** The Codex section above excludes them because Anthropic has banned OAuth accounts used outside Claude Code. Anthropic has also been seen billing third-party-app traffic on OAuth accounts against the account's extra usage credits and rejecting it with a 400 when extra usage is off; the proxy labels that `extra_usage_exhausted` and fails over. Neither behaviour is guaranteed. If you want these accounts kept out of third-party traffic, use API-key or non-Anthropic accounts for it.
 
+Anthropic has also been seen refusing such a request with a bare 429 that names no rate-limit window, from every OAuth account in turn, while the same accounts served Claude Code. So when one Claude OAuth account refuses a translated request that way, the request skips every other Claude OAuth account and goes straight to the rest of the pool. Nothing is benched, and the skip lasts for that one request only. Claude Code traffic is unaffected.
+
+When a different model answers than the one requested, for example a Codex account answering a `claude-opus-*` request after the Claude accounts refused it, the response's `model` names the model that answered and the response carries `x-better-ccflare-model-substituted: <requested> -> <answered>`. The header is absent when the answer came from the requested model, a dated snapshot of it (`claude-sonnet-4-5-20250929` for `claude-sonnet-4-5`), or the upstream id a gateway's model set maps the requested name to. It is on chat completions, streamed or not, and on a named gateway's `/responses`; the plain `/v1/responses` reports the requested name, as it always has.
+
 #### Named gateways
 
 The default base URL above applies no rules and can route to every account in the pool. To give an app its own base URL with its own rules, add named gateways to the config file under `openai_gateways`:
