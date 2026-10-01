@@ -41,9 +41,22 @@
  * above this one it sees no DOM and fails, below it sees a DOM and passes.
  * Module evaluation order in the importer is source order.
  *
- * The claim is true for `react-dom/client` alone, and the reason is not
- * hoisting: `dom.ts` imports `react-dom/client` itself, so react-dom is always
- * a dependency of the registration module and always evaluates after it.
+ * `react-dom/client` is the exception, and a static import of it cannot be
+ * ordered at all. This file used to import it statically and to say that made
+ * react-dom evaluate after the registration below. It did not (SB23-3556):
+ * react-dom loaded with no DOM, read `canUseDOM` as false, set
+ * `isInputEventSupported` to false at load, and handled text inputs with its
+ * IE polyfill, so a plain `input` event fired no `onChange`. Measured with one
+ * input and one dispatched event: 0 calls. Moving the registration into its
+ * own module imported first still gave 0, because Bun evaluates a CommonJS
+ * dependency such as react-dom before the body of an ES module imported
+ * above it. So `react-dom/client` is loaded with `await import()` after the
+ * registration block, and the same probe gives 1. `dom.test.tsx` pins it.
+ *
+ * The hazard that remains: react-dom is cached for the whole process, so a
+ * test file that statically imports `react-dom/client` before this module
+ * loads the broken copy for every file after it. Import `createRoot` from here
+ * through `mount`, never from react-dom directly.
  *
  * Registration is process-wide and deliberately never undone. Bun runs every
  * test file in one process, so an `unregister` in one file would pull the DOM
@@ -80,7 +93,6 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ReactElement } from "react";
 import { act } from "react";
-import { createRoot } from "react-dom/client";
 
 /**
  * Globals Bun implements and the DOM does not need, restored after
@@ -211,6 +223,10 @@ if (typeof globalThis.document === "undefined") {
 (
 	globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
+
+// Loaded here, after registration, and never by a static import: react-dom
+// decides at load whether the DOM supports `input` events. See the header.
+const { createRoot } = await import("react-dom/client");
 
 export interface Mounted {
 	/** The element the tree is rendered into, for `querySelector`. */
