@@ -9,6 +9,7 @@ import {
 	parseUsagePauseThreshold,
 	supportsUsagePauseThreshold,
 	type UsagePauseSetting,
+	unreportedWindowRefusal,
 	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
 	validateApiKey,
@@ -2309,6 +2310,10 @@ export async function setUsagePauseThresholds(
 	if (typeof validated === "string") {
 		return { success: false, message: validated };
 	}
+	// The API handler's refusal, for the same reason: the poller would drop
+	// a window this provider never reports (SB23-3686).
+	const refusal = unreportedWindowRefusal(account.provider, validated);
+	if (refusal !== null) return { success: false, message: refusal };
 
 	await dbOps.setUsagePauseThresholds(
 		account.id,

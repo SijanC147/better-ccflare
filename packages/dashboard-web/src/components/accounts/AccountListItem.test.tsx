@@ -103,6 +103,92 @@ function renderAccount(
 	);
 }
 
+describe("AccountListItem — usage pause conditions reach the usage bar (SB23-3691, SB23-3686)", () => {
+	const fiveHourUsage = {
+		five_hour: {
+			utilization: 30,
+			resets_at: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+		},
+	};
+
+	// Covers the call, not only RateLimitProgress: before SB23-3691 the card
+	// passed the percent alone, so a reset-only window drew nothing.
+	it("passes a reset-only window's condition to its bar", () => {
+		const html = renderAccount({
+			...baseAccount,
+			paused: false,
+			pauseReason: null,
+			usageData: fiveHourUsage,
+			usageUtilization: 30,
+			usageWindow: "five_hour",
+			usagePauseFiveHourEnabled: true,
+			usagePauseFiveHourMinResetRemainingMs: 2 * 60 * 60 * 1000,
+		});
+
+		expect(html).toContain("Pauses while the reset is at least 2h away");
+	});
+
+	it("passes nothing for a window that is switched off", () => {
+		const html = renderAccount({
+			...baseAccount,
+			paused: false,
+			pauseReason: null,
+			usageData: fiveHourUsage,
+			usageUtilization: 30,
+			usageWindow: "five_hour",
+			usagePauseFiveHourEnabled: false,
+			usagePauseFiveHourMinResetRemainingMs: 2 * 60 * 60 * 1000,
+		});
+
+		// The bar is rendered, so the missing line is a decision, not an empty card.
+		expect(html).toContain("Usage (5-hour)");
+		expect(html).not.toContain("Pauses while the reset");
+	});
+
+	it("passes a reset-only weekly condition to the weekly bar", () => {
+		const html = renderAccount({
+			...baseAccount,
+			paused: false,
+			pauseReason: null,
+			usageData: {
+				seven_day: {
+					utilization: 40,
+					resets_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+				},
+			},
+			usageUtilization: 40,
+			usageWindow: "seven_day",
+			usagePauseWeeklyEnabled: true,
+			usagePauseWeeklyMinResetRemainingMs: 36 * 60 * 60 * 1000,
+		});
+
+		expect(html).toContain("Pauses while the reset is at least 36h away");
+	});
+
+	it("marks an xAI account's Grok credits bar at its weekly threshold", () => {
+		const html = renderAccount({
+			...baseAccount,
+			provider: "xai",
+			paused: false,
+			pauseReason: null,
+			usageData: {
+				credits: {
+					utilization: 60,
+					resets_at: new Date(
+						Date.now() + 4 * 24 * 60 * 60 * 1000,
+					).toISOString(),
+				},
+			},
+			usageUtilization: 60,
+			usageWindow: "credits",
+			usagePauseWeeklyEnabled: true,
+			usagePauseWeeklyThreshold: 75,
+		});
+
+		expect(html).toContain("Pause threshold · 75%");
+	});
+});
+
 describe("AccountListItem", () => {
 	it("shows Needs authentication only when requiresReauth is true", () => {
 		const healthyHtml = renderAccount(baseAccount);
