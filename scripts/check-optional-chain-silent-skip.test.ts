@@ -720,6 +720,17 @@ describe("check-optional-chain-silent-skip", () => {
 			"toHaveReturnedWith",
 			"toHaveLastReturnedWith",
 			"toHaveNthReturnedWith",
+			// SB23-3836: measured failing under `.not` on undefined on Bun 1.3.14 and 1.4.2,
+			// and reported as silent skips until the set listed them.
+			"toBeCalled",
+			"toBeCalledTimes",
+			"toBeCalledWith",
+			"toHaveBeenCalledOnce",
+			"toReturn",
+			"lastCalledWith",
+			"lastReturnedWith",
+			"nthCalledWith",
+			"nthReturnedWith",
 		];
 		const { dir } = sb23_2498Fixture([
 			"expect(row).toBeDefined();",
@@ -729,6 +740,112 @@ describe("check-optional-chain-silent-skip", () => {
 		expect(stderr).toBe("");
 		expect(stdout).toContain(`${names.length} guarded optional chains, 0 offences`);
 		expect(exitCode).toBe(0);
+	});
+
+	/**
+	 * SB23-3836. Matchers whose verdict on `undefined` depends on the argument, measured on Bun
+	 * 1.3.14 and 1.4.2, and `toContainValues`, which passes on `undefined` for any array. Each
+	 * reported case has a silent near-miss that differs only in the argument or the `.not`.
+	 */
+	const argumentReported: Array<[string, string[]]> = [
+		["toContainValues, which passes on undefined", ["expect(row).toBeDefined();", "expect(row?.x).toContainValues([1]);"]],
+		["toBeTypeOf(\"undefined\")", ["expect(row).toBeDefined();", 'expect(row?.x).toBeTypeOf("undefined");']],
+		["not.toBeTypeOf a present type", ["expect(row).toBeDefined();", 'expect(row?.x).not.toBeTypeOf("string");']],
+		["toBeOneOf a list holding undefined", ["expect(row).toBeDefined();", "expect(row?.x).toBeOneOf([undefined, 1]);"]],
+		["not.toBeOneOf a list without undefined", ["expect(row).toBeDefined();", "expect(row?.x).not.toBeOneOf([1, 2]);"]],
+		["toContainKeys([])", ["expect(row).toBeDefined();", "expect(row?.x).toContainKeys([]);"]],
+		["not.toContainKeys a non-empty list", ["expect(row).toBeDefined();", 'expect(row?.x).not.toContainKeys(["a"]);']],
+	];
+
+	for (const [matcher, body] of argumentReported) {
+		test(`reports a guarded chain handed to ${matcher}`, () => {
+			const { dir, line } = sb23_2498Fixture(body);
+			const { exitCode, stderr } = runGate(dir);
+			expect(exitCode).toBe(1);
+			expect(stderr).toContain(`subject.test.ts:${line}:`);
+		});
+	}
+
+	const argumentSilent: Array<[string, string[]]> = [
+		["not.toContainValues", ["expect(row).toBeDefined();", "expect(row?.x).not.toContainValues([1]);"]],
+		["not.toBeTypeOf(\"undefined\")", ["expect(row).toBeDefined();", 'expect(row?.x).not.toBeTypeOf("undefined");']],
+		["toBeTypeOf a present type", ["expect(row).toBeDefined();", 'expect(row?.x).toBeTypeOf("string");']],
+		["toBeTypeOf a type the source does not fix", ["expect(row).toBeDefined();", "expect(row?.x).toBeTypeOf(kind);"]],
+		["toBeOneOf a list without undefined", ["expect(row).toBeDefined();", "expect(row?.x).toBeOneOf([1, 2]);"]],
+		["not.toBeOneOf a list holding undefined", ["expect(row).toBeDefined();", "expect(row?.x).not.toBeOneOf([undefined]);"]],
+		["toBeOneOf a list the source does not fix", ["expect(row).toBeDefined();", "expect(row?.x).toBeOneOf(values);"]],
+		["not.toBeOneOf a list with an element the source does not fix", ["expect(row).toBeDefined();", "expect(row?.x).not.toBeOneOf([1, other]);"]],
+		["not.toContainKeys([])", ["expect(row).toBeDefined();", "expect(row?.x).not.toContainKeys([]);"]],
+		["toContainKeys a non-empty list", ["expect(row).toBeDefined();", 'expect(row?.x).toContainKeys(["a"]);']],
+		["toSatisfy, whose predicate the source cannot evaluate", ["expect(row).toBeDefined();", "expect(row?.x).toSatisfy((v) => v === undefined);"]],
+		["not.toSatisfy, whose predicate the source cannot evaluate", ["expect(row).toBeDefined();", "expect(row?.x).not.toSatisfy((v) => v === 1);"]],
+	];
+
+	for (const [matcher, body] of argumentSilent) {
+		test(`does not report a guarded chain handed to ${matcher}`, () => {
+			const { dir } = sb23_2498Fixture(body);
+			const { exitCode, stdout, stderr } = runGate(dir);
+			expect(stderr).toBe("");
+			// The chain was examined and matched its guard; it is silent because of the matcher.
+			expect(stdout).toContain("1 guarded optional chains, 0 offences");
+			expect(exitCode).toBe(0);
+		});
+	}
+
+	/**
+	 * SB23-3836 item 1. Only an `expect(fn)` whose assertion fails when `fn` neither throws
+	 * nor rejects observes a skip inside `fn`. Measured on Bun 1.3.14 and 1.4.2:
+	 * `expect(() => {}).not.toThrow()` and `expect(() => {}).toBeFunction()` both pass.
+	 */
+	const heldButSilent: Array<[string, string[]]> = [
+		["a statement inside a function expect holds for not.toThrow", ["expect(() => {", "\tsink?.flush();", "}).not.toThrow();"]],
+		["a statement inside a function expect never calls", ["expect(() => {", "\tsink?.flush();", "}).toBeFunction();"]],
+		["a function stored under a const that expect holds for not.toThrow", ["const act = () => {", "\tsink?.flush();", "};", "expect(act).not.toThrow();"]],
+		// The stored name binds to a different function at the `expect`, so this one is unobserved.
+		["a stored function whose name an inner const rebinds", ["const act = () => {", "\tsink?.flush();", "};", "{", "\tconst act = () => {};", "\texpect(act).toThrow();", "}"]],
+		["a stored function whose name a callback parameter rebinds", ["const act = () => {", "\tsink?.flush();", "};", "[() => {}].forEach((act) => expect(act).toThrow());"]],
+		["a function stored under a let", ["let act = () => {", "\tsink?.flush();", "};", "expect(act).toThrow();"]],
+	];
+
+	for (const [position, body] of heldButSilent) {
+		test(`reports ${position}`, () => {
+			const { exitCode, stderr } = runGate(sb23_2499Fixture(body));
+			expect(exitCode).toBe(1);
+			const offset = body.findIndex((line) => line.includes("?."));
+			expect(stderr).toContain(`subject.test.ts:${BODY_LINE + offset}:`);
+		});
+	}
+
+	const heldAndObserved: Array<[string, string[]]> = [
+		// N4 from PR #288's review: reported until SB23-3836, although toThrow observes the skip.
+		["a function stored under a const that expect holds for toThrow", ["const act = () => {", "\tsink?.flush();", "};", "expect(act).toThrow();"]],
+		["a function declaration that expect holds for toThrowError", ["function act() {", "\tsink?.flush();", "}", "expect(act).toThrowError();"]],
+		["a stored async function that expect holds for rejects", ["const act = async () => {", "\tawait sink?.close();", "};", "await expect(act).rejects.toThrow();"]],
+		["a stored function held by expect inside a nested test", ["const act = () => {", "\tsink?.flush();", "};", 'test("inner", () => {', "\texpect(act).toThrow();", "});"]],
+		["a statement inside a function expect holds for rejects.not.toThrow", ["await expect(async () => {", "\tawait sink?.close();", "}).rejects.not.toThrow();"]],
+	];
+
+	for (const [position, body] of heldAndObserved) {
+		test(`does not report ${position}`, () => {
+			const { exitCode, stderr } = runGate(sb23_2499Fixture(body));
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+		});
+	}
+
+	test("does not match two calls with identical text as one value", () => {
+		// N4 from PR #288's review: each call returns a new value, which is why a `const`
+		// holding a call's result is not an alias. The text rule now agrees with the alias rule.
+		const silent = sb23_2498Fixture(['expect(store.get("k")).toBeDefined();', 'store.get("k")?.clear();']);
+		const quiet = runGate(silent.dir);
+		expect(quiet.stderr).toBe("");
+		expect(quiet.stdout).toContain("0 guarded optional chains, 0 offences");
+		expect(quiet.exitCode).toBe(0);
+		// The receiver BEFORE the call is still one value, so this stays reported.
+		const receiver = sb23_2498Fixture(['expect(store.get("k")).toBeDefined();', "store?.clear();"]);
+		const reported = runGate(receiver.dir);
+		expect(reported.exitCode).toBe(1);
+		expect(reported.stderr).toContain(`subject.test.ts:${receiver.line}:`);
 	});
 
 	test("labels a chain with the best guard when two cover it", () => {
