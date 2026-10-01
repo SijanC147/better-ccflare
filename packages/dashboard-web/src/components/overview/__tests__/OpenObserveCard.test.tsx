@@ -233,6 +233,19 @@ describe("OpenObserveCardView", () => {
 		expect(byTextCount(html, "Clear stored token")).toBe(1);
 	});
 
+	// Keyed on tokenSet, never on enabled: the two disagree in both directions,
+	// so both are rendered.
+	it("offers Clear stored token exactly when a token is stored", () => {
+		const enabledNoToken = render({
+			data: config({ enabled: true, tokenSet: false }),
+		});
+		expect(byTextCount(enabledNoToken, "Clear stored token")).toBe(0);
+		const disabledWithToken = render({
+			data: config({ enabled: false, url: "", tokenSet: true }),
+		});
+		expect(byTextCount(disabledWithToken, "Clear stored token")).toBe(1);
+	});
+
 	it("reports shipping disabled when the server says no base URL is set", () => {
 		const html = render({ data: config({ enabled: false, url: "" }) });
 		expect(html).toContain("Shipping disabled");
