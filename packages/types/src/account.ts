@@ -288,8 +288,8 @@ export interface UsageWindowData {
 // all-models weekly come as kind "session" / "weekly_all"; per-model weekly caps
 // (Fable/Opus/Sonnet) come ONLY as kind "weekly_scoped" with scope.model.
 export interface UsageLimit {
-	kind: string;
-	group?: string;
+	kind: string; // "session" | "weekly_all" | "weekly_scoped" | ...
+	group?: string; // "session" | "weekly"
 	percent: number | null;
 	severity?: "normal" | "warning" | "critical" | string;
 	resets_at: string | null;
@@ -375,6 +375,14 @@ export interface AnthropicUsageData {
 	credits?: CodexCreditsData;
 }
 
+// Per-provider usage payloads. Each one is declared here and only here:
+// `@better-ccflare/providers` re-exports these from its fetcher modules
+// rather than declaring its own copy, because two structurally identical
+// declarations compile cleanly while they drift apart (SB23-2453). Types is
+// the source because it cannot import providers, and `FullUsageData` below
+// needs every member. `packages/providers/src/__tests__/usage-type-identity.test.ts`
+// fails the providers typecheck if a fetcher ever declares its own copy again.
+
 // Usage data types for NanoGPT accounts
 export interface NanoGPTUsageWindow {
 	used: number;
@@ -389,11 +397,14 @@ export interface NanoGPTUsageData {
 		daily: number;
 		monthly: number;
 	};
-	enforceDailyLimit: boolean;
+	enforceDailyLimit: boolean; // If true, both daily AND monthly required; if false, only monthly
 	daily: NanoGPTUsageWindow;
 	monthly: NanoGPTUsageWindow;
 	state: "active" | "grace" | "inactive";
-	graceUntil: string | null;
+	graceUntil: string | null; // ISO timestamp
+	period?: {
+		currentPeriodEnd?: string; // ISO timestamp
+	};
 }
 
 // Usage data types for Zai accounts
@@ -415,17 +426,20 @@ export interface ZaiUsageData {
 
 // Usage data types for Kilo accounts
 export interface KiloUsageData {
-	remainingUsd: number; // Remaining credits in USD
+	/** Remaining credits in USD */
+	remainingUsd: number;
 	microdollarsUsed: number;
 	totalMicrodollarsAcquired: number;
-	utilizationPercent: number; // 0-100
+	/** Utilization as percentage 0-100 */
+	utilizationPercent: number;
 }
 
 // Usage data types for Alibaba Coding Plan accounts
 export interface AlibabaCodingPlanQuotaWindow {
 	used: number;
 	total: number;
-	percentUsed: number; // 0-100
+	/** Percentage 0-100 */
+	percentUsed: number;
 	resetAt: number | null; // Unix timestamp in milliseconds
 }
 
@@ -433,8 +447,11 @@ export interface AlibabaCodingPlanUsageData {
 	five_hour: AlibabaCodingPlanQuotaWindow;
 	weekly: AlibabaCodingPlanQuotaWindow;
 	monthly: AlibabaCodingPlanQuotaWindow;
+	/** Plan name e.g. "Coding Plan Lite" */
 	planName: string | null;
+	/** Plan status e.g. "VALID" */
 	status: string | null;
+	/** Remaining days in billing period */
 	remainingDays: number | null;
 }
 
@@ -448,19 +465,23 @@ export interface XaiUsageData {
 	credits: XaiUsageWindow;
 }
 
-// Usage data types for MiniMax Token Plan accounts. Mirrors
-// MinimaxUsageWindow/MinimaxUsageData in
-// packages/providers/src/minimax-usage-fetcher.ts — camelCase `resetAt`
+// Usage data types for MiniMax Token Plan accounts: camelCase `resetAt`
 // (epoch ms), distinct from the Anthropic-style snake_case `resets_at`.
 export interface MinimaxUsageWindow {
-	utilization: number; // 0-100. 0 = fully available, 100 = exhausted.
-	remainingPercent: number; // 0-100, straight from the API.
-	resetAt: number | null; // Epoch milliseconds.
-	intervalMs: number | null; // Window length in ms.
+	/** Utilization percent (0-100). 0 = fully available, 100 = exhausted. */
+	utilization: number;
+	/** Remaining percent (0-100) straight from the API. */
+	remainingPercent: number;
+	/** Reset time as epoch milliseconds. */
+	resetAt: number | null;
+	/** Window length in ms, derived from end_time - start_time per entry. */
+	intervalMs: number | null;
 }
 
 export interface MinimaxUsageData {
+	/** 5h-style per-model-class window derived from the `general` entry. */
 	five_hour: MinimaxUsageWindow | null;
+	/** 7d weekly window derived from the same `general` entry. */
 	seven_day: MinimaxUsageWindow | null;
 }
 

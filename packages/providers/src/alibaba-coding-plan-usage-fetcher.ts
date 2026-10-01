@@ -1,29 +1,15 @@
 import { Logger } from "@better-ccflare/logger";
+import type { AlibabaCodingPlanUsageData } from "@better-ccflare/types";
+
+export type {
+	AlibabaCodingPlanQuotaWindow,
+	AlibabaCodingPlanUsageData,
+} from "@better-ccflare/types";
 
 const log = new Logger("AlibabaCodingPlanUsageFetcher");
 
 const USAGE_URL =
 	"https://bailian-singapore-cs.alibabacloud.com/data/api.json?action=IntlBroadScopeAspnGateway&product=sfm_bailian&api=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2&_v=undefined";
-
-export interface AlibabaCodingPlanQuotaWindow {
-	used: number;
-	total: number;
-	/** Percentage 0-100 */
-	percentUsed: number;
-	resetAt: number | null; // Unix timestamp in milliseconds
-}
-
-export interface AlibabaCodingPlanUsageData {
-	five_hour: AlibabaCodingPlanQuotaWindow;
-	weekly: AlibabaCodingPlanQuotaWindow;
-	monthly: AlibabaCodingPlanQuotaWindow;
-	/** Plan name e.g. "Coding Plan Lite" */
-	planName: string | null;
-	/** Plan status e.g. "VALID" */
-	status: string | null;
-	/** Remaining days in billing period */
-	remainingDays: number | null;
-}
 
 /**
  * Fetch usage data from Alibaba Coding Plan's quota endpoint.
