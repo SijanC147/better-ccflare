@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { ComboSlot } from "@better-ccflare/types";
+import {
+	type ComboSlot,
+	MAX_MIN_RESET_REMAINING_MS,
+	MS_PER_HOUR,
+} from "@better-ccflare/types";
 import {
 	buildSlotUpdate,
 	describeSlotThrottle,
@@ -98,12 +102,32 @@ describe("parseHoursField", () => {
 		expect(parseHoursField("-1")).toBe("invalid");
 	});
 
-	// Without a ceiling, 1e20 hours is 3.6e26, Number.isInteger(3.6e26) is true,
-	// and the handler only checks Number.isInteger and >= 0, so the value would
-	// pass validation and reach the database far above int64.
+	// Without a ceiling, 1e20 hours is 3.6e26 and Number.isInteger(3.6e26) is
+	// true, so the value would reach the database far above int64.
 	test("rejects a value beyond the safe integer range", () => {
 		expect(parseHoursField("1e20")).toBe("invalid");
 		expect(parseHoursField(String(MAX_RESET_HOURS + 1))).toBe("invalid");
+	});
+
+	// SB23-4018: the form was bounded at Number.MAX_SAFE_INTEGER milliseconds
+	// while the handler refuses anything above MAX_MIN_RESET_REMAINING_MS, about
+	// 0.98 hours lower. Half an hour past the advertised maximum is the case
+	// that fell between them: still a safe integer, refused by the API.
+	test("rejects a value the handler refuses, short of the safe integer range", () => {
+		const raw = String(MAX_RESET_HOURS + 0.5);
+		expect(Math.round(Number(raw) * MS_PER_HOUR)).toBeLessThanOrEqual(
+			Number.MAX_SAFE_INTEGER,
+		);
+		expect(Math.round(Number(raw) * MS_PER_HOUR)).toBeGreaterThan(
+			MAX_MIN_RESET_REMAINING_MS,
+		);
+		expect(parseHoursField(raw)).toBe("invalid");
+	});
+
+	test("accepts exactly the handler's inclusive maximum", () => {
+		expect(parseHoursField(String(MAX_RESET_HOURS))).toBe(
+			MAX_MIN_RESET_REMAINING_MS,
+		);
 	});
 
 	test("accepts the largest value it advertises", () => {

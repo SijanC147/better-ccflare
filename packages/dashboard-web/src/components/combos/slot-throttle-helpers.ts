@@ -1,5 +1,6 @@
 import {
 	type ComboSlot,
+	MAX_MIN_RESET_REMAINING_MS,
 	MAX_RESET_HOURS,
 	MS_PER_HOUR,
 } from "@better-ccflare/types";
@@ -47,12 +48,15 @@ export function parseHoursField(raw: string): ParsedField {
 	if (!Number.isFinite(hours) || hours < 0) return "invalid";
 	const ms = Math.round(hours * MS_PER_HOUR);
 	// Without a ceiling, "1e20" hours produces 3.6e26, which passes
-	// Number.isInteger and therefore passes the handler's validation too
-	// (combos.ts only checks Number.isInteger and >= 0). It then reaches the
-	// database as a value far above int64, turning what should be a 400 into a
-	// 500 or a corrupt row. Reject it here, where the operator can still see
-	// which field is wrong.
-	if (ms > Number.MAX_SAFE_INTEGER) return "invalid";
+	// Number.isInteger, so it would reach the database as a value far above
+	// int64. The ceiling is the handler's own constant (combos.ts refuses
+	// anything above MAX_MIN_RESET_REMAINING_MS), not Number.MAX_SAFE_INTEGER:
+	// the two differ by about 0.98 hours, and a form bounded at the larger one
+	// accepted "MAX_RESET_HOURS + 0.5", which the handler then refused with a
+	// 400 while the message below said MAX_RESET_HOURS was the limit
+	// (SB23-4018). Reject it here, where the operator can still see which field
+	// is wrong.
+	if (ms > MAX_MIN_RESET_REMAINING_MS) return "invalid";
 	return ms;
 }
 
@@ -127,10 +131,11 @@ export function buildSlotUpdate(
 		// An invalid threshold must not produce a partial threshold payload, but
 		// it must not hold the enabled toggle hostage either. The toggle is a
 		// boolean that cannot itself be invalid, and the case is reachable: the
-		// handler has no upper bound on min_reset_remaining_ms, so a value stored
-		// through the API above Number.MAX_SAFE_INTEGER renders back into the
-		// hours field as invalid text the operator never typed. Without this, a
-		// slot in that state could not be disabled from the UI at all.
+		// handler had no upper bound on min_reset_remaining_ms until SB23-2061,
+		// so a row stored through the API before then can hold a value above
+		// MAX_MIN_RESET_REMAINING_MS, which renders back into the hours field as
+		// invalid text the operator never typed. Without this, a slot in that
+		// state could not be disabled from the UI at all.
 		if (draft.enabled !== slot.enabled) return { enabled: draft.enabled };
 		return null;
 	}
