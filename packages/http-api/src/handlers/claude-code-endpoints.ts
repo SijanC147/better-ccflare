@@ -19,6 +19,7 @@ import {
 	claudeCodeEndpointBasePath,
 	claudeCodeHostRefusalMessage,
 	claudeCodeMachineHostnames,
+	type InvalidConfigEntry,
 	isClaudeCodeHostAllowed,
 	isPathWithinRoots,
 	isValidClaudeCodeEndpointName,
@@ -128,6 +129,7 @@ export function loadClaudeCodeEndpointState(
 ): {
 	endpoints: ClaudeCodeEndpoints;
 	errors: string[];
+	invalid: InvalidConfigEntry[];
 	allowedHosts: string[];
 } {
 	const parsed = parseClaudeCodeEndpoints(
@@ -138,17 +140,20 @@ export function loadClaudeCodeEndpointState(
 	);
 	const { roots, errors: rootErrors } = claudeCodeDirectoryRoots(config, facts);
 	const errors = [...parsed.errors, ...hosts.errors, ...rootErrors];
+	const invalid = [...parsed.invalid];
 	const endpoints: ClaudeCodeEndpoints = {};
 	for (const [name, endpoint] of Object.entries(parsed.endpoints)) {
 		if (!isClaudeCodeDirectoryAllowed(endpoint.directory, roots)) {
-			errors.push(
-				`endpoint ${name}: ${claudeCodeDirectoryRootsMessage(endpoint.directory)}`,
-			);
+			// Valid config, but stored and not served, so it is deletable like
+			// any other skipped entry.
+			const error = `endpoint ${name}: ${claudeCodeDirectoryRootsMessage(endpoint.directory)}`;
+			errors.push(error);
+			invalid.push({ name, error });
 			continue;
 		}
 		endpoints[name] = endpoint;
 	}
-	return { endpoints, errors, allowedHosts: hosts.hosts };
+	return { endpoints, errors, invalid, allowedHosts: hosts.hosts };
 }
 
 function directoryExists(directory: string): boolean {
@@ -207,6 +212,7 @@ export function createClaudeCodeEndpointHandlers(
 			return jsonResponse({
 				endpoints: listEndpoints(parsed.endpoints),
 				errors: parsed.errors,
+				invalid: parsed.invalid,
 			});
 		},
 

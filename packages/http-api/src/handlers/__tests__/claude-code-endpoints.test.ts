@@ -145,6 +145,7 @@ describe("claude code endpoints API", () => {
 		expect(await handlers.listEndpoints().json()).toEqual({
 			endpoints: [expected],
 			errors: [],
+			invalid: [],
 		});
 
 		const deleted = handlers.deleteEndpoint(del(), "demo");
@@ -153,6 +154,7 @@ describe("claude code endpoints API", () => {
 		expect(await handlers.listEndpoints().json()).toEqual({
 			endpoints: [],
 			errors: [],
+			invalid: [],
 		});
 		expect(handlers.getEndpoint("demo").status).toBe(404);
 		expect(handlers.deleteEndpoint(del(), "demo").status).toBe(404);
@@ -306,10 +308,14 @@ describe("claude code endpoints API", () => {
 		const before = (await handlers.listEndpoints().json()) as {
 			endpoints: unknown[];
 			errors: string[];
+			invalid: Array<{ name: string; error: string }>;
 		};
 		expect(before.endpoints).toEqual([]);
 		expect(before.errors).toHaveLength(1);
 		expect(before.errors[0]).toContain("endpoint broken:");
+		expect(before.invalid).toEqual([
+			{ name: "broken", error: before.errors[0] },
+		]);
 
 		await handlers.putEndpoint(put({ directory: project }), "good");
 		expect(stored(path, CLAUDE_CODE_ENDPOINTS_CONFIG_KEY)).toEqual({
@@ -629,11 +635,18 @@ describe("claude code endpoints API: directory roots (SB23-3408 item 7)", () => 
 		const listed = (await handlers.listEndpoints().json()) as {
 			endpoints: Array<{ name: string }>;
 			errors: string[];
+			invalid: Array<{ name: string; error: string }>;
 		};
 		expect(listed.endpoints.map((e) => e.name)).toEqual(["good"]);
 		expect(listed.errors).toEqual([
 			`endpoint hooks: ${checkClaudeCodeExtraArgs(["--settings", "{}"])}`,
 			`endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside)}`,
+		]);
+		// An invalid config and a valid one outside the roots are both
+		// stored and skipped, so both are named for DELETE.
+		expect(listed.invalid).toEqual([
+			{ name: "hooks", error: listed.errors[0] },
+			{ name: "escaped", error: listed.errors[1] },
 		]);
 		expect(handlers.getEndpoint("hooks").status).toBe(404);
 		expect(handlers.getEndpoint("escaped").status).toBe(404);
@@ -660,9 +673,11 @@ describe("loadClaudeCodeEndpointState", () => {
 				escaped: { directory: outside },
 			},
 		});
+		const escapedError = `endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside)}`;
 		expect(loadClaudeCodeEndpointState(config, FACTS)).toEqual({
 			endpoints: { inside: { directory: root } },
-			errors: [`endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside)}`],
+			errors: [escapedError],
+			invalid: [{ name: "escaped", error: escapedError }],
 			allowedHosts: ["proxy.example"],
 		});
 	});
@@ -691,6 +706,7 @@ describe("loadClaudeCodeEndpointState", () => {
 				`${CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY} must be a non-empty array of absolute paths; using the home directory`,
 				escapedError,
 			],
+			invalid: [{ name: "escaped", error: escapedError }],
 			allowedHosts: [],
 		});
 
@@ -706,6 +722,7 @@ describe("loadClaudeCodeEndpointState", () => {
 				`${CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY} entry "relative" is not an absolute path; using the home directory`,
 				escapedError,
 			],
+			invalid: [{ name: "escaped", error: escapedError }],
 			allowedHosts: ["ok.example"],
 		});
 

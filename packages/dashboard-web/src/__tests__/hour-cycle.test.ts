@@ -31,6 +31,11 @@
  *
  * It replaces #262's scan of RateLimitProgress.tsx alone, which read argument
  * text and could not see a formatter without an `hour:` option.
+ *
+ * A second program, built from the root tsconfig, applies the same rules to
+ * every other workspace package and app (SB23-3614): CLI output and the token
+ * health report are shown to a person too. It leaves this package out so the
+ * two `pinned` floors stay independent.
  */
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -39,6 +44,7 @@ import ts from "typescript";
 
 const PACKAGE_DIR = path.resolve(import.meta.dir, "../..");
 const REPO_DIR = path.resolve(PACKAGE_DIR, "../..");
+const ROOT_TSCONFIG = path.join(REPO_DIR, "tsconfig.json");
 const FIXTURE = path.join(import.meta.dir, "fixtures", "hour-cycle.fixture.ts");
 
 /** A program build costs about 6s unloaded; give it room under a full suite. */
@@ -63,22 +69,43 @@ function isTestPath(file: string): boolean {
 	);
 }
 
-let cached: { program: ts.Program; checker: ts.TypeChecker } | undefined;
+function isDashboardPath(file: string): boolean {
+	return file.startsWith(PACKAGE_DIR + path.sep);
+}
 
-function program(): { program: ts.Program; checker: ts.TypeChecker } {
-	if (cached) return cached;
-	const configPath = path.join(PACKAGE_DIR, "tsconfig.json");
+interface Built {
+	program: ts.Program;
+	checker: ts.TypeChecker;
+}
+
+const cached = new Map<string, Built>();
+
+/**
+ * The program for one tsconfig, test files left out. The dashboard's carries
+ * the fixture; the root one leaves the dashboard out, since its own program
+ * already covers it.
+ */
+function program(configPath = path.join(PACKAGE_DIR, "tsconfig.json")): Built {
+	const hit = cached.get(configPath);
+	if (hit) return hit;
+	const isRoot = configPath === ROOT_TSCONFIG;
 	const config = ts.readConfigFile(configPath, ts.sys.readFile);
 	if (config.error) throw new Error(`cannot read ${configPath}`);
 	const parsed = ts.parseJsonConfigFileContent(
 		config.config,
 		ts.sys,
-		PACKAGE_DIR,
+		path.dirname(configPath),
 	);
-	const roots = parsed.fileNames.filter((f) => !isTestPath(f));
-	const built = ts.createProgram([...roots, FIXTURE], parsed.options);
-	cached = { program: built, checker: built.getTypeChecker() };
-	return cached;
+	const roots = parsed.fileNames.filter(
+		(f) => !isTestPath(f) && !(isRoot && isDashboardPath(f)),
+	);
+	const built = ts.createProgram(
+		isRoot ? roots : [...roots, FIXTURE],
+		parsed.options,
+	);
+	const result = { program: built, checker: built.getTypeChecker() };
+	cached.set(configPath, result);
+	return result;
 }
 
 function propertyName(node: ts.ObjectLiteralElementLike): string | undefined {
@@ -265,8 +292,11 @@ function scanFile(checker: ts.TypeChecker, sf: ts.SourceFile): ScanResult {
 	return { offences, pinned };
 }
 
-function scan(files: (sf: ts.SourceFile) => boolean): ScanResult {
-	const { program: built, checker } = program();
+function scan(
+	files: (sf: ts.SourceFile) => boolean,
+	configPath?: string,
+): ScanResult {
+	const { program: built, checker } = program(configPath);
 	const result: ScanResult = { offences: [], pinned: 0 };
 	for (const sf of built.getSourceFiles()) {
 		if (!files(sf)) continue;
@@ -340,6 +370,37 @@ describe("dashboard 24-hour clock", () => {
 				]),
 			);
 			expect(actual).toEqual(expected);
+		},
+		SCAN_TIMEOUT_MS,
+	);
+});
+
+describe("server and CLI 24-hour clock", () => {
+	it(
+		"pins hourCycle h23 on every hour-bearing formatter outside the dashboard",
+		() => {
+			const { offences, pinned } = scan(
+				(sf) =>
+					sf.fileName.startsWith(REPO_DIR + path.sep) &&
+					!sf.fileName.split(path.sep).includes("node_modules") &&
+					!isTestPath(sf.fileName) &&
+					!isDashboardPath(sf.fileName),
+				ROOT_TSCONFIG,
+			);
+
+			expect(offences).toEqual([]);
+			// Every pinned site today is under packages/, so the floor alone
+			// would not notice apps/ dropping out of the program.
+			const appsServer =
+				path.join(REPO_DIR, "apps", "server", "src") + path.sep;
+			expect(
+				program(ROOT_TSCONFIG)
+					.program.getRootFileNames()
+					.some((f) => path.resolve(f).startsWith(appsServer)),
+			).toBe(true);
+			// 5 when this was written, the two SB23-3614 sites among them; fewer
+			// means the scan stopped matching.
+			expect(pinned).toBeGreaterThanOrEqual(5);
 		},
 		SCAN_TIMEOUT_MS,
 	);

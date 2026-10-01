@@ -47,6 +47,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { SkippedConfigEntries } from "./SkippedConfigEntries";
 
 export const BYPASS_PERMISSIONS_WARNING =
 	"Anyone who can reach this endpoint can make Claude run commands and edit files in this directory.";
@@ -493,8 +494,11 @@ export function ClaudeCodeEndpointsCard() {
 	const [form, setForm] = useState<EndpointFormState | null>(null);
 	const [editing, setEditing] = useState(false);
 	const [formError, setFormError] = useState<string | null>(null);
-	const [pendingDelete, setPendingDelete] =
-		useState<ClaudeCodeEndpointListing | null>(null);
+	// `basePath` is null for a skipped entry, which is stored but not served.
+	const [pendingDelete, setPendingDelete] = useState<{
+		name: string;
+		basePath: string | null;
+	} | null>(null);
 
 	const endpoints = data?.endpoints ?? [];
 	const origin = currentOrigin();
@@ -545,7 +549,12 @@ export function ClaudeCodeEndpointsCard() {
 
 	function openDelete(endpoint: ClaudeCodeEndpointListing) {
 		remove.reset();
-		setPendingDelete(endpoint);
+		setPendingDelete({ name: endpoint.name, basePath: endpoint.base_path });
+	}
+
+	function openDeleteSkipped(name: string) {
+		remove.reset();
+		setPendingDelete({ name, basePath: null });
 	}
 
 	function handleDelete() {
@@ -610,17 +619,14 @@ export function ClaudeCodeEndpointsCard() {
 					))}
 				</div>
 
-				{data && data.errors.length > 0 && (
-					<div className="space-y-1">
-						<p className="text-xs font-medium text-destructive">
-							Skipped config entries
-						</p>
-						{data.errors.map((message) => (
-							<p key={message} className="text-xs text-destructive">
-								{message}
-							</p>
-						))}
-					</div>
+				{data && (
+					<SkippedConfigEntries
+						noun="endpoint"
+						errors={data.errors}
+						invalid={data.invalid}
+						disabled={busy}
+						onDelete={openDeleteSkipped}
+					/>
 				)}
 			</CardContent>
 
@@ -673,9 +679,11 @@ export function ClaudeCodeEndpointsCard() {
 					<DialogHeader>
 						<DialogTitle>Delete endpoint</DialogTitle>
 						<DialogDescription>
-							Remove {pendingDelete?.name}? Clients using{" "}
-							{pendingDelete?.base_path} will get an error. The directory is not
-							touched.
+							{/* Null while the dialog fades out after a delete. */}
+							{pendingDelete &&
+								(pendingDelete.basePath
+									? `Remove ${pendingDelete.name}? Clients using ${pendingDelete.basePath} will get an error. The directory is not touched.`
+									: `Remove the skipped entry ${pendingDelete.name} from the config file? It is not being served now. The directory is not touched.`)}
 						</DialogDescription>
 					</DialogHeader>
 					{remove.isError && (

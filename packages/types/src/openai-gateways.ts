@@ -222,34 +222,53 @@ function validateGatewayModels(
 }
 
 /**
+ * A stored config entry the server skipped, by the key it is stored under, so
+ * a client can offer to delete it (SB23-3557). `error` is byte-identical to
+ * the entry's line in the `errors` list beside it, so a client showing both
+ * can tell which `errors` lines belong to an entry and which do not.
+ */
+export interface InvalidConfigEntry {
+	name: string;
+	error: string;
+}
+
+/**
  * Reads the stored map. An invalid entry is left out and reported in
  * `errors`, never repaired, so one bad gateway cannot disable the others and
- * a caller can say exactly which one was skipped.
+ * a caller can say exactly which one was skipped. `invalid` names each skipped
+ * entry by its stored key; an error that belongs to no entry, such as the key
+ * not holding an object, is in `errors` only.
  */
 export function parseOpenAIGateways(raw: unknown): {
 	gateways: OpenAIGateways;
 	errors: string[];
+	invalid: InvalidConfigEntry[];
 } {
 	const gateways: OpenAIGateways = {};
 	const errors: string[] = [];
-	if (raw === undefined || raw === null) return { gateways, errors };
+	const invalid: InvalidConfigEntry[] = [];
+	if (raw === undefined || raw === null) return { gateways, errors, invalid };
 	if (typeof raw !== "object" || Array.isArray(raw)) {
 		errors.push(`${OPENAI_GATEWAYS_CONFIG_KEY} must be an object`);
-		return { gateways, errors };
+		return { gateways, errors, invalid };
 	}
+	const skip = (name: string, error: string) => {
+		errors.push(error);
+		invalid.push({ name, error });
+	};
 	for (const [name, config] of Object.entries(raw as Record<string, unknown>)) {
 		if (!isValidOpenAIGatewayName(name)) {
-			errors.push(`invalid gateway name ${JSON.stringify(name)}`);
+			skip(name, `invalid gateway name ${JSON.stringify(name)}`);
 			continue;
 		}
 		const result = validateOpenAIGatewayConfig(config);
 		if (!result.ok) {
-			errors.push(`gateway ${name}: ${result.error}`);
+			skip(name, `gateway ${name}: ${result.error}`);
 			continue;
 		}
 		gateways[name] = result.value;
 	}
-	return { gateways, errors };
+	return { gateways, errors, invalid };
 }
 
 export function openAIGatewayBasePath(name: string): string {

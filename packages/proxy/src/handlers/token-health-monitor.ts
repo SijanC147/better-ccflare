@@ -212,7 +212,7 @@ export function formatTokenHealthReport(report: TokenHealthReport): string {
 		"│                    Token Health Report                          │",
 	);
 	lines.push(
-		`│ Generated: ${new Date(report.timestamp).toLocaleString()}                 │`,
+		`│ Generated: ${new Date(report.timestamp).toLocaleString(undefined, { hourCycle: "h23" })}                 │`,
 	);
 	lines.push(
 		"╰─────────────────────────────────────────────────────────────────╯",
