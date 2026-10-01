@@ -5,7 +5,7 @@ import { Button } from "../ui/button";
 
 interface ToolUsageBlockProps {
 	toolName: string;
-	input?: Record<string, unknown>;
+	input?: Record<string, unknown> | undefined;
 }
 
 const MAX_CHARS_COLLAPSE = 200;

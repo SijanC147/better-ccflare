@@ -187,49 +187,49 @@ export interface Request {
 	errorMessage: string | null;
 	responseTimeMs: number | null;
 	failoverAttempts: number;
-	model?: string;
-	promptTokens?: number;
-	completionTokens?: number;
-	totalTokens?: number;
-	costUsd?: number;
-	inputTokens?: number;
-	cacheReadInputTokens?: number;
-	cacheCreationInputTokens?: number;
-	outputTokens?: number;
-	agentUsed?: string;
-	tokensPerSecond?: number;
-	project?: string | null;
-	projectId?: string | null;
-	worktreePath?: string | null;
-	apiKeyId?: string;
-	apiKeyName?: string;
-	billingType?: string;
-	comboName?: string;
-	originalModel?: string;
-	appliedModel?: string;
-	projectAttributionSource?: ProjectAttributionSource;
-	agentAttributionSource?: AgentAttributionSource;
-	clientSessionId?: string;
-	streamTerminalState?: ReportedStreamTerminalState;
+	model?: string | undefined;
+	promptTokens?: number | undefined;
+	completionTokens?: number | undefined;
+	totalTokens?: number | undefined;
+	costUsd?: number | undefined;
+	inputTokens?: number | undefined;
+	cacheReadInputTokens?: number | undefined;
+	cacheCreationInputTokens?: number | undefined;
+	outputTokens?: number | undefined;
+	agentUsed?: string | undefined;
+	tokensPerSecond?: number | undefined;
+	project?: string | null | undefined;
+	projectId?: string | null | undefined;
+	worktreePath?: string | null | undefined;
+	apiKeyId?: string | undefined;
+	apiKeyName?: string | undefined;
+	billingType?: string | undefined;
+	comboName?: string | undefined;
+	originalModel?: string | undefined;
+	appliedModel?: string | undefined;
+	projectAttributionSource?: ProjectAttributionSource | undefined;
+	agentAttributionSource?: AgentAttributionSource | undefined;
+	clientSessionId?: string | undefined;
+	streamTerminalState?: ReportedStreamTerminalState | undefined;
 	/**
 	 * Claude Code's opt-in "gateway hint" request headers (CLI >= 2.1.273,
 	 * `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`). Pure observability metadata —
 	 * absent for every client that doesn't send them, which is the normal
 	 * case. See packages/proxy/src/gateway-hint-headers.ts for the producer.
 	 */
-	gatewayHintRequestClass?: string;
-	gatewayHintAgentType?: string;
-	gatewayHintPrevToolDurations?: string;
-	gatewayHintCompaction?: string;
-	gatewayHintContextCompacted?: string;
+	gatewayHintRequestClass?: string | undefined;
+	gatewayHintAgentType?: string | undefined;
+	gatewayHintPrevToolDurations?: string | undefined;
+	gatewayHintCompaction?: string | undefined;
+	gatewayHintContextCompacted?: string | undefined;
 	/**
 	 * The OpenAI-shaped API a translated request arrived on (`openai-chat` or
 	 * `openai-responses`) and the named gateway it came through. Both absent
 	 * for native Anthropic traffic, whose row path is the real one. See
 	 * packages/proxy/src/inbound-marker.ts for the producer (SB23-2727).
 	 */
-	inboundFormat?: string;
-	inboundGateway?: string;
+	inboundFormat?: string | undefined;
+	inboundGateway?: string | undefined;
 }
 
 // API response type
@@ -244,48 +244,48 @@ export interface RequestResponse {
 	errorMessage: string | null;
 	responseTimeMs: number | null;
 	failoverAttempts: number;
-	model?: string;
-	promptTokens?: number;
-	completionTokens?: number;
-	totalTokens?: number;
-	inputTokens?: number;
-	cacheReadInputTokens?: number;
-	cacheCreationInputTokens?: number;
-	outputTokens?: number;
-	costUsd?: number;
-	agentUsed?: string;
-	tokensPerSecond?: number;
-	project?: string | null;
-	projectId?: string | null;
-	worktreePath?: string | null;
-	apiKeyId?: string;
-	apiKeyName?: string;
-	billingType?: string;
-	comboName?: string;
-	originalModel?: string;
-	appliedModel?: string;
+	model?: string | undefined;
+	promptTokens?: number | undefined;
+	completionTokens?: number | undefined;
+	totalTokens?: number | undefined;
+	inputTokens?: number | undefined;
+	cacheReadInputTokens?: number | undefined;
+	cacheCreationInputTokens?: number | undefined;
+	outputTokens?: number | undefined;
+	costUsd?: number | undefined;
+	agentUsed?: string | undefined;
+	tokensPerSecond?: number | undefined;
+	project?: string | null | undefined;
+	projectId?: string | null | undefined;
+	worktreePath?: string | null | undefined;
+	apiKeyId?: string | undefined;
+	apiKeyName?: string | undefined;
+	billingType?: string | undefined;
+	comboName?: string | undefined;
+	originalModel?: string | undefined;
+	appliedModel?: string | undefined;
 	// Derived from statusCode === 429 server-side so the list view can render
 	// the "Rate Limited" badge without lazy-loading the full payload.
-	rateLimited?: boolean;
-	projectAttributionSource?: ProjectAttributionSource;
-	agentAttributionSource?: AgentAttributionSource;
+	rateLimited?: boolean | undefined;
+	projectAttributionSource?: ProjectAttributionSource | undefined;
+	agentAttributionSource?: AgentAttributionSource | undefined;
 	/**
 	 * Client session id the request came from (body `metadata.user_id`).
 	 * Lets a stored row be traced back to the session that produced it —
 	 * without it, a session's own requests and those of its subagents are
 	 * indistinguishable after the fact, since both share account and model.
 	 */
-	clientSessionId?: string;
-	streamTerminalState?: ReportedStreamTerminalState;
+	clientSessionId?: string | undefined;
+	streamTerminalState?: ReportedStreamTerminalState | undefined;
 	/** See the matching field on `Request` above. */
-	gatewayHintRequestClass?: string;
-	gatewayHintAgentType?: string;
-	gatewayHintPrevToolDurations?: string;
-	gatewayHintCompaction?: string;
-	gatewayHintContextCompacted?: string;
+	gatewayHintRequestClass?: string | undefined;
+	gatewayHintAgentType?: string | undefined;
+	gatewayHintPrevToolDurations?: string | undefined;
+	gatewayHintCompaction?: string | undefined;
+	gatewayHintContextCompacted?: string | undefined;
 	/** See the matching fields on `Request` above. */
-	inboundFormat?: string;
-	inboundGateway?: string;
+	inboundFormat?: string | undefined;
+	inboundGateway?: string | undefined;
 }
 
 // Detailed request with payload

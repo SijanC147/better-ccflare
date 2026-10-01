@@ -37,7 +37,7 @@ export function ConfigFlagDialog({
 	switchLabel: string;
 	/** Explanation shown under the switch. */
 	children: ReactNode;
-	triggerLabel?: string;
+	triggerLabel?: string | undefined;
 }) {
 	const flagQuery = useConfigFlag(path);
 	const saveFlag = useSaveConfigFlag(path);

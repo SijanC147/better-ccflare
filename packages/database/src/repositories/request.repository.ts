@@ -98,12 +98,12 @@ export interface RequestData {
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
-	agentUsed?: string;
-	apiKeyId?: string;
-	apiKeyName?: string;
-	project?: string | null;
-	billingType?: string;
-	comboName?: string | null;
+	agentUsed?: string | undefined;
+	apiKeyId?: string | undefined;
+	apiKeyName?: string | undefined;
+	project?: string | null | undefined;
+	billingType?: string | undefined;
+	comboName?: string | null | undefined;
 	/**
 	 * Model the client originally requested and the model actually sent
 	 * upstream, when an agent-preference rewrite (`isRewriteTargetServable`
@@ -112,12 +112,12 @@ export interface RequestData {
 	 * so the columns stay unpopulated rather than duplicating the `model`
 	 * column with an unchanged value.
 	 */
-	originalModel?: string | null;
-	appliedModel?: string | null;
-	projectAttributionSource?: ProjectAttributionSource | null;
-	agentAttributionSource?: AgentAttributionSource | null;
+	originalModel?: string | null | undefined;
+	appliedModel?: string | null | undefined;
+	projectAttributionSource?: ProjectAttributionSource | null | undefined;
+	agentAttributionSource?: AgentAttributionSource | null | undefined;
 	/** Client-supplied session id (body `metadata.user_id`), used for attribution. */
-	clientSessionId?: string | null;
+	clientSessionId?: string | null | undefined;
 	// (sanitized on write — see sanitizeClientSessionId)
 	/**
 	 * Real SSE termination state for Anthropic-Messages-shaped streams. One of
@@ -132,40 +132,43 @@ export interface RequestData {
 		| "error"
 		| "truncated"
 		| "client_cancelled"
-		| null;
+		| null
+		| undefined;
 	/** Resolved project UUID from worktree path attribution (Phase 3) */
-	projectId?: string | null;
+	projectId?: string | null | undefined;
 	/** Resolved worktree path matched during attribution (Phase 3) */
-	worktreePath?: string | null;
+	worktreePath?: string | null | undefined;
 	/**
 	 * Claude Code's opt-in "gateway hint" request headers (CLI >= 2.1.273,
 	 * `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`) — pure observability metadata,
 	 * absent for the overwhelming majority of clients that don't send them.
 	 * See packages/proxy/src/gateway-hint-headers.ts for the producer.
 	 */
-	gatewayHintRequestClass?: string | null;
-	gatewayHintAgentType?: string | null;
-	gatewayHintPrevToolDurations?: string | null;
-	gatewayHintCompaction?: string | null;
-	gatewayHintContextCompacted?: string | null;
+	gatewayHintRequestClass?: string | null | undefined;
+	gatewayHintAgentType?: string | null | undefined;
+	gatewayHintPrevToolDurations?: string | null | undefined;
+	gatewayHintCompaction?: string | null | undefined;
+	gatewayHintContextCompacted?: string | null | undefined;
 	/**
 	 * The OpenAI-shaped API and named gateway a translated request arrived
 	 * through (SB23-2727). See packages/proxy/src/inbound-marker.ts.
 	 */
-	inboundFormat?: string | null;
-	inboundGateway?: string | null;
-	usage?: {
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
-		tokensPerSecond?: number;
-	};
+	inboundFormat?: string | null | undefined;
+	inboundGateway?: string | null | undefined;
+	usage?:
+		| {
+				model?: string | undefined;
+				promptTokens?: number | undefined;
+				completionTokens?: number | undefined;
+				totalTokens?: number | undefined;
+				costUsd?: number | undefined;
+				inputTokens?: number | undefined;
+				cacheReadInputTokens?: number | undefined;
+				cacheCreationInputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				tokensPerSecond?: number | undefined;
+		  }
+		| undefined;
 }
 
 export class RequestRepository extends BaseRepository<RequestData> {

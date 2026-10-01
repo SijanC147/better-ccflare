@@ -68,7 +68,8 @@ function asStranger<T>(fn: () => T): T {
 	try {
 		return fn();
 	} finally {
-		process.getuid = real;
+		if (real) process.getuid = real;
+		else delete process.getuid;
 	}
 }
 

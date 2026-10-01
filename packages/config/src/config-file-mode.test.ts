@@ -416,7 +416,8 @@ describe("config file permissions", () => {
 
 			// Control, in its own directory because the link above is gone: with the
 			// real uid the same layout is followed and the target does see the write.
-			process.getuid = realGetuid;
+			if (realGetuid) process.getuid = realGetuid;
+			else delete process.getuid;
 			const allowedTarget = join(control, "real.json");
 			const allowedLink = join(control, "config.json");
 			writeFileSync(allowedTarget, JSON.stringify({ lb_strategy: "session" }));
@@ -426,7 +427,8 @@ describe("config file permissions", () => {
 			expect(readFileSync(allowedTarget, "utf8")).toContain("hunter2");
 			expect(lstatSync(allowedLink).isSymbolicLink()).toBe(true);
 		} finally {
-			process.getuid = realGetuid;
+			if (realGetuid) process.getuid = realGetuid;
+			else delete process.getuid;
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(control, { recursive: true, force: true });
 		}

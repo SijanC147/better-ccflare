@@ -32,7 +32,7 @@ interface AccountAddFormProps {
 			| "qwen"
 			| "ollama";
 		priority: number;
-		customEndpoint?: string;
+		customEndpoint?: string | undefined;
 	}) => Promise<{ authUrl: string; sessionId: string }>;
 	onCompleteAccount: (params: {
 		sessionId: string;
@@ -42,8 +42,8 @@ interface AccountAddFormProps {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddMinimaxAccount: (params: {
 		name: string;
@@ -54,28 +54,28 @@ interface AccountAddFormProps {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddAnthropicCompatibleAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddNanoGPTAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddOpenAIAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddVertexAIAccount: (params: {
 		name: string;
@@ -88,45 +88,45 @@ interface AccountAddFormProps {
 		profile: string;
 		region: string;
 		priority: number;
-		cross_region_mode?: "geographic" | "global" | "regional";
-		customModel?: string;
+		cross_region_mode?: "geographic" | "global" | "regional" | undefined;
+		customModel?: string | undefined;
 	}) => Promise<void>;
 	onAddAlibabaCodingPlanAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddKiloAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddOpenRouterAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddOllamaAccount: (params: {
 		name: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddOllamaCloudAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onAddMetaAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => Promise<void>;
 	onCancel: () => void;
 	onSuccess: () => void;

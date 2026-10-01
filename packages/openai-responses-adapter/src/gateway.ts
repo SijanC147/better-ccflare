@@ -26,7 +26,7 @@ export interface OpenAIGatewayOptions {
 	 * entries; the entry decides the upstream model and, through its combo,
 	 * the fallback ladder.
 	 */
-	models?: OpenAIGatewayModelEntry[];
+	models?: OpenAIGatewayModelEntry[] | undefined;
 }
 
 export const EXCLUDE_PROVIDERS_HEADER = "x-better-ccflare-exclude-providers";

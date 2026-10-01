@@ -20,11 +20,11 @@ import {
 
 interface BaseAreaChartProps extends CommonChartProps {
 	dataKey: string;
-	color?: string;
-	gradientId?: string;
-	customGradient?: ReactNode;
-	strokeWidth?: number;
-	fillOpacity?: number;
+	color?: string | undefined;
+	gradientId?: string | undefined;
+	customGradient?: ReactNode | undefined;
+	strokeWidth?: number | undefined;
+	fillOpacity?: number | undefined;
 }
 
 export function BaseAreaChart({
@@ -77,7 +77,11 @@ export function BaseAreaChart({
 			emptyState={emptyState}
 		>
 			<ResponsiveContainer width="100%" height={chartHeight}>
-				<AreaChart data={data} margin={margin} onClick={onChartClick}>
+				<AreaChart
+					data={data}
+					{...(margin !== undefined ? { margin } : {})}
+					{...(onChartClick !== undefined ? { onClick: onChartClick } : {})}
+				>
 					<defs>{customGradient || defaultGradient}</defs>
 					<CartesianGrid
 						strokeDasharray={CHART_PROPS.strokeDasharray}
@@ -89,12 +93,16 @@ export function BaseAreaChart({
 						angle={xAxisAngle}
 						textAnchor={xAxisTextAnchor}
 						height={xAxisHeight}
-						tickFormatter={xAxisTickFormatter}
+						{...(xAxisTickFormatter !== undefined
+							? { tickFormatter: xAxisTickFormatter }
+							: {})}
 					/>
 					<YAxis
 						className="text-xs"
-						domain={yAxisDomain}
-						tickFormatter={yAxisTickFormatter}
+						{...(yAxisDomain !== undefined ? { domain: yAxisDomain } : {})}
+						{...(yAxisTickFormatter !== undefined
+							? { tickFormatter: yAxisTickFormatter }
+							: {})}
 					/>
 					<Tooltip
 						contentStyle={tooltipStyles}

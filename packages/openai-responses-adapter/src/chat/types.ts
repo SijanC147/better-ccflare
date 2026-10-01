@@ -95,7 +95,7 @@ export interface ChatCompletionRequest {
 	messages: ChatMessage[];
 	stream?: boolean;
 	stream_options?: { include_usage?: boolean } | null;
-	max_tokens?: number | null;
+	max_tokens?: number | null | undefined;
 	max_completion_tokens?: number | null;
 	temperature?: number | null;
 	top_p?: number | null;

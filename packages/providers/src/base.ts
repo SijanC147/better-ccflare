@@ -154,11 +154,11 @@ export abstract class BaseProvider implements Provider {
 	 * Default implementation: Return null (no usage info)
 	 */
 	async extractUsageInfo?(_response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		costUsd?: number | undefined;
 	} | null> {
 		return null;
 	}

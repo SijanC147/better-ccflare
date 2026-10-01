@@ -9,14 +9,28 @@ export function TokenUsageDisplay({ summary }: TokenUsageDisplayProps) {
 	// Convert RequestSummary to TokenUsageData format, handling null -> undefined conversion
 	const tokenData = summary
 		? {
-				inputTokens: summary.inputTokens,
-				outputTokens: summary.outputTokens,
-				cacheReadInputTokens: summary.cacheReadInputTokens,
-				cacheCreationInputTokens: summary.cacheCreationInputTokens,
-				totalTokens: summary.totalTokens,
-				costUsd: summary.costUsd,
-				responseTimeMs: summary.responseTimeMs ?? undefined,
-				tokensPerSecond: summary.tokensPerSecond,
+				...(summary.inputTokens !== undefined
+					? { inputTokens: summary.inputTokens }
+					: {}),
+				...(summary.outputTokens !== undefined
+					? { outputTokens: summary.outputTokens }
+					: {}),
+				...(summary.cacheReadInputTokens !== undefined
+					? { cacheReadInputTokens: summary.cacheReadInputTokens }
+					: {}),
+				...(summary.cacheCreationInputTokens !== undefined
+					? { cacheCreationInputTokens: summary.cacheCreationInputTokens }
+					: {}),
+				...(summary.totalTokens !== undefined
+					? { totalTokens: summary.totalTokens }
+					: {}),
+				...(summary.costUsd !== undefined ? { costUsd: summary.costUsd } : {}),
+				...(summary.responseTimeMs != null
+					? { responseTimeMs: summary.responseTimeMs }
+					: {}),
+				...(summary.tokensPerSecond !== undefined
+					? { tokensPerSecond: summary.tokensPerSecond }
+					: {}),
 			}
 		: undefined;
 

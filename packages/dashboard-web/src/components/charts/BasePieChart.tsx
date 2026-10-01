@@ -18,28 +18,28 @@ import type { ChartClickHandler, TooltipFormatterFunction } from "./types";
 
 interface BasePieChartProps {
 	data: Array<{ name: string; value: number; [key: string]: string | number }>;
-	dataKey?: string;
-	nameKey?: string;
-	loading?: boolean;
-	height?: keyof typeof CHART_HEIGHTS | number;
-	innerRadius?: number;
-	outerRadius?: number;
-	paddingAngle?: number;
-	cx?: string | number;
-	cy?: string | number;
-	colors?: string[];
-	tooltipFormatter?: TooltipFormatterFunction;
-	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
-	animationDuration?: number;
-	showLegend?: boolean;
-	legendLayout?: "horizontal" | "vertical";
-	legendAlign?: "left" | "center" | "right";
-	legendVerticalAlign?: "top" | "middle" | "bottom";
-	renderLabel?: boolean;
-	className?: string;
-	error?: Error | null;
-	emptyState?: ReactNode;
-	onPieClick?: ChartClickHandler;
+	dataKey?: string | undefined;
+	nameKey?: string | undefined;
+	loading?: boolean | undefined;
+	height?: keyof typeof CHART_HEIGHTS | number | undefined;
+	innerRadius?: number | undefined;
+	outerRadius?: number | undefined;
+	paddingAngle?: number | undefined;
+	cx?: string | number | undefined;
+	cy?: string | number | undefined;
+	colors?: string[] | undefined;
+	tooltipFormatter?: TooltipFormatterFunction | undefined;
+	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object | undefined;
+	animationDuration?: number | undefined;
+	showLegend?: boolean | undefined;
+	legendLayout?: "horizontal" | "vertical" | undefined;
+	legendAlign?: "left" | "center" | "right" | undefined;
+	legendVerticalAlign?: "top" | "middle" | "bottom" | undefined;
+	renderLabel?: boolean | undefined;
+	className?: string | undefined;
+	error?: Error | null | undefined;
+	emptyState?: ReactNode | undefined;
+	onPieClick?: ChartClickHandler | undefined;
 }
 
 export function BasePieChart({
@@ -93,7 +93,7 @@ export function BasePieChart({
 						nameKey={nameKey}
 						animationDuration={animationDuration}
 						label={renderLabel}
-						onClick={onPieClick}
+						{...(onPieClick !== undefined ? { onClick: onPieClick } : {})}
 					>
 						{data.map((entry, index) => (
 							<Cell

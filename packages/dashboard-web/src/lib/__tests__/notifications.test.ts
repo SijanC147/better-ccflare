@@ -22,7 +22,10 @@ interface FakeOptions {
 
 /** A fake `Notification` constructor recording what it was asked to do. */
 function fakeNotification(opts: FakeOptions = {}) {
-	const created: Array<{ title: string; options?: NotificationOptions }> = [];
+	const created: Array<{
+		title: string;
+		options?: NotificationOptions | undefined;
+	}> = [];
 	let requests = 0;
 	const Fake = function (
 		this: { onclick: unknown; close: () => void },

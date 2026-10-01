@@ -30,7 +30,7 @@ export function viewerRenewal(
 ): RenewalStatus | null {
 	return computeNextRenewal({
 		renewalDay,
-		now,
+		...(now !== undefined ? { now } : {}),
 		timeZone: viewerTimeZone(),
 	});
 }

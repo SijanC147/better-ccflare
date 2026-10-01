@@ -207,16 +207,16 @@ export interface BrowserNotification {
 }
 
 export interface NotificationEnv {
-	Notification?: NotificationApi;
-	isSecureContext?: boolean;
+	Notification?: NotificationApi | undefined;
+	isSecureContext?: boolean | undefined;
 }
 
 /** The real browser environment, read defensively. */
 export function browserNotificationEnv(): NotificationEnv {
 	try {
 		const scope = globalThis as unknown as {
-			Notification?: NotificationApi;
-			isSecureContext?: boolean;
+			Notification?: NotificationApi | undefined;
+			isSecureContext?: boolean | undefined;
 		};
 		return {
 			Notification:
@@ -287,7 +287,7 @@ export interface NotificationMessage {
 	 */
 	tag: string;
 	/** Dashboard path to open when the notification is clicked. */
-	path?: string;
+	path?: string | undefined;
 }
 
 export type Notifier = (message: NotificationMessage) => boolean;

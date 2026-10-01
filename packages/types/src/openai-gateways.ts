@@ -39,7 +39,7 @@ export interface OpenAIGatewayConfig {
 	 * any other model is refused rather than routed. Absent means the gateway
 	 * passes the client's model through, as before.
 	 */
-	models?: OpenAIGatewayModelEntry[];
+	models?: OpenAIGatewayModelEntry[] | undefined;
 }
 
 /**

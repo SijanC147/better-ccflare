@@ -28,7 +28,7 @@ export interface CompleteOptions {
 	name: string; // Required to properly create the account
 	id?: string; // Account ID for re-authentication (UPDATE by id instead of name)
 	priority?: number;
-	customEndpoint?: string; // Custom API endpoint
+	customEndpoint?: string | undefined; // Custom API endpoint
 }
 
 export interface AccountCreated {

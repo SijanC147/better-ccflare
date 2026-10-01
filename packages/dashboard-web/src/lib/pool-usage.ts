@@ -190,7 +190,9 @@ function extractFiveHour(usageData: FullUsageData): ExtractedValue | null {
 		const fromLimits = extractAnthropicLimit(usageData, "session");
 		if (fromLimits) return fromLimits;
 		const data = usageData as {
-			five_hour?: { utilization: number | null; resets_at: string | null };
+			five_hour?:
+				| { utilization: number | null; resets_at: string | null }
+				| undefined;
 		};
 		const five = data.five_hour;
 		if (!five) {
@@ -223,7 +225,9 @@ function extractSevenDay(usageData: FullUsageData): ExtractedValue | null {
 		const fromLimits = extractAnthropicLimit(usageData, "weekly_all");
 		if (fromLimits) return fromLimits;
 		const data = usageData as {
-			seven_day?: { utilization: number | null; resets_at: string | null };
+			seven_day?:
+				| { utilization: number | null; resets_at: string | null }
+				| undefined;
 		};
 		const seven = data.seven_day;
 		if (!seven) {
@@ -670,7 +674,7 @@ export interface PoolSegment {
 	name: string;
 	pct: number | null;
 	kind: "active" | "exhausted" | "unknown";
-	reason?: ExcludedReason;
+	reason?: ExcludedReason | undefined;
 	// The projected exhaustion timestamp (ms) for this segment's account, taken
 	// from result.atRisk by name. Only ever set for "active" segments -- atRisk
 	// is built exclusively from `contributing` accounts (finalizePoolResult), so
@@ -678,7 +682,7 @@ export interface PoolSegment {
 	// null) when the account has no burn-rate projection, matching the "absent
 	// = not applicable" convention used by the other optional PoolSegment
 	// fields (e.g. `reason`).
-	exhaustsAtMs?: number;
+	exhaustsAtMs?: number | undefined;
 	// The account's own window reset (ms), carried straight through from its
 	// contributing/exhausted/excluded source entry -- null when unknown, never
 	// omitted (unlike `reason`/`exhaustsAtMs`, every segment has a resetMs,

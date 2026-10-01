@@ -230,7 +230,7 @@ interface EndpointFormProps {
 	form: EndpointFormState;
 	onChange: (next: EndpointFormState) => void;
 	editing: boolean;
-	disabled?: boolean;
+	disabled?: boolean | undefined;
 }
 
 export function EndpointForm({
@@ -407,7 +407,7 @@ interface EndpointRowProps {
 	origin: string;
 	onEdit: (endpoint: ClaudeCodeEndpointListing) => void;
 	onDelete: (endpoint: ClaudeCodeEndpointListing) => void;
-	disabled?: boolean;
+	disabled?: boolean | undefined;
 }
 
 export function EndpointRow({

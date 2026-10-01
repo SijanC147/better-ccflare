@@ -32,13 +32,13 @@ export function getTooltipStyles(
  * Common chart axis props
  */
 export interface CommonAxisProps {
-	xAxisKey?: string;
-	xAxisAngle?: number;
-	xAxisTextAnchor?: "start" | "middle" | "end";
-	xAxisHeight?: number;
-	xAxisTickFormatter?: (value: number | string) => string;
-	yAxisDomain?: [number | "auto", number | "auto"];
-	yAxisTickFormatter?: (value: number | string) => string;
+	xAxisKey?: string | undefined;
+	xAxisAngle?: number | undefined;
+	xAxisTextAnchor?: "start" | "middle" | "end" | undefined;
+	xAxisHeight?: number | undefined;
+	xAxisTickFormatter?: ((value: number | string) => string) | undefined;
+	yAxisDomain?: [number | "auto", number | "auto"] | undefined;
+	yAxisTickFormatter?: ((value: number | string) => string) | undefined;
 }
 
 /**
@@ -46,17 +46,21 @@ export interface CommonAxisProps {
  */
 export interface CommonChartProps extends CommonAxisProps {
 	data: ChartDataPoint[];
-	loading?: boolean;
-	height?: keyof typeof CHART_HEIGHTS | number;
-	className?: string;
-	error?: Error | null;
-	emptyState?: React.ReactNode;
-	margin?: { top?: number; right?: number; bottom?: number; left?: number };
-	showLegend?: boolean;
-	legendHeight?: number;
-	tooltipFormatter?: (value: number, name: string) => [string, string];
-	tooltipLabelFormatter?: (label: string) => string;
-	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
-	animationDuration?: number;
-	onChartClick?: ChartClickHandler;
+	loading?: boolean | undefined;
+	height?: keyof typeof CHART_HEIGHTS | number | undefined;
+	className?: string | undefined;
+	error?: Error | null | undefined;
+	emptyState?: React.ReactNode | undefined;
+	margin?:
+		| { top?: number; right?: number; bottom?: number; left?: number }
+		| undefined;
+	showLegend?: boolean | undefined;
+	legendHeight?: number | undefined;
+	tooltipFormatter?:
+		| ((value: number, name: string) => [string, string])
+		| undefined;
+	tooltipLabelFormatter?: ((label: string) => string) | undefined;
+	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object | undefined;
+	animationDuration?: number | undefined;
+	onChartClick?: ChartClickHandler | undefined;
 }

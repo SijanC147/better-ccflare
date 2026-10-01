@@ -16,8 +16,8 @@ import {
 } from "../ui/card";
 
 interface AnomaliesViewProps {
-	data?: AnomalyInsightsResponse;
-	loading?: boolean;
+	data?: AnomalyInsightsResponse | undefined;
+	loading?: boolean | undefined;
 	timeRange: TimeRange;
 }
 
@@ -478,7 +478,7 @@ interface DetectorTotalsProps {
 	totalCount: number;
 	shown: number;
 	truncated: boolean;
-	threshold?: number;
+	threshold?: number | undefined;
 }
 
 function DetectorTotals({

@@ -38,8 +38,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 interface ContextCompositionViewProps {
-	data?: ContextInsightsResponse;
-	loading?: boolean;
+	data?: ContextInsightsResponse | undefined;
+	loading?: boolean | undefined;
 	timeRange: TimeRange;
 }
 

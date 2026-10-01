@@ -235,7 +235,7 @@ interface GatewayFormProps {
 	editing: boolean;
 	providerOptions: ProviderOption[];
 	comboOptions: ComboOption[];
-	disabled?: boolean;
+	disabled?: boolean | undefined;
 }
 
 export function GatewayForm({
@@ -464,7 +464,7 @@ interface GatewayRowProps {
 	origin: string;
 	onEdit: (gateway: OpenAIGatewayListing) => void;
 	onDelete: (gateway: OpenAIGatewayListing) => void;
-	disabled?: boolean;
+	disabled?: boolean | undefined;
 }
 
 export function GatewayRow({

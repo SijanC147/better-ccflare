@@ -1129,15 +1129,15 @@ export class AnthropicProvider extends BaseProvider {
 	}
 
 	async extractUsageInfo(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		costUsd?: number | undefined;
+		inputTokens?: number | undefined;
+		cacheReadInputTokens?: number | undefined;
+		cacheCreationInputTokens?: number | undefined;
+		outputTokens?: number | undefined;
 	} | null> {
 		try {
 			const clone = response.clone();

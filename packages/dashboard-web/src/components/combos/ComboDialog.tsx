@@ -17,7 +17,7 @@ import { ComboSlotBuilder } from "./ComboSlotBuilder";
 interface ComboDialogProps {
 	isOpen: boolean;
 	onClose: () => void;
-	comboId?: string | null;
+	comboId?: string | null | undefined;
 }
 
 export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {

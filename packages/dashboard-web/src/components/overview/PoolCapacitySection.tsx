@@ -23,7 +23,7 @@ interface PoolCapacitySectionProps {
 	// (AccountResponse.isPrimary), passed through to every PoolUsageRow for
 	// its "next" badge. Resolved once by the caller (OverviewTab) -- see its
 	// comment for why this must never be recomputed here.
-	primaryAccountName?: string | null;
+	primaryAccountName?: string | null | undefined;
 	// Current time (ms), refreshed every 30s by the caller (OverviewTab) --
 	// drives the ObservedRoutingTable's "observed Xs/Xm ago" age label and
 	// each pool row's per-segment relative reset time.
@@ -33,7 +33,7 @@ interface PoolCapacitySectionProps {
 	// ObservedRoutingTable (the single place the observed routing order is
 	// shown). Undefined/null while the query hasn't loaded yet, or once
 	// loaded but empty -- both simply render no extra block.
-	observations?: Record<string, RoutingObservation> | null;
+	observations?: Record<string, RoutingObservation> | null | undefined;
 }
 
 /**

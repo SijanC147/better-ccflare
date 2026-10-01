@@ -60,8 +60,8 @@ export async function compactDatabase(dbOps: DatabaseOperations): Promise<{
 	walLog: number;
 	walCheckpointed: number;
 	vacuumed: boolean;
-	walTruncateBusy?: number;
-	error?: string;
+	walTruncateBusy?: number | undefined;
+	error?: string | undefined;
 }> {
 	const dbPath = dbOps.getResolvedDbPath();
 	if (dbPath) {

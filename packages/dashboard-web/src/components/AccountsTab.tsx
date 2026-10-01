@@ -141,7 +141,7 @@ export function AccountsTab() {
 			| "qwen"
 			| "ollama";
 		priority: number;
-		customEndpoint?: string;
+		customEndpoint?: string | undefined;
 	}) => {
 		try {
 			const result = await api.initAddAccount(params);
@@ -175,8 +175,8 @@ export function AccountsTab() {
 		profile: string;
 		region: string;
 		priority: number;
-		cross_region_mode?: "geographic" | "global" | "regional";
-		customModel?: string;
+		cross_region_mode?: "geographic" | "global" | "regional" | undefined;
+		customModel?: string | undefined;
 	}) => {
 		try {
 			await api.addBedrockAccount(params);
@@ -208,8 +208,8 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addZaiAccount(params);
@@ -227,7 +227,7 @@ export function AccountsTab() {
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addOpenAIAccount(params);
@@ -260,7 +260,7 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addDeepseekAccount(params);
@@ -277,8 +277,8 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addNanoGPTAccount(params);
@@ -295,7 +295,7 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addAlibabaCodingPlanAccount(params);
@@ -312,7 +312,7 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addKiloAccount(params);
@@ -329,7 +329,7 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addOpenRouterAccount(params);
@@ -346,8 +346,8 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addAnthropicCompatibleAccount(params);
@@ -363,8 +363,8 @@ export function AccountsTab() {
 	const handleAddOllamaAccount = async (params: {
 		name: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addOllamaAccount(params);
@@ -381,7 +381,7 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addOllamaCloudAccount(params);
@@ -398,8 +398,8 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}) => {
 		try {
 			await api.addMetaAccount(params);

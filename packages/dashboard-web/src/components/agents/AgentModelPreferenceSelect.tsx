@@ -8,7 +8,7 @@ import { ModelSelect } from "./ModelSelect";
 
 interface AgentModelPreferenceSelectProps {
 	agent: Agent;
-	triggerClassName?: string;
+	triggerClassName?: string | undefined;
 }
 
 /**

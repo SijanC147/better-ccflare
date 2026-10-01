@@ -33,8 +33,8 @@ function AlertCard({
 	acknowledgeDisabled,
 }: {
 	alert: AlertEvent;
-	onAcknowledge?: (id: string) => void;
-	acknowledgeDisabled?: boolean;
+	onAcknowledge?: ((id: string) => void) | undefined;
+	acknowledgeDisabled?: boolean | undefined;
 }) {
 	return (
 		<Card>
@@ -92,10 +92,10 @@ function AlertGroupRow({
 }: {
 	group: AlertGroup;
 	loadedCount: number;
-	onAcknowledgeGroup?: (ids: string[]) => void;
-	onAcknowledgeAlert?: (id: string) => void;
-	groupPending?: boolean;
-	singlePending?: boolean;
+	onAcknowledgeGroup?: ((ids: string[]) => void) | undefined;
+	onAcknowledgeAlert?: ((id: string) => void) | undefined;
+	groupPending?: boolean | undefined;
+	singlePending?: boolean | undefined;
 }) {
 	const count = group.members.length;
 
@@ -170,12 +170,12 @@ export function AlertsList({
 }: {
 	alerts: AlertEvent[];
 	unacknowledgedCount: number;
-	onAcknowledgeAll?: () => void;
-	onAcknowledgeGroup?: (key: string, ids: string[]) => void;
-	onAcknowledgeAlert?: (id: string) => void;
-	acknowledgeAllDisabled?: boolean;
-	pendingGroupKey?: string | null;
-	singlePending?: boolean;
+	onAcknowledgeAll?: (() => void) | undefined;
+	onAcknowledgeGroup?: ((key: string, ids: string[]) => void) | undefined;
+	onAcknowledgeAlert?: ((id: string) => void) | undefined;
+	acknowledgeAllDisabled?: boolean | undefined;
+	pendingGroupKey?: string | null | undefined;
+	singlePending?: boolean | undefined;
 }) {
 	const { open, acknowledged } = groupAlerts(alerts);
 	// Count over what the page actually loaded, not over the 100 the client

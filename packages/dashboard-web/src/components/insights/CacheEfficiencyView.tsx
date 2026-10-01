@@ -28,8 +28,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 interface CacheEfficiencyViewProps {
-	data?: CacheInsightsResponse;
-	loading?: boolean;
+	data?: CacheInsightsResponse | undefined;
+	loading?: boolean | undefined;
 	timeRange: TimeRange;
 }
 

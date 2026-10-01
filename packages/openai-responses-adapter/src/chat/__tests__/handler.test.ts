@@ -420,7 +420,7 @@ describe("dispatchOpenAIGatewayRequest", () => {
 		const req = new Request(`http://localhost${path}`, {
 			method,
 			headers: { "content-type": "application/json" },
-			body: body === undefined ? undefined : JSON.stringify(body),
+			body: body === undefined ? null : JSON.stringify(body),
 		});
 		const url = new URL(req.url);
 		const match = matchOpenAIGatewayPath(url.pathname);

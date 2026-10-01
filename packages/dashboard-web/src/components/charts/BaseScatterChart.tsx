@@ -26,24 +26,26 @@ interface BaseScatterChartProps {
 	data: ChartDataPoint[];
 	xKey: string;
 	yKey: string;
-	loading?: boolean;
-	height?: keyof typeof CHART_HEIGHTS | number;
-	fill?: string;
-	xAxisLabel?: string;
-	yAxisLabel?: string;
-	xAxisDomain?: [number | "auto", number | "auto"];
-	xAxisTickFormatter?: (value: number | string) => string;
-	yAxisDomain?: [number | "auto", number | "auto"];
-	yAxisTickFormatter?: (value: number | string) => string;
-	tooltipFormatter?: TooltipFormatterFunction;
-	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
-	animationDuration?: number;
-	margin?: { top?: number; right?: number; bottom?: number; left?: number };
-	className?: string;
-	error?: Error | null;
-	emptyState?: ReactNode;
-	onDotClick?: ChartClickHandler;
-	renderLabel?: (entry: ChartDataPoint) => ReactNode;
+	loading?: boolean | undefined;
+	height?: keyof typeof CHART_HEIGHTS | number | undefined;
+	fill?: string | undefined;
+	xAxisLabel?: string | undefined;
+	yAxisLabel?: string | undefined;
+	xAxisDomain?: [number | "auto", number | "auto"] | undefined;
+	xAxisTickFormatter?: ((value: number | string) => string) | undefined;
+	yAxisDomain?: [number | "auto", number | "auto"] | undefined;
+	yAxisTickFormatter?: ((value: number | string) => string) | undefined;
+	tooltipFormatter?: TooltipFormatterFunction | undefined;
+	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object | undefined;
+	animationDuration?: number | undefined;
+	margin?:
+		| { top?: number; right?: number; bottom?: number; left?: number }
+		| undefined;
+	className?: string | undefined;
+	error?: Error | null | undefined;
+	emptyState?: ReactNode | undefined;
+	onDotClick?: ChartClickHandler | undefined;
+	renderLabel?: ((entry: ChartDataPoint) => ReactNode) | undefined;
 }
 
 export function BaseScatterChart({
@@ -83,7 +85,7 @@ export function BaseScatterChart({
 			emptyState={emptyState}
 		>
 			<ResponsiveContainer width="100%" height={chartHeight}>
-				<ScatterChart margin={margin}>
+				<ScatterChart {...(margin !== undefined ? { margin } : {})}>
 					<CartesianGrid
 						strokeDasharray={CHART_PROPS.strokeDasharray}
 						className={CHART_PROPS.gridClassName}
@@ -92,33 +94,37 @@ export function BaseScatterChart({
 						dataKey={xKey}
 						name={xAxisLabel || xKey}
 						className="text-xs"
-						domain={xAxisDomain}
-						tickFormatter={xAxisTickFormatter}
-						label={
-							xAxisLabel
-								? {
+						{...(xAxisDomain !== undefined ? { domain: xAxisDomain } : {})}
+						{...(xAxisTickFormatter !== undefined
+							? { tickFormatter: xAxisTickFormatter }
+							: {})}
+						{...(xAxisLabel
+							? {
+									label: {
 										value: xAxisLabel,
-										position: "insideBottom",
+										position: "insideBottom" as const,
 										offset: -5,
-									}
-								: undefined
-						}
+									},
+								}
+							: {})}
 					/>
 					<YAxis
 						dataKey={yKey}
 						name={yAxisLabel || yKey}
 						className="text-xs"
-						domain={yAxisDomain}
-						tickFormatter={yAxisTickFormatter}
-						label={
-							yAxisLabel
-								? {
+						{...(yAxisDomain !== undefined ? { domain: yAxisDomain } : {})}
+						{...(yAxisTickFormatter !== undefined
+							? { tickFormatter: yAxisTickFormatter }
+							: {})}
+						{...(yAxisLabel
+							? {
+									label: {
 										value: yAxisLabel,
 										angle: -90,
-										position: "insideLeft",
-									}
-								: undefined
-						}
+										position: "insideLeft" as const,
+									},
+								}
+							: {})}
 					/>
 					<Tooltip
 						contentStyle={tooltipStyles}
@@ -130,7 +136,7 @@ export function BaseScatterChart({
 						data={data}
 						fill={fill}
 						animationDuration={animationDuration}
-						onClick={onDotClick}
+						{...(onDotClick !== undefined ? { onClick: onDotClick } : {})}
 					>
 						{renderLabel &&
 							data.map((entry) => (

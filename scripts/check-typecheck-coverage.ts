@@ -190,7 +190,9 @@ for (const [project, script] of targets) {
 	const program = ts.createProgram({
 		rootNames: parsed.fileNames,
 		options: parsed.options,
-		projectReferences: parsed.projectReferences,
+		...(parsed.projectReferences
+			? { projectReferences: parsed.projectReferences }
+			: {}),
 		configFileParsingDiagnostics: ts.getConfigFileParsingDiagnostics(parsed),
 	});
 	const optionsDiagnostics = program.getOptionsDiagnostics();

@@ -1664,7 +1664,7 @@ export function RequestsTab() {
 														? await api.getRequestPayload(request.id)
 														: request;
 													const decoded: RequestPayload & {
-														decoded?: true;
+														decoded?: true | undefined;
 													} = {
 														...full,
 														request: full.request

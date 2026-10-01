@@ -470,10 +470,9 @@ describe("AccountListItem", () => {
 		// An absent value is off, not on: nothing invents a pause the operator
 		// never asked for.
 		expect(
-			accountMenuToggles(
-				{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: undefined },
-				allHandlers,
-			).find((toggle) => toggle.id === "peak-hours-pause")?.checked,
+			accountMenuToggles({ ...baseAccount, provider: "zai" }, allHandlers).find(
+				(toggle) => toggle.id === "peak-hours-pause",
+			)?.checked,
 		).toBe(false);
 	});
 

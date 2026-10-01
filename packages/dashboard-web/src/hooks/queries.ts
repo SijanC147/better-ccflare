@@ -36,17 +36,21 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
 			summary.statusCode != null
 				? { status: summary.statusCode, headers: {}, body: null }
 				: null,
-		error: summary.errorMessage ?? undefined,
+		...(summary.errorMessage != null ? { error: summary.errorMessage } : {}),
 		meta: {
-			accountName,
+			...(accountName !== undefined ? { accountName } : {}),
 			timestamp: new Date(summary.timestamp).getTime(),
 			success: summary.success,
 			path: summary.path,
 			method: summary.method,
-			agentUsed: summary.agentUsed,
+			...(summary.agentUsed !== undefined
+				? { agentUsed: summary.agentUsed }
+				: {}),
 			// Server derives this from statusCode === 429 so the list view can
 			// render the Rate Limited badge without lazy-loading the body.
-			rateLimited: summary.rateLimited,
+			...(summary.rateLimited !== undefined
+				? { rateLimited: summary.rateLimited }
+				: {}),
 			bodiesOmitted: true,
 		},
 	};
@@ -120,7 +124,7 @@ export interface AccountsQueryOptions {
 	// and the version-status query keeps refetchIntervalInBackground: false on
 	// purpose (PR #71 / SB23-1790): it polls GitHub every 15 minutes, and a
 	// background tab doing that is how a rate limit gets hit.
-	backgroundRefresh?: boolean;
+	backgroundRefresh?: boolean | undefined;
 }
 
 /**
@@ -209,11 +213,11 @@ export const useStats = (
 export const useAnalytics = (
 	timeRange: string,
 	filters: {
-		accounts?: string[];
-		models?: string[];
-		projects?: string[];
-		apiKeys?: string[];
-		status?: "all" | "success" | "error";
+		accounts?: string[] | undefined;
+		models?: string[] | undefined;
+		projects?: string[] | undefined;
+		apiKeys?: string[] | undefined;
+		status?: "all" | "success" | "error" | undefined;
 	},
 	viewMode: "normal" | "cumulative",
 	modelBreakdown?: boolean,
@@ -537,9 +541,9 @@ export const useSetRetention = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: (partial: {
-			payloadDays?: number;
-			requestDays?: number;
-			storePayloads?: boolean;
+			payloadDays?: number | undefined;
+			requestDays?: number | undefined;
+			storePayloads?: boolean | undefined;
 		}) => api.setRetention(partial),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["retention"] });
@@ -797,13 +801,13 @@ export const useSetPostgresConfig = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: (body: {
-			enabled?: boolean;
-			host?: string;
-			port?: number;
-			database?: string;
-			user?: string;
-			password?: string;
-			sslMode?: "disable" | "require" | "verify-ca" | "verify-full";
+			enabled?: boolean | undefined;
+			host?: string | undefined;
+			port?: number | undefined;
+			database?: string | undefined;
+			user?: string | undefined;
+			password?: string | undefined;
+			sslMode?: "disable" | "require" | "verify-ca" | "verify-full" | undefined;
 		}) => api.setPostgresConfig(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["postgres-config"] });
@@ -836,8 +840,8 @@ export const useCreateCombo = () => {
 	return useMutation({
 		mutationFn: (params: {
 			name: string;
-			description?: string;
-			enabled?: boolean;
+			description?: string | undefined;
+			enabled?: boolean | undefined;
 		}) => api.createCombo(params),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
@@ -875,9 +879,9 @@ export const useUpdateCombo = () => {
 	return useMutation({
 		mutationFn: (params: {
 			id: string;
-			name?: string;
-			description?: string;
-			enabled?: boolean;
+			name?: string | undefined;
+			description?: string | undefined;
+			enabled?: boolean | undefined;
 		}) => api.updateCombo(params.id, params),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
@@ -922,10 +926,10 @@ export const useUpdateComboSlot = () => {
 			comboId: string;
 			slotId: string;
 			params: {
-				model?: string;
-				enabled?: boolean;
-				max_utilization_percent?: number | null;
-				min_reset_remaining_ms?: number | null;
+				model?: string | undefined;
+				enabled?: boolean | undefined;
+				max_utilization_percent?: number | null | undefined;
+				min_reset_remaining_ms?: number | null | undefined;
 			};
 		}) => api.updateComboSlot(comboId, slotId, params),
 		onSuccess: (_data, { comboId }) => {
@@ -1087,9 +1091,9 @@ export const useCreateProject = () => {
 	return useMutation({
 		mutationFn: (body: {
 			canonical_path: string;
-			display_name?: string;
-			parent_project_id?: string | null;
-			enabled?: boolean;
+			display_name?: string | undefined;
+			parent_project_id?: string | null | undefined;
+			enabled?: boolean | undefined;
 		}) => api.createProject(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.projectsAll() });
@@ -1126,8 +1130,8 @@ export const useCreateWorktreeRule = () => {
 		mutationFn: (body: {
 			kind: string;
 			pattern: string;
-			parent_project_id?: string | null;
-			priority?: number;
+			parent_project_id?: string | null | undefined;
+			priority?: number | undefined;
 		}) => api.createWorktreeRule(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.worktreeRules() });

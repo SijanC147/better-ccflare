@@ -38,7 +38,7 @@ import { API_LIMITS, API_TIMEOUT } from "./constants";
 // Re-export types with dashboard-specific aliases for backward compatibility
 export type Account = AccountResponse & {
 	/** @deprecated Fallbacks are now merged into modelMappings as arrays */
-	modelFallbacks?: { [key: string]: string } | null;
+	modelFallbacks?: { [key: string]: string } | null | undefined;
 };
 export type Stats = StatsWithAccounts;
 export type LogEntry = LogEvent;
@@ -131,9 +131,9 @@ export interface RetryConfig {
 
 /** An omitted field leaves that stored key alone. */
 export interface RetryConfigUpdate {
-	attempts?: number;
-	delayMs?: number;
-	backoff?: number;
+	attempts?: number | undefined;
+	delayMs?: number | undefined;
+	backoff?: number | undefined;
 }
 
 /** The levels the server accepts, in ascending order of severity. */
@@ -269,7 +269,7 @@ export interface TokenHealthResponse {
 	hasRefreshToken: boolean;
 	status: "healthy" | "warning" | "critical" | "expired" | "no-refresh-token";
 	message: string;
-	daysUntilExpiration?: number;
+	daysUntilExpiration?: number | undefined;
 	requiresReauth: boolean;
 }
 
@@ -428,7 +428,10 @@ class API extends HttpClient {
 	async rawRequest(
 		method: string,
 		path: string,
-		options: { body?: string; signal?: AbortSignal } = {},
+		options: {
+			body?: string | undefined;
+			signal?: AbortSignal | undefined;
+		} = {},
 	): Promise<RawResponse> {
 		const headers: Record<string, string> = {};
 		const apiKey = this.getApiKey();
@@ -441,8 +444,10 @@ class API extends HttpClient {
 		const response = await fetch(path, {
 			method,
 			headers,
-			body: options.body === "" ? undefined : options.body,
-			signal: options.signal,
+			...(options.body !== undefined && options.body !== ""
+				? { body: options.body }
+				: {}),
+			...(options.signal !== undefined ? { signal: options.signal } : {}),
 		});
 		const durationMs = Date.now() - startTime;
 
@@ -504,7 +509,7 @@ class API extends HttpClient {
 	}
 
 	async getStats(opts?: {
-		errorsSinceHours?: number;
+		errorsSinceHours?: number | undefined;
 	}): Promise<StatsWithAccounts> {
 		const startTime = Date.now();
 		const hours = opts?.errorsSinceHours;
@@ -570,9 +575,9 @@ class API extends HttpClient {
 			| "codex"
 			| "qwen"
 			| "ollama";
-		apiKey?: string;
+		apiKey?: string | undefined;
 		priority: number;
-		customEndpoint?: string;
+		customEndpoint?: string | undefined;
 	}): Promise<{ authUrl: string; sessionId: string }> {
 		const startTime = Date.now();
 		const url = "/api/oauth/init";
@@ -634,8 +639,8 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/zai";
@@ -668,7 +673,7 @@ class API extends HttpClient {
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/openai-compatible";
@@ -737,8 +742,8 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/nanogpt";
@@ -768,7 +773,7 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/alibaba-coding-plan";
@@ -798,7 +803,7 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/kilo";
@@ -828,7 +833,7 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/openrouter";
@@ -889,7 +894,7 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/deepseek";
@@ -978,8 +983,8 @@ class API extends HttpClient {
 		profile: string;
 		region: string;
 		priority: number;
-		cross_region_mode?: "geographic" | "global" | "regional";
-		customModel?: string;
+		cross_region_mode?: "geographic" | "global" | "regional" | undefined;
+		customModel?: string | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/bedrock";
@@ -1011,8 +1016,8 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/anthropic-compatible";
@@ -1044,8 +1049,8 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/meta";
@@ -1076,8 +1081,8 @@ class API extends HttpClient {
 	async addOllamaAccount(data: {
 		name: string;
 		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
+		customEndpoint?: string | undefined;
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/ollama";
@@ -1109,7 +1114,7 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
+		modelMappings?: { [key: string]: string } | undefined;
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/ollama-cloud";
@@ -1338,11 +1343,11 @@ class API extends HttpClient {
 	async getAnalytics(
 		range = "24h",
 		filters?: {
-			accounts?: string[];
-			models?: string[];
-			projects?: string[];
-			apiKeys?: string[];
-			status?: "all" | "success" | "error";
+			accounts?: string[] | undefined;
+			models?: string[] | undefined;
+			projects?: string[] | undefined;
+			apiKeys?: string[] | undefined;
+			status?: "all" | "success" | "error" | undefined;
 		},
 		mode: "normal" | "cumulative" = "normal",
 		modelBreakdown?: boolean,
@@ -1442,8 +1447,8 @@ class API extends HttpClient {
 	async getAnomalyInsights(
 		range = "24h",
 		options?: {
-			zScoreThreshold?: number;
-			maxEventsPerDetector?: number;
+			zScoreThreshold?: number | undefined;
+			maxEventsPerDetector?: number | undefined;
 		},
 	): Promise<AnomalyInsightsResponse> {
 		const params = new URLSearchParams({ range });
@@ -1482,14 +1487,14 @@ class API extends HttpClient {
 	// Batch analytics requests for improved performance
 	async getBatchAnalytics(
 		requests: Array<{
-			range?: string;
+			range?: string | undefined;
 			filters?: {
-				accounts?: string[];
-				models?: string[];
-				status?: "all" | "success" | "error";
+				accounts?: string[] | undefined;
+				models?: string[] | undefined;
+				status?: "all" | "success" | "error" | undefined;
 			};
-			mode?: "normal" | "cumulative";
-			modelBreakdown?: boolean;
+			mode?: "normal" | "cumulative" | undefined;
+			modelBreakdown?: boolean | undefined;
 		}>,
 	): Promise<AnalyticsResponse[]> {
 		const startTime = Date.now();
@@ -2255,9 +2260,9 @@ class API extends HttpClient {
 	}
 
 	async setRetention(partial: {
-		payloadDays?: number;
-		requestDays?: number;
-		storePayloads?: boolean;
+		payloadDays?: number | undefined;
+		requestDays?: number | undefined;
+		storePayloads?: boolean | undefined;
 	}): Promise<void> {
 		const startTime = Date.now();
 		const url = "/api/config/retention";
@@ -2509,7 +2514,7 @@ class API extends HttpClient {
 		tableRowCounts: Array<{
 			name: string;
 			rowCount: number;
-			dataBytes?: number;
+			dataBytes?: number | undefined;
 		}>;
 	}> {
 		const startTime = Date.now();
@@ -2527,7 +2532,7 @@ class API extends HttpClient {
 				tableRowCounts: Array<{
 					name: string;
 					rowCount: number;
-					dataBytes?: number;
+					dataBytes?: number | undefined;
 				}>;
 			}>(url, undefined, { timeout: 10 * 60 * 1000 });
 			const duration = Date.now() - startTime;
@@ -2630,7 +2635,11 @@ class API extends HttpClient {
 
 	async updateCombo(
 		id: string,
-		params: { name?: string; description?: string; enabled?: boolean },
+		params: {
+			name?: string | undefined;
+			description?: string | undefined;
+			enabled?: boolean | undefined;
+		},
 	): Promise<{ combo: Combo }> {
 		const res = await this.put<{ success: boolean; data: Combo }>(
 			`/api/combos/${id}`,
@@ -2641,8 +2650,8 @@ class API extends HttpClient {
 
 	async createCombo(params: {
 		name: string;
-		description?: string;
-		enabled?: boolean;
+		description?: string | undefined;
+		enabled?: boolean | undefined;
 	}): Promise<{ combo: Combo }> {
 		const res = await this.post<{ success: boolean; data: Combo }>(
 			"/api/combos",
@@ -2695,10 +2704,10 @@ class API extends HttpClient {
 		// alone, null clears it, and a number sets it. `max_utilization_percent:
 		// 0` is a real setting (skip at any usage), not a cleared field.
 		params: {
-			model?: string;
-			enabled?: boolean;
-			max_utilization_percent?: number | null;
-			min_reset_remaining_ms?: number | null;
+			model?: string | undefined;
+			enabled?: boolean | undefined;
+			max_utilization_percent?: number | null | undefined;
+			min_reset_remaining_ms?: number | null | undefined;
 		},
 	): Promise<{ slot: ComboSlot }> {
 		const res = await this.put<{ success: boolean; data: ComboSlot }>(
@@ -2738,15 +2747,16 @@ class API extends HttpClient {
 		}
 	}
 
-	async getCodexAuthStatus(
-		sessionId: string,
-	): Promise<{ status: "pending" | "complete" | "error"; error?: string }> {
+	async getCodexAuthStatus(sessionId: string): Promise<{
+		status: "pending" | "complete" | "error";
+		error?: string | undefined;
+	}> {
 		const url = `/api/oauth/codex/status/${sessionId}`;
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<{
 				status: "pending" | "complete" | "error";
-				error?: string;
+				error?: string | undefined;
 			}>(url);
 			this.logger.debug(`← GET ${url} - 200`);
 			return response;
@@ -2868,15 +2878,16 @@ class API extends HttpClient {
 		});
 	}
 
-	async getQwenAuthStatus(
-		sessionId: string,
-	): Promise<{ status: "pending" | "complete" | "error"; error?: string }> {
+	async getQwenAuthStatus(sessionId: string): Promise<{
+		status: "pending" | "complete" | "error";
+		error?: string | undefined;
+	}> {
 		const url = `/api/oauth/qwen/status/${sessionId}`;
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<{
 				status: "pending" | "complete" | "error";
-				error?: string;
+				error?: string | undefined;
 			}>(url);
 			this.logger.debug(`← GET ${url} - 200`);
 			return response;
@@ -2957,9 +2968,9 @@ class API extends HttpClient {
 
 	async createProject(body: {
 		canonical_path: string;
-		display_name?: string;
-		parent_project_id?: string | null;
-		enabled?: boolean;
+		display_name?: string | undefined;
+		parent_project_id?: string | null | undefined;
+		enabled?: boolean | undefined;
 	}): Promise<Project> {
 		const response = await this.post<{ success: boolean; data: Project }>(
 			"/api/projects",
@@ -3017,8 +3028,8 @@ class API extends HttpClient {
 	async createWorktreeRule(body: {
 		kind: string;
 		pattern: string;
-		parent_project_id?: string | null;
-		priority?: number;
+		parent_project_id?: string | null | undefined;
+		priority?: number | undefined;
 	}): Promise<WorktreeRule> {
 		const response = await this.post<{ success: boolean; data: WorktreeRule }>(
 			"/api/worktree-rules",
@@ -3237,13 +3248,13 @@ class API extends HttpClient {
 	}
 
 	async setPostgresConfig(body: {
-		enabled?: boolean;
-		host?: string;
-		port?: number;
-		database?: string;
-		user?: string;
-		password?: string;
-		sslMode?: "disable" | "require" | "verify-ca" | "verify-full";
+		enabled?: boolean | undefined;
+		host?: string | undefined;
+		port?: number | undefined;
+		database?: string | undefined;
+		user?: string | undefined;
+		password?: string | undefined;
+		sslMode?: "disable" | "require" | "verify-ca" | "verify-full" | undefined;
 	}): Promise<void> {
 		const startTime = Date.now();
 		const url = "/api/config/postgres";
