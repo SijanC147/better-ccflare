@@ -1,4 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	CODEX_CREDITS_MAX_AGE_MS,
+	usageCache,
+} from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import {
 	collectWindows,
@@ -64,6 +68,7 @@ describe("getUsageThrottleUntil", () => {
 				five_hour: { utilization: 80, resets_at: resetAt },
 				seven_day: { utilization: 10, resets_at: null },
 			},
+			"anthropic",
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
 		);
@@ -81,6 +86,7 @@ describe("getUsageThrottleUntil", () => {
 				five_hour: { utilization: 10, resets_at: resetAt },
 				seven_day: { utilization: 5, resets_at: null },
 			},
+			"anthropic",
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
 		);
@@ -108,6 +114,7 @@ describe("getUsageThrottleUntil", () => {
 					resetAt: now + 20 * 24 * 60 * 60 * 1000,
 				},
 			},
+			"anthropic",
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
 		);
@@ -128,6 +135,7 @@ describe("getUsageThrottleUntil", () => {
 					resets_at: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
 				},
 			},
+			"anthropic",
 			{ fiveHourEnabled: false, weeklyEnabled: true },
 			now,
 		);
@@ -145,6 +153,7 @@ describe("getUsageThrottleUntil", () => {
 				five_hour: { utilization: 120, resets_at: resetAt },
 				seven_day: { utilization: 10, resets_at: null },
 			},
+			"anthropic",
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
 		);
@@ -177,23 +186,29 @@ describe("model-aware limits[] throttling (Phase 2a)", () => {
 		}) as never;
 
 	it("reads weekly_scoped from limits[] and throttles it (scopedMode 'all')", () => {
-		const status = getUsageThrottleStatus(scoped(50), settings, NOW, {
-			scopedMode: "all",
-		});
+		const status = getUsageThrottleStatus(
+			scoped(50),
+			"anthropic",
+			settings,
+			NOW,
+			{
+				scopedMode: "all",
+			},
+		);
 		expect(status.throttledWindows).toContain("seven_day_fable");
 		expect(status.throttleUntil).not.toBeNull();
 	});
 
 	it("throttles a scoped Fable cap only for the matching request family (match mode)", () => {
 		expect(
-			getUsageThrottleUntil(scoped(50), settings, NOW, {
+			getUsageThrottleUntil(scoped(50), "anthropic", settings, NOW, {
 				requestModel: "claude-fable-5",
 				scopedMode: "match",
 			}),
 		).not.toBeNull();
 		// An Opus request over the same account is NOT throttled by the Fable cap.
 		expect(
-			getUsageThrottleUntil(scoped(50), settings, NOW, {
+			getUsageThrottleUntil(scoped(50), "anthropic", settings, NOW, {
 				requestModel: "claude-opus-4-8",
 				scopedMode: "match",
 			}),
@@ -202,7 +217,7 @@ describe("model-aware limits[] throttling (Phase 2a)", () => {
 
 	it("skips scoped windows when the request model is unknown/combo (null) in match mode", () => {
 		expect(
-			getUsageThrottleUntil(scoped(50), settings, NOW, {
+			getUsageThrottleUntil(scoped(50), "anthropic", settings, NOW, {
 				requestModel: null,
 				scopedMode: "match",
 			}),
@@ -216,7 +231,7 @@ describe("model-aware limits[] throttling (Phase 2a)", () => {
 			],
 		} as never;
 		expect(
-			getUsageThrottleUntil(data, settings, NOW, {
+			getUsageThrottleUntil(data, "anthropic", settings, NOW, {
 				requestModel: "claude-opus-4-8",
 				scopedMode: "match",
 			}),
@@ -226,6 +241,7 @@ describe("model-aware limits[] throttling (Phase 2a)", () => {
 	it("throttles a dynamic seven_day_<slug> window (isWindowThrottlingEnabled default)", () => {
 		const status = getUsageThrottleStatus(
 			scoped(50, "Fable 4.5"),
+			"anthropic",
 			settings,
 			NOW,
 			{ scopedMode: "all" },
@@ -241,7 +257,7 @@ describe("model-aware limits[] throttling (Phase 2a)", () => {
 				{ kind: "weekly_all", percent: 50, resets_at: weekReset, scope: null },
 			],
 		} as never;
-		const status = getUsageThrottleStatus(data, settings, NOW, {
+		const status = getUsageThrottleStatus(data, "anthropic", settings, NOW, {
 			scopedMode: "all",
 		});
 		// seven_day comes from the limits[] weekly_all (50%, over pace).
@@ -267,7 +283,7 @@ describe("review fixes (codex/grok/fable)", () => {
 			five_hour: { utilization: 50, resets_at: fiveReset },
 			seven_day: { utilization: 50, resets_at: weekReset },
 		} as never;
-		const status = getUsageThrottleStatus(data, settings, NOW, {
+		const status = getUsageThrottleStatus(data, "anthropic", settings, NOW, {
 			scopedMode: "all",
 		});
 		expect(status.throttledWindows).toContain("five_hour");
@@ -287,7 +303,7 @@ describe("review fixes (codex/grok/fable)", () => {
 			five_hour: { utilization: 50, resets_at: fiveReset },
 			seven_day: { utilization: 50, resets_at: weekReset },
 		} as never;
-		const status = getUsageThrottleStatus(data, settings, NOW, {
+		const status = getUsageThrottleStatus(data, "anthropic", settings, NOW, {
 			scopedMode: "all",
 		});
 		expect(status.throttledWindows).toContain("five_hour");
@@ -310,15 +326,16 @@ describe("review fixes (codex/grok/fable)", () => {
 		} as never;
 		// match mode with any model -> scoped skipped (cannot attribute) -> no throttle.
 		expect(
-			getUsageThrottleUntil(data, settings, NOW, {
+			getUsageThrottleUntil(data, "anthropic", settings, NOW, {
 				requestModel: "claude-opus-4-8",
 				scopedMode: "match",
 			}),
 		).toBeNull();
 		// all mode (display) still surfaces the cap.
 		expect(
-			getUsageThrottleStatus(data, settings, NOW, { scopedMode: "all" })
-				.throttledWindows,
+			getUsageThrottleStatus(data, "anthropic", settings, NOW, {
+				scopedMode: "all",
+			}).throttledWindows,
 		).toContain("seven_day_mystery");
 	});
 
@@ -329,7 +346,7 @@ describe("review fixes (codex/grok/fable)", () => {
 				{ kind: "session", percent: 90, resets_at: fiveReset, scope: null },
 			],
 		} as never;
-		const status = getUsageThrottleStatus(data, settings, NOW, {
+		const status = getUsageThrottleStatus(data, "anthropic", settings, NOW, {
 			scopedMode: "all",
 		});
 		// five_hour comes from the limits[] session; the flat five_hour is NOT re-added.
@@ -355,7 +372,7 @@ describe("review fixes (codex/grok/fable)", () => {
 		// A Sonnet request: the Fable scoped cap is skipped (family mismatch), but
 		// the exhausted flat five_hour ACCOUNT cap must still throttle.
 		expect(
-			getUsageThrottleUntil(data, settings, NOW, {
+			getUsageThrottleUntil(data, "anthropic", settings, NOW, {
 				requestModel: "claude-sonnet-4-5",
 				scopedMode: "match",
 			}),
@@ -440,5 +457,175 @@ describe("collectWindows with a single flat window", () => {
 			"monthly",
 		]);
 		expect(windows.find((w) => w.window === "weekly")?.utilization).toBe(95);
+	});
+});
+
+/**
+ * SB23-2541: the weekly usage throttle leaves out `seven_day` for a Codex
+ * account whose fresh credit balance covers it, using the admission predicate
+ * (`codexCreditsExcludeWeekly`) rather than a copy of it. Every negative below
+ * is throttled exactly as it was before the change.
+ */
+describe("weekly throttle and a credit-covered Codex account (SB23-2541)", () => {
+	const NOW = Date.UTC(2026, 9, 1, 12, 0, 0);
+	const DAY = 24 * 60 * 60 * 1000;
+	const HOUR = 60 * 60 * 1000;
+	const settings = { fiveHourEnabled: true, weeklyEnabled: true };
+	const ACCOUNT = "sb23-2541-codex";
+
+	type Credits = {
+		has_credits: boolean;
+		unlimited: boolean;
+		balance: string | null;
+	};
+
+	/**
+	 * Halfway through both windows, so the expected pace is 50 percent and a
+	 * weekly window at 100 is throttled until its reset on its own.
+	 */
+	function payload(opts: {
+		fiveHour?: number;
+		weekly?: number;
+		credits?: Credits;
+	}) {
+		return {
+			five_hour: {
+				utilization: opts.fiveHour ?? 10,
+				resets_at: new Date(NOW + 2.5 * HOUR).toISOString(),
+			},
+			seven_day: {
+				utilization: opts.weekly ?? 100,
+				resets_at: new Date(NOW + 3.5 * DAY).toISOString(),
+			},
+			...(opts.credits ? { credits: opts.credits } : {}),
+		} as never;
+	}
+
+	const covering: Credits = {
+		has_credits: true,
+		unlimited: false,
+		balance: "9.99",
+	};
+
+	function status(data: unknown, provider: string) {
+		return getUsageThrottleStatus(data as never, provider, settings, NOW, {
+			scopedMode: "match",
+		});
+	}
+
+	it("does not throttle a credit-covered Codex account at seven_day = 100", () => {
+		const result = status(payload({ credits: covering }), "codex");
+		expect(result.throttleUntil).toBeNull();
+		expect(result.throttledWindows).toEqual([]);
+	});
+
+	it("does not throttle an unlimited credit-covered Codex account either", () => {
+		const result = status(
+			payload({
+				credits: { has_credits: true, unlimited: true, balance: null },
+			}),
+			"codex",
+		);
+		expect(result.throttleUntil).toBeNull();
+	});
+
+	it("leaves out a weekly_all limit for the same account, which collectWindows names seven_day", () => {
+		const data = {
+			limits: [
+				{
+					kind: "weekly_all",
+					percent: 100,
+					resets_at: new Date(NOW + 3.5 * DAY).toISOString(),
+				},
+			],
+			credits: covering,
+		};
+		expect(status(data, "codex").throttleUntil).toBeNull();
+		// Same payload without the balance: throttled, so the case above is the
+		// exclusion and not an unparsed shape.
+		const { credits: _c, ...bare } = data;
+		expect(status(bare, "codex").throttledWindows).toEqual(["seven_day"]);
+	});
+
+	it("still throttles the five-hour window of a credit-covered Codex account", () => {
+		const result = status(
+			payload({ fiveHour: 80, credits: covering }),
+			"codex",
+		);
+		expect(result.throttledWindows).toEqual(["five_hour"]);
+		expect(result.throttleUntil).toBe(NOW - 2.5 * HOUR + 0.8 * 5 * HOUR);
+	});
+
+	const throttledWeekly = NOW + 3.5 * DAY;
+
+	it.each([
+		["no credits", undefined],
+		[
+			"a zero balance",
+			{ has_credits: true, unlimited: false, balance: "0" } as Credits,
+		],
+		[
+			"has_credits false",
+			{ has_credits: false, unlimited: false, balance: "9.99" } as Credits,
+		],
+		[
+			"has_credits true with no balance",
+			{ has_credits: true, unlimited: false, balance: null } as Credits,
+		],
+	])("throttles a Codex account at seven_day = 100 with %s", (_label, credits) => {
+		const result = status(payload({ credits }), "codex");
+		expect(result.throttledWindows).toEqual(["seven_day"]);
+		expect(result.throttleUntil).toBe(throttledWeekly);
+	});
+
+	it("throttles an Anthropic payload carrying a covering credits key: the gate is the provider, not the key", () => {
+		const result = status(payload({ credits: covering }), "anthropic");
+		expect(result.throttledWindows).toEqual(["seven_day"]);
+		expect(result.throttleUntil).toBe(throttledWeekly);
+	});
+
+	it("leaves an xAI payload, whose only field is credits, exactly as before (no windows, never throttled)", () => {
+		// Guard only: collectWindows yields nothing for this shape, so this case
+		// passes with or without the provider gate and kills no mutation. The
+		// Anthropic case above is the one that pins the gate.
+		const xai = {
+			credits: {
+				utilization: 100,
+				resets_at: new Date(NOW + 3.5 * DAY).toISOString(),
+			},
+		};
+		expect(status(xai, "xai")).toEqual({
+			throttleUntil: null,
+			throttledWindows: [],
+		});
+	});
+
+	describe("read through usageCache, where a stale balance is withheld", () => {
+		const realNow = Date.now;
+		beforeEach(() => {
+			// Frozen BEFORE usageCache.set, so the entry's own timestamp is NOW
+			// and only the credits' age differs between the two cases.
+			Date.now = () => NOW;
+		});
+		afterEach(() => {
+			Date.now = realNow;
+			usageCache.delete(ACCOUNT);
+		});
+
+		it("does not throttle when the balance was observed just now", () => {
+			usageCache.set(ACCOUNT, payload({ credits: covering }), NOW);
+			expect(status(usageCache.get(ACCOUNT), "codex").throttleUntil).toBeNull();
+		});
+
+		it("throttles when the balance is older than CODEX_CREDITS_MAX_AGE_MS, though the entry is fresh", () => {
+			usageCache.set(
+				ACCOUNT,
+				payload({ credits: covering }),
+				NOW - CODEX_CREDITS_MAX_AGE_MS - 1,
+			);
+			const result = status(usageCache.get(ACCOUNT), "codex");
+			expect(result.throttledWindows).toEqual(["seven_day"]);
+			expect(result.throttleUntil).toBe(throttledWeekly);
+		});
 	});
 });

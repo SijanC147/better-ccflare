@@ -7,6 +7,7 @@ import {
 	runMigrations,
 } from "@better-ccflare/database";
 import { parseCodexUsageHeaders, usageCache } from "@better-ccflare/providers";
+import { getUsageThrottleUntil } from "@better-ccflare/proxy";
 import type { AccountResponse } from "@better-ccflare/types";
 import { createAccountsListHandler } from "../accounts";
 
@@ -339,5 +340,118 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
 
 		expect(usage).not.toBeNull();
 		expect(usage && "credits" in usage).toBe(false);
+	});
+});
+
+/**
+ * SB23-2541: the dashboard's throttle state for an account is the one the
+ * router acts on. Both read the same cache entry and pass the account's
+ * provider to the same function, so a credit-covered Codex account at weekly
+ * 100 is neither throttled on the card nor in routing.
+ */
+describe("GET /api/accounts — weekly throttle agrees with routing (SB23-2541)", () => {
+	const ID = "codex-throttle-acct";
+	const SETTINGS = { fiveHourEnabled: true, weeklyEnabled: true };
+	const THROTTLE_CONFIG = {
+		getUsageThrottlingFiveHourEnabled: () => SETTINGS.fiveHourEnabled,
+		getUsageThrottlingWeeklyEnabled: () => SETTINGS.weeklyEnabled,
+	} as unknown as Config;
+	let sqlite: Database;
+	let adapter: BunSqlAdapter;
+
+	beforeEach(async () => {
+		sqlite = new Database(":memory:");
+		ensureSchema(sqlite);
+		runMigrations(sqlite);
+		adapter = new BunSqlAdapter(sqlite);
+		usageCache.delete(ID);
+		await adapter.run(
+			`INSERT INTO accounts (
+				id, name, provider, refresh_token, access_token, expires_at, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				ID,
+				"Codex throttle",
+				"codex",
+				"refresh-token",
+				"access-token",
+				Date.now() + 3_600_000,
+				Date.now(),
+			],
+		);
+	});
+
+	afterEach(() => {
+		usageCache.delete(ID);
+		sqlite.close();
+	});
+
+	/** Halfway through the week, so the expected pace is 50 percent. */
+	function weekly(utilization: number, credits?: Record<string, unknown>) {
+		return {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization,
+				resets_at: new Date(Date.now() + 3.5 * 86_400_000).toISOString(),
+			},
+			...(credits ? { credits } : {}),
+		};
+	}
+
+	async function card(): Promise<AccountResponse | undefined> {
+		const dbOps = {
+			getAdapter: () => adapter,
+			getStatsRepository: () => ({
+				getSessionStats: async () => new Map(),
+			}),
+			getLatestUsageSnapshot: async () => null,
+		};
+		const response = await createAccountsListHandler(
+			dbOps as never,
+			THROTTLE_CONFIG,
+		)();
+		const accounts = (await response.json()) as AccountResponse[];
+		return accounts.find((a) => a.id === ID);
+	}
+
+	function routed(): number | null {
+		return getUsageThrottleUntil(
+			usageCache.get(ID),
+			"codex",
+			SETTINGS,
+			Date.now(),
+			{ scopedMode: "match" },
+		);
+	}
+
+	it("shows a credit-covered Codex account at weekly 100 as not throttled, as routing does", async () => {
+		usageCache.set(
+			ID,
+			weekly(100, {
+				has_credits: true,
+				unlimited: false,
+				balance: "9.99",
+			}) as never,
+		);
+
+		const account = await card();
+
+		expect(account?.usageThrottledUntil).toBeNull();
+		expect(account?.usageThrottledWindows).toEqual([]);
+		expect(routed()).toBeNull();
+	});
+
+	it("shows the same throttle the router applies when the account holds no credits", async () => {
+		usageCache.set(ID, weekly(90) as never);
+
+		const account = await card();
+		const until = routed();
+
+		expect(until).not.toBeNull();
+		expect(account?.usageThrottledWindows).toEqual(["seven_day"]);
+		expect(account?.usageThrottledUntil).toBe(until);
 	});
 });

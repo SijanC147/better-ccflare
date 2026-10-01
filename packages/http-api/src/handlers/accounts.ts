@@ -648,6 +648,12 @@ export function createAccountsListHandler(
 				) {
 					const usageThrottleStatus = getUsageThrottleStatus(
 						fullUsageData as AnyUsageData,
+						// The same provider the router passes (proxy.ts), so the card
+						// shows the throttle state routing acts on: a credit-covered
+						// Codex account is not throttled on its weekly window here
+						// either (SB23-2541). The `?? "anthropic"` is the default
+						// toAccount() applies when it builds the router's Account.
+						account.provider ?? "anthropic",
 						usageThrottleSettings,
 						now,
 						// Display path: surface ALL per-model caps (m3 amber highlight);

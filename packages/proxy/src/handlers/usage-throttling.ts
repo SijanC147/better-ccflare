@@ -3,7 +3,11 @@ import {
 	getModelFamily,
 	weeklyScopedWindowKey,
 } from "@better-ccflare/core";
-import type { AnyUsageData } from "@better-ccflare/providers";
+import {
+	type AnyUsageData,
+	CODEX_CREDIT_COVERED_WINDOW,
+	codexCreditsExcludeWeekly,
+} from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 
 const RETRY_AFTER_SECONDS = 60;
@@ -268,6 +272,14 @@ function isWindowThrottlingEnabled(
 
 export function getUsageThrottleStatus(
 	data: AnyUsageData | null,
+	/**
+	 * The account's provider. Required, not optional: it decides whether a Codex
+	 * credit balance takes the weekly window out of play (below), and an omitted
+	 * provider would fail closed, which is the inert behaviour SB23-2541 fixed.
+	 * A required argument makes every caller say, and the typechecker finds the
+	 * ones that do not.
+	 */
+	provider: string,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
 	opts?: { requestModel?: string | null; scopedMode?: "match" | "all" },
@@ -279,10 +291,29 @@ export function getUsageThrottleStatus(
 	const requestFamily =
 		opts?.requestModel != null ? getModelFamily(opts.requestModel) : null;
 	const windows = collectWindows(data);
+	// A Codex account holding a fresh, positive credit balance is not paced on
+	// its weekly window (SB23-2541, ruled 2026-10-01). Admission already leaves
+	// that window out (SB23-2289, PR #236), so without this the throttle benched
+	// the account admission had just kept, on the very `seven_day = 100` the
+	// ruling excluded, and the ruling was inert for every operator running
+	// `usage_throttling_weekly_enabled`.
+	//
+	// The admission predicate and window name, imported rather than restated,
+	// so the two features cannot disagree about which provider or which window.
+	// Unconditional on utilization, exactly as admission is. `five_hour` is not
+	// covered and still throttles. Freshness is not checked here: `usageCache.get`
+	// withholds a stale balance, so `data` must be what that read returned.
+	//
+	// Not in `collectWindows`: that parser also feeds per-model exhaustion in
+	// model-capacity.ts, which this ruling does not touch.
+	const creditsCoverWeekly = codexCreditsExcludeWeekly(data, provider);
 	let throttleUntil: number | null = null;
 	const throttledWindows: string[] = [];
 
 	for (const window of windows) {
+		if (creditsCoverWeekly && window.window === CODEX_CREDIT_COVERED_WINDOW) {
+			continue;
+		}
 		// A per-model (scoped) cap only throttles in "all" mode, or in "match" mode
 		// when its family is KNOWN and equals the request's. An unmapped scoped cap
 		// (modelFamily undefined) is skipped in match mode rather than throttling
@@ -325,11 +356,13 @@ export function getUsageThrottleStatus(
 
 export function getUsageThrottleUntil(
 	data: AnyUsageData | null,
+	provider: string,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
 	opts?: { requestModel?: string | null; scopedMode?: "match" | "all" },
 ): number | null {
-	return getUsageThrottleStatus(data, settings, now, opts).throttleUntil;
+	return getUsageThrottleStatus(data, provider, settings, now, opts)
+		.throttleUntil;
 }
 
 export function createUsageThrottledResponse(accounts: Account[]): Response {
