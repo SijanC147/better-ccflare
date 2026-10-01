@@ -260,7 +260,17 @@ async function getCachedOrPersistedCodexUsage(
 				payloadTimestamp,
 			);
 			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
-			return normalizedUsage;
+			// Return what the cache now serves, not the payload just written. The
+			// two differ when the stored balance is older than
+			// CODEX_CREDITS_MAX_AGE_MS: get() withholds it. Returning the written
+			// payload put a day-old balance on the card and fed it to the status
+			// label, while routing read the entry without it, so every card field
+			// disagreed with the router until the entry expired (PR #267 review).
+			// get() cannot return null here, since the entry was installed a line
+			// above; the fallback only keeps the type honest.
+			return (
+				(usageCache.get(accountId) as FullUsageData | null) ?? normalizedUsage
+			);
 		} catch (error) {
 			log.warn(
 				`Failed to recover Codex usage from stored payload for ${accountName}:`,

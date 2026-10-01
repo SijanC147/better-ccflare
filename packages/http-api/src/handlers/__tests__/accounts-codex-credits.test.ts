@@ -349,7 +349,7 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
  * provider to the same function, so a credit-covered Codex account at weekly
  * 100 is neither throttled on the card nor in routing.
  */
-describe("GET /api/accounts — weekly throttle agrees with routing (SB23-2541)", () => {
+describe("GET /api/accounts: weekly throttle agrees with routing (SB23-2541)", () => {
 	const ID = "codex-throttle-acct";
 	const SETTINGS = { fiveHourEnabled: true, weeklyEnabled: true };
 	const THROTTLE_CONFIG = {
@@ -488,6 +488,12 @@ describe("GET /api/accounts — weekly throttle agrees with routing (SB23-2541)"
 		expect(until).not.toBeNull();
 		expect(account?.usageThrottledWindows).toEqual(["seven_day"]);
 		expect(account?.usageThrottledUntil).toBe(until);
+		// The rest of the card reads the same entry: no day-old balance shown,
+		// and the status label agrees with the weekly window routing sees.
+		const usage = account?.usageData as UsageWithCredits | null;
+		expect(usage && "credits" in usage).toBe(false);
+		expect(usage?.seven_day.utilization).toBe(100);
+		expect(account?.rateLimitStatus).toStartWith("usage_exhausted");
 	});
 
 	it("shows the same throttle the router applies when the account holds no credits", async () => {

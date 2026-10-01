@@ -519,6 +519,18 @@ describe("weekly throttle and a credit-covered Codex account (SB23-2541)", () =>
 		expect(result.throttledWindows).toEqual([]);
 	});
 
+	it("does not throttle a credit-covered Codex account ahead of pace below 100: the exclusion is unconditional on utilization", () => {
+		// Admission skips seven_day at any value; a throttle that excluded it
+		// only at 100 would 529 this account while admission admits it.
+		const result = status(payload({ weekly: 90, credits: covering }), "codex");
+		expect(result.throttleUntil).toBeNull();
+		expect(result.throttledWindows).toEqual([]);
+		// Control: the same reading without credits is ahead of pace and throttled.
+		expect(status(payload({ weekly: 90 }), "codex").throttledWindows).toEqual([
+			"seven_day",
+		]);
+	});
+
 	it("does not throttle an unlimited credit-covered Codex account either", () => {
 		const result = status(
 			payload({
