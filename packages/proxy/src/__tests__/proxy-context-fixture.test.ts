@@ -123,6 +123,31 @@ describe("makeProxyContext", () => {
 		);
 	});
 
+	// The other plain-object arm: a mock built with no prototype at all.
+	// Without this case, dropping `prototype === null` from isPlainObject
+	// passes every test and such a mock goes through unwrapped (FM1 on PR
+	// #294, measured on darwin).
+	it.each([
+		"strategy",
+		"config",
+		"provider",
+		"asyncWriter",
+	] as const)("wraps a null-prototype %s mock like any other plain object", (field) => {
+		const named = () => "served";
+		const mockObject: Record<string, unknown> = Object.create(null);
+		mockObject.named = named;
+		const context = makeProxyContext({ [field]: mockObject });
+		expect(context[field]).not.toBe(mockObject as never);
+		const stub = context[field] as unknown as Record<string, unknown>;
+		expect(stub.named).toBe(named);
+		expect(() => stub.unnamed).toThrow(
+			new Error(
+				`ProxyContext.${field}.unnamed was read by a test that did not supply it. ` +
+					`The ${field} passed to makeProxyContext() is a partial mock that does not name unnamed. Add unnamed to it, or pass a real instance.`,
+			),
+		);
+	});
+
 	it.each([
 		"strategy",
 		"config",

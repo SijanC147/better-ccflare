@@ -69,6 +69,18 @@
  *   `prepareRequest` (`if (provider.x)`), `observeRequest` (proxy.ts picks
  *   the codex observer when it is absent), `observeUpstream` (`?.()`).
  *
+ * One exception: a member production tests with `in`, such as
+ * `"parseRateLimitFromBody" in provider` (handlers/response-processor.ts),
+ * must be OMITTED, not named as `undefined`. The `has` trap answers true for
+ * a named member, so `in` takes the present branch and calls `undefined`.
+ *
+ * ## Spy on the object you passed, never on `ctx.<field>`
+ *
+ * `spyOn(ctx.config, "getX")` does not throw and does nothing: Bun's `spyOn`
+ * writes past the `Proxy` traps, so later reads still return the original and
+ * the spy records no calls. Reads are live, so spying on the object handed to
+ * `makeProxyContext()` works. Measured on Bun 1.4.2 by the PR #294 reviewer.
+ *
  * **Several of those reads sit inside a `catch` that logs and carries on**, so
  * a stub throw there changes the branch with every test still green and the
  * same `expect()` count. A test-name diff cannot see it. A preload that wraps

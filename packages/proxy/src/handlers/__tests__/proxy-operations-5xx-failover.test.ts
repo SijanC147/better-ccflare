@@ -101,9 +101,6 @@ function makeContext(): ProxyContext {
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			// Absent on the old literal, which answered undefined for both.
-			resolverManager: undefined,
-			updateRequestUsage: undefined,
 		},
 		// The fork reads the in-place retry budget from ctx.runtime.retry rather
 		// than from a hardcoded 2. Pinned to upstream's documented numbers so the

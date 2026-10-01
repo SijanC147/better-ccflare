@@ -20,6 +20,7 @@ import {
 	resetAutoRefreshPromptPoolForTests,
 } from "../auto-refresh-prompt-pool";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import type { ProxyContext } from "../handlers/proxy-types";
 import { makeProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
@@ -372,13 +373,12 @@ describe("AutoRefreshScheduler.sendDummyMessage — returning what it did not sp
 		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 		// No runtime on the context: building the endpoint URL throws, which lands
 		// in the catch without a single byte having left the process.
-		// Kept as a literal on purpose: makeProxyContext() always supplies a
-		// complete runtime, and this test needs the context to have none.
+		// The one cast on a context here: makeProxyContext() always supplies a
+		// complete runtime, and this test needs the context to have none. The
+		// spread keeps the fixture's named throws for every other field.
 		const scheduler = new AutoRefreshScheduler(
 			makeDb() as never,
-			{
-				refreshInFlight: new Map(),
-			} as never,
+			{ ...makeProxyContext(), runtime: undefined } as unknown as ProxyContext,
 		) as unknown as {
 			sendDummyMessage(
 				row: ReturnType<typeof makeAccountRow>,
