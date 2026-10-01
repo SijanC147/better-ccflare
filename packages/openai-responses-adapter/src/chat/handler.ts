@@ -1,12 +1,15 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
 import {
-	GATEWAY_COMBO_HEADER,
-	GATEWAY_REQUIRE_MODEL_HEADER,
-	type OpenAIGatewayModelEntry,
 	type OpenAIGateways,
 	REPORT_UPSTREAM_MODEL_HEADER,
 } from "@better-ccflare/types";
+import {
+	applyGatewayExclusions,
+	type OpenAIGatewayOptions,
+	resolveGatewayModel,
+} from "../gateway";
+import { handleResponsesRequest } from "../handler";
 import type { HandleProxyFn } from "../types";
 import { translateChatRequestToAnthropic } from "./request-translator";
 import {
@@ -68,89 +71,21 @@ function statusOfThrow(err: unknown): number {
 		: 500;
 }
 
-export interface OpenAIGatewayOptions {
-	/**
-	 * Providers this request never routes to, in the vocabulary of
-	 * `x-better-ccflare-exclude-providers` (account-selector.ts), which
-	 * request-handler.ts strips before anything goes upstream.
-	 */
-	excludeProviders?: string[];
-	/**
-	 * The gateway's model set. When present, a request must name one of these
-	 * entries; the entry decides the upstream model and, through its combo,
-	 * the fallback ladder.
-	 */
-	models?: OpenAIGatewayModelEntry[];
-}
-
-/** The ids a gateway model set exposes, for an error message. */
-function modelSetNames(models: OpenAIGatewayModelEntry[]): string {
-	return models.map((entry) => entry.name).join(", ");
-}
-
 /**
- * Applies a gateway model set to the request: resolves the client's model to
- * an entry, rewrites the body's model to the entry's upstream id, and sets the
- * internal routing headers from the entry alone. Both headers are removed
- * first on every path, so a client can neither pick a ladder nor lift the
- * model filter by sending them itself. Returns a refusal when the gateway has
- * a model set and the request names none of it.
+ * Applies a gateway model set to a Chat Completions body: the shared resolver
+ * sets the routing headers, and the body's model becomes the entry's upstream
+ * id. Returns a refusal when the gateway has a model set and the request names
+ * none of it.
  */
 function applyModelSet(
 	body: ChatCompletionRequest,
 	headers: Headers,
 	options: OpenAIGatewayOptions | undefined,
 ): Response | null {
-	headers.delete(GATEWAY_COMBO_HEADER);
-	headers.delete(GATEWAY_REQUIRE_MODEL_HEADER);
-	const models = options?.models;
-	if (!models) return null;
-	const requested = typeof body.model === "string" ? body.model : "";
-	const entry = models.find((candidate) => candidate.name === requested);
-	if (!entry) {
-		return jsonResponse(404, {
-			error: {
-				message: `The model "${requested}" is not served by this gateway. Use one of: ${modelSetNames(models)}.`,
-				type: "invalid_request_error",
-				param: "model",
-				code: "model_not_found",
-			},
-		});
-	}
-	body.model = entry.model;
-	if (entry.combo) {
-		headers.set(GATEWAY_COMBO_HEADER, entry.combo);
-	} else {
-		headers.set(GATEWAY_REQUIRE_MODEL_HEADER, "1");
-	}
-	// A forced account would route around the entry's ladder and filter.
-	headers.delete(FORCED_ACCOUNT_HEADER);
+	const resolved = resolveGatewayModel(body.model, headers, options);
+	if ("refusal" in resolved) return resolved.refusal;
+	if (resolved.entry) body.model = resolved.entry.model;
 	return null;
-}
-
-const EXCLUDE_PROVIDERS_HEADER = "x-better-ccflare-exclude-providers";
-const FORCED_ACCOUNT_HEADER = "x-better-ccflare-account-id";
-
-/**
- * Sets the exclusion header from the gateway's rules, and otherwise removes
- * it, so a client cannot widen or narrow a gateway's rules by sending the
- * header itself.
- */
-function applyExclusions(
-	headers: Headers,
-	options: OpenAIGatewayOptions | undefined,
-): void {
-	const excluded = options?.excludeProviders ?? [];
-	if (excluded.length > 0) {
-		headers.set(EXCLUDE_PROVIDERS_HEADER, excluded.join(","));
-		// account-selector.ts returns a forced account before it reads the
-		// exclusions, so a forced id would route around the gateway's rules.
-		// Only a gateway with rules drops it; on the default gateway it stays
-		// the documented test-routing header.
-		headers.delete(FORCED_ACCOUNT_HEADER);
-	} else {
-		headers.delete(EXCLUDE_PROVIDERS_HEADER);
-	}
 }
 
 /** A throw from `handleProxy`, answered in the OpenAI shape. */
@@ -341,7 +276,7 @@ export async function handleChatCompletionsRequest(
 	if (!syntheticHeaders.has("anthropic-version")) {
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
-	applyExclusions(syntheticHeaders, options);
+	applyGatewayExclusions(syntheticHeaders, options);
 	// Report the model that answered, not the requested name (SB23-2781).
 	syntheticHeaders.set(REPORT_UPSTREAM_MODEL_HEADER, "1");
 	const syntheticReq = new Request(messagesUrl.toString(), {
@@ -468,7 +403,7 @@ export async function handleOpenAIModelsRequest(
 	const syntheticHeaders = new Headers(req.headers);
 	syntheticHeaders.delete("content-length");
 	syntheticHeaders.delete("content-encoding");
-	applyExclusions(syntheticHeaders, options);
+	applyGatewayExclusions(syntheticHeaders, options);
 	const syntheticReq = new Request(modelsUrl.toString(), {
 		method: "GET",
 		headers: syntheticHeaders,
@@ -543,6 +478,36 @@ export async function dispatchOpenAIGatewayRequest(
 		excludeProviders: gateway.exclude_providers ?? [],
 		models: gateway.models,
 	};
+	const isResponsesPath =
+		match.rest === "/responses" || match.rest === "/responses/compact";
+	// Codex tries WebSocket transport first. Refused exactly as on the plain
+	// /v1/responses path (server.ts), so the client falls back to HTTPS.
+	if (
+		isResponsesPath &&
+		req.headers.get("upgrade")?.toLowerCase() === "websocket"
+	) {
+		return jsonResponse(503, {
+			type: "error",
+			error: {
+				type: "not_supported_error",
+				message:
+					"WebSocket transport is not supported. Codex will retry over HTTPS automatically.",
+			},
+		});
+	}
+	// The Responses API, which is all Codex speaks (SB23-3469). Compact is
+	// served by the same handler, as on the plain path.
+	if (req.method === "POST" && isResponsesPath) {
+		return handleResponsesRequest(
+			req,
+			url,
+			handleProxy,
+			ctx,
+			apiKeyId,
+			apiKeyName,
+			options,
+		);
+	}
 	if (req.method === "POST" && match.rest === "/chat/completions") {
 		return handleChatCompletionsRequest(
 			req,
@@ -566,7 +531,7 @@ export async function dispatchOpenAIGatewayRequest(
 		);
 	}
 	return notFound(
-		`${req.method} ${match.rest || "/"} is not served by gateway "${match.name}". Use POST /chat/completions or GET /models.`,
+		`${req.method} ${match.rest || "/"} is not served by gateway "${match.name}". Use POST /chat/completions, POST /responses, POST /responses/compact or GET /models.`,
 		"unknown_endpoint",
 	);
 }
