@@ -93,7 +93,7 @@ function writableConfig(label: string, mode: number): string {
 
 /** The exact line saveConfig() emits when it refuses. Asserted whole, see below. */
 function refusalMessage(configPath: string, strippedCount: number): string {
-	return `Config not saved: ${configPath} was loaded from a file other local users can write, with ${strippedCount} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`;
+	return `Config not saved: ${configPath} was loaded from a file other local users can write, with ${strippedCount} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process generates one and keeps it until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process, and neither can a client holding an earlier secret. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`;
 }
 
 describe("a config other local users can write", () => {
