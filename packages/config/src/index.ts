@@ -3,8 +3,8 @@ import { EventEmitter } from "node:events";
 import {
 	closeSync,
 	existsSync,
-	fchmodSync,
 	fchownSync,
+	fstatSync,
 	fsyncSync,
 	lstatSync,
 	mkdirSync,
@@ -34,7 +34,7 @@ import {
 } from "@better-ccflare/core";
 import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
-import { chmodForConfig } from "./chmod-seam";
+import { chmodForConfig, fchmodForConfig } from "./chmod-seam";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
 import {
@@ -188,6 +188,20 @@ const strippedFieldsReported = new Set<string>();
  * holds, and the refusal messages say so.
  */
 const localControlSecretsByPath = new Map<string, string>();
+
+/**
+ * Config paths whose save-path fchmod has already been reported as not taking,
+ * so that warning lands once per path per process (SB23-2274).
+ *
+ * A Set of its own, not unenforceableModes, although SB23-2274 suggested that
+ * one. readConfigData() branches on unenforceableModes to choose its report for
+ * a writable config, so an entry added from the save path would select the load
+ * path's branch without the load path's own chmod, re-stat and compare having
+ * run. That is the defect SB23-2365 removed, where a pre-seeded Set let a
+ * mutation deleting the measurement survive the whole suite. The load path
+ * measures for itself, and this records only what a save measured.
+ */
+const unenforceableSaveModes = new Set<string>();
 
 /**
  * Whole families that are an endpoint or a credential, stripped from a config
@@ -381,6 +395,48 @@ function chmodAndVerify(path: string, mode: number, what: string): void {
 			`including Docker bind mounts from a macOS or Windows host and FAT or ` +
 			`exFAT volumes. Move the config onto a filesystem that enforces modes, ` +
 			`or mount it so only this user can read it.`,
+	);
+}
+
+/**
+ * Read back the mode a save's fchmod set on the new config file, before the
+ * rename publishes it (SB23-2274).
+ *
+ * The one chmod on this file that was not verified. restrictConfigFile() and
+ * restrictConfigDir() read their result back through chmodAndVerify(), but the
+ * save path set 0600 through the descriptor and reported nothing, so on a
+ * filesystem that ignores modes every save published the secrets at whatever
+ * mode the mount presents. restrictConfigFile() warns about that on the next
+ * load, which can be a restart away; this says it at the save that did it.
+ *
+ * fstat on the descriptor rather than stat on a path, for the reason the fchmod
+ * uses one: in a directory another user can write, the path can become a link
+ * between the write and the read.
+ *
+ * Warns and lets the save go ahead. The file being replaced sits on the same
+ * filesystem and already presents the same mode, so refusing would lose the
+ * setting without changing who can read it.
+ *
+ * Skipped on Windows for the reason chmodAndVerify() gives: the mode there is
+ * derived from the read-only attribute, so a writable file reads 0666 and a
+ * read-back would warn on every save. Argued from libuv, not measured, and no
+ * test can reach the branch from macOS or Linux.
+ *
+ * Keyed on the config target, never on the temp path, which is random per save
+ * and would make the once-per-path set warn on every save.
+ */
+function verifySavedMode(fd: number, target: string): void {
+	if (process.platform === "win32") return;
+	const after = fstatSync(fd).mode & 0o777;
+	if (after === CONFIG_FILE_MODE) return;
+	if (unenforceableSaveModes.has(target)) return;
+	unenforceableSaveModes.add(target);
+	const exposure =
+		(after & 0o077) !== 0
+			? "Other local users may be able to read the credentials in it."
+			: "It is not readable by other local users, but it is not the mode this process set.";
+	log.warn(
+		`fchmod to 0600 on the config being saved to ${target} did not take: the new file reads ${modeText(after)}. ${exposure} Filesystems without Unix modes behave this way, including Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes. The save goes ahead, because the file it replaces sits on the same filesystem and refusing would lose the setting without changing its mode. Move the config onto a filesystem that enforces modes, or mount it so only this user can read it. This line does not repeat for this path in this process.`,
 	);
 }
 
@@ -2112,8 +2168,11 @@ export class Config extends EventEmitter {
 				// break every later write. Set through the descriptor rather than the
 				// path, because a path-based chmod follows a symlink and the window
 				// between write and chmod is enough for one to appear in a directory
-				// another user can write.
-				fchmodSync(fd, 0o600);
+				// another user can write. Read back like every other chmod here,
+				// because a filesystem without Unix modes reports success and keeps
+				// whatever mode it presents (SB23-2274).
+				fchmodForConfig(fd, CONFIG_FILE_MODE);
+				verifySavedMode(fd, target);
 				// The temp inode belongs to whoever is writing, and the rename
 				// discards the old file's ownership. An administrator running the CLI
 				// as root against a config owned by the service account would leave

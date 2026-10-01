@@ -1,4 +1,4 @@
-import { chmodSync } from "node:fs";
+import { chmodSync, fchmodSync } from "node:fs";
 
 /**
  * The chmod this package calls, behind a reference a test can swap
@@ -79,4 +79,40 @@ export function __setChmodForTest(
 		);
 	}
 	chmodImpl = fn ?? chmodSync;
+}
+
+let fchmodImpl: (fd: number, mode: number) => void = fchmodSync;
+
+/**
+ * fchmod a descriptor, through the reference a test can swap (SB23-2274).
+ *
+ * The save path sets the new config file's mode through its descriptor, and its
+ * read-back needs the same fixture the chmod above has: a filesystem that
+ * reports success and changes nothing. No unprivileged fixture produces one that
+ * also leaves a mode a test can tell apart, for the reasons given above.
+ */
+export function fchmodForConfig(fd: number, mode: number): void {
+	fchmodImpl(fd, mode);
+}
+
+/**
+ * Swap the fchmod above, for tests, and refuse outside a test run. Same gate and
+ * same reasoning as __setChmodForTest: a seam reachable in production would
+ * disarm the mode every save sets on the file holding the secrets.
+ *
+ * Pass null to restore the real `fchmodSync`. Only the install is gated, so a
+ * restore in a finally always lands.
+ */
+export function __setFchmodForTest(
+	fn: ((fd: number, mode: number) => void) | null,
+): void {
+	if (fn !== null && process.env.NODE_ENV !== "test") {
+		throw new Error(
+			"__setFchmodForTest is available only while NODE_ENV=test. " +
+				"Swapping the fchmod this package calls outside a test run would " +
+				"silently disarm the mode every save sets on the config file, which " +
+				"holds local_control_secret, pg_password and upstream_maintainer_token.",
+		);
+	}
+	fchmodImpl = fn ?? fchmodSync;
 }
