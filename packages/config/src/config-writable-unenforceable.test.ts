@@ -218,9 +218,15 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 			expect(chmodAt).toBeGreaterThanOrEqual(0);
 			expect(errorAt).toBeGreaterThanOrEqual(0);
 			expect(chmodAt).toBeLessThan(errorAt);
-			// The field that makes this an authentication bypass rather than a
-			// disclosure is still named.
-			expect(reported[0].msg).toContain("local_control_secret");
+			// Whole message with toBe (SB23-2389). It used to be a count plus
+			// toContain("local_control_secret"), and appending " No action is
+			// required." to this branch survived the whole config suite, 196 pass, as
+			// PR #200's reviewer measured. The text names the field that makes this an
+			// authentication bypass rather than a disclosure, so a sentence added to
+			// it is a claim to the operator about a security condition.
+			expect(reported[0].msg).toBe(
+				`The config file ${configPath} was mode 0666, group- and world-writable, so another local user could write it and its contents may not be yours. It has been brought to 0600. Its ordinary settings were loaded and are in effect; credential and endpoint fields were NOT adopted from it, and any it contained are named in a separate line below. That is what stops an attacker who wrote this file supplying local_control_secret, which would authenticate them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which would point every credential this process persists at a database they control; and openobserve_url with openobserve_token, which would ship request and response bodies to a collector of theirs. If any were ignored, no setting is written back either, because saveConfig() refuses rather than persist a config it knows is incomplete. Inspect the file, or delete it so a fresh one is created. This line does not repeat on the next boot, because the file is 0600 now, but the bytes in it are still whatever was written, and the next boot adopts them.`,
+			);
 			// And the window is closed on the way out, which is what makes this one
 			// clearable: the next boot reads 0600 and says nothing.
 			expect(statSync(configPath).mode & 0o777).toBe(0o600);
@@ -314,10 +320,16 @@ describe("a writable config on a filesystem that cannot enforce modes", () => {
 							event.level === "ERROR" && event.msg.includes(ERROR_MARK),
 					);
 					expect(errored).toHaveLength(1);
-					expect(errored[0].msg).toContain("The chmod to 0600 FAILED");
-					expect(errored[0].msg).toContain("repeats on every boot");
-					expect(errored[0].msg).not.toContain("has been brought to 0600");
-					expect(errored[0].msg).not.toContain("does not repeat");
+					// Whole message with toBe (SB23-2389). This was three toContain and
+					// two not.toContain, an allowlist of what must be present with no
+					// statement about what must be absent, and appending " No action is
+					// required." survived it: 196 pass, measured by PR #200's reviewer.
+					// That sentence contradicts every claim this branch exists to make,
+					// that the chmod failed, the file is still writable, and the line
+					// repeats until the operator acts.
+					expect(errored[0].msg).toBe(
+						`The config file ${configPath} is mode 0666, group- and world-writable, so another local user can write it and its contents may not be yours. The chmod to 0600 FAILED, reported just above, so it is still 0666 and this line repeats on every boot until that is fixed. Its ordinary settings have been loaded and are in effect; credential and endpoint fields have NOT been adopted from it, and any it contained are named in a separate line below. That is what stops an attacker who writes this file supplying local_control_secret, which would authenticate them against the local control endpoint rather than merely disclosing anything; pg_enabled with pg_host and pg_password, which would point every credential this process persists at a database they control; and openobserve_url with openobserve_token, which would ship request and response bodies to a collector of theirs. If any were ignored, no setting is written back either, because saveConfig() refuses rather than persist a config it knows is incomplete. A read-only mount and a macOS uchg flag are the usual causes. Inspect the file, clear whatever refuses the chmod, or delete it so a fresh one is created.`,
+					);
 					// The chmod failure is reported in its own right, at warn, rather
 					// than swallowed. More than one: restrictConfigFile() re-attempts
 					// the same chmod further down loadConfig() and throws again, which
