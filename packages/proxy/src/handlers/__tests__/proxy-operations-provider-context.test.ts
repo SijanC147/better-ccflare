@@ -390,4 +390,83 @@ describe("proxyWithAccount — per-request provider carrier (SB23-2508)", () => 
 		expect(Object.keys(shared)).not.toContain("_originalModel");
 		expect(Object.keys(shared)).not.toContain("_vertexModel");
 	});
+
+	/**
+	 * SB23-3971. vertex-ai names the model in the URL path, not the body, so a
+	 * model fallback has to re-derive it and rebuild the URL. The loop used to
+	 * re-send to the URL built for the first model, with `model` re-added to a
+	 * body vertex had removed it from, and the response was restored with the
+	 * first model's name. The fallback is in the primary's family on purpose:
+	 * re-applying the account mapping to it would map it back to the primary.
+	 */
+	it("sends a vertex-ai model fallback to the fallback model's URL and reports that model", async () => {
+		const vertex = getProvider("vertex-ai");
+		if (!vertex) throw new Error("vertex-ai is not registered");
+
+		const PRIMARY = "claude-sonnet-4-5-20250929";
+		const FALLBACK = "claude-sonnet-4-20250514";
+		const account: Account = {
+			...BASE_ACCOUNT,
+			id: "vertex-fallback",
+			name: "vertex-fallback",
+			provider: "vertex-ai",
+			api_key: null,
+			access_token: "test-access-token",
+			expires_at: Date.now() + 60 * 60 * 1000,
+			custom_endpoint: JSON.stringify({
+				projectId: "test-project",
+				region: "us-east5",
+			}),
+			model_mappings: JSON.stringify({ sonnet: [PRIMARY, FALLBACK] }),
+		};
+
+		const sent: { url: string; body: Record<string, unknown> }[] = [];
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
+			const request = input as Request;
+			sent.push({
+				url: request.url,
+				body: (await request.clone().json()) as Record<string, unknown>,
+			});
+			return sent.length === 1
+				? new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "rate_limit_error", message: "Rate limited" },
+						}),
+						{ status: 429, headers: { "content-type": "application/json" } },
+					)
+				: messageResponse("claude-sonnet-4@20250514");
+		});
+
+		let restored: string | undefined;
+		const originalProcessResponse = vertex.processResponse;
+		vertex.processResponse = async (response, acct, ...rest) => {
+			const out = await originalProcessResponse.call(
+				vertex,
+				response,
+				acct,
+				...rest,
+			);
+			if (out.ok)
+				restored = ((await out.clone().json()) as { model?: string }).model;
+			return out;
+		};
+		try {
+			await dispatch(
+				account,
+				"req-fallback",
+				bodyFor(PRIMARY),
+				makeContext({}),
+			);
+		} finally {
+			vertex.processResponse = originalProcessResponse;
+		}
+
+		expect(sent).toHaveLength(2);
+		expect(sent[0].url).toContain("/models/claude-sonnet-4-5@20250929:");
+		expect(sent[1].url).toContain("/models/claude-sonnet-4@20250514:");
+		expect(sent[0].body).not.toHaveProperty("model");
+		expect(sent[1].body).not.toHaveProperty("model");
+		expect(restored).toBe(FALLBACK);
+	});
 });

@@ -161,10 +161,12 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 				return;
 			}
 
-			// Extract model from request body
+			// Extract model from request body. On a model fallback the proxy names
+			// the model it is retrying with, already mapped (SB23-3971).
 			const bodyText = new TextDecoder().decode(requestBodyBuffer);
 			const body = JSON.parse(bodyText);
-			const originalModel = body.model || "claude-sonnet-4-5-20250929";
+			const originalModel =
+				context.fallbackModel || body.model || "claude-sonnet-4-5-20250929";
 
 			console.log(
 				`[Vertex AI] prepareRequest - extracted model: ${originalModel}`,
@@ -172,7 +174,7 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 
 			// Apply custom model mappings if configured
 			let transformedModel = originalModel;
-			if (account?.model_mappings) {
+			if (account?.model_mappings && !context.fallbackModel) {
 				transformedModel = getModelName(originalModel, account);
 				console.log(
 					`[Vertex AI] prepareRequest - after mapping: ${transformedModel}`,

@@ -36,6 +36,15 @@ export interface ProviderRequestContext {
 	 * `buildUrl`.
 	 */
 	requestModel?: string | null;
+	/**
+	 * Set by the proxy's model-fallback loop to the model it is about to retry
+	 * with, before it calls `prepareRequest` and `buildUrl` again on this same
+	 * carrier (SB23-3971). The name is already an entry of the account's model
+	 * list, so a provider that maps the client's model in `prepareRequest` uses
+	 * this one verbatim: mapping it again can turn a fallback in the primary's
+	 * family back into the primary.
+	 */
+	fallbackModel?: string;
 }
 
 /** The name this type had when only `processResponse` received it. */

@@ -2067,7 +2067,26 @@ export async function proxyWithAccount(
 						signal: req.signal,
 					};
 
-					const retryProviderRequest = new Request(targetUrl, retryRequestInit);
+					// A provider that names the model in the URL (vertex-ai) derives it
+					// in prepareRequest. Re-derive it for this model on the same carrier
+					// and rebuild the URL, or the retry asks the first model's URL for
+					// it (SB23-3971). Later in-place retries reuse this URL through
+					// `outgoing.request`.
+					let retryTargetUrl = targetUrl;
+					if (provider.prepareRequest) {
+						providerContext.fallbackModel = nextModel;
+						provider.prepareRequest(req, patchedBody, account, providerContext);
+						retryTargetUrl = provider.buildUrl(
+							url.pathname,
+							url.search,
+							account,
+							providerContext,
+						);
+					}
+					const retryProviderRequest = new Request(
+						retryTargetUrl,
+						retryRequestInit,
+					);
 					let retryTransformedRequest =
 						await transformRequestForAccount(retryProviderRequest);
 
@@ -2091,7 +2110,13 @@ export async function proxyWithAccount(
 					if (retryTransformedBodyText !== undefined) {
 						try {
 							const transformedBody = JSON.parse(retryTransformedBodyText);
-							if (transformedBody.model !== nextModel) {
+							// Only a body that still names a model was remapped. One the
+							// provider took the model out of (vertex-ai puts it in the URL)
+							// must not get it back.
+							if (
+								Object.hasOwn(transformedBody, "model") &&
+								transformedBody.model !== nextModel
+							) {
 								transformedBody.model = nextModel;
 								const repatchedBodyText = JSON.stringify(transformedBody);
 								const repatchedHeaders = new Headers(
