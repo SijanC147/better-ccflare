@@ -244,6 +244,22 @@ describe("check-typecheck-coverage", () => {
 		expect(result.stderr).toContain("tests/tsconfig.json: TS18003");
 	});
 
+	test("refuses to run when a target's program has options diagnostics", () => {
+		// The fresh-worktree case: `types: ["bun-types"]` with no `node_modules` builds a program
+		// whose type reference cannot resolve. tsc fails there, so this must not pass.
+		const root = makeRepo({
+			files: {
+				"tests/tsconfig.json": JSON.stringify({
+					compilerOptions: { noEmit: true, noLib: true, types: ["does-not-exist"] },
+					include: ["**/*.ts"],
+				}),
+			},
+		});
+		const result = runGate(root);
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toContain("tests/tsconfig.json: TS2688");
+	});
+
 	test("refuses to run when a target's tsconfig does not exist", () => {
 		const root = makeRepo({
 			scripts: { typecheck: "bunx tsc --noEmit && bunx tsc --noEmit -p missing/tsconfig.json" },
