@@ -670,6 +670,9 @@ async function collapseAccountDuplicatesPreservingStatePg(
 			   rate_limited_until = (SELECT MAX(COALESCE(rate_limited_until, 0)) FROM accounts ${PG_GROUP_SCOPE}),
 			   session_start = (SELECT MAX(COALESCE(session_start, 0)) FROM accounts ${PG_GROUP_SCOPE}),
 			   rate_limit_reset = (SELECT MAX(COALESCE(rate_limit_reset, 0)) FROM accounts ${PG_GROUP_SCOPE}),
+			   -- NULL stays NULL for these two, since it means never (SB23-2531).
+			   rate_limit_reset_at = (SELECT MAX(rate_limit_reset_at) FROM accounts ${PG_GROUP_SCOPE}),
+			   last_manual_reauth_at = (SELECT MAX(last_manual_reauth_at) FROM accounts ${PG_GROUP_SCOPE}),
 			   rate_limited_at = (SELECT MAX(COALESCE(rate_limited_at, 0)) FROM accounts ${PG_GROUP_SCOPE}),
 			   auto_fallback_enabled = (SELECT MAX(COALESCE(auto_fallback_enabled, 0)) FROM accounts ${PG_GROUP_SCOPE}),
 			   auto_refresh_enabled = (SELECT MAX(COALESCE(auto_refresh_enabled, 0)) FROM accounts ${PG_GROUP_SCOPE}),
@@ -689,7 +692,8 @@ async function collapseAccountDuplicatesPreservingStatePg(
 			   usage_pause_weekly_enabled = (SELECT MAX(COALESCE(usage_pause_weekly_enabled, 0)) FROM accounts ${PG_GROUP_SCOPE}),
 			   usage_pause_five_hour_min_reset_remaining_ms = COALESCE(usage_pause_five_hour_min_reset_remaining_ms, ${pgFreshest("usage_pause_five_hour_min_reset_remaining_ms")}),
 			   usage_pause_weekly_min_reset_remaining_ms = COALESCE(usage_pause_weekly_min_reset_remaining_ms, ${pgFreshest("usage_pause_weekly_min_reset_remaining_ms")}),
-			   billing_type = COALESCE(billing_type, ${pgFreshest("billing_type")})
+			   billing_type = COALESCE(billing_type, ${pgFreshest("billing_type")}),
+			   renewal_day = COALESCE(renewal_day, ${pgFreshest("renewal_day")})
 			 WHERE id = $8`,
 			[
 				merged.merged_refresh_token, // $1

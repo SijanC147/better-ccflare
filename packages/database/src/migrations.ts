@@ -623,6 +623,17 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 	// treatment `paused` and `requires_reauth` already had. It is a deliberate
 	// policy choice, not a coincidence of the aggregate.
 	//
+	// rate_limit_reset_at, last_manual_reauth_at and renewal_day were absent
+	// from this statement and from the exclusion list until SB23-2531, so the
+	// survivor kept its own value and a discarded duplicate's was lost. The
+	// two timestamps take MAX with NULL kept as NULL. For rate_limit_reset_at
+	// MAX is the safe direction: clearStaleRateLimitReset only clears while
+	// rate_limit_reset_at < observedAt, so the newest write-time in the group
+	// can delay a stale clear and can never license one. renewal_day is
+	// operator-entered config, so it takes COALESCE like the columns above.
+	// A test compares this statement's column set against the live table and
+	// against the PostgreSQL mirror, so the next omission fails there.
+	//
 	// Deliberately NOT merged: id (the survivor keeps its own, and every
 	// dependent row is repointed to it), and name / provider / custom_endpoint,
 	// which are the dedup key itself and are identical across the group by
@@ -643,6 +654,12 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 		    LIMIT 1)`;
 	const agg = (fn: "MAX" | "MIN" | "SUM", col: string, dflt = "0") =>
 		`(SELECT ${fn}(COALESCE(${col}, ${dflt})) FROM accounts ${groupScope})`;
+	// MAX over the group with NULL left as NULL, for timestamps where NULL
+	// means "never" (SB23-2531). `agg("MAX", ...)` coalesces to 0 first, so an
+	// all-NULL group would store 0, which reads as an instant in 1970 to any
+	// age computation rather than as absence.
+	const maxKeepingNull = (col: string) =>
+		`(SELECT MAX(${col}) FROM accounts ${groupScope})`;
 
 	const mergeSurvivor = db.prepare(
 		`UPDATE accounts SET
@@ -661,6 +678,8 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 		   rate_limited_until = ${agg("MAX", "rate_limited_until")},
 		   session_start = ${agg("MAX", "session_start")},
 		   rate_limit_reset = ${agg("MAX", "rate_limit_reset")},
+		   rate_limit_reset_at = ${maxKeepingNull("rate_limit_reset_at")},
+		   last_manual_reauth_at = ${maxKeepingNull("last_manual_reauth_at")},
 		   paused = ${agg("MAX", "paused")},
 		   requires_reauth = ${agg("MAX", "requires_reauth")},
 		   rate_limited_at = ${agg("MAX", "rate_limited_at")},
@@ -683,7 +702,8 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 		   usage_pause_weekly_enabled = ${agg("MAX", "usage_pause_weekly_enabled")},
 		   usage_pause_five_hour_min_reset_remaining_ms = COALESCE(usage_pause_five_hour_min_reset_remaining_ms, ${freshest("usage_pause_five_hour_min_reset_remaining_ms")}),
 		   usage_pause_weekly_min_reset_remaining_ms = COALESCE(usage_pause_weekly_min_reset_remaining_ms, ${freshest("usage_pause_weekly_min_reset_remaining_ms")}),
-		   billing_type = COALESCE(billing_type, ${freshest("billing_type")})
+		   billing_type = COALESCE(billing_type, ${freshest("billing_type")}),
+		   renewal_day = COALESCE(renewal_day, ${freshest("renewal_day")})
 		 WHERE rowid = $rowid`,
 	);
 
@@ -1232,7 +1252,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					requires_reauth INTEGER DEFAULT 0,
 					consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
 					last_manual_reauth_at INTEGER,
-					renewal_day INTEGER
+					renewal_day INTEGER,
+					rate_limit_reset_at INTEGER
 				)
 			`).run();
 
@@ -1248,6 +1269,12 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			// and the other to NULL. There is no constraint violation and no log line,
 			// which is why nothing caught it: a dropped column reads as an account that
 			// has simply never been rate limited or manually reauthenticated.
+			//
+			// rate_limit_reset_at had the same omission until SB23-2531. Its ALTER also
+			// runs above this branch, so the rebuild dropped it, and because that ALTER
+			// is guarded on the PRAGMA read before the transaction it did not come
+			// back: for the rest of that server lifetime the repository's
+			// updateRateLimitMeta failed with "no such column: rate_limit_reset_at".
 			//
 			// Any future accounts column has to be added HERE and in that second list,
 			// not only to ensureSchema and runMigrations. That makes seven places, not
@@ -1266,7 +1293,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					auto_pause_on_overage_enabled, pause_reason,
 					billing_type, refresh_token_issued_at, peak_hours_pause_enabled,
 					rate_limited_reason, rate_limited_at, requires_reauth,
-					consecutive_rate_limits, last_manual_reauth_at, renewal_day
+					consecutive_rate_limits, last_manual_reauth_at, renewal_day,
+					rate_limit_reset_at
 				FROM accounts
 			`).run();
 
@@ -1779,7 +1807,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       access_token, expires_at,
 			       created_at, last_used, request_count, total_requests, priority,
 			       rate_limited_until, session_start, session_request_count, paused,
-			       rate_limit_reset, rate_limit_status, rate_limit_remaining,
+			       rate_limit_reset, rate_limit_reset_at, rate_limit_status, rate_limit_remaining,
 			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
 			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
 			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
