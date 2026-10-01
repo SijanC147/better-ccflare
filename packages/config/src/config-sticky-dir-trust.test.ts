@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
 import { stickyFixture } from "@better-ccflare/security/testing";
 import type { LogEvent } from "@better-ccflare/types";
+import { __setEntryLstatForTest } from "./entry-lstat-seam";
 import { Config } from "./index";
 
 function captureLogs(fn: () => void): LogEvent[] {
@@ -46,26 +47,17 @@ function captureLogs(fn: () => void): LogEvent[] {
  * argument at the same rung as the ownership check PR #145 shipped. Disclosed
  * rather than counted.
  *
- * One mutation still survives: deleting the `uid === uid` comparison while keeping
- * the nlink conjunct. Killing it needs a sticky directory that passes the
- * directory-ownership test while an entry inside it reads as another user's, and a
- * test-created sticky directory is owned by the test process, so stubbing
- * `process.getuid` to a stranger is refused one line earlier by the
- * directory-ownership test and never reaches the comparison.
- *
- * An earlier version of this header said that was the end of it, because the one
- * root-owned sticky directory, /tmp, is rejected by validatePathOrThrow. Review
- * falsified that: the validator builds its default allowed base paths from
- * `tmpdir()` (packages/security/src/path-validator.ts:267-276), so TMPDIR pointed
- * at /private/tmp, which is uid 0 and mode 1777, makes a root-owned sticky
- * directory an allowed base and the stub then reaches the comparison. Measured
- * here, and it is still not shippable: `cachedDefaultAllowedPaths` is memoised on
- * first use and the only exported reset, `clearValidationCache()`, clears the
- * results cache and not that one. So the fixture works when its file runs first
- * and fails inside the full suite, measured as `Path outside allowed directories
- * in config file: /private/tmp/...` with the allowed list still naming
- * /var/folders. Giving the validator an exported way to reset it is a change to a
- * security module and is SB23-2316, not this commit.
+ * The `own.uid === uid` comparison is reached through a gated lstat seam
+ * (SB23-2316), in the "whose entry reads as another user's" block below. It was
+ * the one mutation that survived this file when SB23-2267 shipped: a sticky
+ * directory a test creates is owned by the test process, so every entry in it
+ * reads as ours, and stubbing `process.getuid` to a stranger instead is refused
+ * one line earlier by the directory-ownership test. Pointing TMPDIR at the
+ * root-owned /private/tmp was tried and measured: it made the comparison
+ * reachable, then failed inside the full suite, because the path validator
+ * memoises its allowed base paths on first use and exports no reset for them.
+ * The seam swaps only the entry's lstat, and only its uid and nlink, so the
+ * directory checks run for real.
  *
  * The nlink conjunct is separately covered, by the hardlink test below.
  */
@@ -295,6 +287,181 @@ describe("a config symlink in a sticky directory", () => {
 			fx.cleanup();
 			rmSync(other, { recursive: true, force: true });
 			rmSync(home, { recursive: true, force: true });
+		}
+	});
+});
+
+/**
+ * Make one entry read as owned by `reportedUid(realUid)`, with its real link
+ * count, for the duration of `fn`, and return how many times the trust check
+ * read that entry. Every other path passes through to the real lstat.
+ *
+ * Restored in a `finally`: `bun test` shares one process across files, and a
+ * stub left installed would decide every later sticky-directory trust check in
+ * it.
+ */
+function withEntryOwner(
+	entry: string,
+	reportedUid: (realUid: number) => number,
+	fn: () => void,
+): number {
+	let reached = 0;
+	__setEntryLstatForTest((path) => {
+		const real = lstatSync(path);
+		if (path !== entry) return real;
+		reached++;
+		return { uid: reportedUid(real.uid), nlink: real.nlink };
+	});
+	try {
+		fn();
+	} finally {
+		__setEntryLstatForTest(null);
+	}
+	return reached;
+}
+
+describe("a config symlink in a sticky directory whose entry reads as another user's", () => {
+	// SB23-2316. The fixture is "is followed for read and write when the link is
+	// ours" above, unchanged except that the trust check's lstat of the link
+	// reports a different uid. The directory is ours and sticky, the link is a
+	// symlink with one name, so the only line in entryIsTrusted() that can tell
+	// the two cases below apart is the uid comparison.
+	function linkFixture(
+		label: string,
+		fn: (link: string, real: string) => void,
+	) {
+		const fx = stickyFixture(label);
+		const target = mkdtempSync(join(tmpdir(), "better-ccflare-sticky-own-"));
+		try {
+			const link = fx.entry("config.json");
+			const real = join(target, "config.json");
+			writeFileSync(real, JSON.stringify({ lb_strategy: "session" }), {
+				mode: 0o600,
+			});
+			symlinkSync(real, link);
+			// The premise, measured: the link really is ours and has one name, so a
+			// refusal below cannot come from the nlink conjunct or from a real
+			// stranger's entry.
+			expect(lstatSync(link).uid).toBe(process.getuid?.() ?? -1);
+			expect(lstatSync(link).nlink).toBe(1);
+			fn(link, real);
+		} finally {
+			fx.cleanup();
+			rmSync(target, { recursive: true, force: true });
+		}
+	}
+
+	it("is refused, for read and write, when the entry's uid is not ours", () => {
+		linkFixture("sticky-stranger", (link, real) => {
+			let config: Config | undefined;
+			let logs: LogEvent[] = [];
+			const reached = withEntryOwner(
+				link,
+				(uid) => uid + 1,
+				() => {
+					logs = captureLogs(() => {
+						config = new Config(link);
+						config.set("pg_password", "hunter2");
+					});
+				},
+			);
+			// The stub was consulted for this entry. Without this a call site that
+			// bypassed the seam would leave the comparison reading our real uid, and
+			// the assertions below would fail for a reason that says nothing about
+			// the comparison.
+			expect(reached).toBeGreaterThan(0);
+
+			// Not read: the process runs on defaults rather than the link's target.
+			expect(config?.get("lb_strategy")).toBeUndefined();
+			// Not written through.
+			expect(readFileSync(real, "utf8")).not.toContain("hunter2");
+			expect(lstatSync(link).isSymbolicLink()).toBe(true);
+
+			// Refused by the sticky-entry branch, naming the entry, and nothing
+			// else. Whole message: the directory branch's text would mean the
+			// refusal came from a check this test is not about.
+			const uid = process.getuid?.() ?? "unknown";
+			const refusals = logs.filter(
+				(event) =>
+					event.level === "ERROR" &&
+					event.msg.startsWith("Refusing the config path"),
+			);
+			expect(refusals).toHaveLength(1);
+			expect(refusals[0].msg).toBe(
+				`Refusing the config path ${link}: ${link} sits in a sticky ` +
+					"directory, where this path is trusted only when an entry already exists at " +
+					"that exact name, has exactly one hard link, and is owned by uid " +
+					`${uid}. One of those is not true of ${link}. A sticky bit ` +
+					"restricts who may remove an entry, never who may create one, so a name that " +
+					"does not exist yet is another local user's to claim first, and a name with a " +
+					"second hard link was not written as our config. Create that entry yourself " +
+					"before starting, or point the config at a directory no other local user can " +
+					"write. Moving the config to another name in the same shared directory does " +
+					"not satisfy this. If this line appears at startup then the config was not " +
+					"read and this process is running on defaults, which regenerates " +
+					"local_control_secret, so anything holding the previous one stops " +
+					"authenticating against the local control endpoint.",
+			);
+		});
+	});
+
+	it("is followed when the same stub reports our own uid", () => {
+		// The control. Same fixture, same stub, same pass-through of nlink; only
+		// the reported uid differs. Without it, a stub that broke the trust check
+		// some other way would make the test above pass for the wrong reason.
+		linkFixture("sticky-self", (link, real) => {
+			let config: Config | undefined;
+			let logs: LogEvent[] = [];
+			const reached = withEntryOwner(
+				link,
+				(uid) => uid,
+				() => {
+					logs = captureLogs(() => {
+						config = new Config(link);
+						config.set("pg_password", "hunter2");
+					});
+				},
+			);
+			expect(reached).toBeGreaterThan(0);
+			expect(config?.get("lb_strategy")).toBe("session");
+			expect(readFileSync(real, "utf8")).toContain("hunter2");
+			expect(
+				logs.filter((event) =>
+					event.msg.startsWith("Refusing the config path"),
+				),
+			).toHaveLength(0);
+		});
+	});
+});
+
+describe("the entry-lstat seam's NODE_ENV gate", () => {
+	const GATE_REFUSAL =
+		"__setEntryLstatForTest is available only while NODE_ENV=test. " +
+		"Swapping the lstat this package's config trust check calls outside a " +
+		"test run would let a caller choose who owns the config entry, which " +
+		"decides whether local_control_secret is read through a link in a " +
+		"shared directory.";
+
+	it("refuses to swap the lstat when NODE_ENV is not test, and always restores", () => {
+		const saved = process.env.NODE_ENV;
+		try {
+			for (const value of ["production", undefined]) {
+				if (value === undefined) delete process.env.NODE_ENV;
+				else process.env.NODE_ENV = value;
+				let thrown: unknown;
+				try {
+					__setEntryLstatForTest(() => ({ uid: 0, nlink: 1 }));
+				} catch (error) {
+					thrown = error;
+				}
+				// Whole message with toBe. toThrow(string) is a substring match.
+				expect(thrown).toBeInstanceOf(Error);
+				expect((thrown as Error).message).toBe(GATE_REFUSAL);
+				expect(() => __setEntryLstatForTest(null)).not.toThrow();
+			}
+		} finally {
+			process.env.NODE_ENV = saved;
+			__setEntryLstatForTest(null);
 		}
 	});
 });
