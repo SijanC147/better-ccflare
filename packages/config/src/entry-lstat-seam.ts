@@ -18,11 +18,13 @@ export interface EntryOwnership {
  * reference a test can swap (SB23-2316).
  *
  * The seam exists for one measurement: the comparison of that entry's uid with
- * ours. No unprivileged fixture can reach it any other way. A sticky directory
- * a test creates is owned by the test process, so every entry the test puts in
- * it reads as ours; stubbing process.getuid() to a stranger instead is refused
- * one line earlier, by the directory-ownership test, and never reaches the
- * comparison. The one root-owned sticky directory, /private/tmp on macOS, can
+ * ours. On macOS no unprivileged fixture can reach it any other way. A sticky
+ * directory a test creates is owned by the test process, so every entry the
+ * test puts in it reads as ours; stubbing process.getuid() to a stranger instead
+ * is refused one line earlier, by the directory-ownership test, and never
+ * reaches the comparison. (On Linux stickyFixture() returns the root-owned /tmp,
+ * which the directory check admits, so a getuid stub would reach it there; the
+ * seam is used anyway because it works on both platforms.) The one root-owned sticky directory, /private/tmp on macOS, can
  * be made an allowed base by pointing TMPDIR at it, but the path validator
  * memoises its allowed base paths on first use and exports no reset for that
  * cache, so a test built that way passed alone and failed inside the full suite
@@ -38,7 +40,13 @@ export interface EntryOwnership {
  * which leaks across files in a shared `bun test` process, and not re-exported
  * from index.ts, so reaching it takes a deep import of an internal file.
  */
-let lstatImpl: (path: string) => EntryOwnership = (path) => lstatSync(path);
+// One spelling of the production default, used at install and at restore, so
+// the two cannot drift: with two closures, a test running after the first
+// restore measured the restore's spelling while production ran the other one,
+// and a mutation to one of them hid a kill (PR #293 review, F2).
+const realLstat = (path: string): EntryOwnership => lstatSync(path);
+
+let lstatImpl: (path: string) => EntryOwnership = realLstat;
 
 /** lstat an entry for the sticky-directory trust decision. */
 export function lstatEntryForTrust(path: string): EntryOwnership {
@@ -69,5 +77,5 @@ export function __setEntryLstatForTest(
 				"shared directory.",
 		);
 	}
-	lstatImpl = fn ?? ((path) => lstatSync(path));
+	lstatImpl = fn ?? realLstat;
 }

@@ -124,10 +124,10 @@ export function stickyFixture(label: string): StickyFixture {
 	// on an arrow assigned to a bare const does not count. Measured with tsc
 	// --strict: `const r = (m: string): never => { throw ... }` leaves TS2454 at a
 	// later use of a variable assigned only on the other branch, while
-	// `const r: (m: string) => never = ...` is clean. In this form a branch added
-	// to the body that does not throw is TS2322 here, so each call site below
+	// `const r: (m: string) => never = ...` is clean. So each call site below
 	// really does stop, rather than running on into statSync(dir) on a directory
-	// that just failed its precondition.
+	// that just failed its precondition. (Both forms reject a non-throwing branch
+	// in the body; the difference is only the narrowing at the call site.)
 	const refuse: (message: string) => never = (message) => {
 		if (createdByUs) rmSync(made, { recursive: true, force: true });
 		throw new Error(message);

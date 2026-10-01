@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
 import { stickyFixture } from "@better-ccflare/security/testing";
 import type { LogEvent } from "@better-ccflare/types";
-import { __setEntryLstatForTest } from "./entry-lstat-seam";
+import { __setEntryLstatForTest, lstatEntryForTrust } from "./entry-lstat-seam";
 import { Config } from "./index";
 
 function captureLogs(fn: () => void): LogEvent[] {
@@ -49,10 +49,12 @@ function captureLogs(fn: () => void): LogEvent[] {
  *
  * The `own.uid === uid` comparison is reached through a gated lstat seam
  * (SB23-2316), in the "whose entry reads as another user's" block below. It was
- * the one mutation that survived this file when SB23-2267 shipped: a sticky
- * directory a test creates is owned by the test process, so every entry in it
- * reads as ours, and stubbing `process.getuid` to a stranger instead is refused
- * one line earlier by the directory-ownership test. Pointing TMPDIR at the
+ * the one mutation that survived this file when SB23-2267 shipped: on macOS a
+ * sticky directory a test creates is owned by the test process, so every entry
+ * in it reads as ours, and stubbing `process.getuid` to a stranger instead is
+ * refused one line earlier by the directory-ownership test. On Linux the
+ * fixture is the root-owned /tmp, which that check admits, but the seam works
+ * on both platforms. Pointing TMPDIR at the
  * root-owned /private/tmp was tried and measured: it made the comparison
  * reachable, then failed inside the full suite, because the path validator
  * memoises its allowed base paths on first use and exports no reset for them.
@@ -351,59 +353,76 @@ describe("a config symlink in a sticky directory whose entry reads as another us
 		}
 	}
 
-	it("is refused, for read and write, when the entry's uid is not ours", () => {
-		linkFixture("sticky-stranger", (link, real) => {
-			let config: Config | undefined;
-			let logs: LogEvent[] = [];
-			const reached = withEntryOwner(
-				link,
-				(uid) => uid + 1,
-				() => {
-					logs = captureLogs(() => {
-						config = new Config(link);
-						config.set("pg_password", "hunter2");
+	// Three foreign uids, not one (PR #293 review, F3). With only uid+1, both
+	// `own.uid <= uid` and `own.uid === uid || own.uid === 0` survived the whole
+	// config suite: the first trusts any lower uid's planted link, the second is
+	// the plausible "consistency" edit, since the directory check and
+	// trustedRegularPath() both accept root. Root is refused here on purpose: a
+	// root-owned entry in a sticky directory is not one we created. A value equal
+	// to our own uid is dropped, which only happens for 0 when the suite runs as
+	// root.
+	const ownUid = process.getuid?.() ?? -1;
+	const strangers: Array<[string, (uid: number) => number]> = [
+		["a higher uid", (uid) => uid + 1],
+		["a lower uid", (uid) => uid - 1],
+		["root", () => 0],
+	];
+	for (const [label, stranger] of strangers.filter(
+		([, pick]) => pick(ownUid) !== ownUid,
+	)) {
+		it(`is refused, for read and write, when the entry's uid is ${label}`, () => {
+			linkFixture(
+				`sticky-stranger-${label.replace(/ /g, "-")}`,
+				(link, real) => {
+					let config: Config | undefined;
+					let logs: LogEvent[] = [];
+					const reached = withEntryOwner(link, stranger, () => {
+						logs = captureLogs(() => {
+							config = new Config(link);
+							config.set("pg_password", "hunter2");
+						});
 					});
+					// The stub was consulted for this entry. Without this a call site that
+					// bypassed the seam would leave the comparison reading our real uid, and
+					// the assertions below would fail for a reason that says nothing about
+					// the comparison.
+					expect(reached).toBeGreaterThan(0);
+
+					// Not read: the process runs on defaults rather than the link's target.
+					expect(config?.get("lb_strategy")).toBeUndefined();
+					// Not written through.
+					expect(readFileSync(real, "utf8")).not.toContain("hunter2");
+					expect(lstatSync(link).isSymbolicLink()).toBe(true);
+
+					// Refused by the sticky-entry branch, naming the entry, and nothing
+					// else. Whole message: the directory branch's text would mean the
+					// refusal came from a check this test is not about.
+					const uid = process.getuid?.() ?? "unknown";
+					const refusals = logs.filter(
+						(event) =>
+							event.level === "ERROR" &&
+							event.msg.startsWith("Refusing the config path"),
+					);
+					expect(refusals).toHaveLength(1);
+					expect(refusals[0].msg).toBe(
+						`Refusing the config path ${link}: ${link} sits in a sticky ` +
+							"directory, where this path is trusted only when an entry already exists at " +
+							"that exact name, has exactly one hard link, and is owned by uid " +
+							`${uid}. One of those is not true of ${link}. A sticky bit ` +
+							"restricts who may remove an entry, never who may create one, so a name that " +
+							"does not exist yet is another local user's to claim first, and a name with a " +
+							"second hard link was not written as our config. Create that entry yourself " +
+							"before starting, or point the config at a directory no other local user can " +
+							"write. Moving the config to another name in the same shared directory does " +
+							"not satisfy this. If this line appears at startup then the config was not " +
+							"read and this process is running on defaults, which regenerates " +
+							"local_control_secret, so anything holding the previous one stops " +
+							"authenticating against the local control endpoint.",
+					);
 				},
 			);
-			// The stub was consulted for this entry. Without this a call site that
-			// bypassed the seam would leave the comparison reading our real uid, and
-			// the assertions below would fail for a reason that says nothing about
-			// the comparison.
-			expect(reached).toBeGreaterThan(0);
-
-			// Not read: the process runs on defaults rather than the link's target.
-			expect(config?.get("lb_strategy")).toBeUndefined();
-			// Not written through.
-			expect(readFileSync(real, "utf8")).not.toContain("hunter2");
-			expect(lstatSync(link).isSymbolicLink()).toBe(true);
-
-			// Refused by the sticky-entry branch, naming the entry, and nothing
-			// else. Whole message: the directory branch's text would mean the
-			// refusal came from a check this test is not about.
-			const uid = process.getuid?.() ?? "unknown";
-			const refusals = logs.filter(
-				(event) =>
-					event.level === "ERROR" &&
-					event.msg.startsWith("Refusing the config path"),
-			);
-			expect(refusals).toHaveLength(1);
-			expect(refusals[0].msg).toBe(
-				`Refusing the config path ${link}: ${link} sits in a sticky ` +
-					"directory, where this path is trusted only when an entry already exists at " +
-					"that exact name, has exactly one hard link, and is owned by uid " +
-					`${uid}. One of those is not true of ${link}. A sticky bit ` +
-					"restricts who may remove an entry, never who may create one, so a name that " +
-					"does not exist yet is another local user's to claim first, and a name with a " +
-					"second hard link was not written as our config. Create that entry yourself " +
-					"before starting, or point the config at a directory no other local user can " +
-					"write. Moving the config to another name in the same shared directory does " +
-					"not satisfy this. If this line appears at startup then the config was not " +
-					"read and this process is running on defaults, which regenerates " +
-					"local_control_secret, so anything holding the previous one stops " +
-					"authenticating against the local control endpoint.",
-			);
 		});
-	});
+	}
 
 	it("is followed when the same stub reports our own uid", () => {
 		// The control. Same fixture, same stub, same pass-through of nlink; only
@@ -462,6 +481,73 @@ describe("the entry-lstat seam's NODE_ENV gate", () => {
 		} finally {
 			process.env.NODE_ENV = saved;
 			__setEntryLstatForTest(null);
+		}
+	});
+});
+
+describe("the entry-lstat seam's production default", () => {
+	it("reads the entry itself, not what a symlink points at", () => {
+		// PR #293 review, F1. index.ts calls lstat-not-stat load-bearing: a link
+		// read through stat substitutes the uid of whatever it points at, which is
+		// the attacker's choice. No stubbed test can see the default, so this one
+		// installs nothing. The link is ours with one name; its target is ours
+		// with TWO names, so stat would report nlink 2 and the hardlink conjunct
+		// would refuse a config that lstat correctly follows.
+		const fx = stickyFixture("lstat-default");
+		const target = mkdtempSync(join(tmpdir(), "better-ccflare-lstat-tgt-"));
+		const second = mkdtempSync(join(tmpdir(), "better-ccflare-lstat-2nd-"));
+		try {
+			const real = join(target, "config.json");
+			writeFileSync(real, JSON.stringify({ lb_strategy: "session" }), {
+				mode: 0o600,
+			});
+			linkSync(real, join(second, "other-name.json"));
+			const link = fx.entry("config.json");
+			symlinkSync(real, link);
+			// The premise: the two reads disagree on this entry.
+			expect(lstatSync(link).nlink).toBe(1);
+			expect(statSync(link).nlink).toBe(2);
+
+			// The default, directly, and through the trust decision.
+			expect(lstatEntryForTrust(link).nlink).toBe(1);
+			const config = new Config(link);
+			expect(config.get("lb_strategy")).toBe("session");
+		} finally {
+			fx.cleanup();
+			rmSync(target, { recursive: true, force: true });
+			rmSync(second, { recursive: true, force: true });
+		}
+	});
+
+	it("is left in place by a refused install, and put back by null", () => {
+		// PR #293 review, F4. The gate test checks the refusal text and then
+		// restores, which hides whether a refused install moved the reference
+		// anyway, and whether null restores at all: both mutations survived the
+		// whole config suite, because withEntryOwner's stub passes every other path
+		// through to the real lstat.
+		const dir = mkdtempSync(join(tmpdir(), "better-ccflare-lstat-restore-"));
+		const saved = process.env.NODE_ENV;
+		try {
+			const file = join(dir, "f");
+			writeFileSync(file, "x");
+			const real = lstatSync(file);
+			const bogus = () => ({ uid: real.uid + 7, nlink: 42 });
+
+			process.env.NODE_ENV = "production";
+			expect(() => __setEntryLstatForTest(bogus)).toThrow();
+			expect(lstatEntryForTrust(file).nlink).toBe(real.nlink);
+			expect(lstatEntryForTrust(file).uid).toBe(real.uid);
+
+			process.env.NODE_ENV = saved;
+			__setEntryLstatForTest(bogus);
+			expect(lstatEntryForTrust(file).nlink).toBe(42);
+			__setEntryLstatForTest(null);
+			expect(lstatEntryForTrust(file).nlink).toBe(real.nlink);
+			expect(lstatEntryForTrust(file).uid).toBe(real.uid);
+		} finally {
+			process.env.NODE_ENV = saved;
+			__setEntryLstatForTest(null);
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });
