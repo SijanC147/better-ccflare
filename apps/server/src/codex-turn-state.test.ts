@@ -336,6 +336,33 @@ describe("x-codex-turn-state on the native /v1/responses path (SB23-2370)", () =
 	});
 });
 
+describe("x-codex-turn-state from a refused request (SB23-2370)", () => {
+	it("is not filed: only a 2xx response's token is, as the Codex client reads it only from a stream", async () => {
+		const turnId = newTurn();
+		route = ["a", "b"];
+		queued.set("a", [
+			() =>
+				new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+					status: 429,
+					headers: {
+						"content-type": "application/json",
+						"retry-after": "60",
+						[TURN_STATE]: "ts-a-refused",
+					},
+				}),
+		]);
+		const first = await codexCli({ turnId });
+		expect(first.status).toBe(200);
+		route = ["a"];
+		await codexCli({ turnId });
+		expect(seen.map((s) => [s.account, s.turnState])).toEqual([
+			["a", null],
+			["b", null],
+			["a", null],
+		]);
+	});
+});
+
 describe("x-codex-turn-state on /v1/messages (SB23-2370)", () => {
 	it("carries the upstream's token back to the client and sends none the client did not earn", async () => {
 		route = ["a"];
