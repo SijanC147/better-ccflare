@@ -66,7 +66,7 @@ export interface VersionStatusServiceOptions {
 	/** Upstream sha recorded as merged into this fork, or null if unknown. */
 	mergedSha: string | null;
 	fetchImpl?: typeof fetch;
-	now?: () => number;
+	now?: (() => number) | undefined;
 	/**
 	 * GitHub token used only to raise the rate limit. Never returned by an
 	 * endpoint and never logged.

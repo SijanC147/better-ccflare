@@ -14,13 +14,6 @@
 		"strict": true,
 		"skipLibCheck": true,
 		"noFallthroughCasesInSwitch": true,
-		// `exactOptionalPropertyTypes` rejects an explicit `undefined` on an
-		// optional member (SB23-2456). Set here rather than inherited because the
-		// root config does not set it yet: proxy and the programs that import it
-		// still carry sites. It applies to every file this program reaches
-		// through the `@better-ccflare/*` path map, so a violation in
-		// `packages/types` fails this target as well.
-		"exactOptionalPropertyTypes": true,
 		"noUncheckedSideEffectImports": false,
 		// `paths` REPLACES the inherited map rather than merging with it, so
 		// the root's `@better-ccflare/*` entries have to be restated here or

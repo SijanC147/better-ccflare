@@ -61,8 +61,8 @@ export interface AddAccountOptionsWithAdapter {
 	modelMappings?: { [key: string]: string | string[] };
 	/** @deprecated Use comma-separated values in modelMappings instead */
 	modelFallbacks?: { [key: string]: string };
-	profile?: string;
-	crossRegionMode?: "geographic" | "global" | "regional";
+	profile?: string | undefined;
+	crossRegionMode?: "geographic" | "global" | "regional" | undefined;
 	adapter?: PromptAdapter;
 }
 

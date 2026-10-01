@@ -201,10 +201,10 @@ function makeCtx(): ProxyContext {
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getModelScopedCapacityRouting: undefined,
-			getCombosEnabled: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getModelScopedCapacityRouting: () => "off",
+			getCombosEnabled: () => true,
 			getStorePayloads: () => false,
 		},
 		provider: {
@@ -245,8 +245,8 @@ function newTurn(): string {
 }
 
 async function codexCli(opts: {
-	turnId?: string;
-	token?: string | null;
+	turnId?: string | undefined;
+	token?: string | null | undefined;
 	stream?: boolean;
 }): Promise<Response> {
 	const headers: Record<string, string> = {

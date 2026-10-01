@@ -46,7 +46,7 @@ export interface DiscoveryOptions {
 	 * Override the projects directory.  Defaults to
 	 * `CLAUDE_PROJECTS_DIR` env-var → `~/.claude/projects`.
 	 */
-	projectsDir?: string;
+	projectsDir?: string | undefined;
 	/**
 	 * When true, canonicalPath comparisons are case-insensitive.
 	 * Defaults to false; callers decide based on the host filesystem.

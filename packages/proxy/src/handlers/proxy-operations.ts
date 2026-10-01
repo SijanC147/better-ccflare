@@ -823,7 +823,7 @@ export async function proxyUnauthenticated(
 		const wire = new Request(targetUrl, {
 			method: req.method,
 			headers,
-			body: requestBodyBuffer ? new Uint8Array(requestBodyBuffer) : undefined,
+			body: requestBodyBuffer ? new Uint8Array(requestBodyBuffer) : null,
 			signal,
 		});
 		const response = await forwardObservedUpstream(
@@ -2363,7 +2363,7 @@ export async function proxyWithAccount(
 			const retryRequest = new Request(outgoing.request.url, {
 				method: outgoing.request.method,
 				headers: outgoing.request.headers,
-				body: outgoing.bodyText || undefined,
+				body: outgoing.bodyText || null,
 				signal: req.signal,
 			});
 			const retryRaw = isSyntheticProviderResponse(retryRequest)

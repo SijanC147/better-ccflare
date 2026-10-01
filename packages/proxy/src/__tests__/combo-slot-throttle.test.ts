@@ -147,10 +147,10 @@ function makeContext(
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () => "off",
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getCombosEnabled: undefined,
-			getComboSessionFallback: undefined,
-			getForceAccountModel: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getCombosEnabled: () => true,
+			getComboSessionFallback: () => true,
+			getForceAccountModel: () => false,
 		},
 		provider: { name: "anthropic" },
 		asyncWriter: { enqueue: mock(() => {}) },

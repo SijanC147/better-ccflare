@@ -78,9 +78,9 @@ function makeContext(
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () =>
 				opts.capacityRoutingMode ?? "exhausted",
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getCombosEnabled: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getCombosEnabled: () => true,
 		},
 		provider: {
 			name: "anthropic",
@@ -235,10 +235,10 @@ function makeComboContext(
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () => "exhausted",
 			getStorePayloads: () => true,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getCombosEnabled: undefined,
-			getComboSessionFallback: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getCombosEnabled: () => true,
+			getComboSessionFallback: () => true,
 		},
 		provider: {
 			name: "anthropic",

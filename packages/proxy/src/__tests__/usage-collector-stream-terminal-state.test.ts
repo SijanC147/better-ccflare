@@ -118,7 +118,9 @@ describe("UsageCollector - stream terminal state in the live summary", () => {
 			type: "end",
 			requestId,
 			success: true,
-			streamTerminalState,
+			// `undefined` here means the field is absent from the message, so
+			// leave the key out rather than send it holding `undefined`.
+			...(streamTerminalState !== undefined ? { streamTerminalState } : {}),
 		};
 		await collector.handleEnd(endMsg);
 		const summary = summaries.get(requestId);

@@ -47,9 +47,9 @@ export interface CacheCostBreakdown {
 export interface CacheInsightsOptions {
 	range: string;
 	/** Hit-rate percentage below which a row is flagged. Default 50. */
-	thresholdPercent?: number;
+	thresholdPercent?: number | undefined;
 	/** Minimum requests before a row can be flagged. Default 10. */
-	minRequestsForFlag?: number;
+	minRequestsForFlag?: number | undefined;
 }
 
 export interface BuildCacheInsightsInput {

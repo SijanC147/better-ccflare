@@ -111,10 +111,10 @@ function makeCtx(
 		},
 		asyncWriter: { enqueue: mock(() => {}) },
 		config: {
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getCombosEnabled: undefined,
-			getForceAccountModel: undefined,
-			getModelScopedCapacityRouting: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getCombosEnabled: () => true,
+			getForceAccountModel: () => false,
+			getModelScopedCapacityRouting: () => "off",
 		},
 	});
 }
