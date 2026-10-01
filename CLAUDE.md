@@ -56,15 +56,19 @@ Every migration added to `packages/database/src/migrations.ts` MUST also be port
 4. `columnsToAdd` array in `runMigrationsPg()` (PG ALTER TABLE for existing DBs)
 5. Mirror any SQLite backfill as an `adapter.unsafe(UPDATE ...)` in `runMigrationsPg()`
 
-**An `accounts` column needs two more places, for seven in total, and nothing points at them:**
-6. The `INSERT INTO accounts_new SELECT` column list at `migrations.ts:1212-1226`
-7. The second rebuild's column list at `migrations.ts:1580-1592`
+**An `accounts` column needs two more schema places, for seven, plus the three read-side SELECT lists (`AccountRepository.findAll`, `findById`, the accounts list handler), for ten in total:**
+6. The refresh_token NOT NULL rebuild in `runMigrations`: its `CREATE TABLE accounts_new` and
+   its positional `INSERT INTO accounts_new SELECT`
+7. The canonical rebuild (the `account_tier` removal and CTAS repair): its `CREATE TABLE
+   accounts_new`, which is a fresh install's table column for column, and its named
+   `INSERT ... SELECT`
 
 Both are explicit column lists in table rebuilds, so a column missing from one is **dropped
 silently** when a database takes that branch, with no constraint violation and no log line.
-Measured 2026-09-15: both lists already omit `consecutive_rate_limits` and
-`last_manual_reauth_at`, which is `SB23-2073`. Check whether your column belongs in a rebuild
-before assuming five places is the whole rule.
+That happened three times (`SB23-2073`, `SB23-2531`). **`accounts-rebuild-gate.test.ts` now
+fails on it** (`SB23-3919`): each list must be the base columns plus every column ALTERed
+above it, in the CREATE's order. The six `usage_pause_*` columns are the one stated exception
+to place 6, because their ALTERs sit below it.
 
 New tables go in `ensureSchemaPg()` AND `runMigrationsPg()` (`CREATE TABLE IF NOT EXISTS`).
 
