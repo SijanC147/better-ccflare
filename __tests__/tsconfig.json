@@ -1,0 +1,12 @@
+{
+	"extends": "../tsconfig.json",
+	// The repository-root `__tests__/` is outside every package, so no `include`
+	// reached `api-auth.test.ts` (SB23-2304). The declaration file is listed
+	// for the reason `apps/server/tsconfig.json` gives: the test imports
+	// http-api, which imports `MERGELOG.md` through an ambient module.
+	"include": ["**/*", "../packages/http-api/src/mergelog.d.ts"],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's test-file exclusions. Wired into the root
+	// `typecheck:tests` chain; without that entry the gate never runs.
+	"exclude": ["node_modules"]
+}

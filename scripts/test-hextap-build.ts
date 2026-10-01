@@ -46,7 +46,10 @@ try {
 	const secondDirectory = join(testRoot, "second");
 	await mkdir(firstDirectory);
 	await mkdir(secondDirectory);
-	const executableName = targetOS === "windows" ? "better-ccflare.exe" : "better-ccflare";
+	// `targetOS` is only ever "darwin" or "linux", and the adapter runs under
+	// /bin/bash, so this script never builds a Windows binary. A `.exe` branch
+	// here was unreachable, which typechecking scripts/ reported as TS2367.
+	const executableName = "better-ccflare";
 	const first = join(firstDirectory, executableName);
 	const second = join(secondDirectory, executableName);
 
