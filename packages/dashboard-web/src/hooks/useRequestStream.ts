@@ -143,11 +143,13 @@ export function useRequestStream(limit = 200) {
 							// modal shows empty headers/body and the copy returns
 							// nulled-out bodies.
 							//
-							// `response: null` when no status is known yet so the
-							// status chip (guarded by `statusCode != null`) does NOT
-							// render a "0" before the response lands. The summary
-							// handler below patches response.status from
-							// `evt.payload.statusCode` once the request completes.
+							// The proxy emits this event once the upstream has
+							// answered, with its status (response-handler.ts). The
+							// one emitter of 0 is the auto-refresh probe, which never
+							// gets a summary. `response: null` when the status is 0
+							// so the status chip (guarded by `statusCode != null`)
+							// does NOT render a "0"; the summary handler below
+							// patches response.status from `evt.payload.statusCode`.
 							const hasStatus = evt.statusCode > 0;
 							const placeholder: RequestPayload = {
 								id: evt.id,
@@ -214,18 +216,16 @@ export function useRequestStream(limit = 200) {
 							const newRequests = [...current.requests];
 							// Update meta to remove pending status. Preserve
 							// `bodiesOmitted: true` so consumers continue to lazy-
-							// load bodies, and refresh `rateLimited` from the final
-							// statusCode (the placeholder set it from `evt.statusCode`
-							// which is 0 until the response lands).
+							// load bodies, and take `rateLimited` from the summary,
+							// so the flag no longer depends on the start event
+							// having carried the status.
 							if (newRequests[requestIndex].meta) {
 								newRequests[requestIndex] = {
 									...newRequests[requestIndex],
-									// Refresh response.status from the final summary —
-									// the start placeholder set it to 0 before the HTTP
-									// response landed, and the new header-row chip uses
-									// a `statusCode != null` guard (0 is not null), so
-									// without this every SSE-completed request would
-									// permanently display a grey "0" chip.
+									// Refresh response.status from the final summary:
+									// a start event with status 0 leaves the placeholder
+									// without one, and the header-row chip uses a
+									// `statusCode != null` guard (0 is not null).
 									response:
 										evt.payload.statusCode != null
 											? {
@@ -240,9 +240,12 @@ export function useRequestStream(limit = 200) {
 										...newRequests[requestIndex].meta,
 										pending: false,
 										success: evt.payload.success,
-										...(evt.payload.rateLimited !== undefined
-											? { rateLimited: evt.payload.rateLimited }
-											: {}),
+										// The collector sends the flag as of SB23-3995, derived
+										// from the same status the REST list uses. When the key
+										// is absent, derive it here the same way, so the flag
+										// never rests on the start event alone.
+										rateLimited:
+											evt.payload.rateLimited ?? evt.payload.statusCode === 429,
 										bodiesOmitted: true,
 									},
 								};

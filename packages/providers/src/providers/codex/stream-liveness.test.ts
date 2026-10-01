@@ -1,4 +1,5 @@
 import { describe, expect, it, jest } from "bun:test";
+import { settle } from "../../testing/fake-timers";
 import {
 	CODEX_STREAM_HEARTBEAT_INTERVAL_MS,
 	CODEX_STREAM_RAW_SILENCE_TIMEOUT_MS,
@@ -24,38 +25,6 @@ function makeSilentReader() {
 		},
 		getCancelReason: () => cancelReason,
 	};
-}
-
-/**
- * Runs `promise` to settlement on fake timers: flush microtasks, and while it
- * is still pending jump the clock to the next timer. `next()` awaits a
- * microtask before it arms its timer, so the flush comes first. The clock moves
- * only here, so `performance.now()` differences are exact, where on real
- * timers a loaded machine stretched them past the deadlines under test
- * (SB23-3567).
- */
-async function settle<T>(promise: Promise<T>): Promise<T> {
-	let settled = false;
-	let value: T | undefined;
-	let failure: unknown;
-	let failed = false;
-	promise.then(
-		(result) => {
-			settled = true;
-			value = result;
-		},
-		(error: unknown) => {
-			failed = true;
-			failure = error;
-		},
-	);
-	for (let step = 0; step < 1_000; step++) {
-		for (let turn = 0; turn < 20; turn++) await Promise.resolve();
-		if (failed) throw failure;
-		if (settled) return value as T;
-		jest.advanceTimersToNextTimer();
-	}
-	throw new Error("settle: the promise never settled");
 }
 
 async function advanceBy(ms: number): Promise<void> {
