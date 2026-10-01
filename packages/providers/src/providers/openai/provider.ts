@@ -503,8 +503,12 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	 * Inject enable_thinking for reasoning models on DashScope.
 	 * DashScope's OpenAI-compatible API requires this flag to return reasoning_content.
 	 * Without it, reasoning models like Qwen-Plus, Qwen3, qwq, etc. never output thinking tokens.
+	 *
+	 * Protected rather than private, like the `beforeConvert` and `afterConvert`
+	 * hooks it runs after, so a test subclass can widen it and drive it in
+	 * isolation instead of reaching past the modifier with a cast (SB23-2454).
 	 */
-	private injectDashScopeReasoning(
+	protected injectDashScopeReasoning(
 		openaiBody: OpenAIRequest,
 		anthropicBody: Record<string, unknown>,
 		endpointParam?: string,
