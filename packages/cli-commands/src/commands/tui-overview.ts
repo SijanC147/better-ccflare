@@ -104,10 +104,21 @@ export async function fetchOverview(
 
 	if (response.status === 401) {
 		const detail = await serverErrorMessage(response);
+		if (!apiKey) {
+			return {
+				ok: false,
+				kind: "unauthorized",
+				message: `${detail ?? API_KEY_REQUIRED_SENTENCE}. Pass --api-key <key> or set BETTER_CCFLARE_API_KEY.`,
+			};
+		}
+		// The /api router answers a valid key without admin access with 401,
+		// not 403 (`Unauthorized(authzResult.reason)` in router.ts), so a
+		// refused key is reported the same way whether it is wrong or merely
+		// not an admin key, with the server's own reason.
 		return {
 			ok: false,
 			kind: "unauthorized",
-			message: `${detail ?? API_KEY_REQUIRED_SENTENCE}. Pass --api-key <key> or set BETTER_CCFLARE_API_KEY.`,
+			message: `The server refused the API key: ${detail ?? "unauthorized"}. /api/accounts needs an admin key (better-ccflare --generate-api-key <name> --admin).`,
 		};
 	}
 	if (response.status === 403) {

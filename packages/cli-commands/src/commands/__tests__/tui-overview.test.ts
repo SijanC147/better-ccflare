@@ -276,6 +276,22 @@ describe("fetchOverview", () => {
 		});
 	});
 
+	it("401 with a key names the server's reason and the admin requirement", async () => {
+		const result = await fetchOverview(url, "k-api-only", {
+			fetch: json(401, {
+				error: {
+					message: "Unauthorized: This API key does not have dashboard access",
+				},
+			}),
+		});
+		expect(result).toEqual({
+			ok: false,
+			kind: "unauthorized",
+			message:
+				"The server refused the API key: Unauthorized: This API key does not have dashboard access. /api/accounts needs an admin key (better-ccflare --generate-api-key <name> --admin).",
+		});
+	});
+
 	it("403 says the key lacks admin access", async () => {
 		const result = await fetchOverview(url, "k-api-only", {
 			fetch: json(403, { error: { message: "no dashboard access" } }),
