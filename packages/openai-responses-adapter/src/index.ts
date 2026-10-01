@@ -17,4 +17,5 @@ export type {
 	ResponseItem,
 	ResponsesRequest,
 	ResponsesResponse,
+	TranslatableRequest,
 } from "./types";

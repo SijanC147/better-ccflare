@@ -22,7 +22,11 @@ import {
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
-import type { HandleProxyFn, ResponseItem, ResponsesRequest } from "./types";
+import type {
+	HandleProxyFn,
+	ResponsesRequest,
+	TranslatableRequest,
+} from "./types";
 
 const log = new Logger("openai-responses-adapter");
 
@@ -567,7 +571,7 @@ export async function handleResponsesRequest(
 
 	// 4. Translate to Anthropic format
 	const anthropicBody = translateRequestToAnthropic(
-		body as typeof body & { input: ResponseItem[] },
+		body as TranslatableRequest,
 	);
 	// A gateway entry names its upstream model outright. The selector routes
 	// on the synthetic body's model, so it must see that id for the entry's

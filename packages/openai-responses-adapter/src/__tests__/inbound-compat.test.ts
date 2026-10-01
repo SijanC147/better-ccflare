@@ -3,7 +3,7 @@ import { translateChatRequestToAnthropic } from "../chat/request-translator";
 import type { ChatCompletionRequest } from "../chat/types";
 import { flattenToolHistory, parseBase64DataUrl } from "../inbound-compat";
 import { translateRequestToAnthropic } from "../request-translator";
-import type { ResponseItem, ResponsesRequest } from "../types";
+import type { ResponseItem, TranslatableRequest } from "../types";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk";
 
@@ -232,8 +232,6 @@ describe("Chat Completions translation of tool history", () => {
 		]);
 	});
 });
-
-type TranslatableRequest = ResponsesRequest & { input: ResponseItem[] };
 
 const RESPONSES_HISTORY: ResponseItem[] = [
 	{
