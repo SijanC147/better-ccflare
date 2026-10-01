@@ -79,6 +79,7 @@ import {
 	analyzePerformance,
 	clearRequestHistory,
 	compactDatabase,
+	defaultTuiDeps,
 	deleteApiKey,
 	disableApiKey,
 	enableApiKey,
@@ -188,6 +189,11 @@ interface ParsedArgs {
 // races the server's drain, disposes the same resources concurrently, and
 // its process.exit() severs active streams mid-response.
 let serverOwnsShutdown = false;
+
+// `tui` in live mode owns its own exit for the same reason: its SIGINT and
+// SIGTERM handlers restore the terminal (raw mode, alternate screen) before
+// the process ends, and exitGracefully() racing them could exit first.
+let tuiOwnsShutdown = false;
 
 /**
  * Helper function to start server with unified environment variable handling
@@ -1002,7 +1008,13 @@ async function main() {
 	// first Config, database or server code: falling through would start a
 	// server on top of the one it is meant to watch.
 	if (parsed.tui) {
-		fastExit((await runTui(parsed.tui)) === 0 ? 0 : 1);
+		const code = await runTui(parsed.tui, {
+			...defaultTuiDeps(),
+			onLiveStart: () => {
+				tuiOwnsShutdown = true;
+			},
+		});
+		fastExit(code === 0 ? 0 : 1);
 		return;
 	}
 
@@ -1642,11 +1654,11 @@ main().catch(async (error) => {
 // Handle process termination. When the server is running it owns shutdown
 // (see serverOwnsShutdown); these handlers cover short-lived CLI commands.
 process.on("SIGINT", async () => {
-	if (serverOwnsShutdown) return;
+	if (serverOwnsShutdown || tuiOwnsShutdown) return;
 	await exitGracefully(0);
 });
 
 process.on("SIGTERM", async () => {
-	if (serverOwnsShutdown) return;
+	if (serverOwnsShutdown || tuiOwnsShutdown) return;
 	await exitGracefully(0);
 });

@@ -8,7 +8,10 @@ import {
 	DEFAULT_TUI_PORT,
 	type FetchLike,
 	fetchOverview,
+	type LoopIO,
+	type LoopSignal,
 	renderOverview,
+	runOverviewLoop,
 } from "./tui-overview";
 
 /** Dashboards `tui` can render. Each further one is its own issue. */
@@ -216,10 +219,33 @@ export interface TuiStdout {
 
 export interface TuiDeps {
 	env: Record<string, string | undefined>;
-	stdout: TuiStdout;
+	stdout: TuiStdout & LoopIO["stdout"];
 	stderr: { write(text: string): unknown };
 	fetch?: FetchLike;
 	now: () => number;
+	/** The live loop's terminal, signal and timer access. */
+	loop?: Omit<LoopIO, "stdout" | "stderr" | "now">;
+	/**
+	 * Called once, just before the live loop takes the terminal, so the CLI's
+	 * own signal handlers can stand down. Not called for a one-shot print,
+	 * where those handlers are still what ends a Ctrl-C during the fetch.
+	 */
+	onLiveStart?: () => void;
+}
+
+function processLoopIO(): Omit<LoopIO, "stdout" | "stderr" | "now"> {
+	return {
+		stdin: process.stdin.isTTY ? process.stdin : null,
+		onSignal: (signal: LoopSignal, handler: () => void) => {
+			process.on(signal, handler);
+			return () => {
+				process.removeListener(signal, handler);
+			};
+		},
+		setTimer: (callback, ms) => setTimeout(callback, ms),
+		clearTimer: (handle) =>
+			clearTimeout(handle as ReturnType<typeof setTimeout>),
+	};
 }
 
 export function defaultTuiDeps(): TuiDeps {
@@ -228,6 +254,7 @@ export function defaultTuiDeps(): TuiDeps {
 		stdout: process.stdout,
 		stderr: process.stderr,
 		now: () => Date.now(),
+		loop: processLoopIO(),
 	};
 }
 
@@ -255,11 +282,36 @@ export async function runTui(
 	const baseUrl = resolveBaseUrl(options, deps.env);
 	const apiKey = resolveApiKey(options, deps.env);
 
-	const result = await fetchOverview(baseUrl, apiKey, { fetch: deps.fetch });
+	const fetchOnce = () => fetchOverview(baseUrl, apiKey, { fetch: deps.fetch });
+
+	// The first read happens here in every mode, so a server that is down or a
+	// wrong key exits 1 in the calling terminal before anything takes it over.
+	const result = await fetchOnce();
 	if (!result.ok) {
 		deps.stderr.write(`❌ ${result.message}\n`);
 		return 1;
 	}
+
+	// Live when stdout is a terminal, once otherwise (`| cat`, a file, cron),
+	// matching `top`. `--once` forces the single print on a terminal.
+	if (deps.stdout.isTTY === true && !options.once && deps.loop) {
+		deps.onLiveStart?.();
+		return runOverviewLoop({
+			baseUrl,
+			intervalMs: options.intervalSeconds * 1000,
+			color: useColor(deps.stdout, deps.env),
+			initial: result.accounts,
+			fetchOnce,
+			quitHint: `q or Ctrl-C to quit; refreshes every ${options.intervalSeconds}s`,
+			io: {
+				...deps.loop,
+				stdout: deps.stdout,
+				stderr: deps.stderr,
+				now: deps.now,
+			},
+		});
+	}
+
 	deps.stdout.write(
 		renderOverview(result.accounts, {
 			width: terminalWidth(deps.stdout),

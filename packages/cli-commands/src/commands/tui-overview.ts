@@ -431,3 +431,174 @@ export function renderOverview(
 	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	return `${lines.join("\n")}\n`;
 }
+
+/** Alternate screen on, cursor hidden; and the exact reverse. */
+export const ENTER_SCREEN = "\x1b[?1049h\x1b[?25l";
+export const LEAVE_SCREEN = "\x1b[?25h\x1b[?1049l";
+const HOME = "\x1b[H";
+const CLEAR_LINE_END = "\x1b[K";
+const CLEAR_BELOW = "\x1b[J";
+const CTRL_C = "\x03";
+
+/** Repaint shortly after start: a fresh kitty panel reports 63x18 at first. */
+export const SETTLE_REPAINT_MS = 300;
+
+export type LoopSignal = "SIGTERM" | "SIGHUP" | "SIGINT" | "SIGWINCH";
+
+/** Everything the live loop touches outside itself, injected so it can be tested. */
+export interface LoopIO {
+	stdout: {
+		write(text: string, callback?: () => void): unknown;
+		columns?: number;
+		rows?: number;
+	};
+	stderr: { write(text: string): unknown };
+	/** Read for `q` and Ctrl-C when it is a TTY; null inside a panel or a pipe. */
+	stdin: {
+		isTTY?: boolean;
+		setRawMode?(mode: boolean): unknown;
+		on(event: "data", listener: (chunk: Buffer | string) => void): unknown;
+		removeListener(
+			event: "data",
+			listener: (chunk: Buffer | string) => void,
+		): unknown;
+		resume(): unknown;
+		pause(): unknown;
+	} | null;
+	/** Register a signal handler; returns its unregister function. */
+	onSignal(signal: LoopSignal, handler: () => void): () => void;
+	setTimer(callback: () => void, ms: number): unknown;
+	clearTimer(handle: unknown): void;
+	now(): number;
+}
+
+export interface LoopOptions {
+	baseUrl: string;
+	intervalMs: number;
+	color: boolean;
+	/** The rows already fetched by the caller's preflight. */
+	initial: AccountResponse[];
+	fetchOnce: () => Promise<OverviewFetchResult>;
+	/** The last footer line: how to leave. */
+	quitHint: string;
+	io: LoopIO;
+}
+
+/**
+ * Repaint the Overview every `intervalMs` until `q`, Ctrl-C, SIGINT, SIGTERM
+ * or SIGHUP, then restore the terminal and resolve with the exit code.
+ *
+ * Inside a kitty panel the keyboard never arrives (focus policy
+ * `not-allowed`), so SIGTERM and SIGHUP are the only way out there: closing
+ * the panel over its socket sends SIGHUP. A transient fetch failure keeps the
+ * last good table on screen with the error under it; an authentication
+ * failure exits 1, because retrying cannot fix a wrong key.
+ */
+export function runOverviewLoop(options: LoopOptions): Promise<number> {
+	const { io } = options;
+	let accounts = options.initial;
+	let lastGoodAt = io.now();
+	let lastError: string | null = null;
+	let timer: unknown = null;
+	let settleTimer: unknown = null;
+	let stopped = false;
+	const unregister: Array<() => void> = [];
+
+	return new Promise<number>((resolve) => {
+		const paint = () => {
+			if (stopped) return;
+			const footer: string[] = [];
+			if (lastError) {
+				footer.push(
+					`! ${lastError}; showing data from ${formatClock(new Date(lastGoodAt))}`,
+				);
+			}
+			footer.push(options.quitHint);
+			const frame = renderOverview(accounts, {
+				width: io.stdout.columns ?? 80,
+				color: options.color,
+				now: io.now(),
+				baseUrl: options.baseUrl,
+				footer,
+			});
+			let lines = frame.replace(/\n$/, "").split("\n");
+			const rows = io.stdout.rows;
+			if (rows && rows > 1 && lines.length > rows) {
+				lines = lines.slice(0, rows);
+			}
+			io.stdout.write(
+				`${HOME}${lines.join(`${CLEAR_LINE_END}\n`)}${CLEAR_LINE_END}${CLEAR_BELOW}`,
+			);
+		};
+
+		const stop = (code: number, message?: string) => {
+			if (stopped) return;
+			stopped = true;
+			if (timer !== null) io.clearTimer(timer);
+			if (settleTimer !== null) io.clearTimer(settleTimer);
+			for (const off of unregister) off();
+			if (io.stdin) {
+				io.stdin.removeListener("data", onKey);
+				if (io.stdin.isTTY) io.stdin.setRawMode?.(false);
+				io.stdin.pause();
+			}
+			io.stdout.write(LEAVE_SCREEN, () => {
+				if (message) io.stderr.write(`❌ ${message}\n`);
+				resolve(code);
+			});
+		};
+
+		const onKey = (chunk: Buffer | string) => {
+			const text = chunk.toString();
+			if (text.includes("q") || text.includes("Q") || text.includes(CTRL_C)) {
+				stop(0);
+			}
+		};
+
+		const tick = async () => {
+			timer = null;
+			try {
+				const result = await options.fetchOnce();
+				if (stopped) return;
+				if (result.ok) {
+					accounts = result.accounts;
+					lastGoodAt = io.now();
+					lastError = null;
+				} else if (
+					result.kind === "unauthorized" ||
+					result.kind === "forbidden"
+				) {
+					stop(1, result.message);
+					return;
+				} else {
+					lastError = result.message;
+				}
+				paint();
+			} catch (error) {
+				// The terminal is in raw mode on the alternate screen; an escaping
+				// throw would leave it there.
+				stop(1, error instanceof Error ? error.message : String(error));
+				return;
+			}
+			timer = io.setTimer(() => void tick(), options.intervalMs);
+		};
+
+		io.stdout.write(ENTER_SCREEN);
+		for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
+			unregister.push(io.onSignal(signal, () => stop(0)));
+		}
+		unregister.push(io.onSignal("SIGWINCH", paint));
+		if (io.stdin?.isTTY) {
+			io.stdin.setRawMode?.(true);
+			io.stdin.on("data", onKey);
+			io.stdin.resume();
+		}
+
+		paint();
+		settleTimer = io.setTimer(() => {
+			settleTimer = null;
+			paint();
+		}, SETTLE_REPAINT_MS);
+		timer = io.setTimer(() => void tick(), options.intervalMs);
+	});
+}
