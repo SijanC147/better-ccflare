@@ -597,8 +597,16 @@ export function AccountsTab() {
 
 	const handleUpdateUsageThresholds = async (
 		accountId: string,
-		fiveHour: { enabled: boolean; percent: number | null },
-		weekly: { enabled: boolean; percent: number | null },
+		fiveHour: {
+			enabled: boolean;
+			percent: number | null;
+			minResetRemainingMs: number | null;
+		},
+		weekly: {
+			enabled: boolean;
+			percent: number | null;
+			minResetRemainingMs: number | null;
+		},
 	) => {
 		try {
 			await api.updateAccountUsagePauseThresholds(accountId, fiveHour, weekly);

@@ -4,6 +4,11 @@ import {
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
+import {
+	describeUsagePauseWindow,
+	getThresholdLabels,
+	storedWindowSettings,
+} from "./usage-pause-helpers";
 
 /**
  * The card's overflow menu is built here rather than inline in the JSX so the
@@ -252,20 +257,21 @@ export function accountMenuActions(
 		supportsUsagePauseThreshold(account.provider) &&
 		handlers.usageThresholds
 	) {
+		// Both conditions, not the percent alone: a window with only a reset
+		// minimum is configured too, and would otherwise read as "not set"
+		// (SB23-2575).
+		const { fiveHour, weekly } = storedWindowSettings(account);
+		const { fiveHourLabel, weeklyLabel } = getThresholdLabels(account);
 		const activeUsageThresholds = [
-			account.usagePauseFiveHourEnabled && account.usagePauseFiveHourThreshold
-				? `${account.usagePauseFiveHourThreshold}% of the 5-hour window`
-				: null,
-			account.usagePauseWeeklyEnabled && account.usagePauseWeeklyThreshold
-				? `${account.usagePauseWeeklyThreshold}% of the weekly window`
-				: null,
+			describeUsagePauseWindow(fiveHourLabel, fiveHour),
+			describeUsagePauseWindow(weeklyLabel, weekly),
 		].filter((entry): entry is string => entry !== null);
 		actions.push({
 			id: "usage-thresholds",
 			label: "Usage pause thresholds",
 			title:
 				activeUsageThresholds.length > 0
-					? `Pauses at ${activeUsageThresholds.join(", ")}`
+					? `Pauses on the ${activeUsageThresholds.join("; the ")}`
 					: "Set usage pause thresholds",
 			configured: activeUsageThresholds.length > 0,
 		});
