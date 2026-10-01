@@ -53,12 +53,12 @@ interface RequestState {
 	chunksBytes: number;
 	chunksTruncated: boolean;
 	usage: {
-		model?: string;
+		model?: string | undefined;
 		inputTokens?: number;
 		cacheReadInputTokens?: number;
 		cacheCreationInputTokens?: number;
 		outputTokens?: number;
-		outputTokensComputed?: number;
+		outputTokensComputed?: number | undefined;
 		totalTokens?: number;
 		costUsd?: number;
 		tokensPerSecond?: number;
@@ -76,7 +76,7 @@ interface RequestState {
 	lastTokenTimestamp?: number;
 	providerFinalOutputTokens?: number;
 	shouldSkipLogging?: boolean;
-	currentEvent?: string; // Track SSE event type across chunks
+	currentEvent?: string | undefined; // Track SSE event type across chunks
 	payloadReleased: boolean;
 	/**
 	 * Bodies were dropped to bound memory while the header set was kept, so the

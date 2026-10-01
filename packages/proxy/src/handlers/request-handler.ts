@@ -180,9 +180,12 @@ export async function makeProxyRequest(
 		chatGptCloudflareCookieJar.applyCookieHeader(target, mutableHeaders);
 
 		const response = await fetch(target, {
-			method,
+			// WebIDL treats an `undefined` dictionary member like an absent one, so leaving
+			// the key out when no method was passed is what `method: undefined`
+			// already did: fetch defaults to GET.
+			...(method !== undefined ? { method } : {}),
 			headers: mutableHeaders,
-			body: createBodyStream ? createBodyStream() : undefined,
+			body: createBodyStream?.() ?? null,
 			signal: effectiveSignal,
 			...(hasBody ? ({ duplex: "half" } as RequestInit) : {}),
 		});

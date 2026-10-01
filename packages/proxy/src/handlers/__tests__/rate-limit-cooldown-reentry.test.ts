@@ -56,7 +56,7 @@ function makeCtx() {
 		markRateLimited: [] as Array<{
 			until: number;
 			reason: string;
-			incrementStreak?: boolean;
+			incrementStreak?: boolean | undefined;
 		}>,
 	};
 	const ctx = makeProxyContext({

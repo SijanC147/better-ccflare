@@ -127,7 +127,7 @@ type Hook = "prepareRequest" | "buildUrl" | "processResponse";
 interface Seen {
 	hook: Hook;
 	context: ProviderRequestContext | undefined;
-	requestModel?: string | null;
+	requestModel?: string | null | undefined;
 }
 
 function makeContext(provider: Partial<Provider>): ProxyContext {

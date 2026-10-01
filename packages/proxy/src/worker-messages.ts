@@ -101,7 +101,7 @@ export interface EndMessage {
 	requestId: string;
 	responseBody?: string | null; // base64 encoded, for non-streaming
 	success: boolean;
-	error?: string;
+	error?: string | undefined;
 	/**
 	 * Real observed SSE termination state for Anthropic-Messages-shaped
 	 * streaming responses. Null when the wrapper did not observe the stream
@@ -118,7 +118,8 @@ export interface EndMessage {
 		| "error"
 		| "truncated"
 		| "client_cancelled"
-		| null;
+		| null
+		| undefined;
 }
 
 export interface ControlMessage {

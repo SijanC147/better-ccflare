@@ -103,7 +103,7 @@ export interface ResponseHandlerOptions {
 	account: Account | null;
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
-	project?: string | null;
+	project?: string | null | undefined;
 	/** Optional explicit cwd hint from X-CCFlare-CWD header — fed into resolver before heuristics */
 	cwdHint?: string | null;
 	/** Raw URL query string (e.g. `?after_id=...`), used for passive model-catalog capture. */
@@ -113,22 +113,22 @@ export interface ResponseHandlerOptions {
 	timestamp: number;
 	retryAttempt: number;
 	failoverAttempts: number;
-	agentUsed?: string | null;
+	agentUsed?: string | null | undefined;
 	agentAttributionSource?: AgentAttributionSource | null;
 	/** Client session id (body `metadata.user_id`), persisted for attribution. */
 	clientSessionId?: string | null;
-	apiKeyId?: string | null;
-	apiKeyName?: string | null;
-	comboName?: string | null;
-	originalModel?: string | null;
-	appliedModel?: string | null;
+	apiKeyId?: string | null | undefined;
+	apiKeyName?: string | null | undefined;
+	comboName?: string | null | undefined;
+	originalModel?: string | null | undefined;
+	appliedModel?: string | null | undefined;
 	/**
 	 * Controller whose signal was merged into the upstream fetch's
 	 * `init.signal` (see proxy-operations.ts). Passed through to the
 	 * terminal-recovery stream so a stuck-upstream drain deadline can abort
 	 * the actual connection instead of only releasing the reader lock.
 	 */
-	drainAbort?: AbortController;
+	drainAbort?: AbortController | undefined;
 }
 
 /**

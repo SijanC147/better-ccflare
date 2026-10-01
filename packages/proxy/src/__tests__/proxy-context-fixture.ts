@@ -69,6 +69,14 @@
  *   `prepareRequest` (`if (provider.x)`), `observeRequest` (proxy.ts picks
  *   the codex observer when it is absent), `observeUpstream` (`?.()`).
  *
+ * That is why the four fields and `dbOps` are typed `MockOf<T>` rather than
+ * `Partial<T>`. Under `exactOptionalPropertyTypes` (SB23-3983) `Partial<T>`
+ * refuses an explicit `undefined`, and here an explicit `undefined` differs from
+ * leaving the member out: the stub serves an own key holding
+ * `undefined` and throws for a key the mock does not name. `Config`,
+ * `Provider` and `DatabaseOperations` are not widened; only what this file
+ * accepts is.
+ *
  * One exception: a member production tests with `in`, such as
  * `"parseRateLimitFromBody" in provider` (handlers/response-processor.ts),
  * must be OMITTED, not named as `undefined`. The `has` trap answers true for
@@ -136,6 +144,13 @@ import type {
 import type { Provider } from "@better-ccflare/providers";
 import type { LoadBalancingStrategy } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers/proxy-types";
+
+/**
+ * A partial mock of `T` whose members may also be named as `undefined`. See
+ * "Members production tests for presence" above: an own key holding
+ * `undefined` is served as `undefined`, while a key that is not named throws.
+ */
+export type MockOf<T> = { [K in keyof T]?: T[K] | undefined };
 
 /**
  * Property names a runtime probes on an arbitrary object without the code
@@ -216,14 +231,14 @@ function isPlainObject(value: object): boolean {
  * The value for one of the four fields that are either a partial mock or a
  * real instance. See "Supplying `strategy`, ..." in the header.
  *
- * The single assertion here is the passthrough arm: `Partial<T>` is the
+ * The single assertion here is the passthrough arm: `MockOf<T>` is the
  * declared type, and an instance that is not a plain object is taken to be the
  * whole `T` it was constructed as. That is the same claim every call site used
  * to make with `as never`, made once, behind a runtime check.
  */
 function suppliedOrStub<T extends object>(
 	field: string,
-	supplied: Partial<T> | undefined,
+	supplied: MockOf<T> | undefined,
 ): T {
 	if (supplied === undefined) return throwingStub<T>(field);
 	if (isPlainObject(supplied)) {
@@ -251,22 +266,22 @@ export interface ProxyContextOverrides {
 	 * The `DatabaseOperations` methods this test expects to be called. Any
 	 * other method throws naming itself.
 	 */
-	dbOps?: Partial<DatabaseOperations>;
+	dbOps?: MockOf<DatabaseOperations>;
 	/** Defaults to a fresh empty `Map`, never shared between two contexts. */
 	refreshInFlight?: Map<string, Promise<string>>;
 	/** Absent by default, matching the six helpers this fixture replaces. */
-	internalProbeSecret?: string;
+	internalProbeSecret?: string | undefined;
 	/**
 	 * A plain object is a partial mock: its methods are served and any other
 	 * property throws. A class instance passes through unchanged.
 	 */
-	strategy?: Partial<LoadBalancingStrategy>;
+	strategy?: MockOf<LoadBalancingStrategy>;
 	/** As `strategy`. */
-	config?: Partial<Config>;
+	config?: MockOf<Config>;
 	/** As `strategy`. A real provider instance passes through. */
-	provider?: Partial<Provider>;
+	provider?: MockOf<Provider>;
 	/** As `strategy`. */
-	asyncWriter?: Partial<AsyncDbWriter>;
+	asyncWriter?: MockOf<AsyncDbWriter>;
 }
 
 /**

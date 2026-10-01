@@ -405,7 +405,8 @@ describe("CacheKeepaliveScheduler", () => {
 		});
 
 		it("with one cached account — fetch called once with correct URL and headers", async () => {
-			const capturedInputs: { url: string; init?: RequestInit }[] = [];
+			const capturedInputs: { url: string; init?: RequestInit | undefined }[] =
+				[];
 			const fetchMock = mock(
 				async (input: RequestInfo | URL, init?: RequestInit) => {
 					// When called with a string URL, input is the URL string.
