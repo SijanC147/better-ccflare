@@ -2185,6 +2185,9 @@ export async function proxyWithAccount(
 						break; // Success — stop cycling
 					}
 				}
+				// Live only while the loop above re-prepares a model. A later hook
+				// that re-ran prepareRequest must not inherit it.
+				delete providerContext.fallbackModel;
 			}
 
 			// If still unavailable/rate-limited after exhausting the model list,

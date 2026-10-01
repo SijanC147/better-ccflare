@@ -439,8 +439,10 @@ describe("proxyWithAccount — per-request provider carrier (SB23-2508)", () => 
 		});
 
 		let restored: string | undefined;
+		let carrierAtResponse: ProviderRequestContext | undefined;
 		const originalProcessResponse = vertex.processResponse;
 		vertex.processResponse = async (response, acct, ...rest) => {
+			carrierAtResponse = rest[2];
 			const out = await originalProcessResponse.call(
 				vertex,
 				response,
@@ -468,5 +470,8 @@ describe("proxyWithAccount — per-request provider carrier (SB23-2508)", () => 
 		expect(sent[0].body).not.toHaveProperty("model");
 		expect(sent[1].body).not.toHaveProperty("model");
 		expect(restored).toBe(FALLBACK);
+		// The fallback name is cleared once the loop is done with it.
+		expect(carrierAtResponse).toBeDefined();
+		expect(carrierAtResponse).not.toHaveProperty("fallbackModel");
 	});
 });
