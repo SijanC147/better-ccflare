@@ -27,6 +27,7 @@ import { api, type RequestPayload, type RequestSummary } from "../api";
 import { useAccounts, useApiKeys, useRequests } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
 import { attributionSourceLabel } from "../lib/attribution";
+import { formatHistoryTime } from "../lib/inbound";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { InboundBadge } from "./InboundBadge";
@@ -209,9 +210,6 @@ export function RequestsTab() {
 	const [withTokensOnly, setWithTokensOnly] = useState(false);
 	const [modelFilters, setModelFilters] = useState<Set<string>>(new Set());
 	const [projectFilters, setProjectFilters] = useState<Set<string>>(new Set());
-	const [use24HourFormat, setUse24HourFormat] = useState(() => {
-		return localStorage.getItem("ccflare-24h-time") === "true";
-	});
 	const [groupByProject, setGroupByProject] = useState(() => {
 		return localStorage.getItem("ccflare-group-by-project") === "true";
 	});
@@ -542,11 +540,6 @@ export function RequestsTab() {
 		});
 	};
 
-	const handleToggle24HourFormat = (checked: boolean) => {
-		setUse24HourFormat(checked);
-		localStorage.setItem("ccflare-24h-time", checked ? "true" : "false");
-	};
-
 	const handleToggleGroupByProject = (checked: boolean) => {
 		setGroupByProject(checked);
 		localStorage.setItem(
@@ -555,18 +548,8 @@ export function RequestsTab() {
 		);
 	};
 
-	const formatTime = (timestamp: number | string): string => {
-		const date = new Date(timestamp);
-		if (use24HourFormat) {
-			return date.toLocaleTimeString("en-GB", {
-				hour: "2-digit",
-				minute: "2-digit",
-				second: "2-digit",
-				hour12: false,
-			});
-		}
-		return date.toLocaleTimeString();
-	};
+	const formatTime = (timestamp: number | string): string =>
+		formatHistoryTime(timestamp);
 
 	const getStatusCodeColor = (code: number) => {
 		if (code >= 200 && code < 300) return "text-green-600";
@@ -946,19 +929,6 @@ export function RequestsTab() {
 									))}
 								</SelectContent>
 							</Select>
-						</div>
-						<div className="flex items-center gap-2">
-							<Label
-								htmlFor="24h-format"
-								className="text-sm font-medium cursor-pointer"
-							>
-								24h
-							</Label>
-							<Switch
-								id="24h-format"
-								checked={use24HourFormat}
-								onCheckedChange={handleToggle24HourFormat}
-							/>
 						</div>
 						<div className="flex items-center gap-2">
 							<Label

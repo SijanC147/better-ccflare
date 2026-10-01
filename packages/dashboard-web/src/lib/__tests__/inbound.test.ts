@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { inboundLabel, inboundPath } from "../inbound";
+import { formatHistoryTime, inboundLabel, inboundPath } from "../inbound";
 
 describe("inboundLabel", () => {
 	it("names the plain Chat Completions endpoint", () => {
@@ -38,5 +38,15 @@ describe("inboundPath", () => {
 
 	it("is null without a known format", () => {
 		expect(inboundPath(undefined, "work")).toBeNull();
+	});
+});
+
+describe("formatHistoryTime", () => {
+	it("uses the 24-hour clock, midnight as 00", () => {
+		const midnight = new Date(2026, 9, 1, 0, 5, 9).getTime();
+		const afternoon = new Date(2026, 9, 1, 16, 10, 37).getTime();
+		expect(formatHistoryTime(midnight)).toBe("00:05:09");
+		expect(formatHistoryTime(afternoon)).toBe("16:10:37");
+		expect(formatHistoryTime(afternoon)).not.toMatch(/AM|PM/i);
 	});
 });

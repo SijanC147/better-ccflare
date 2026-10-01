@@ -32,3 +32,18 @@ export function inboundPath(
 	if (rest === null) return null;
 	return gateway ? `/v1/gateways/${gateway}${rest}` : `/v1${rest}`;
 }
+
+/**
+ * A request history timestamp on the 24-hour clock, whatever the viewer's
+ * locale: `toLocaleTimeString()` with no options prints "4:10:37 AM" for an
+ * en-US viewer. `hourCycle: "h23"` rather than `hour12: false`, which some
+ * engines render as hour 24 at midnight.
+ */
+export function formatHistoryTime(timestamp: number | string): string {
+	return new Date(timestamp).toLocaleTimeString("en-GB", {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hourCycle: "h23",
+	});
+}
