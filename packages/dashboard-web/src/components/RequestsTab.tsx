@@ -29,6 +29,7 @@ import { useRequestStream } from "../hooks/useRequestStream";
 import { attributionSourceLabel } from "../lib/attribution";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
+import { InboundBadge } from "./InboundBadge";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { Badge } from "./ui/badge";
@@ -711,6 +712,10 @@ export function RequestsTab() {
 								Agent: {summary?.agentUsed || request.meta.agentUsed}
 							</Badge>
 						)}
+						<InboundBadge
+							format={summary?.inboundFormat}
+							gateway={summary?.inboundGateway}
+						/>
 						{summary?.comboName && (
 							<Badge
 								variant="outline"
@@ -1722,6 +1727,7 @@ export function RequestsTab() {
 										agent ||
 										project ||
 										worktreePath ||
+										summary?.inboundFormat ||
 										summary?.comboName ||
 										summary?.apiKeyName ||
 										summary?.totalTokens != null ||
@@ -1777,6 +1783,10 @@ export function RequestsTab() {
 													)}
 												</Badge>
 											)}
+											<InboundBadge
+												format={summary?.inboundFormat}
+												gateway={summary?.inboundGateway}
+											/>
 											{summary?.comboName && (
 												<Badge
 													variant="outline"
