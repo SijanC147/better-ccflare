@@ -1,9 +1,16 @@
 import { describe, expect, it } from "bun:test";
+import type { Account } from "@better-ccflare/types";
+import { CodexProvider } from "./provider";
 import {
+	CODEX_INTERNAL_REPLAY_HEADER,
+	CODEX_MESSAGES_TURN_LEASE_MS,
 	CODEX_TURN_METADATA_HEADER,
 	CODEX_TURN_STATE_HEADER,
 	CodexTurnStateStore,
 	codexTurnId,
+	type MessagesTurn,
+	messagesTurn,
+	turnAnchorIndex,
 } from "./turn-state";
 
 // SB23-2370. The store files a token under the account that issued it and the
@@ -179,5 +186,512 @@ describe("CodexTurnStateStore", () => {
 		const toB = new Headers({ [CODEX_TURN_STATE_HEADER]: "ts-a" });
 		store.scope(toB, client({ turnId: "t1", token: "ts-a" }), "acc-b");
 		expect(toB.has(CODEX_TURN_STATE_HEADER)).toBe(false);
+	});
+});
+
+// SB23-3629: turns derived from an Anthropic Messages body.
+describe("messagesTurn", () => {
+	const session = "5e550000-0000-4000-8000-000000000001";
+	const body = (over: Record<string, unknown> = {}) => ({
+		model: "m",
+		metadata: { user_id: JSON.stringify({ session_id: session }) },
+		messages: [{ role: "user", content: "hi" }],
+		...over,
+	});
+
+	it("is null without a UUID session id, without messages, or without an anchor", () => {
+		expect(messagesTurn(body({ metadata: undefined }))).toBeNull();
+		expect(
+			messagesTurn(
+				body({ metadata: { user_id: JSON.stringify({ session_id: "nope" }) } }),
+			),
+		).toBeNull();
+		expect(messagesTurn(body({ messages: [] }))).toBeNull();
+		expect(
+			messagesTurn(
+				body({
+					messages: [
+						{
+							role: "user",
+							content: [
+								{ type: "tool_result", tool_use_id: "t", content: "x" },
+							],
+						},
+					],
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("names the turn by session and model, and ignores system and cache_control", () => {
+		const base = messagesTurn(body());
+		expect(base).not.toBeNull();
+		expect(messagesTurn(body({ system: "changed every request" }))?.key).toBe(
+			base?.key,
+		);
+		expect(
+			messagesTurn(
+				body({
+					messages: [
+						{
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text: "hi",
+									cache_control: { type: "ephemeral" },
+								},
+							],
+						},
+					],
+				}),
+			)?.key,
+		).toBe(base?.key);
+		expect(messagesTurn(body({ model: "other" }))?.key).not.toBe(base?.key);
+		// The authenticated caller keeps one API key out of another's turns.
+		const callerA = messagesTurn(body(), "a".repeat(64))?.key;
+		expect(callerA).not.toBe(base?.key);
+		expect(messagesTurn(body(), "b".repeat(64))?.key).not.toBe(callerA);
+		expect(
+			messagesTurn(
+				body({
+					metadata: {
+						user_id: JSON.stringify({
+							session_id: "5e550000-0000-4000-8000-000000000002",
+						}),
+					},
+				}),
+			)?.key,
+		).not.toBe(base?.key);
+	});
+
+	it("anchors on the last user message holding anything but a tool_result", () => {
+		const tr = { type: "tool_result", tool_use_id: "t", content: "x" };
+		expect(
+			turnAnchorIndex([
+				{ role: "user", content: "a" },
+				{ role: "assistant", content: "b" },
+				{ role: "user", content: [tr] },
+			]),
+		).toBe(0);
+		expect(
+			turnAnchorIndex([
+				{ role: "user", content: "a" },
+				{ role: "assistant", content: "b" },
+				{ role: "user", content: [tr, { type: "text", text: "c" }] },
+			]),
+		).toBe(2);
+		// A refusal opens a turn even with no text block of its own; an
+		// ordinary error result does not.
+		const result = (content: string) => ({
+			role: "user",
+			content: [
+				{ type: "tool_result", tool_use_id: "t", is_error: true, content },
+			],
+		});
+		const history = [
+			{ role: "user", content: "a" },
+			{ role: "assistant", content: "b" },
+		];
+		expect(
+			turnAnchorIndex([
+				...history,
+				result("The user doesn't want to proceed with this tool use. Stop."),
+			]),
+		).toBe(2);
+		expect(turnAnchorIndex([...history, result("exit code 1")])).toBe(0);
+	});
+});
+
+describe("CodexTurnStateStore messages turns", () => {
+	const session = "5e550000-0000-4000-8000-000000000003";
+	const turn = (n: number) =>
+		messagesTurn({
+			model: "m",
+			metadata: { user_id: JSON.stringify({ session_id: session }) },
+			messages: [
+				{ role: "user", content: "go" },
+				...Array.from({ length: n }, (_, i) => [
+					{
+						role: "assistant",
+						content: [{ type: "tool_use", id: `t${i}`, name: "x", input: {} }],
+					},
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: `t${i}`, content: "" },
+						],
+					},
+				]).flat(),
+			],
+		}) as MessagesTurn;
+
+	it("replays only to a strict extension of the last answered request", () => {
+		const store = new CodexTurnStateStore();
+		const l0 = store.lookupMessagesTurn(turn(0), "A", "r0");
+		expect(l0.match).toBe("fresh");
+		store.recordMessagesTurn(l0, "A", "tok");
+		const l1 = store.lookupMessagesTurn(turn(1), "A", "r1");
+		expect([l1.match, l1.token]).toEqual(["extends", "tok"]);
+		store.recordMessagesTurn(l1, "A", null);
+		const l2 = store.lookupMessagesTurn(turn(2), "A", "r2");
+		expect(l2.token).toBe("tok");
+		store.recordMessagesTurn(l2, "A", null);
+		// A shorter body under the same key is a rewind: poisoned from here on.
+		expect(store.lookupMessagesTurn(turn(1), "A", "r3").match).toBe("other");
+		expect(store.lookupMessagesTurn(turn(3), "A", "r4").match).toBe("poisoned");
+	});
+
+	it("does not replay to a longer body that does not extend the answered one", () => {
+		const store = new CodexTurnStateStore();
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(1), "A", "r0"),
+			"A",
+			"tok",
+		);
+		const fork = { ...turn(3), prefixes: [...turn(3).prefixes] };
+		// Index 2 is the chain digest over the three messages A answered.
+		fork.prefixes[2] = "not-the-answered-history";
+		expect(store.lookupMessagesTurn(fork, "A", "r1")).toMatchObject({
+			match: "other",
+			token: null,
+		});
+	});
+
+	it("keeps accounts apart", () => {
+		const store = new CodexTurnStateStore();
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		expect(store.lookupMessagesTurn(turn(1), "B", "r1")).toMatchObject({
+			match: "fresh",
+			token: null,
+		});
+	});
+
+	it("poisons a key a second fresh start reaches while the first is unanswered", () => {
+		const store = new CodexTurnStateStore();
+		const first = store.lookupMessagesTurn(turn(0), "A", "r1");
+		const second = store.lookupMessagesTurn(turn(0), "A", "r2");
+		expect([first.match, second.match]).toEqual(["fresh", "other"]);
+		store.recordMessagesTurn(first, "A", "tok-1");
+		store.recordMessagesTurn(second, "A", "tok-2");
+		expect(store.lookupMessagesTurn(turn(1), "A", "r3").match).toBe("poisoned");
+	});
+
+	it("gives the token to one of two follow-ups of one position, never both", () => {
+		const store = new CodexTurnStateStore();
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		const x = store.lookupMessagesTurn(turn(1), "A", "rx");
+		const y = store.lookupMessagesTurn(turn(2), "A", "ry");
+		expect([x.token, y.token]).toEqual(["tok", null]);
+		store.recordMessagesTurn(x, "A", null);
+		expect(store.lookupMessagesTurn(turn(3), "A", "rz").match).toBe("poisoned");
+	});
+
+	it("files nothing from an opening whose placeholder was evicted and retaken", () => {
+		// Two siblings with byte-identical openings, S and R, and enough other
+		// turns between them to evict S's placeholder before S is answered.
+		const store = new CodexTurnStateStore(undefined, 2);
+		const s = store.lookupMessagesTurn(turn(0), "A", "s");
+		store.lookupMessagesTurn(turn(0), "X1", "f1");
+		store.lookupMessagesTurn(turn(0), "X2", "f2");
+		const r = store.lookupMessagesTurn(turn(0), "A", "r");
+		expect(r.match).toBe("fresh");
+		store.recordMessagesTurn(s, "A", "tok-S");
+		store.recordMessagesTurn(r, "A", "tok-R");
+		expect(store.lookupMessagesTurn(turn(1), "A", "s2")).toMatchObject({
+			match: "poisoned",
+			token: null,
+		});
+	});
+
+	it("lets the same request look up again without losing its lease", () => {
+		const store = new CodexTurnStateStore();
+		store.lookupMessagesTurn(turn(0), "A", "r");
+		const again = store.lookupMessagesTurn(turn(0), "A", "r");
+		expect(again.match).toBe("fresh");
+		store.recordMessagesTurn(again, "A", "tok");
+		expect(store.lookupMessagesTurn(turn(1), "A", "r2").token).toBe("tok");
+	});
+
+	it("treats a lease left by an unanswered request as released after two minutes", () => {
+		const c = clock();
+		const store = new CodexTurnStateStore(undefined, undefined, c.now);
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		// A 429 failover: looked up, never answered.
+		store.lookupMessagesTurn(turn(1), "A", "lost");
+		c.advance(CODEX_MESSAGES_TURN_LEASE_MS - 1);
+		expect(store.lookupMessagesTurn(turn(1), "A", "early").match).toBe("other");
+		const fresh = new CodexTurnStateStore(undefined, undefined, c.now);
+		fresh.recordMessagesTurn(
+			fresh.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		fresh.lookupMessagesTurn(turn(1), "A", "lost");
+		c.advance(CODEX_MESSAGES_TURN_LEASE_MS + 1);
+		expect(fresh.lookupMessagesTurn(turn(1), "A", "late")).toMatchObject({
+			match: "extends",
+			token: "tok",
+		});
+	});
+
+	it("poisons the key when a holder whose lease lapsed records after another took it", () => {
+		// From the #280 review (F8): the record-side lease check is the only
+		// thing that catches this; the token checks behind it cannot.
+		const c = clock();
+		const store = new CodexTurnStateStore(undefined, undefined, c.now);
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		const x = store.lookupMessagesTurn(turn(1), "A", "x");
+		c.advance(CODEX_MESSAGES_TURN_LEASE_MS + 1);
+		const y = store.lookupMessagesTurn(turn(2), "A", "y");
+		expect([x.token, y.token]).toEqual(["tok", "tok"]);
+		store.recordMessagesTurn(x, "A", null);
+		store.recordMessagesTurn(y, "A", null);
+		expect(store.lookupMessagesTurn(turn(3), "A", "y2").match).toBe("poisoned");
+	});
+
+	it("forgets a turn after the TTL and files no oversized token", () => {
+		const c = clock();
+		const store = new CodexTurnStateStore(1000, 100, c.now);
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		c.advance(1001);
+		expect(store.lookupMessagesTurn(turn(1), "A", "r1").match).toBe("fresh");
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "B", "r2"),
+			"B",
+			"x".repeat(4097),
+		);
+		expect(store.lookupMessagesTurn(turn(1), "B", "r3").match).toBe("fresh");
+	});
+});
+
+describe("CodexProvider pending derived turns", () => {
+	it("holds at most 5000 lookups awaiting a response, dropping the oldest", async () => {
+		const provider = new CodexProvider();
+		const pending = (
+			provider as unknown as { messagesTurnByRequest: Map<string, unknown> }
+		).messagesTurnByRequest;
+		const account = {
+			id: "acc-cap",
+			name: "cap",
+			provider: "codex",
+		} as Account;
+		const body = JSON.stringify({
+			model: "gpt-5.5",
+			max_tokens: 16,
+			metadata: {
+				user_id: JSON.stringify({
+					session_id: "5e550000-0000-4000-8000-0000000000ca",
+				}),
+			},
+			messages: [{ role: "user", content: "hi" }],
+		});
+		for (let i = 0; i <= 5000; i++) {
+			await provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": `req-${i}`,
+					},
+					body,
+				}),
+				account,
+			);
+		}
+		expect(pending.size).toBe(5000);
+		expect(pending.has("req-0\0acc-cap")).toBe(false);
+		expect(pending.has("req-5000\0acc-cap")).toBe(true);
+	});
+
+	it("leaves nothing pending and no lease when the conversion refuses the request", async () => {
+		const provider = new CodexProvider();
+		const pending = (
+			provider as unknown as { messagesTurnByRequest: Map<string, unknown> }
+		).messagesTurnByRequest;
+		const account = {
+			id: "acc-refuse",
+			name: "r",
+			provider: "codex",
+		} as Account;
+		const send = (requestId: string, toolChoice?: unknown) =>
+			provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": requestId,
+					},
+					body: JSON.stringify({
+						model: "gpt-5.5",
+						max_tokens: 16,
+						metadata: {
+							user_id: JSON.stringify({
+								session_id: "5e550000-0000-4000-8000-0000000000cb",
+							}),
+						},
+						messages: [{ role: "user", content: "hi" }],
+						...(toolChoice ? { tool_choice: toolChoice } : {}),
+					}),
+				}),
+				account,
+			);
+		await expect(
+			send("refused", { type: "tool", name: "no-such-tool" }),
+		).rejects.toThrow("unknown tool");
+		expect(pending.size).toBe(0);
+		// Had the refused request leased the turn, this one would read "other".
+		await send("next");
+		expect(
+			(pending.get("next\0acc-refuse") as { lookup: { match: string } }).lookup
+				.match,
+		).toBe("fresh");
+	});
+
+	it("keys the turn on the authenticated caller the proxy forwards", async () => {
+		const provider = new CodexProvider();
+		const pending = (
+			provider as unknown as {
+				messagesTurnByRequest: Map<string, { lookup: { match: string } }>;
+			}
+		).messagesTurnByRequest;
+		const account = {
+			id: "acc-caller",
+			name: "c",
+			provider: "codex",
+		} as Account;
+		const send = (requestId: string, caller: string) =>
+			provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": requestId,
+						"x-better-ccflare-authenticated-caller": caller,
+					},
+					body: JSON.stringify({
+						model: "gpt-5.5",
+						max_tokens: 16,
+						metadata: {
+							user_id: JSON.stringify({
+								session_id: "5e550000-0000-4000-8000-0000000000cc",
+							}),
+						},
+						messages: [{ role: "user", content: "hi" }],
+					}),
+				}),
+				account,
+			);
+		await send("from-a", "a".repeat(64));
+		await send("from-b", "b".repeat(64));
+		// One caller's unanswered opening would make the other's read "other".
+		expect(pending.get("from-b\0acc-caller")?.lookup.match).toBe("fresh");
+	});
+
+	it("does not reuse an earlier transform's lookup when the same request is transformed again without one", async () => {
+		const provider = new CodexProvider();
+		const account = {
+			id: "acc-again",
+			name: "g",
+			provider: "codex",
+		} as Account;
+		const body = (messages: unknown[]) =>
+			JSON.stringify({
+				model: "gpt-5.5",
+				max_tokens: 16,
+				metadata: {
+					user_id: JSON.stringify({
+						session_id: "5e550000-0000-4000-8000-0000000000cd",
+					}),
+				},
+				messages,
+			});
+		const send = (requestId: string, payload: string, type: string) =>
+			provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": type,
+						"x-better-ccflare-request-id": requestId,
+					},
+					body: payload,
+				}),
+				account,
+			);
+		const opening = [{ role: "user", content: "go" }];
+		await send("o1", body(opening), "application/json");
+		await provider.processResponse(
+			new Response(
+				JSON.stringify({
+					id: "r",
+					object: "response",
+					model: "gpt-5.5",
+					status: "completed",
+					output: [],
+					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+				}),
+				{
+					status: 200,
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": "o1",
+						"x-better-ccflare-request-path": "/v1/messages",
+						[CODEX_TURN_STATE_HEADER]: "tok-o",
+					},
+				},
+			),
+			account,
+		);
+		const loop = body([
+			...opening,
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "t", name: "x", input: {} }],
+			},
+			{
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: "t", content: "" }],
+			},
+		]);
+		const first = await send("f1", loop, "application/json");
+		expect(first.headers.get(CODEX_TURN_STATE_HEADER)).toBe("tok-o");
+		// The same request id again, through a branch that derives nothing.
+		const again = await send("f1", loop, "text/plain");
+		expect(again.headers.get(CODEX_TURN_STATE_HEADER)).toBeNull();
+	});
+
+	it("strips the internal-replay marker on the passthrough branch too", async () => {
+		const out = await new CodexProvider().transformRequestBody(
+			new Request("https://chatgpt.com/backend-api/codex/responses", {
+				method: "POST",
+				headers: {
+					"content-type": "text/plain",
+					[CODEX_INTERNAL_REPLAY_HEADER]: "true",
+				},
+				body: "not json",
+			}),
+			{ id: "acc-pt", name: "pt", provider: "codex" } as Account,
+		);
+		expect(out.headers.get(CODEX_INTERNAL_REPLAY_HEADER)).toBeNull();
 	});
 });

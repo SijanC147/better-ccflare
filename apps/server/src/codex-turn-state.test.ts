@@ -40,6 +40,8 @@ interface Seen {
 }
 
 const seen: Seen[] = [];
+/** The internal-replay marker as each upstream request carried it (SB23-3629). */
+const markers: Array<string | null> = [];
 /**
  * Never reset: the provider's store is a registry singleton that outlives one
  * test, so a token value reused across tests would be a hit nothing earned.
@@ -86,6 +88,7 @@ beforeAll(() => {
 				turnState,
 				turnMetadata: req.headers.get(TURN_METADATA),
 			});
+			markers.push(req.headers.get("x-better-ccflare-internal-replay"));
 			const override = queued.get(account)?.shift();
 			if (override) return override();
 			const headers: Record<string, string> = {
@@ -209,6 +212,7 @@ function makeCtx(): ProxyContext {
 let collector: ReturnType<typeof spyOn> | null = null;
 beforeEach(() => {
 	seen.length = 0;
+	markers.length = 0;
 	queued.clear();
 	route = ["a", "b"];
 	answerJson = false;
@@ -448,5 +452,307 @@ describe("x-codex-turn-state on /v1/messages (SB23-2370)", () => {
 		expect(seen).toHaveLength(1);
 		expect(seen[0]?.turnState).toBeNull();
 		expect(res.headers.get(TURN_STATE)).toMatch(/^ts-a-\d+$/);
+	});
+});
+
+/**
+ * SB23-3629: Claude Code reaches Codex accounts through /v1/messages and never
+ * replays the token, so the proxy derives the turn from the body. The bodies
+ * below have Claude Code's shape: `metadata.user_id` is JSON carrying a
+ * `session_id`, the newest message is a block array carrying `cache_control`,
+ * and the same message is a plain string once it is older.
+ */
+describe("x-codex-turn-state replayed on turns derived from /v1/messages bodies (SB23-3629)", () => {
+	let sessionSeq = 0;
+	function newSession(): string {
+		sessionSeq += 1;
+		return `5e550000-0000-4000-8000-${String(sessionSeq).padStart(12, "0")}`;
+	}
+
+	type Msg = { role: string; content: unknown };
+	const fresh = (text: string): Msg => ({
+		role: "user",
+		content: [{ type: "text", text, cache_control: { type: "ephemeral" } }],
+	});
+	const older = (text: string): Msg => ({ role: "user", content: text });
+	const toolUse = (id: string): Msg => ({
+		role: "assistant",
+		content: [{ type: "tool_use", id, name: "Bash", input: { command: "ls" } }],
+	});
+	const toolResult = (id: string, extra: unknown[] = []): Msg => ({
+		role: "user",
+		content: [
+			{ type: "tool_result", tool_use_id: id, content: "ok" },
+			...extra,
+		],
+	});
+	const said = (text: string): Msg => ({
+		role: "assistant",
+		content: [{ type: "text", text }],
+	});
+
+	const PROBE_SECRET = "sb23-3629-probe-secret";
+
+	async function claudeCode(
+		session: string | null,
+		messages: Msg[],
+		extraHeaders: Record<string, string> = {},
+	): Promise<Response> {
+		const req = new Request("http://localhost/v1/messages", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"anthropic-version": "2023-06-01",
+				...extraHeaders,
+			},
+			body: JSON.stringify({
+				model: "gpt-5.5",
+				max_tokens: 16,
+				stream: true,
+				...(session
+					? {
+							metadata: {
+								user_id: JSON.stringify({
+									device_id: "d",
+									session_id: session,
+								}),
+							},
+						}
+					: {}),
+				messages,
+			}),
+		});
+		const ctx = { ...makeCtx(), internalProbeSecret: PROBE_SECRET };
+		const res = await handleProxy(req, new URL(req.url), ctx as ProxyContext);
+		await res.text();
+		expect(res.status).toBe(200);
+		return res;
+	}
+
+	function sent(): Array<[string, string | null]> {
+		return seen.map((s) => [s.account, s.turnState]);
+	}
+
+	it("replays the account's token through a tool loop, across the string and block forms of one message", async () => {
+		route = ["a"];
+		const s = newSession();
+		const first = await claudeCode(s, [fresh("list files")]);
+		const token = first.headers.get(TURN_STATE);
+		expect(token).toMatch(/^ts-a-\d+$/);
+		await claudeCode(s, [older("list files"), toolUse("t1"), toolResult("t1")]);
+		await claudeCode(s, [
+			older("list files"),
+			toolUse("t1"),
+			toolResult("t1"),
+			toolUse("t2"),
+			toolResult("t2"),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", token],
+			["a", token],
+		]);
+	});
+
+	it("sends none for a new prompt in the same session", async () => {
+		route = ["a"];
+		const s = newSession();
+		await claudeCode(s, [fresh("list files")]);
+		await claudeCode(s, [
+			older("list files"),
+			said("done"),
+			fresh("now count them"),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+		]);
+	});
+
+	it("sends none when a tool result arrives beside typed text: an interrupt plus a new prompt is a new turn", async () => {
+		route = ["a"];
+		const s = newSession();
+		await claudeCode(s, [fresh("list files")]);
+		await claudeCode(s, [
+			older("list files"),
+			toolUse("t1"),
+			toolResult("t1", [
+				{ type: "text", text: "[Request interrupted by user for tool use]" },
+				{ type: "text", text: "do something else" },
+			]),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+		]);
+	});
+
+	it("sends none after a refusal whose feedback sits inside the tool_result: the user's words may open a new turn", async () => {
+		route = ["a"];
+		const s = newSession();
+		await claudeCode(s, [fresh("edit the file")]);
+		await claudeCode(s, [
+			older("edit the file"),
+			toolUse("t1"),
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "t1",
+						is_error: true,
+						content:
+							"The user doesn't want to proceed with this tool use. the user said: use tabs",
+					},
+				],
+			},
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+		]);
+	});
+
+	it("never replays after a rewind resends the same prompt inside the TTL, nor on the rewound branch's follow-ups", async () => {
+		route = ["a"];
+		const s = newSession();
+		const first = await claudeCode(s, [fresh("list files")]);
+		const token = first.headers.get(TURN_STATE);
+		await claudeCode(s, [older("list files"), toolUse("t1"), toolResult("t1")]);
+		// The rewind: the same prompt again, as the opening of a new turn.
+		await claudeCode(s, [fresh("list files")]);
+		await claudeCode(s, [older("list files"), toolUse("t9"), toolResult("t9")]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", token],
+			["a", null],
+			["a", null],
+		]);
+	});
+
+	it("never replays to a fork that grows past the answered request without extending it", async () => {
+		route = ["a"];
+		const s = newSession();
+		const first = await claudeCode(s, [fresh("list files")]);
+		const token = first.headers.get(TURN_STATE);
+		await claudeCode(s, [older("list files"), toolUse("t1"), toolResult("t1")]);
+		// Same prompt, longer, but a different history: not this turn's next step.
+		await claudeCode(s, [
+			older("list files"),
+			toolUse("t8"),
+			toolResult("t8"),
+			toolUse("t9"),
+			toolResult("t9"),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", token],
+			["a", null],
+		]);
+	});
+
+	it("never hands one account's token to another, and gives each its own", async () => {
+		const s = newSession();
+		route = ["a"];
+		const first = await claudeCode(s, [fresh("list files")]);
+		const tokenA = first.headers.get(TURN_STATE);
+		expect(tokenA).toMatch(/^ts-a-\d+$/);
+		const loop = [older("list files"), toolUse("t1"), toolResult("t1")];
+		route = ["b"];
+		const toB = await claudeCode(s, loop);
+		const tokenB = toB.headers.get(TURN_STATE);
+		expect(tokenB).toMatch(/^ts-b-\d+$/);
+		const loop2 = [...loop, toolUse("t2"), toolResult("t2")];
+		await claudeCode(s, loop2);
+		route = ["a"];
+		await claudeCode(s, [...loop2, toolUse("t3"), toolResult("t3")]);
+		expect(sent()).toEqual([
+			["a", null],
+			["b", null],
+			["b", tokenB],
+			["a", tokenA],
+		]);
+	});
+
+	it("does not let the proxy's own keepalive replay of a body poison the turn", async () => {
+		route = ["a"];
+		const s = newSession();
+		const first = await claudeCode(s, [fresh("list files")]);
+		const token = first.headers.get(TURN_STATE);
+		// The cache keepalive replays the last body byte for byte.
+		await claudeCode(s, [fresh("list files")], {
+			"x-better-ccflare-keepalive": "true",
+			"x-better-ccflare-account-id": "acc-a",
+			"x-better-ccflare-bypass-session": "true",
+			"x-better-ccflare-internal-probe-secret": PROBE_SECRET,
+		});
+		await claudeCode(s, [older("list files"), toolUse("t1"), toolResult("t1")]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+			["a", token],
+		]);
+		// The proxy's own marker never leaves it, the keepalive included.
+		expect(markers).toEqual([null, null, null]);
+	});
+
+	it("ignores a client's copy of the internal-replay marker: derivation stays on and nothing leaks upstream", async () => {
+		route = ["a"];
+		const s = newSession();
+		const forged = { "x-better-ccflare-internal-replay": "true" };
+		const first = await claudeCode(s, [fresh("list files")], forged);
+		const token = first.headers.get(TURN_STATE);
+		expect(token).toMatch(/^ts-a-\d+$/);
+		await claudeCode(
+			s,
+			[older("list files"), toolUse("t1"), toolResult("t1")],
+			forged,
+		);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", token],
+		]);
+		expect(markers).toEqual([null, null]);
+	});
+
+	it("treats a byte-identical re-send from the client as a different turn", async () => {
+		route = ["a"];
+		const s = newSession();
+		await claudeCode(s, [fresh("list files")]);
+		await claudeCode(s, [fresh("list files")]);
+		await claudeCode(s, [older("list files"), toolUse("t1"), toolResult("t1")]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+			["a", null],
+		]);
+	});
+
+	it("derives nothing without a session id: the same prompt from two clients is two turns", async () => {
+		route = ["a"];
+		await claudeCode(null, [fresh("list files")]);
+		await claudeCode(null, [
+			older("list files"),
+			toolUse("t1"),
+			toolResult("t1"),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+		]);
+	});
+
+	it("keeps sessions apart: the same tool loop in another session gets nothing", async () => {
+		route = ["a"];
+		await claudeCode(newSession(), [fresh("list files")]);
+		await claudeCode(newSession(), [
+			older("list files"),
+			toolUse("t1"),
+			toolResult("t1"),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", null],
+		]);
 	});
 });
