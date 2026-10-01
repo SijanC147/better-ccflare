@@ -151,6 +151,17 @@ describe("SB23-4035: the CLI notifies only the socket the server published", () 
 		expect(configured.received).toEqual([]);
 	});
 
+	it("sends nothing when the bind host is a name and nothing is published", async () => {
+		process.env.BETTER_CCFLARE_HOST = "localhost";
+		const configured = listen("127.0.0.1");
+		const path = configWithPort(configured.port);
+
+		const outcome = await postLocalControl(new Config(path), PATH);
+
+		expect(outcome.kind).toBe("not-sent");
+		expect(configured.received).toEqual([]);
+	});
+
 	it("sends exactly one notify to the configured port when nothing is published", async () => {
 		delete process.env.BETTER_CCFLARE_HOST;
 		const configured = listen("127.0.0.1");

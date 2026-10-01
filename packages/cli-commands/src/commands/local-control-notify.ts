@@ -39,6 +39,12 @@ export async function postLocalControl(
 			reason: `the server that published ${config.getLocalControlSidecarPath()} (pid ${target.pid}) is no longer running, so its port may now belong to anyone and the secret is not sent there`,
 		};
 	}
+	if (target.kind === "unaddressed") {
+		return {
+			kind: "not-sent",
+			reason: `BETTER_CCFLARE_HOST is the name "${target.bindHost}" and no running server has published the address it bound, so there is no literal address to send the secret to`,
+		};
+	}
 	const url = `${target.baseUrl}${path}`;
 	try {
 		const response = await fetch(url, {

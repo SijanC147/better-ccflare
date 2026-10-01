@@ -418,11 +418,17 @@ export interface LocalControlListener {
  *   listener, a sidecar that was refused, or none at all, so the notification
  *   goes to the configured port alone, on the address the configured bind host
  *   maps to. Never to a fixed pair of ports.
+ * - "unaddressed": nothing usable was published and the configured bind host is
+ *   a name, so there is no literal address to send to. Nothing is sent: a
+ *   guessed family, such as 127.0.0.1 for a server bound to localhost, which
+ *   holds only ::1, misses the server and is anyone's to bind (the #311 delta
+ *   review, D2).
  */
 export type LocalControlTarget =
 	| { kind: "published"; secret: string; baseUrl: string }
 	| { kind: "stale"; pid: number }
-	| { kind: "configured"; secret: string; baseUrl: string };
+	| { kind: "configured"; secret: string; baseUrl: string }
+	| { kind: "unaddressed"; bindHost: string };
 
 /**
  * The address a local client connects to for a server bound to `bindHost`
@@ -437,9 +443,10 @@ export type LocalControlTarget =
  * can change between the server binding it and a CLI resolving it again, by
  * DHCP, a VPN, /etc/hosts or a spoofed reply, and the secret would then go
  * wherever the name points, possibly off this host (the #311 review, L1). So
- * only literal addresses are published or sent to. The server resolves a name
- * once and publishes the address; a CLI with no published listener uses
- * 127.0.0.1.
+ * only literal addresses are published or sent to. For a name the server
+ * publishes the address its socket reports it bound, never a second lookup's
+ * answer, which can differ (the #311 delta review, D1); a CLI with no
+ * published listener sends nothing.
  */
 export function localControlNotifyHost(bindHost: string): string | null {
 	const host = bindHost.trim();
@@ -2853,6 +2860,9 @@ export class Config extends EventEmitter {
 				baseUrl: localControlBaseUrl(host, port),
 			};
 		}
+		const bindHost = process.env.BETTER_CCFLARE_HOST ?? "";
+		const host = localControlNotifyHost(bindHost);
+		if (host === null) return { kind: "unaddressed", bindHost };
 		const secret =
 			published !== undefined
 				? this.rememberLocalControlSecret(published.secret)
@@ -2860,11 +2870,7 @@ export class Config extends EventEmitter {
 		return {
 			kind: "configured",
 			secret,
-			baseUrl: localControlBaseUrl(
-				localControlNotifyHost(process.env.BETTER_CCFLARE_HOST ?? "") ??
-					"127.0.0.1",
-				this.getRuntime().port,
-			),
+			baseUrl: localControlBaseUrl(host, this.getRuntime().port),
 		};
 	}
 

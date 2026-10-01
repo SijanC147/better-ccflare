@@ -1,5 +1,5 @@
-import { lookup as lookupHost } from "node:dns/promises";
 import { existsSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { dirname } from "node:path";
 import {
 	Config,
@@ -1097,6 +1097,18 @@ function startUsagePollingWithRefresh(
 // Export for programmatic use
 let serverLifecycleOwned = false;
 
+/**
+ * The IP address a Bun server's socket reports it bound, or null. Read
+ * defensively, because `Server.address` is absent from the pinned Bun's
+ * types (1.3.14) and was measured only on 1.4.2 (SB23-4035).
+ */
+function boundAddress(server: unknown): string | null {
+	const reported = (server as { address?: { address?: unknown } | null })
+		.address;
+	const address = reported?.address;
+	return typeof address === "string" && isIP(address) !== 0 ? address : null;
+}
+
 export default async function startServer(options?: {
 	port?: number | undefined;
 	withDashboard?: boolean;
@@ -2137,21 +2149,28 @@ export default async function startServer(options?: {
 	// caught, because publishing is best effort and must not stop a server that
 	// is already listening.
 	//
-	// A bind host given as a name is resolved here, once, and the address is
-	// published, so the CLI never resolves it again and cannot be sent off this
-	// host by a changed answer. The first address the name resolves to is the
-	// one getaddrinfo also handed serve().
+	// A bind host given as a name publishes the address the socket reports it
+	// bound, never a fresh lookup's answer: measured on Bun 1.4.2, a server
+	// bound to localhost held only ::1 while lookup() under ipv4first answered
+	// 127.0.0.1, which anyone may bind (the #311 delta review, D1). A runtime
+	// that does not report the bound address publishes nothing for a name, and
+	// the CLI then sends nothing.
 	const boundPort = serverInstance.port;
 	if (typeof boundPort === "number") {
 		try {
 			const host =
-				localControlNotifyHost(hostname) ??
-				(await lookupHost(hostname)).address;
-			config.publishLocalControlSecret({
-				host,
-				port: boundPort,
-				pid: process.pid,
-			});
+				localControlNotifyHost(hostname) ?? boundAddress(serverInstance);
+			if (host === null) {
+				new Logger("LocalControl").warn(
+					`Did not publish where this server listens: BETTER_CCFLARE_HOST is the name "${hostname}" and the runtime did not report the address it bound, so the CLI sends no notification to this server. Set BETTER_CCFLARE_HOST to an address instead.`,
+				);
+			} else {
+				config.publishLocalControlSecret({
+					host,
+					port: boundPort,
+					pid: process.pid,
+				});
+			}
 		} catch (error) {
 			new Logger("LocalControl").warn(
 				`Could not publish the local control secret file: ${error instanceof Error ? error.message : String(error)}. The CLI falls back to the configured port.`,

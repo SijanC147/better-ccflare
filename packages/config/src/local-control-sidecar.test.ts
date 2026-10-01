@@ -732,8 +732,8 @@ describe("SB23-4035: the sidecar names where the server listens", () => {
 		expect(localControlNotifyHost("example.com")).toBeNull();
 	});
 
-	it("refuses a sidecar whose listener names a host by name, and falls back to 127.0.0.1", () => {
-		withBindHost("localhost", () => {
+	it("refuses a sidecar whose listener names a host by name", () => {
+		withBindHost(undefined, () => {
 			withConfiguredPort(18008, (path, sidecar) => {
 				seed(
 					sidecar,
@@ -749,7 +749,6 @@ describe("SB23-4035: the sidecar names where the server listens", () => {
 
 				expect(result.kind).toBe("configured");
 				if (result.kind !== "configured") throw new Error("unreachable");
-				// BETTER_CCFLARE_HOST is a name too, so the fallback is loopback.
 				expect(result.baseUrl).toBe("http://127.0.0.1:18008");
 				expect(sidecarWarnings(logs)).toEqual([
 					ignoredMessage(
@@ -760,15 +759,24 @@ describe("SB23-4035: the sidecar names where the server listens", () => {
 			});
 		});
 	});
+
+	/**
+	 * A name bind host with nothing published has no literal address. Guessing
+	 * 127.0.0.1 misses a server bound to localhost, which holds only ::1, and is
+	 * anyone's to bind (the #311 delta review, D2), so nothing is addressed.
+	 */
+	it("addresses nothing for a name bind host when no listener is published", () => {
+		withBindHost("localhost", () => {
+			withConfiguredPort(18009, (path) => {
+				expect(new Config(path).getLocalControlTarget()).toEqual({
+					kind: "unaddressed",
+					bindHost: "localhost",
+				});
+			});
+		});
+	});
 });
 
-/**
- * SB23-4035: what the trust checks judged must be what is read. The swap is made
- * from inside the lstat seam, which entryIsTrusted() calls in a sticky directory
- * between the reader's first lstat and its open, so it lands in exactly that
- * window. In a directory only we can write nobody else could make it; the check
- * is for the directory whose rules allow more than this code assumes.
- */
 describe("SB23-4035: a sidecar replaced between lstat and open is refused", () => {
 	function expectSwapRefused(
 		swap: (sidecar: string, replacement: string) => void,
