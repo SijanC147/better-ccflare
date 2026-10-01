@@ -21,7 +21,16 @@ import { createApiKeysGenerateHandler } from "../api-keys";
  * Fix: when the caller does not explicitly request a role and no active
  * keys exist, the bootstrap key defaults to "admin".
  */
-const TEST_DB_PATH = "/tmp/test-api-keys-bootstrap.db";
+// Per process: a fixed /tmp name is shared by every worktree's suite.
+const TEST_DB_PATH = `/tmp/test-api-keys-bootstrap-${process.pid}.db`;
+
+// The database plus the WAL and SHM files SQLite leaves beside it. With a
+// per-process name these would otherwise pile up in /tmp, one pair per run.
+function removeSqliteFiles(dbPath: string): void {
+	for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+		if (existsSync(file)) unlinkSync(file);
+	}
+}
 
 describe("API key generate handler — first-key bootstrap (Codex P2)", () => {
 	let dbOps: DatabaseOperations;
@@ -29,7 +38,7 @@ describe("API key generate handler — first-key bootstrap (Codex P2)", () => {
 
 	beforeAll(() => {
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			removeSqliteFiles(TEST_DB_PATH);
 		} catch (error) {
 			console.warn("Failed to clean up existing test database:", error);
 		}
@@ -39,12 +48,12 @@ describe("API key generate handler — first-key bootstrap (Codex P2)", () => {
 	});
 
 	afterAll(() => {
+		DatabaseFactory.reset();
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			removeSqliteFiles(TEST_DB_PATH);
 		} catch (error) {
 			console.warn("Failed to clean up test database:", error);
 		}
-		DatabaseFactory.reset();
 	});
 
 	beforeEach(async () => {

@@ -24,7 +24,17 @@ import {
 } from "../oauth";
 
 // Test database path
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-oauth-handler.db`;
+// Per process: TMPDIR is per user, so a fixed name is shared by every
+// worktree's suite.
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-oauth-handler-${process.pid}.db`;
+
+// The database plus the WAL and SHM files SQLite leaves beside it. With a
+// per-process name these would otherwise pile up in /tmp, one pair per run.
+function removeSqliteFiles(dbPath: string): void {
+	for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+		if (existsSync(file)) unlinkSync(file);
+	}
+}
 
 // The handler constructs `new Config()` with no path at oauth.ts:878 and :971.
 // Under NODE_ENV=test, which `bun test` sets, `resolveConfigPath` refuses to
@@ -96,9 +106,7 @@ describe("OAuth Handler - Backward Compatibility", () => {
 	beforeAll(async () => {
 		// Clean up any existing test database
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
+			removeSqliteFiles(TEST_DB_PATH);
 		} catch (error) {
 			console.warn("Failed to clean up existing test database:", error);
 		}
@@ -112,15 +120,13 @@ describe("OAuth Handler - Backward Compatibility", () => {
 	});
 
 	afterAll(() => {
+		DatabaseFactory.reset();
 		// Clean up test database
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
+			removeSqliteFiles(TEST_DB_PATH);
 		} catch (error) {
 			console.warn("Failed to clean up test database:", error);
 		}
-		DatabaseFactory.reset();
 	});
 
 	describe('Deprecated "max" mode handling', () => {
@@ -793,7 +799,7 @@ describe("createAnthropicReauthCallbackHandler", () => {
  * instead of returning a success response for a session that was never stored.
  */
 describe("OAuth session persistence must be awaited (Codex P2)", () => {
-	const TEST_DB_PATH_2 = "/tmp/test-oauth-session-persist.db";
+	const TEST_DB_PATH_2 = `/tmp/test-oauth-session-persist-${process.pid}.db`;
 	let realDbOps: DatabaseOperations;
 	// The reauth handler requires a Config; mirrors the stub the
 	// createAnthropicReauthInitHandler describe block above uses.
@@ -803,7 +809,7 @@ describe("OAuth session persistence must be awaited (Codex P2)", () => {
 
 	beforeAll(() => {
 		try {
-			if (existsSync(TEST_DB_PATH_2)) unlinkSync(TEST_DB_PATH_2);
+			removeSqliteFiles(TEST_DB_PATH_2);
 		} catch (error) {
 			console.warn("Failed to clean up existing test database:", error);
 		}
@@ -812,12 +818,12 @@ describe("OAuth session persistence must be awaited (Codex P2)", () => {
 	});
 
 	afterAll(() => {
+		DatabaseFactory.reset();
 		try {
-			if (existsSync(TEST_DB_PATH_2)) unlinkSync(TEST_DB_PATH_2);
+			removeSqliteFiles(TEST_DB_PATH_2);
 		} catch (error) {
 			console.warn("Failed to clean up test database:", error);
 		}
-		DatabaseFactory.reset();
 	});
 
 	// Wrap the real dbOps so only createOAuthSession rejects, simulating a

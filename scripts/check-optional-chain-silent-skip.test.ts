@@ -486,6 +486,9 @@ describe("check-optional-chain-silent-skip", () => {
 	});
 
 	test("reads zero offences on the repository as it stands", () => {
+		// Explicit timeout: this spawns the gate over the whole tree, about 1.7 s at
+		// load 100. Bun's 5 s default timed it out at load 163 in a full suite
+		// (SB23-3567), with nothing wrong in the tree.
 		// The gate ships green, which is the SB23-2375 precedent: a check that fails the
 		// build has to start from zero. This test is what makes a reintroduction fail CI, and
 		// it is the one that will go red when someone writes the sixth instance.
@@ -526,5 +529,5 @@ describe("check-optional-chain-silent-skip", () => {
 		for (const raw of [counts[1], counts[2], counts[3]]) {
 			expect(Number(raw)).toBeGreaterThan(0);
 		}
-	});
+	}, 30_000);
 });

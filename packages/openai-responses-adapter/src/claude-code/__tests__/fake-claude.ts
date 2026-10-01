@@ -45,6 +45,8 @@ export interface FakeClaude {
 	/** A directory to use as the endpoint's project directory. */
 	projectDir: string;
 	invocations(): FakeInvocation[];
+	/** How many SIGTERMs an "ignore-term" fake has received and ignored. */
+	ignoredSigterms(): number;
 	cleanup(): void;
 }
 
@@ -59,6 +61,7 @@ export function makeFakeClaude(options: {
 	const projectDir = path.join(dir, "project");
 	fs.mkdirSync(projectDir);
 	const log = path.join(dir, "invocations.jsonl");
+	const termLog = path.join(dir, "ignored-sigterms.log");
 	const bin = path.join(dir, "claude");
 	const config = {
 		mode: options.mode,
@@ -67,12 +70,18 @@ export function makeFakeClaude(options: {
 			options.resultText ??
 			(options.textDeltas ?? ["Hello", " world"]).join(""),
 		log,
+		termLog,
 		delayMs: options.delayMs ?? 0,
 	};
 	const script = `#!${process.execPath}
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const cfg = ${JSON.stringify(config)};
+// First, before any await or other work: a SIGTERM that lands before the trap
+// kills the fake at once, which is the race SB23-3514 measured under load. The
+// invocation log line below is written after this, so a test that waits for it
+// knows the trap is in place.
+if (cfg.mode === "ignore-term") { process.on("SIGTERM", () => { fs.appendFileSync(cfg.termLog, "TERM\\n"); }); }
 const argv = process.argv.slice(2);
 const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const sessionId = flag("--resume") ?? flag("--session-id") ?? "no-session";
@@ -106,7 +115,6 @@ if (cfg.mode === "subagent") {
   out({ type: "assistant", parent_tool_use_id: "toolu_sub", message: { content: [{ type: "text", text: "SUBAGENT-SECRET" }] } });
 }
 if (cfg.mode === "exit3") { process.stderr.write("boom: something broke\\n"); process.exit(3); }
-if (cfg.mode === "ignore-term") { process.on("SIGTERM", () => {}); }
 if (cfg.mode === "hang" || cfg.mode === "ignore-term") { setInterval(() => {}, 1000); await new Promise(() => {}); }
 out({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
 for (const t of cfg.textDeltas) {
@@ -136,6 +144,11 @@ process.exit(cfg.mode === "is-error" ? 1 : 0);
 				.split("\n")
 				.filter(Boolean)
 				.map((line) => JSON.parse(line) as FakeInvocation);
+		},
+		ignoredSigterms() {
+			if (!fs.existsSync(termLog)) return 0;
+			return fs.readFileSync(termLog, "utf8").split("\n").filter(Boolean)
+				.length;
 		},
 		cleanup() {
 			// `dir` came from mkdtemp above, so removing it cannot touch anything

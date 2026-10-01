@@ -692,20 +692,37 @@ describe("concurrency, timeout and abort", () => {
 	});
 
 	test("a process that ignores SIGTERM is killed after the grace period", async () => {
-		const ctx = setup("ignore-term", { timeout_ms: 300 });
-		const started = Date.now();
-		const res = await call(ctx, {
-			model: "opus",
-			messages: [{ role: "user", content: "hi" }],
-		});
-		expect(res.status).toBe(504);
-		// timeout 300ms + killGraceMs 300ms: the answer cannot come earlier.
-		expect(Date.now() - started).toBeGreaterThanOrEqual(550);
+		// A client abort starts the termination here, not `timeout_ms`. The
+		// timeout runs from spawn, so on a loaded machine it fired before the
+		// fake had installed its SIGTERM trap, the fake died on SIGTERM, and the
+		// answer came early (SB23-3514: 314, 326 and 536 ms against 550). An
+		// abort can wait for the logged invocation, which the fake writes only
+		// after its trap is in place. Abort and timeout share one terminate():
+		// SIGTERM to the group, then SIGKILL after killGraceMs; the timeout's
+		// own 504 is "timeout kills the whole process group and answers 504".
+		const ctx = setup("ignore-term");
+		const abort = new AbortController();
+		const pending = call(
+			ctx,
+			{ model: "opus", messages: [{ role: "user", content: "hi" }] },
+			abort.signal,
+			{ killGraceMs: 600 },
+		);
+		await waitFor(() => (fake?.invocations().length ?? 0) === 1);
+		const abortedAt = Date.now();
+		abort.abort();
+		const res = await pending;
+		expect(res.status).toBe(499);
+		// The answer waits for the process to exit, which takes the SIGKILL, and
+		// a timer never fires early: it cannot come before the 600 ms grace.
+		expect(Date.now() - abortedAt).toBeGreaterThanOrEqual(550);
+		// SIGTERM came first and was ignored; the SIGKILL was the escalation.
+		expect(fake?.ignoredSigterms()).toBe(1);
 		const [inv] = fake?.invocations() ?? [];
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	});
+	}, 10_000);
 
 	test("client abort kills the process group", async () => {
 		const ctx = setup("hang");

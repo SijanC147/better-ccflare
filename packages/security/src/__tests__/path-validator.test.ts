@@ -8,10 +8,16 @@ import {
 	validatePathOrThrow,
 } from "../path-validator";
 
-// Test directory setup - using os.tmpdir() for cross-platform compatibility
-const TEST_DIR = join(tmpdir(), "better-ccflare-security-tests");
+// Test directory setup - using os.tmpdir() for cross-platform compatibility.
+// Both names carry the pid: tmpdir() is shared by every worktree's suite, and
+// afterAll removes these recursively, so a fixed name could delete another
+// run's fixtures (or an unrelated "unsafe-dir") mid-test.
+const TEST_DIR = join(tmpdir(), `better-ccflare-security-tests-${process.pid}`);
 const SAFE_DIR = join(TEST_DIR, "safe");
-const UNSAFE_DIR = join(tmpdir(), "unsafe-dir");
+const UNSAFE_DIR = join(
+	tmpdir(),
+	`better-ccflare-security-unsafe-${process.pid}`,
+);
 
 describe("Path Validator - Core Security Tests", () => {
 	beforeAll(() => {

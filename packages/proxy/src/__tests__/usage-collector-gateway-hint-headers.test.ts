@@ -28,7 +28,16 @@ import type { RequestResponse } from "@better-ccflare/types";
 import { UsageCollector } from "../usage-collector";
 import type { EndMessage, StartMessage } from "../worker-messages";
 
-const TEST_DB_PATH = "/tmp/test-usage-collector-gateway-hint-headers.db";
+// Per process: a fixed /tmp name is shared by every worktree's suite.
+const TEST_DB_PATH = `/tmp/test-usage-collector-gateway-hint-headers-${process.pid}.db`;
+
+// The database plus the WAL and SHM files SQLite leaves beside it. With a
+// per-process name these would otherwise pile up in /tmp, one pair per run.
+function removeSqliteFiles(dbPath: string): void {
+	for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+		if (existsSync(file)) unlinkSync(file);
+	}
+}
 
 describe("UsageCollector - gateway hint headers in the live summary", () => {
 	let dbOps: DatabaseOperations;
@@ -38,7 +47,7 @@ describe("UsageCollector - gateway hint headers in the live summary", () => {
 
 	beforeAll(() => {
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			removeSqliteFiles(TEST_DB_PATH);
 		} catch (error) {
 			console.warn("Failed to clean up existing test database:", error);
 		}
@@ -61,7 +70,7 @@ describe("UsageCollector - gateway hint headers in the live summary", () => {
 		await collector.drain();
 		DatabaseFactory.reset();
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			removeSqliteFiles(TEST_DB_PATH);
 		} catch (error) {
 			console.warn("Failed to clean up test database:", error);
 		}
