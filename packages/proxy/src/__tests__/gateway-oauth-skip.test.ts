@@ -15,7 +15,15 @@
  * registry outranks `ctx.provider` for a registered provider name
  * (`proxy-operations.ts`, `getProvider(account.provider) || ctx.provider`).
  */
-import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { AnthropicProvider, usageCache } from "@better-ccflare/providers";
 import {
 	type Account,
@@ -237,6 +245,7 @@ type Call = "oauth" | "api-key" | "codex";
  */
 function installFetch(
 	oauthAnswer: (index: number) => Response = () => windowless429(),
+	codexAnswer: () => Response = () => message("gpt-5.6-sol"),
 ): Call[] {
 	const calls: Call[] = [];
 	const unknown: string[] = [];
@@ -264,7 +273,7 @@ function installFetch(
 		}
 		if (url.href.startsWith(CODEX_ENDPOINT)) {
 			calls.push("codex");
-			return message("gpt-5.6-sol");
+			return codexAnswer();
 		}
 		unknown.push(url.href);
 		throw new Error(`unexpected fetch in gateway-oauth-skip test: ${url.href}`);
@@ -295,28 +304,31 @@ function makeRequest(gateway: boolean): Request {
 	});
 }
 
-async function send(ctx: ProxyContext, gateway: boolean): Promise<Response> {
-	const collector = spyOn(
-		usageCollectorModule,
-		"getUsageCollector",
-	).mockReturnValue({
-		handleStart: mock(() => {}),
-		handleChunk: mock(() => {}),
-		handleEnd: mock(() => Promise.resolve()),
-	} as unknown as usageCollectorModule.UsageCollector);
-	try {
-		return await handleProxy(
-			makeRequest(gateway),
-			new URL("http://localhost/v1/messages"),
-			ctx,
-		);
-	} finally {
-		collector.mockRestore();
-	}
+function send(ctx: ProxyContext, gateway: boolean): Promise<Response> {
+	return handleProxy(
+		makeRequest(gateway),
+		new URL("http://localhost/v1/messages"),
+		ctx,
+	);
 }
 
 describe("gateway request: one OAuth call after a windowless 429 (SB23-2781)", () => {
+	// Installed for the whole test, not around handleProxy alone: a forwarded
+	// body reports to the collector when it is read, after handleProxy returns.
+	let collector: ReturnType<typeof spyOn> | null = null;
+	beforeEach(() => {
+		collector = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue({
+			handleStart: mock(() => {}),
+			handleChunk: mock(() => {}),
+			handleEnd: mock(() => Promise.resolve()),
+		} as unknown as usageCollectorModule.UsageCollector);
+	});
+
 	afterEach(() => {
+		collector?.mockRestore();
 		fetchSlot.fetch = originalFetch;
 		usageCache.clear();
 		clearFamilyExhaustionCache();
@@ -398,6 +410,67 @@ describe("gateway request: one OAuth call after a windowless 429 (SB23-2781)", (
 		expect(response.status).toBe(200);
 		expect(calls).toEqual(["oauth", "api-key"]);
 		expect(unknownCalls(calls)).toEqual([]);
+	});
+
+	it("a refusal inside the SessionStrategy fallback skips the fallback's remaining OAuth accounts", async () => {
+		const oauth = oauthAccounts();
+		// The combo holds one OAuth slot that reports a real window, so the
+		// flag is first set inside the fallback loop, not the combo loop.
+		const ctx = makeContext(
+			[...oauth, codexAccount()],
+			makeCombo([oauth[0].id]),
+		);
+		const calls = installFetch((index) =>
+			index === 0 ? windowed429() : windowless429(),
+		);
+
+		const response = await send(ctx, true);
+
+		expect(response.status).toBe(200);
+		expect(calls).toEqual(["oauth", "oauth", "codex"]);
+		expect(unknownCalls(calls)).toEqual([]);
+	});
+
+	it("an all-OAuth pool ends after one OAuth call, with no ungated retry of a skipped account", async () => {
+		const oauth = oauthAccounts();
+		const ctx = makeContext(oauth, makeCombo(oauth.map((a) => a.id)));
+		const calls = installFetch();
+
+		// The terminal for an exhausted pool is a throw that the server maps to
+		// 503 (proxy.ts step 11); no request row, no response object.
+		await expect(send(ctx, true)).rejects.toThrow();
+		expect(calls).toEqual(["oauth"]);
+		expect(unknownCalls(calls)).toEqual([]);
+	});
+
+	it("a candidate followed only by skipped OAuth accounts is the terminal attempt, so its 5xx is forwarded", async () => {
+		const [first, ...rest] = oauthAccounts();
+		const ctx = makeContext([first, codexAccount(), ...rest], null);
+		// No in-place re-issue, so one Codex call answers the request.
+		ctx.runtime = {
+			...ctx.runtime,
+			retry: { attempts: 1, delayMs: 0, backoff: 1 },
+		};
+		const calls = installFetch(
+			() => windowless429(),
+			() =>
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "api_error", message: "codex upstream 502" },
+					}),
+					{ status: 502, headers: { "content-type": "application/json" } },
+				),
+		);
+
+		// Forwarded rather than swallowed into the step-11 throw: Codex is the
+		// last account this request can reach, because the four OAuth accounts
+		// after it are skipped.
+		const response = await send(ctx, true);
+
+		expect(response.status).toBe(502);
+		expect(await response.text()).toContain("codex upstream 502");
+		expect(calls).toEqual(["oauth", "codex"]);
 	});
 
 	it("an OAuth account behind a custom endpoint is not skipped", async () => {
