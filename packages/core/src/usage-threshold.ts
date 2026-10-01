@@ -17,6 +17,8 @@
  * rules stay testable without a database or a poller.
  */
 
+import { MAX_MIN_RESET_REMAINING_MS } from "@better-ccflare/types";
+
 /** A usage window that can carry a pause threshold. */
 export type UsagePauseWindow = "five_hour" | "weekly";
 
@@ -38,17 +40,31 @@ export type UsagePauseWindow = "five_hour" | "weekly";
 export const USAGE_THRESHOLD_PAUSE_REASON = "usage_threshold";
 
 /**
- * One window's setting: the percentage its owner chose, and whether it is
- * currently in force.
+ * One window's setting: the conditions its owner chose, and whether the window
+ * is currently in force.
  *
- * The two are stored separately so switching a window off keeps the number
- * rather than making someone type it again when they switch it back on. A
- * window with `enabled: false`, or with no percent yet, is simply not
- * considered.
+ * Two conditions, matching the combo slot rule (SB23-1269, SB23-2575): the
+ * window's utilization is at or above `percent`, and the window's reset is still
+ * at least `minResetRemainingMs` away. Either may be null, meaning that condition
+ * is off. Only the configured conditions are considered and every configured one
+ * must hold, so a window with only a percent pauses on utilization alone, one
+ * with only a reset minimum pauses on time-to-reset alone, and one with both
+ * pauses only when both hold.
+ *
+ * `enabled` governs the window as a whole and is stored apart from the numbers,
+ * so switching a window off keeps them rather than making someone type them
+ * again when they switch it back on. A window with `enabled: false`, or with
+ * neither condition set, is simply not considered.
+ *
+ * `minResetRemainingMs` is required rather than optional so that no caller can
+ * build a setting that silently drops the reset condition: an absent property
+ * would read as "off" and nothing would say so.
  */
 export interface UsagePauseSetting {
 	enabled: boolean;
 	percent: number | null;
+	/** Milliseconds; the same unit and bound as `ComboSlot.min_reset_remaining_ms`. */
+	minResetRemainingMs: number | null;
 }
 
 /** Per-account pause settings, one per window. */
@@ -65,6 +81,29 @@ export function effectiveThreshold(
 	return setting.percent ?? null;
 }
 
+/** The reset minimum a window will actually pause on, or null when it will not. */
+export function effectiveMinResetRemainingMs(
+	setting: UsagePauseSetting | null | undefined,
+): number | null {
+	if (!setting?.enabled) return null;
+	return setting.minResetRemainingMs ?? null;
+}
+
+/**
+ * Whether a window is in force with at least one condition configured: the
+ * question the poller asks before reading a payload at all. Deliberately not
+ * `effectiveThreshold(...) !== null`, which is how the poller asked it before
+ * SB23-2575 and which reads a reset-only window as unconfigured.
+ */
+export function isUsagePauseWindowConfigured(
+	setting: UsagePauseSetting | null | undefined,
+): boolean {
+	return (
+		effectiveThreshold(setting) !== null ||
+		effectiveMinResetRemainingMs(setting) !== null
+	);
+}
+
 /**
  * Utilization for the two windows as of the latest poll, 0–100. `null` means
  * the usage API did not report that window on this snapshot — distinct from 0,
@@ -75,13 +114,33 @@ export interface UsageUtilization {
 	weekly: number | null;
 }
 
+/**
+ * When each window resets, as epoch milliseconds, read off the same payload key
+ * its utilization came from. `null` means the payload carried no reset time for
+ * that window, which Anthropic reports for a window that has not started yet.
+ */
+export interface UsageResets {
+	fiveHour: number | null;
+	weekly: number | null;
+}
+
 /** What the caller should do with the account, given the latest snapshot. */
 export type UsagePauseDecision =
 	| {
 			action: "pause";
 			window: UsagePauseWindow;
-			utilization: number;
-			threshold: number;
+			/**
+			 * The reading and the percent it reached, both null when the window
+			 * has no percent condition and paused on its reset alone.
+			 */
+			utilization: number | null;
+			threshold: number | null;
+			/**
+			 * How far away the reset was and the minimum it met, both null when
+			 * the window has no reset condition.
+			 */
+			resetRemainingMs: number | null;
+			minResetRemainingMs: number | null;
 	  }
 	| { action: "resume" }
 	| { action: "none" };
@@ -90,8 +149,10 @@ export type UsagePauseDecision =
 export interface UsagePauseInput {
 	thresholds: UsagePauseThresholds;
 	utilization: UsageUtilization;
+	resets: UsageResets;
 	paused: boolean;
 	pauseReason: string | null;
+	now: number;
 }
 
 /** The windows in the order they are reported when both are over. */
@@ -104,47 +165,112 @@ const WINDOWS: ReadonlyArray<{
 ];
 
 /**
+ * One configured window's state against its own snapshot.
+ *
+ * Three outcomes, not a boolean, because pausing and resuming need different
+ * answers from the same "we cannot tell": a window that cannot be read must not
+ * pause an account, and must not hand a benched one back to traffic either.
+ */
+type WindowState = "holds" | "clear" | "unknown";
+
+/**
+ * Evaluate one configured window. Mirrors `isSlotThrottled` in
+ * packages/proxy/src/handlers/account-selector.ts, which is the rule this one
+ * was asked to match:
+ *
+ * - A window the payload did not report at all (no utilization and no reset)
+ *   is `unknown`, so a partial payload cannot resume an exhausted account.
+ * - A reset already in the past means the reading describes the previous
+ *   window, which has since rolled over, so the window is `clear` whatever its
+ *   utilization says. For pausing that is the slot rule's staleness guard; for
+ *   resuming it is the honest reading, since a rolled-over window has nothing
+ *   left to protect.
+ * - The percent clause holds at or above the percent; a missing utilization is
+ *   `unknown` rather than a pass or a fail.
+ * - The reset clause holds while the reset is at least the minimum away. An
+ *   absent reset does not hold, which is the slot rule's "an absent `resetMs`
+ *   ignores the reset clause" read for a rule that has one: nothing establishes
+ *   the window is far from resetting. It is `clear` rather than `unknown`
+ *   because Anthropic reports a window that has rolled over and not restarted
+ *   as 0% with no reset (the `#443` shape `onStaleWeeklyReset` detects), and a
+ *   paused account sends no traffic to restart it: `unknown` there would bench
+ *   a reset-only account forever.
+ * - Any configured clause failing makes the window `clear`; otherwise any
+ *   `unknown` clause makes it `unknown`; otherwise it `holds`.
+ */
+function evaluateWindow(
+	setting: UsagePauseSetting,
+	utilization: number | null,
+	resetMs: number | null,
+	now: number,
+): WindowState {
+	const percent = effectiveThreshold(setting);
+	const minReset = effectiveMinResetRemainingMs(setting);
+
+	if (utilization === null && resetMs === null) return "unknown";
+	if (resetMs !== null && resetMs <= now) return "clear";
+
+	let unknown = false;
+	if (percent !== null) {
+		if (utilization === null) unknown = true;
+		else if (utilization < percent) return "clear";
+	}
+	if (minReset !== null) {
+		if (resetMs === null) return "clear";
+		if (resetMs - now < minReset) return "clear";
+	}
+	return unknown ? "unknown" : "holds";
+}
+
+/**
  * Decide whether a usage snapshot should pause or resume an account.
  *
- * Pauses when a configured window has reached its threshold and the account is
- * running. Resumes only an account this rule paused, and only once every
- * configured window reads back below its threshold — a window the snapshot did
- * not report is treated as "still unknown", never as "recovered", so a partial
- * payload cannot hand an exhausted account back to traffic. Manual, overage and
- * failure pauses are left entirely alone.
+ * Pauses when a configured window holds (every condition it has set is met)
+ * and the account is running. Resumes only an account this rule paused, and
+ * only once every configured window is `clear`: a window the snapshot did not
+ * report is "still unknown", never "recovered", so a partial payload cannot
+ * hand an exhausted account back to traffic. A reset condition that stops
+ * holding because the reset is now near is a recovery like any other. Manual,
+ * overage and failure pauses are left entirely alone.
  */
 export function evaluateUsagePause(input: UsagePauseInput): UsagePauseDecision {
-	const { thresholds, utilization, paused, pauseReason } = input;
+	const { thresholds, utilization, resets, paused, pauseReason, now } = input;
 
-	const configured = WINDOWS.map(({ window, key }) => ({
+	const configured = WINDOWS.filter(({ key }) =>
+		isUsagePauseWindowConfigured(thresholds[key]),
+	).map(({ window, key }) => ({
 		window,
-		threshold: effectiveThreshold(thresholds[key]),
+		setting: thresholds[key],
 		utilization: utilization[key],
-	})).filter(
-		(entry): entry is typeof entry & { threshold: number } =>
-			entry.threshold !== null,
-	);
+		resetMs: resets[key],
+		state: evaluateWindow(thresholds[key], utilization[key], resets[key], now),
+	}));
 
 	if (paused) {
 		// Only this rule's own pauses are ours to lift.
 		if (pauseReason !== USAGE_THRESHOLD_PAUSE_REASON) return { action: "none" };
 
 		const everyWindowRecovered = configured.every(
-			(entry) =>
-				entry.utilization !== null && entry.utilization < entry.threshold,
+			(entry) => entry.state === "clear",
 		);
 		return everyWindowRecovered ? { action: "resume" } : { action: "none" };
 	}
 
 	for (const entry of configured) {
-		if (entry.utilization !== null && entry.utilization >= entry.threshold) {
-			return {
-				action: "pause",
-				window: entry.window,
-				utilization: entry.utilization,
-				threshold: entry.threshold,
-			};
-		}
+		if (entry.state !== "holds") continue;
+		const threshold = effectiveThreshold(entry.setting);
+		const minReset = effectiveMinResetRemainingMs(entry.setting);
+		return {
+			action: "pause",
+			window: entry.window,
+			utilization: threshold === null ? null : entry.utilization,
+			threshold,
+			resetRemainingMs:
+				minReset === null || entry.resetMs === null
+					? null
+					: entry.resetMs - now,
+			minResetRemainingMs: minReset,
+		};
 	}
 
 	return { action: "none" };
@@ -269,6 +395,119 @@ export function readUsageUtilization(
 		fiveHour: flat("five_hour") ?? fromLimits("session"),
 		weekly: flat("seven_day") ?? fromLimits("weekly_all"),
 	};
+}
+
+/**
+ * A reset timestamp as epoch milliseconds, from either shape the providers use:
+ * an ISO string (`resets_at`, Anthropic/Codex) or epoch milliseconds already
+ * (`resetAt`, zai/nanogpt/minimax). Mirrors `extractUsageResetMs` in
+ * packages/providers/src/usage-fetcher.ts, which core cannot import.
+ */
+function toResetMs(value: unknown): number | null {
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value === "string") {
+		const ms = new Date(value).getTime();
+		return Number.isFinite(ms) ? ms : null;
+	}
+	return null;
+}
+
+function readWindowReset(window: unknown): number | null {
+	if (typeof window !== "object" || window === null) return null;
+	const w = window as { resets_at?: unknown; resetAt?: unknown };
+	return toResetMs(w.resets_at) ?? toResetMs(w.resetAt);
+}
+
+/**
+ * Read when the 5-hour and weekly windows reset, off the SAME payload key each
+ * window's utilization is read from in {@link readUsageUtilization}. Pairing a
+ * utilization with a reset from a different window is the defect
+ * `getRepresentativeUsageSnapshotForProvider` exists to prevent, so the two
+ * readers share their key choices line for line: zai `tokens_limit` and
+ * `tokens_limit_weekly` (never `time_limit`), nanogpt `daily` and `monthly`,
+ * and otherwise the flat `five_hour` / `seven_day` with `limits[]` kinds
+ * `session` / `weekly_all` filling in what they leave out.
+ *
+ * The flat-or-limits choice is made per window by where the UTILIZATION came
+ * from, not by which one carries a reset, so a flat window with no reset never
+ * borrows the limits entry's.
+ */
+export function readUsageResets(
+	payload: unknown,
+	provider?: string | null,
+): UsageResets {
+	if (typeof payload !== "object" || payload === null) {
+		return { fiveHour: null, weekly: null };
+	}
+	const data = payload as Record<string, unknown>;
+
+	if (provider === "zai") {
+		return {
+			fiveHour: readWindowReset(data.tokens_limit),
+			weekly: readWindowReset(data.tokens_limit_weekly),
+		};
+	}
+	if (provider === "nanogpt") {
+		if (data.active === false) return { fiveHour: null, weekly: null };
+		return {
+			fiveHour: readWindowReset(data.daily),
+			weekly: readWindowReset(data.monthly),
+		};
+	}
+
+	const hasFlatUtilization = (key: string): boolean => {
+		const window = data[key];
+		if (typeof window !== "object" || window === null) return false;
+		const value = (window as { utilization?: unknown }).utilization;
+		return typeof value === "number" && Number.isFinite(value);
+	};
+
+	const fromLimits = (kind: string): number | null => {
+		const limits = data.limits;
+		if (!Array.isArray(limits)) return null;
+		for (const entry of limits) {
+			if (typeof entry !== "object" || entry === null) continue;
+			const limit = entry as { kind?: unknown };
+			if (limit.kind !== kind) continue;
+			return readWindowReset(entry);
+		}
+		return null;
+	};
+
+	return {
+		fiveHour: hasFlatUtilization("five_hour")
+			? readWindowReset(data.five_hour)
+			: fromLimits("session"),
+		weekly: hasFlatUtilization("seven_day")
+			? readWindowReset(data.seven_day)
+			: fromLimits("weekly_all"),
+	};
+}
+
+/**
+ * Normalize a reset minimum coming from an API body or a CLI argument into
+ * whole milliseconds between 0 and `MAX_MIN_RESET_REMAINING_MS`, or `null` for
+ * "condition off". The same bound and the same message shape as the combo slot
+ * field's handler (packages/http-api/src/handlers/combos.ts), because the two
+ * are the same setting on two surfaces.
+ *
+ * 0 is legal, as it is on the slot: it holds for any reset still ahead. Like the
+ * percent parser, anything else throws rather than being clamped.
+ */
+export function parseUsagePauseMinResetMs(value: unknown): number | null {
+	if (value === null || value === undefined || value === "") return null;
+	const parsed = typeof value === "string" ? Number(value) : value;
+	if (
+		typeof parsed !== "number" ||
+		!Number.isInteger(parsed) ||
+		parsed < 0 ||
+		parsed > MAX_MIN_RESET_REMAINING_MS
+	) {
+		throw new Error(
+			`minResetRemainingMs must be an integer between 0 and ${MAX_MIN_RESET_REMAINING_MS}, or null`,
+		);
+	}
+	return parsed;
 }
 
 /**

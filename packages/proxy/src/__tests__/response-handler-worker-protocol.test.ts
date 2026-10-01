@@ -684,6 +684,8 @@ describe("forwardToClient passive model-catalog capture", () => {
 			usage_pause_weekly_threshold: null,
 			usage_pause_five_hour_enabled: false,
 			usage_pause_weekly_enabled: false,
+			usage_pause_five_hour_min_reset_remaining_ms: null,
+			usage_pause_weekly_min_reset_remaining_ms: null,
 			...overrides,
 		};
 	}

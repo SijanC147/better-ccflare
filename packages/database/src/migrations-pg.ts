@@ -102,6 +102,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			usage_pause_weekly_threshold INTEGER,
 			usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0,
 			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0,
+			usage_pause_five_hour_min_reset_remaining_ms BIGINT,
+			usage_pause_weekly_min_reset_remaining_ms BIGINT,
 			pause_reason TEXT,
 			requires_reauth INTEGER DEFAULT 0,
 			billing_type TEXT DEFAULT NULL,
@@ -685,6 +687,8 @@ async function collapseAccountDuplicatesPreservingStatePg(
 			   usage_pause_weekly_threshold = COALESCE(usage_pause_weekly_threshold, ${pgFreshest("usage_pause_weekly_threshold")}),
 			   usage_pause_five_hour_enabled = (SELECT MAX(COALESCE(usage_pause_five_hour_enabled, 0)) FROM accounts ${PG_GROUP_SCOPE}),
 			   usage_pause_weekly_enabled = (SELECT MAX(COALESCE(usage_pause_weekly_enabled, 0)) FROM accounts ${PG_GROUP_SCOPE}),
+			   usage_pause_five_hour_min_reset_remaining_ms = COALESCE(usage_pause_five_hour_min_reset_remaining_ms, ${pgFreshest("usage_pause_five_hour_min_reset_remaining_ms")}),
+			   usage_pause_weekly_min_reset_remaining_ms = COALESCE(usage_pause_weekly_min_reset_remaining_ms, ${pgFreshest("usage_pause_weekly_min_reset_remaining_ms")}),
 			   billing_type = COALESCE(billing_type, ${pgFreshest("billing_type")})
 			 WHERE id = $8`,
 			[
@@ -875,6 +879,21 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "usage_pause_weekly_enabled",
 			definition:
 				"ALTER TABLE accounts ADD COLUMN usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0",
+		},
+		// SB23-2575: the reset condition beside each percentage. BIGINT, the
+		// same as combo_slots.min_reset_remaining_ms, because the bound is
+		// MAX_MIN_RESET_REMAINING_MS and that does not fit an INTEGER.
+		{
+			table: "accounts",
+			column: "usage_pause_five_hour_min_reset_remaining_ms",
+			definition:
+				"ALTER TABLE accounts ADD COLUMN usage_pause_five_hour_min_reset_remaining_ms BIGINT",
+		},
+		{
+			table: "accounts",
+			column: "usage_pause_weekly_min_reset_remaining_ms",
+			definition:
+				"ALTER TABLE accounts ADD COLUMN usage_pause_weekly_min_reset_remaining_ms BIGINT",
 		},
 		{
 			table: "accounts",

@@ -124,9 +124,13 @@ export {
 } from "./throttle-utils";
 export { TtlCache } from "./ttl-cache";
 export {
+	effectiveMinResetRemainingMs,
 	effectiveThreshold,
 	evaluateUsagePause,
+	isUsagePauseWindowConfigured,
+	parseUsagePauseMinResetMs,
 	parseUsagePauseThreshold,
+	readUsageResets,
 	readUsageUtilization,
 	supportsUsagePauseThreshold,
 	USAGE_THRESHOLD_PAUSE_REASON,
@@ -135,6 +139,7 @@ export {
 	type UsagePauseSetting,
 	type UsagePauseThresholds,
 	type UsagePauseWindow,
+	type UsageResets,
 	type UsageUtilization,
 } from "./usage-threshold";
 export { levenshteinDistance } from "./utils";

@@ -422,6 +422,8 @@ describe("AccountListItem, extra usage", () => {
 		usagePauseWeeklyThreshold: null,
 		usagePauseFiveHourEnabled: false,
 		usagePauseWeeklyEnabled: false,
+		usagePauseFiveHourMinResetRemainingMs: null,
+		usagePauseWeeklyMinResetRemainingMs: null,
 	};
 
 	function renderItem(a: Account): string {

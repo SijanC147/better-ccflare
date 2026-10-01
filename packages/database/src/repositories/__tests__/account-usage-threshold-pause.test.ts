@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 // circular dependency — same pattern as account-pause-reason.test.ts.
 import "@better-ccflare/core";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
+import { ensureSchema, runMigrations } from "../../migrations";
 import { AccountRepository } from "../account.repository";
 
 const REASON = "usage_threshold";
@@ -29,7 +30,9 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			usage_pause_five_hour_threshold INTEGER,
 			usage_pause_weekly_threshold INTEGER,
 			usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0,
-			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0
+			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0,
+			usage_pause_five_hour_min_reset_remaining_ms INTEGER,
+			usage_pause_weekly_min_reset_remaining_ms INTEGER
 		)
 	`);
 	return { db, repo: new AccountRepository(new BunSqlAdapter(db)) };
@@ -157,8 +160,8 @@ describe("AccountRepository — usage-threshold pause guards", () => {
 
 			await repo.setUsagePauseThresholds(
 				"acc-1",
-				{ enabled: true, percent: 80 },
-				{ enabled: true, percent: 90 },
+				{ enabled: true, percent: 80, minResetRemainingMs: null },
+				{ enabled: true, percent: 90, minResetRemainingMs: null },
 			);
 			expect(
 				db.query("SELECT * FROM accounts WHERE id = ?").get("acc-1") as Record<
@@ -178,13 +181,15 @@ describe("AccountRepository — usage-threshold pause guards", () => {
 			).toMatchObject({
 				usage_pause_five_hour_enabled: 1,
 				usage_pause_weekly_enabled: 1,
+				usage_pause_five_hour_min_reset_remaining_ms: null,
+				usage_pause_weekly_min_reset_remaining_ms: null,
 			});
 
 			// Switching a window off keeps its number for next time.
 			await repo.setUsagePauseThresholds(
 				"acc-1",
-				{ enabled: false, percent: 80 },
-				{ enabled: false, percent: null },
+				{ enabled: false, percent: 80, minResetRemainingMs: null },
+				{ enabled: false, percent: null, minResetRemainingMs: null },
 			);
 			expect(
 				db.query("SELECT * FROM accounts WHERE id = ?").get("acc-1") as Record<
@@ -196,7 +201,75 @@ describe("AccountRepository — usage-threshold pause guards", () => {
 				usage_pause_five_hour_enabled: 0,
 				usage_pause_weekly_threshold: null,
 				usage_pause_weekly_enabled: 0,
+				usage_pause_five_hour_min_reset_remaining_ms: null,
+				usage_pause_weekly_min_reset_remaining_ms: null,
 			});
 		});
+	});
+});
+
+/**
+ * SB23-2575. The reset minimums against the REAL schema rather than the
+ * hand-rolled table above, so a column missing from `ensureSchema`,
+ * `runMigrations` or either read-side SELECT in the repository fails here. A
+ * read-side list that omits a column does not destroy data, it just never
+ * reads it, so the only symptom is an account behaving as though its owner
+ * never set the value: the read-back is the test.
+ */
+describe("AccountRepository — usage pause reset minimums read back (SB23-2575)", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		ensureSchema(db);
+		runMigrations(db);
+		repo = new AccountRepository(new BunSqlAdapter(db));
+		db.run(
+			`INSERT INTO accounts (id, name, provider, created_at) VALUES ('acc-1', 'acc', 'anthropic', 1)`,
+		);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("writes both reset minimums and reads them back through findAll and findById", async () => {
+		await repo.setUsagePauseThresholds(
+			"acc-1",
+			{ enabled: true, percent: null, minResetRemainingMs: 7_200_000 },
+			{ enabled: false, percent: 90, minResetRemainingMs: 86_400_000 },
+		);
+
+		const [fromAll] = await repo.findAll();
+		const fromId = await repo.findById("acc-1");
+		for (const account of [fromAll, fromId]) {
+			expect(account?.usage_pause_five_hour_min_reset_remaining_ms).toBe(
+				7_200_000,
+			);
+			expect(account?.usage_pause_weekly_min_reset_remaining_ms).toBe(
+				86_400_000,
+			);
+			expect(account?.usage_pause_five_hour_threshold).toBeNull();
+			expect(account?.usage_pause_five_hour_enabled).toBe(true);
+			expect(account?.usage_pause_weekly_threshold).toBe(90);
+			expect(account?.usage_pause_weekly_enabled).toBe(false);
+		}
+	});
+
+	it("reads a stored 0 back as 0, not as 'condition off'", async () => {
+		// 0 ms is legal on a combo slot and here: it holds for any reset still
+		// ahead. A converter that treats 0 as unset turns it into null.
+		await repo.setUsagePauseThresholds(
+			"acc-1",
+			{ enabled: true, percent: 80, minResetRemainingMs: 0 },
+			{ enabled: false, percent: null, minResetRemainingMs: null },
+		);
+
+		const [fromAll] = await repo.findAll();
+		const fromId = await repo.findById("acc-1");
+		expect(fromAll?.usage_pause_five_hour_min_reset_remaining_ms).toBe(0);
+		expect(fromId?.usage_pause_five_hour_min_reset_remaining_ms).toBe(0);
+		expect(fromAll?.usage_pause_weekly_min_reset_remaining_ms).toBeNull();
 	});
 });

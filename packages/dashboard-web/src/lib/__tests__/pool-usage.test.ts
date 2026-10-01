@@ -70,6 +70,10 @@ function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 		usagePauseWeeklyThreshold: partial.usagePauseWeeklyThreshold ?? null,
 		usagePauseFiveHourEnabled: partial.usagePauseFiveHourEnabled ?? false,
 		usagePauseWeeklyEnabled: partial.usagePauseWeeklyEnabled ?? false,
+		usagePauseFiveHourMinResetRemainingMs:
+			partial.usagePauseFiveHourMinResetRemainingMs ?? null,
+		usagePauseWeeklyMinResetRemainingMs:
+			partial.usagePauseWeeklyMinResetRemainingMs ?? null,
 		...partial,
 	};
 }

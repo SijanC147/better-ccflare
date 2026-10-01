@@ -398,7 +398,7 @@ curl -X POST http://localhost:8080/api/accounts/uuid-here/pause
 
 #### POST /api/accounts/:accountId/usage-pause-thresholds
 
-Set the account's usage-window pause thresholds. The account is paused once a configured window reaches its percentage, and resumed automatically once every configured window reads back below it.
+Set the account's usage-window pause thresholds. Each window has two optional conditions, the same pair a combo slot carries: usage at or above a percentage, and the window's reset still at least some time away. Only the conditions that are set are considered, and with both set both must hold. The account is paused while a window that is on meets its conditions, and resumed automatically once no window that is on meets them any more, including when a reset that was far away comes near.
 
 **Request (bare percentage):**
 ```json
@@ -408,17 +408,17 @@ Set the account's usage-window pause thresholds. The account is paused once a co
 }
 ```
 
-Each field is a whole percentage from 1 to 100, or `null` to turn that window's threshold off and clear the stored value. Both windows are written on every call, so a field left out is disabled.
+Each field is a whole percentage from 1 to 100, or `null` to turn that window's threshold off and clear the stored percentage. The bare form never touches a stored reset condition, so a bare percentage that switches a window back on also brings back any reset minimum still stored for it; send the object form with `minResetRemainingMs: null` to drop it. Both windows are written on every call, so a field left out is disabled.
 
 **Request (object form, used by the dashboard):**
 ```json
 {
-  "fiveHour": { "enabled": true, "percent": 80 },
+  "fiveHour": { "enabled": true, "percent": 80, "minResetRemainingMs": 7200000 },
   "weekly": { "enabled": false }
 }
 ```
 
-`enabled` says whether the window is in force. `percent` sets the stored value; omitting it (as in `weekly` above) keeps whatever percentage was already stored for that window, so a client can disable a window without having to look up and resend its number. Sending `percent: null` explicitly still clears it.
+`enabled` says whether the window is in force. `percent` sets the stored percentage and `minResetRemainingMs` the reset condition, in milliseconds from 0 to `MAX_MIN_RESET_REMAINING_MS` (the combo slot field's unit and bound; the dashboard takes hours). Omitting either (as in `weekly` above) keeps whatever was already stored for that window, so a client can disable a window without having to look up and resend its numbers. Sending `null` explicitly clears it. A window with `enabled: true` and neither condition set is refused with a 400, since it would pause at nothing. `{ "enabled": true, "percent": null, "minResetRemainingMs": 7200000 }` is legal: it pauses the account while that window still has at least two hours to run, whatever its usage.
 
 **Response:**
 ```json
@@ -426,7 +426,11 @@ Each field is a whole percentage from 1 to 100, or `null` to turn that window's 
   "success": true,
   "message": "Usage pause thresholds updated for account 'myaccount'",
   "usagePauseFiveHourThreshold": 80,
-  "usagePauseWeeklyThreshold": null
+  "usagePauseFiveHourEnabled": true,
+  "usagePauseFiveHourMinResetRemainingMs": 7200000,
+  "usagePauseWeeklyThreshold": null,
+  "usagePauseWeeklyEnabled": false,
+  "usagePauseWeeklyMinResetRemainingMs": null
 }
 ```
 

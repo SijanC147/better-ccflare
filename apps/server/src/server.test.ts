@@ -10,6 +10,7 @@ import {
 	bootstrapMinimaxUsagePolling,
 	createRefreshBackedTokenProvider,
 	createUsageSnapshotRecorder,
+	describeUsagePause,
 	registerMinimaxUsagePolling,
 	supportsRefreshBackedUsagePolling,
 	supportsUsagePollingForAccount,
@@ -1353,6 +1354,8 @@ describe("applyUsagePauseThresholds", () => {
 							usage_pause_weekly_threshold: null,
 							usage_pause_five_hour_enabled: false,
 							usage_pause_weekly_enabled: false,
+							usage_pause_five_hour_min_reset_remaining_ms: null,
+							usage_pause_weekly_min_reset_remaining_ms: null,
 							...account,
 						} as Account),
 			pauseAccountForUsageThreshold: async (
@@ -1451,6 +1454,8 @@ describe("applyUsagePauseThresholds", () => {
 		const { dbOps, paused } = makeDbOps({
 			usage_pause_weekly_threshold: 50,
 			usage_pause_weekly_enabled: true,
+			usage_pause_five_hour_min_reset_remaining_ms: null,
+			usage_pause_weekly_min_reset_remaining_ms: null,
 		});
 
 		await applyUsagePauseThresholds(
@@ -1515,6 +1520,169 @@ describe("applyUsagePauseThresholds", () => {
 		]);
 		expect(resumed).toStrictEqual([]);
 	});
+	// SB23-2575. A window with only a reset minimum has no percent, so the
+	// poller's early-return gate must ask whether the window is configured, not
+	// whether it has a percent. Mutating the gate back to the percent alone
+	// makes this account return before the payload is read.
+	it("pauses on a reset-only window, which has no percent at all", async () => {
+		const { dbOps, paused, resumed } = makeDbOps({
+			usage_pause_five_hour_enabled: true,
+			usage_pause_five_hour_min_reset_remaining_ms: 2 * 3_600_000,
+		});
+
+		await applyUsagePauseThresholds(
+			"acc-1",
+			{
+				five_hour: {
+					utilization: 5,
+					resets_at: new Date(Date.now() + 3 * 3_600_000).toISOString(),
+				},
+			},
+			dbOps,
+			logger,
+		);
+
+		expect(paused).toStrictEqual([
+			{ accountId: "acc-1", reason: "usage_threshold" },
+		]);
+		expect(resumed).toStrictEqual([]);
+	});
+
+	it("does not pause a reset-only window whose reset is nearer than the minimum", async () => {
+		const { dbOps, paused } = makeDbOps({
+			usage_pause_five_hour_enabled: true,
+			usage_pause_five_hour_min_reset_remaining_ms: 2 * 3_600_000,
+		});
+
+		await applyUsagePauseThresholds(
+			"acc-1",
+			{
+				five_hour: {
+					utilization: 99,
+					resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+				},
+			},
+			dbOps,
+			logger,
+		);
+
+		expect(paused).toStrictEqual([]);
+	});
+
+	it("resumes a reset-only pause once the reset comes near", async () => {
+		const { dbOps, paused, resumed } = makeDbOps({
+			paused: true,
+			pause_reason: "usage_threshold",
+			usage_pause_five_hour_enabled: true,
+			usage_pause_five_hour_min_reset_remaining_ms: 2 * 3_600_000,
+		});
+
+		await applyUsagePauseThresholds(
+			"acc-1",
+			{
+				five_hour: {
+					utilization: 99,
+					resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+				},
+			},
+			dbOps,
+			logger,
+		);
+
+		expect(resumed).toStrictEqual(["acc-1:usage_threshold"]);
+		expect(paused).toStrictEqual([]);
+	});
+
+	it("reads the weekly reset minimum from its own column", async () => {
+		const { dbOps, paused } = makeDbOps({
+			usage_pause_weekly_enabled: true,
+			usage_pause_weekly_min_reset_remaining_ms: 24 * 3_600_000,
+		});
+
+		await applyUsagePauseThresholds(
+			"acc-1",
+			{
+				five_hour: { utilization: 1, resets_at: null },
+				seven_day: {
+					utilization: 1,
+					resets_at: new Date(Date.now() + 48 * 3_600_000).toISOString(),
+				},
+			},
+			dbOps,
+			logger,
+		);
+
+		expect(paused).toStrictEqual([
+			{ accountId: "acc-1", reason: "usage_threshold" },
+		]);
+	});
+
+	// The reset reader needs account.provider as much as the utilization reader
+	// does: zai carries its reset as `tokens_limit.resetAt`, which the
+	// Anthropic-shaped reader would never find.
+	it("passes account.provider to the reset reader so zai resets are found", async () => {
+		const { dbOps, paused } = makeDbOps({
+			provider: "zai",
+			usage_pause_five_hour_enabled: true,
+			usage_pause_five_hour_min_reset_remaining_ms: 2 * 3_600_000,
+		});
+
+		await applyUsagePauseThresholds(
+			"acc-1",
+			{
+				tokens_limit: {
+					percentage: 10,
+					resetAt: Date.now() + 3 * 3_600_000,
+				},
+				tokens_limit_weekly: null,
+			},
+			dbOps,
+			logger,
+		);
+
+		expect(paused).toStrictEqual([
+			{ accountId: "acc-1", reason: "usage_threshold" },
+		]);
+	});
+});
+
+describe("describeUsagePause (SB23-2575)", () => {
+	it("names only the configured clauses", () => {
+		expect(
+			describeUsagePause({
+				action: "pause",
+				window: "five_hour",
+				utilization: 85,
+				threshold: 80,
+				resetRemainingMs: null,
+				minResetRemainingMs: null,
+			}),
+		).toBe("5-hour window usage at 85% reached the configured 80% threshold");
+		expect(
+			describeUsagePause({
+				action: "pause",
+				window: "weekly",
+				utilization: null,
+				threshold: null,
+				resetRemainingMs: 3 * 3_600_000,
+				minResetRemainingMs: 2 * 3_600_000,
+			}),
+		).toBe(
+			"weekly window its reset is 3.0h away, at least the configured 2.0h",
+		);
+		expect(
+			describeUsagePause({
+				action: "pause",
+				window: "five_hour",
+				utilization: 90,
+				threshold: 80,
+				resetRemainingMs: 3 * 3_600_000,
+				minResetRemainingMs: 2 * 3_600_000,
+			}),
+		).toBe(
+			"5-hour window usage at 90% reached the configured 80% threshold and its reset is 3.0h away, at least the configured 2.0h",
+		);
+	});
 });
 
 describe("applyUsagePauseThresholds — switched-off windows", () => {
@@ -1535,6 +1703,8 @@ describe("applyUsagePauseThresholds — switched-off windows", () => {
 					usage_pause_five_hour_enabled: false,
 					usage_pause_weekly_threshold: null,
 					usage_pause_weekly_enabled: false,
+					usage_pause_five_hour_min_reset_remaining_ms: null,
+					usage_pause_weekly_min_reset_remaining_ms: null,
 				}) as unknown as Account,
 			pauseAccountForUsageThreshold: async (
 				accountId: string,

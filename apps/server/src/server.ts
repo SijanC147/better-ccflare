@@ -8,14 +8,15 @@ import {
 import {
 	CACHE,
 	DEFAULT_STRATEGY,
-	effectiveThreshold,
 	evaluateUsagePause,
 	getVersion,
 	HTTP_STATUS,
 	initializeNanoGPTPricingIfAccountsExist,
 	installOutboundProxy,
 	intervalManager,
+	isUsagePauseWindowConfigured,
 	NETWORK,
+	readUsageResets,
 	readUsageUtilization,
 	registerCleanup,
 	registerDisposable,
@@ -24,6 +25,7 @@ import {
 	shutdown,
 	TIME_CONSTANTS,
 	USAGE_THRESHOLD_PAUSE_REASON,
+	type UsagePauseDecision,
 } from "@better-ccflare/core";
 import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
 import type { DatabaseOperations } from "@better-ccflare/database";
@@ -287,6 +289,33 @@ export function createUsageSnapshotRecorder(
 }
 
 /**
+ * The log line for a threshold pause, naming only the conditions the window
+ * has configured: a reset-only pause has no utilization figure to quote, and
+ * printing "null% reached null%" for it would say nothing.
+ *
+ * Exported for tests.
+ */
+export function describeUsagePause(
+	decision: Extract<UsagePauseDecision, { action: "pause" }>,
+): string {
+	const window = decision.window === "five_hour" ? "5-hour" : "weekly";
+	const clauses: string[] = [];
+	if (decision.threshold !== null) {
+		clauses.push(
+			`usage at ${decision.utilization}% reached the configured ${decision.threshold}% threshold`,
+		);
+	}
+	if (decision.minResetRemainingMs !== null) {
+		const hours = (ms: number | null) =>
+			ms === null ? "unknown" : (ms / 3_600_000).toFixed(1);
+		clauses.push(
+			`its reset is ${hours(decision.resetRemainingMs)}h away, at least the configured ${hours(decision.minResetRemainingMs)}h`,
+		);
+	}
+	return `${window} window ${clauses.join(" and ")}`;
+}
+
+/**
  * Pause or resume an account according to its usage-window thresholds.
  *
  * Runs on every usage snapshot, for whichever provider produced it — the
@@ -311,17 +340,22 @@ export async function applyUsagePauseThresholds(
 			fiveHour: {
 				enabled: account.usage_pause_five_hour_enabled,
 				percent: account.usage_pause_five_hour_threshold ?? null,
+				minResetRemainingMs:
+					account.usage_pause_five_hour_min_reset_remaining_ms ?? null,
 			},
 			weekly: {
 				enabled: account.usage_pause_weekly_enabled,
 				percent: account.usage_pause_weekly_threshold ?? null,
+				minResetRemainingMs:
+					account.usage_pause_weekly_min_reset_remaining_ms ?? null,
 			},
 		};
 		// Nothing in force and nothing of ours to lift — the common case, and not
-		// worth a read of the payload.
+		// worth a read of the payload. "In force" is either condition, not the
+		// percent alone: a window with only a reset minimum is configured too.
 		if (
-			effectiveThreshold(thresholds.fiveHour) === null &&
-			effectiveThreshold(thresholds.weekly) === null &&
+			!isUsagePauseWindowConfigured(thresholds.fiveHour) &&
+			!isUsagePauseWindowConfigured(thresholds.weekly) &&
 			!account.paused
 		) {
 			return;
@@ -330,8 +364,10 @@ export async function applyUsagePauseThresholds(
 		const decision = evaluateUsagePause({
 			thresholds,
 			utilization: readUsageUtilization(data, account.provider),
+			resets: readUsageResets(data, account.provider),
 			paused: account.paused,
 			pauseReason: account.pause_reason ?? null,
+			now: Date.now(),
 		});
 
 		// Both writes are guarded on the state this decision was made from: a
@@ -339,9 +375,8 @@ export async function applyUsagePauseThresholds(
 		// below, and it must win rather than have its reason overwritten (pause)
 		// or cleared outright (resume).
 		if (decision.action === "pause") {
-			const window = decision.window === "five_hour" ? "5-hour" : "weekly";
 			logger.info(
-				`Pausing account '${account.name}' (${accountId}): ${window} usage at ${decision.utilization}% reached the configured ${decision.threshold}% threshold`,
+				`Pausing account '${account.name}' (${accountId}): ${describeUsagePause(decision)}`,
 			);
 			await dbOps.pauseAccountForUsageThreshold(
 				accountId,
@@ -349,7 +384,7 @@ export async function applyUsagePauseThresholds(
 			);
 		} else if (decision.action === "resume") {
 			logger.info(
-				`Resuming account '${account.name}' (${accountId}): usage is back below its pause threshold`,
+				`Resuming account '${account.name}' (${accountId}): no usage pause condition holds any more`,
 			);
 			await dbOps.resumeAccountFromUsageThreshold(
 				accountId,

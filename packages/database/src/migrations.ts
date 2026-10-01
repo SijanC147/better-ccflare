@@ -131,7 +131,9 @@ export function ensureSchema(db: Database): void {
 			usage_pause_five_hour_threshold INTEGER,
 			usage_pause_weekly_threshold INTEGER,
 			usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0,
-			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0
+			usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0,
+			usage_pause_five_hour_min_reset_remaining_ms INTEGER,
+			usage_pause_weekly_min_reset_remaining_ms INTEGER
 		)
 	`);
 
@@ -679,6 +681,8 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 		   usage_pause_weekly_threshold = COALESCE(usage_pause_weekly_threshold, ${freshest("usage_pause_weekly_threshold")}),
 		   usage_pause_five_hour_enabled = ${agg("MAX", "usage_pause_five_hour_enabled")},
 		   usage_pause_weekly_enabled = ${agg("MAX", "usage_pause_weekly_enabled")},
+		   usage_pause_five_hour_min_reset_remaining_ms = COALESCE(usage_pause_five_hour_min_reset_remaining_ms, ${freshest("usage_pause_five_hour_min_reset_remaining_ms")}),
+		   usage_pause_weekly_min_reset_remaining_ms = COALESCE(usage_pause_weekly_min_reset_remaining_ms, ${freshest("usage_pause_weekly_min_reset_remaining_ms")}),
 		   billing_type = COALESCE(billing_type, ${freshest("billing_type")})
 		 WHERE rowid = $rowid`,
 	);
@@ -1357,6 +1361,40 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			).run();
 		}
 
+		// The reset condition beside each percentage (SB23-2575): only pause
+		// while the window is still at least this many milliseconds from
+		// resetting. NULL = condition off, so every existing threshold keeps
+		// pausing on its percentage alone. Placed here for the same reason as
+		// the columns above: the refresh_token rebuild runs before this block
+		// and copies a fixed column list, so these are deliberately absent from
+		// that list and present in the account_tier rebuild further down. No
+		// backfill: nothing existed to carry forward.
+		if (
+			!thresholdColumnNames.includes(
+				"usage_pause_five_hour_min_reset_remaining_ms",
+			)
+		) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN usage_pause_five_hour_min_reset_remaining_ms INTEGER",
+			).run();
+			log.info(
+				"Added usage_pause_five_hour_min_reset_remaining_ms column to accounts table",
+			);
+		}
+
+		if (
+			!thresholdColumnNames.includes(
+				"usage_pause_weekly_min_reset_remaining_ms",
+			)
+		) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN usage_pause_weekly_min_reset_remaining_ms INTEGER",
+			).run();
+			log.info(
+				"Added usage_pause_weekly_min_reset_remaining_ms column to accounts table",
+			);
+		}
+
 		// Add UNIQUE index on (name, provider, COALESCE(custom_endpoint,'')) to
 		// enforce atomic uniqueness for the account-add path. The previous
 		// SELECT-then-INSERT pre-check in `assertAccountNameAvailable` is
@@ -1748,7 +1786,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       rate_limited_at, requires_reauth,
 			       consecutive_rate_limits, last_manual_reauth_at, renewal_day,
 			       usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
-			       usage_pause_five_hour_enabled, usage_pause_weekly_enabled
+			       usage_pause_five_hour_enabled, usage_pause_weekly_enabled,
+			       usage_pause_five_hour_min_reset_remaining_ms,
+			       usage_pause_weekly_min_reset_remaining_ms
 			FROM accounts
 		`).run();
 

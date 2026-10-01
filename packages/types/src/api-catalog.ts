@@ -449,7 +449,9 @@ export const API_ROUTES: ApiRoute[] = [
 		path: "/api/accounts/:accountId/usage-pause-thresholds",
 		category: "Accounts",
 		summary:
-			"Set the percentages of the 5-hour and weekly usage windows at which the account pauses itself, each window switchable on its own.",
+			"Set when the account pauses itself on each of its 5-hour and weekly usage windows: at a usage percentage, while the window's reset is still at least some time away, or both, each window switchable on its own.",
+		bodyHint:
+			'{ "fiveHour": { "enabled": true, "percent": 80, "minResetRemainingMs": 7200000 }, "weekly": { "enabled": false, "percent": null, "minResetRemainingMs": null } }',
 	},
 	{
 		method: "POST",

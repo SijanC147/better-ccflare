@@ -77,6 +77,8 @@ const baseAccount: Account = {
 	usagePauseWeeklyThreshold: null,
 	usagePauseFiveHourEnabled: false,
 	usagePauseWeeklyEnabled: false,
+	usagePauseFiveHourMinResetRemainingMs: null,
+	usagePauseWeeklyMinResetRemainingMs: null,
 };
 
 function renderAccount(

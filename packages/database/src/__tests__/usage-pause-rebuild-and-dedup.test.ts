@@ -59,19 +59,30 @@ afterEach(() => {
  */
 const FIVE_HOUR_THRESHOLD = 42;
 const WEEKLY_THRESHOLD = 4242;
+/**
+ * SB23-2575's reset minimums, likewise distinct from each other and from the
+ * thresholds. Non-zero and non-NULL for the same reason: NULL is what a dropped
+ * column produces.
+ */
+const FIVE_HOUR_MIN_RESET_MS = 7_200_000;
+const WEEKLY_MIN_RESET_MS = 86_400_000;
 
 type UsagePauseRow = {
 	usage_pause_five_hour_threshold: number | null;
 	usage_pause_weekly_threshold: number | null;
 	usage_pause_five_hour_enabled: number;
 	usage_pause_weekly_enabled: number;
+	usage_pause_five_hour_min_reset_remaining_ms: number | null;
+	usage_pause_weekly_min_reset_remaining_ms: number | null;
 };
 
 function readUsagePause(db: Database, id: string): UsagePauseRow {
 	return db
 		.query(
 			`SELECT usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
-			        usage_pause_five_hour_enabled, usage_pause_weekly_enabled
+			        usage_pause_five_hour_enabled, usage_pause_weekly_enabled,
+			        usage_pause_five_hour_min_reset_remaining_ms,
+			        usage_pause_weekly_min_reset_remaining_ms
 			 FROM accounts WHERE id = ?`,
 		)
 		.get(id) as UsagePauseRow;
@@ -110,7 +121,9 @@ describe("usage_pause columns: account_tier removal rebuild (SB23-2527)", () => 
 			   usage_pause_five_hour_threshold = ${FIVE_HOUR_THRESHOLD},
 			   usage_pause_weekly_threshold = ${WEEKLY_THRESHOLD},
 			   usage_pause_five_hour_enabled = 1,
-			   usage_pause_weekly_enabled = 1
+			   usage_pause_weekly_enabled = 1,
+			   usage_pause_five_hour_min_reset_remaining_ms = ${FIVE_HOUR_MIN_RESET_MS},
+			   usage_pause_weekly_min_reset_remaining_ms = ${WEEKLY_MIN_RESET_MS}
 			 WHERE id = 'acc-1'`,
 		);
 		first.close();
@@ -143,6 +156,20 @@ describe("usage_pause columns: account_tier removal rebuild (SB23-2527)", () => 
 		expect(row.usage_pause_weekly_threshold).toBe(WEEKLY_THRESHOLD);
 		expect(row.usage_pause_five_hour_enabled).toBe(1);
 		expect(row.usage_pause_weekly_enabled).toBe(1);
+		db.close();
+	});
+
+	it("carries both reset minimums through the rebuild, each in its own column (SB23-2575)", () => {
+		const db = migrateAddTierStampMigrate();
+		expect(columnNames(db)).not.toContain("account_tier");
+		const row = readUsagePause(db, "acc-1");
+
+		expect(row.usage_pause_five_hour_min_reset_remaining_ms).toBe(
+			FIVE_HOUR_MIN_RESET_MS,
+		);
+		expect(row.usage_pause_weekly_min_reset_remaining_ms).toBe(
+			WEEKLY_MIN_RESET_MS,
+		);
 		db.close();
 	});
 
@@ -217,8 +244,10 @@ describe("usage_pause columns: non-destructive dedup merge (SB23-2527)", () => {
 			   (id, name, provider, custom_endpoint, refresh_token, access_token,
 			    created_at, last_used, refresh_token_issued_at,
 			    usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
-			    usage_pause_five_hour_enabled, usage_pause_weekly_enabled)
-			 VALUES (?, 'dup', 'anthropic', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			    usage_pause_five_hour_enabled, usage_pause_weekly_enabled,
+			    usage_pause_five_hour_min_reset_remaining_ms,
+			    usage_pause_weekly_min_reset_remaining_ms)
+			 VALUES (?, 'dup', 'anthropic', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		insert.run(
 			"keeper",
@@ -231,6 +260,8 @@ describe("usage_pause columns: non-destructive dedup merge (SB23-2527)", () => {
 			opts.keeper.usage_pause_weekly_threshold ?? null,
 			opts.keeper.usage_pause_five_hour_enabled ?? 0,
 			opts.keeper.usage_pause_weekly_enabled ?? 0,
+			opts.keeper.usage_pause_five_hour_min_reset_remaining_ms ?? null,
+			opts.keeper.usage_pause_weekly_min_reset_remaining_ms ?? null,
 		);
 		insert.run(
 			"other",
@@ -243,6 +274,8 @@ describe("usage_pause columns: non-destructive dedup merge (SB23-2527)", () => {
 			opts.other.usage_pause_weekly_threshold ?? null,
 			opts.other.usage_pause_five_hour_enabled ?? 0,
 			opts.other.usage_pause_weekly_enabled ?? 0,
+			opts.other.usage_pause_five_hour_min_reset_remaining_ms ?? null,
+			opts.other.usage_pause_weekly_min_reset_remaining_ms ?? null,
 		);
 	}
 
@@ -263,6 +296,32 @@ describe("usage_pause columns: non-destructive dedup merge (SB23-2527)", () => {
 		runMigrations(db);
 
 		expect(survivors()).toEqual(["keeper"]);
+	});
+
+	it("takes the freshest reset minimum when the survivor has none, and keeps its own when it has one (SB23-2575)", () => {
+		// Both COALESCE arms for the new pair in one seed: the keeper owns a
+		// 5-hour value and has no weekly one, and the discarded row carries
+		// different values for both.
+		setupForDedup();
+		seedPair({
+			keeper: {
+				usage_pause_five_hour_min_reset_remaining_ms: FIVE_HOUR_MIN_RESET_MS,
+			},
+			other: {
+				usage_pause_five_hour_min_reset_remaining_ms: WEEKLY_MIN_RESET_MS,
+				usage_pause_weekly_min_reset_remaining_ms: WEEKLY_MIN_RESET_MS,
+			},
+		});
+		runMigrations(db);
+
+		expect(survivors()).toEqual(["keeper"]);
+		const row = readUsagePause(db, "keeper");
+		expect(row.usage_pause_five_hour_min_reset_remaining_ms).toBe(
+			FIVE_HOUR_MIN_RESET_MS,
+		);
+		expect(row.usage_pause_weekly_min_reset_remaining_ms).toBe(
+			WEEKLY_MIN_RESET_MS,
+		);
 	});
 
 	it("keeps the survivor's own threshold when it has one", () => {

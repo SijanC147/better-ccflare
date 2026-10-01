@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RuntimeConfig } from "@better-ccflare/config";
-import type { Disposable } from "@better-ccflare/core";
+import type { Disposable, UsagePauseSetting } from "@better-ccflare/core";
 import {
 	ResolverManager,
 	type ResolverProjectInput,
@@ -1260,13 +1260,13 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
-	 * Set the account's usage-window pause settings: the chosen percentage and
-	 * whether that window is currently in force.
+	 * Set the account's usage-window pause settings: the chosen percentage, the
+	 * reset minimum, and whether that window is currently in force.
 	 */
 	async setUsagePauseThresholds(
 		accountId: string,
-		fiveHour: { enabled: boolean; percent: number | null },
-		weekly: { enabled: boolean; percent: number | null },
+		fiveHour: UsagePauseSetting,
+		weekly: UsagePauseSetting,
 	): Promise<void> {
 		await this.accounts.setUsagePauseThresholds(accountId, fiveHour, weekly);
 	}

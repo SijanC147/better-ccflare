@@ -153,7 +153,9 @@ interface ParsedArgs {
 	pause: string | null;
 	resume: string | null;
 	setPriority: [string, number] | null;
-	setUsagePauseThresholds: [string, string | null, string | null] | null;
+	setUsagePauseThresholds:
+		| [string, string | null, string | null, [string | null, string | null]?]
+		| null;
 	reauthenticate: string | null;
 	analyze: boolean;
 	repairDb: boolean;
@@ -848,7 +850,30 @@ function parseArgs(args: string[]): ParsedArgs {
 					raw === "off" || raw === "none" ? null : raw;
 				const fiveHour = toThreshold(args[++i]);
 				const weekly = toThreshold(args[++i]);
-				parsed.setUsagePauseThresholds = [name, fiveHour, weekly];
+				// Optional trailing pair (SB23-2575): the reset conditions in hours.
+				// Both or neither, because one trailing token cannot say which
+				// window it is for. Absent, the three-argument form behaves as it
+				// always did and keeps the stored reset conditions.
+				const isValue = (raw: string | undefined) =>
+					raw !== undefined && !raw.startsWith("--");
+				if (isValue(args[i + 1])) {
+					if (!isValue(args[i + 2])) {
+						console.error(
+							"❌ --set-usage-pause-thresholds takes reset hours for both windows or for neither: <5h-hours|off> <weekly-hours|off>",
+						);
+						fastExit(1);
+					}
+					const fiveHourReset = toThreshold(args[++i]);
+					const weeklyReset = toThreshold(args[++i]);
+					parsed.setUsagePauseThresholds = [
+						name,
+						fiveHour,
+						weekly,
+						[fiveHourReset, weeklyReset],
+					];
+				} else {
+					parsed.setUsagePauseThresholds = [name, fiveHour, weekly];
+				}
 				break;
 			}
 			case "--analyze":
@@ -1004,8 +1029,9 @@ Options:
   --resume <name>      Resume an account
   --force-reset-rate-limit <name> Force-clear stale rate-limit lock for an account
   --set-priority <name> <priority>  Set account priority
-  --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off>
-                        Pause the account when a usage window reaches the given percentage
+  --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off> [<5h-hours|off> <weekly-hours|off>]
+                        Pause the account when a usage window reaches the given percentage;
+                        the optional hours add "and its reset is still at least this far away"
   --analyze            Analyze database performance
   --repair-db          Check and repair database integrity
   --doctor             Run database integrity check and storage diagnostics
@@ -1449,9 +1475,15 @@ Examples:
 	}
 
 	if (parsed.setUsagePauseThresholds) {
-		const [name, fiveHour, weekly] = parsed.setUsagePauseThresholds;
+		const [name, fiveHour, weekly, resetHours] = parsed.setUsagePauseThresholds;
 
-		const result = await setUsagePauseThresholds(dbOps, name, fiveHour, weekly);
+		const result = await setUsagePauseThresholds(
+			dbOps,
+			name,
+			fiveHour,
+			weekly,
+			resetHours,
+		);
 		console.log(result.message);
 		if (!result.success) {
 			await exitGracefully(1);

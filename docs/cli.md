@@ -100,8 +100,9 @@ Options:
   --pause <name>       Pause an account
   --resume <name>      Resume an account
   --set-priority <name> <priority> Set account priority (0-100)
-  --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off>
-                       Pause an account when a usage window reaches the given percentage
+  --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off> [<5h-hours|off> <weekly-hours|off>]
+                       Pause an account when a usage window reaches the given percentage;
+                       the optional hours add "and its reset is still at least this far away"
   --analyze            Analyze database performance
   --repair-db          Check and repair database integrity
   --reset-stats        Reset usage statistics
@@ -262,13 +263,14 @@ This is the proactive counterpart to rate-limit failover. Without a threshold, a
 
 **Syntax:**
 ```bash
-bun run cli --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off>
+bun run cli --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off> [<5h-hours|off> <weekly-hours|off>]
 ```
 
 **Parameters:**
 - `name`: Account name to update
 - `5h%`: Percentage (1-100) of the 5-hour window at which to pause, or `off`
 - `weekly%`: Percentage (1-100) of the weekly window at which to pause, or `off`
+- `5h-hours`, `weekly-hours` (optional, both or neither): only pause while that window's reset is still at least this many hours away, or `off`. Fractions are allowed. Only the conditions that are set are considered and with both set both must hold, the same rule as a combo slot, so `80 off 2 off` pauses at 80% of the 5-hour window only while that window has two or more hours left, and `off off 2 off` pauses whenever the 5-hour window has at least two hours left to run, whatever its usage. A window is on when either of its conditions is set. Without the pair the command behaves as it always did and keeps any stored reset condition
 
 **Behaviour:**
 - Thresholds are evaluated on each usage poll, so a pause lands within one poll interval of the account crossing the line
@@ -286,6 +288,9 @@ bun run cli --set-usage-pause-thresholds work-account off 80
 
 # Clear both thresholds
 bun run cli --set-usage-pause-thresholds work-account off off
+
+# Pause at 80% of the 5-hour window, but only while that window has 2 or more hours left
+bun run cli --set-usage-pause-thresholds work-account 80 off 2 off
 ```
 
 The same setting is available per account in the dashboard: the gauge button on the account row opens a "Usage Pause Thresholds" dialog, where each window has its own switch and keeps its percentage when switched off. A threshold that is on is drawn as a marker on the matching usage bar, with a tooltip saying where that window stands against it. It is also available over the API as `POST /api/accounts/:id/usage-pause-thresholds` with `{ "fiveHour": 80, "weekly": null }`.
