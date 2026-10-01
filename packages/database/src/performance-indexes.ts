@@ -108,7 +108,33 @@ export function addPerformanceIndexes(db: Database): void {
 	`);
 	log.info("Added index: idx_accounts_request_count");
 
-	// Index for account priority in load balancer
+	// Index for account priority in load balancer.
+	//
+	// Both accounts rebuilds in runMigrations used to recreate this name as a
+	// one-column ON accounts(priority) after their DROP TABLE, and the
+	// IF NOT EXISTS below then kept the composite form out for good on every
+	// install that took either rebuild (SB23-3947). Replace an index under this
+	// name whose key columns are not the composite ones; leave the right one,
+	// and a missing one, alone.
+	const priorityKey = (
+		db.query("PRAGMA index_xinfo(idx_accounts_priority)").all() as Array<{
+			name: string | null;
+			desc: number;
+			key: number;
+		}>
+	)
+		.filter((col) => col.key === 1)
+		.map((col) => `${col.name} ${col.desc ? "DESC" : "ASC"}`)
+		.join(", ");
+	if (
+		priorityKey !== "" &&
+		priorityKey !== "priority ASC, request_count DESC, last_used ASC"
+	) {
+		db.run("DROP INDEX idx_accounts_priority");
+		log.info(
+			`Replacing idx_accounts_priority (${priorityKey}) with the composite form`,
+		);
+	}
 	db.run(`
 		CREATE INDEX IF NOT EXISTS idx_accounts_priority
 		ON accounts(priority ASC, request_count DESC, last_used)
