@@ -697,7 +697,7 @@ describe("SB23-4035: the sidecar names where the server listens", () => {
 				expect(sidecarWarnings(logs)).toEqual([
 					ignoredMessage(
 						sidecar,
-						"its listener is not a host, a port from 1 to 65535 and a pid, so it names no address the secret could be sent to",
+						"its listener is not an IP address, a port from 1 to 65535 and a pid, so it names no address the secret could be sent to",
 					),
 				]);
 			});
@@ -727,7 +727,38 @@ describe("SB23-4035: the sidecar names where the server listens", () => {
 		expect(localControlNotifyHost("127.0.0.1")).toBe("127.0.0.1");
 		expect(localControlNotifyHost("::1")).toBe("::1");
 		expect(localControlNotifyHost("192.168.1.100")).toBe("192.168.1.100");
-		expect(localControlNotifyHost("localhost")).toBe("localhost");
+		// A name is never published or sent to: the #311 review, L1.
+		expect(localControlNotifyHost("localhost")).toBeNull();
+		expect(localControlNotifyHost("example.com")).toBeNull();
+	});
+
+	it("refuses a sidecar whose listener names a host by name, and falls back to 127.0.0.1", () => {
+		withBindHost("localhost", () => {
+			withConfiguredPort(18008, (path, sidecar) => {
+				seed(
+					sidecar,
+					`${JSON.stringify({
+						local_control_secret: SIDECAR_VALUE,
+						listener: { host: "example.com", port: 9, pid: process.pid },
+					})}\n`,
+				);
+
+				const { result, logs } = captureLogs(() =>
+					new Config(path).getLocalControlTarget(),
+				);
+
+				expect(result.kind).toBe("configured");
+				if (result.kind !== "configured") throw new Error("unreachable");
+				// BETTER_CCFLARE_HOST is a name too, so the fallback is loopback.
+				expect(result.baseUrl).toBe("http://127.0.0.1:18008");
+				expect(sidecarWarnings(logs)).toEqual([
+					ignoredMessage(
+						sidecar,
+						"its listener is not an IP address, a port from 1 to 65535 and a pid, so it names no address the secret could be sent to",
+					),
+				]);
+			});
+		});
 	});
 });
 

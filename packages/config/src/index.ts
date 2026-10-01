@@ -426,21 +426,28 @@ export type LocalControlTarget =
 
 /**
  * The address a local client connects to for a server bound to `bindHost`
- * (SB23-4035). A wildcard maps to its own family's loopback, because the
- * wildcard socket is the one that owns that loopback port: 0.0.0.0 to
- * 127.0.0.1, and :: to ::1. Never "localhost", which resolved to ::1 first in
- * the measurement on LocalControlListener, where a server bound to 0.0.0.0
- * does not listen. Any other address is its own answer. A name, such as
- * BETTER_CCFLARE_HOST=localhost, is returned as given, so the CLI resolves it
- * the way the server did, which is the one case this cannot pin to a socket.
+ * (SB23-4035), or null when `bindHost` is a name rather than an address. A
+ * wildcard maps to its own family's loopback, because the wildcard socket is
+ * the one that owns that loopback port: 0.0.0.0 to 127.0.0.1, and :: to ::1.
+ * Never "localhost", which resolved to ::1 first in the measurement on
+ * LocalControlListener, where a server bound to 0.0.0.0 does not listen. Any
+ * other address is its own answer.
+ *
+ * A name, such as BETTER_CCFLARE_HOST=localhost, is null: what it resolves to
+ * can change between the server binding it and a CLI resolving it again, by
+ * DHCP, a VPN, /etc/hosts or a spoofed reply, and the secret would then go
+ * wherever the name points, possibly off this host (the #311 review, L1). So
+ * only literal addresses are published or sent to. The server resolves a name
+ * once and publishes the address; a CLI with no published listener uses
+ * 127.0.0.1.
  */
-export function localControlNotifyHost(bindHost: string): string {
+export function localControlNotifyHost(bindHost: string): string | null {
 	const host = bindHost.trim();
 	if (host === "" || host === "0.0.0.0") return "127.0.0.1";
 	const unbracketed =
 		host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
 	if (unbracketed === "::") return "::1";
-	return unbracketed;
+	return isIP(unbracketed) !== 0 ? unbracketed : null;
 }
 
 /** `http://<host>:<port>`, with an IPv6 literal bracketed. */
@@ -462,8 +469,9 @@ function parseLocalControlListener(
 	}
 	const { host, port, pid } = value as Record<string, unknown>;
 	if (
+		// A literal address only, never a name: see localControlNotifyHost().
 		typeof host !== "string" ||
-		!(isIP(host) !== 0 || /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})$/.test(host))
+		isIP(host) === 0
 	) {
 		return "invalid";
 	}
@@ -2853,7 +2861,8 @@ export class Config extends EventEmitter {
 			kind: "configured",
 			secret,
 			baseUrl: localControlBaseUrl(
-				localControlNotifyHost(process.env.BETTER_CCFLARE_HOST ?? ""),
+				localControlNotifyHost(process.env.BETTER_CCFLARE_HOST ?? "") ??
+					"127.0.0.1",
 				this.getRuntime().port,
 			),
 		};
@@ -3145,7 +3154,7 @@ export class Config extends EventEmitter {
 				return {
 					kind: "refused",
 					reason:
-						"its listener is not a host, a port from 1 to 65535 and a pid, so it names no address the secret could be sent to",
+						"its listener is not an IP address, a port from 1 to 65535 and a pid, so it names no address the secret could be sent to",
 				};
 			}
 			return { kind: "ok", secret, listener };
@@ -3223,9 +3232,14 @@ export class Config extends EventEmitter {
 			// directory's rules allow this uid, which in a directory others can
 			// write without the sticky bit is any entry at this one name.
 			//
-			// Never in a sticky directory. There the entry may be the operator's
-			// own hand-made file with a second name planted on it, which reads as
-			// "sticky-entry" because of the link count. Removing ours frees the
+			// Never in a sticky directory this user or root owns, which is what
+			// "sticky-entry" covers. One owned by a third user reads as
+			// "directory" before the sticky test, so its entry is removed here like
+			// any other refused directory's; unprivileged, that can only be a name
+			// whose inode is ours, and the reader refuses every file there anyway.
+			// In a sticky directory of ours or root's the entry may be the
+			// operator's own hand-made file with a second name planted on it, which
+			// reads as "sticky-entry" because of the link count. Removing ours frees the
 			// name for anyone to claim, and a file another user then creates there
 			// can be removed by nobody but its owner, the directory's owner and
 			// root, so the CLI would be stuck on the config until root steps in.

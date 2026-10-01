@@ -1,3 +1,4 @@
+import { lookup as lookupHost } from "node:dns/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
@@ -2135,11 +2136,19 @@ export default async function startServer(options?: {
 	// serve() try, so a failure here cannot reach its EADDRINUSE handling, and
 	// caught, because publishing is best effort and must not stop a server that
 	// is already listening.
+	//
+	// A bind host given as a name is resolved here, once, and the address is
+	// published, so the CLI never resolves it again and cannot be sent off this
+	// host by a changed answer. The first address the name resolves to is the
+	// one getaddrinfo also handed serve().
 	const boundPort = serverInstance.port;
 	if (typeof boundPort === "number") {
 		try {
+			const host =
+				localControlNotifyHost(hostname) ??
+				(await lookupHost(hostname)).address;
 			config.publishLocalControlSecret({
-				host: localControlNotifyHost(hostname),
+				host,
 				port: boundPort,
 				pid: process.pid,
 			});

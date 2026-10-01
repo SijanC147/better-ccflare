@@ -70,6 +70,13 @@ function configWithPort(port: number): string {
 	return path;
 }
 
+/** The address the server publishes for a bind host, which must be a literal. */
+function notifyHost(bindHost: string): string {
+	const host = localControlNotifyHost(bindHost);
+	if (host === null) throw new Error(`${bindHost} maps to no literal address`);
+	return host;
+}
+
 /** A pid that has exited and been reaped. */
 async function exitedPid(): Promise<number> {
 	const child = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
@@ -92,7 +99,7 @@ describe("SB23-4035: the CLI notifies only the socket the server published", () 
 		const squatter = listen("127.0.0.1");
 		const path = configWithPort(squatter.port);
 		new Config(path).publishLocalControlSecret({
-			host: localControlNotifyHost("127.0.0.1"),
+			host: notifyHost("127.0.0.1"),
 			port: server.port,
 			pid: process.pid,
 		});
@@ -115,7 +122,7 @@ describe("SB23-4035: the CLI notifies only the socket the server published", () 
 		const squatter = listen("::1", server.port);
 		const path = configWithPort(server.port);
 		new Config(path).publishLocalControlSecret({
-			host: localControlNotifyHost("0.0.0.0"),
+			host: notifyHost("0.0.0.0"),
 			port: server.port,
 			pid: process.pid,
 		});

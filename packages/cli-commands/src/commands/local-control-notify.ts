@@ -43,6 +43,8 @@ export async function postLocalControl(
 	try {
 		const response = await fetch(url, {
 			method: "POST",
+			// A redirect would carry the secret header to wherever it points.
+			redirect: "manual",
 			headers: {
 				"Content-Type": "application/json",
 				"x-better-ccflare-local-control-secret": target.secret,

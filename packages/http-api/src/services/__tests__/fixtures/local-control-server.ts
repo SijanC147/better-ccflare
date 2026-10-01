@@ -11,7 +11,7 @@
  * 127.0.0.1 only, on a port the kernel picks, so it cannot collide with the
  * Homebrew service on 8080 or a dev server on 8081.
  */
-import { Config, localControlNotifyHost } from "@better-ccflare/config";
+import { Config } from "@better-ccflare/config";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { AuthService } from "../../auth-service";
 
@@ -49,7 +49,7 @@ const server = Bun.serve({
 const port = server.port;
 if (typeof port !== "number") throw new Error("the fixture server has no port");
 config.publishLocalControlSecret({
-	host: localControlNotifyHost("127.0.0.1"),
+	host: "127.0.0.1",
 	port,
 	pid: process.pid,
 });
