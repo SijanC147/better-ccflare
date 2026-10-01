@@ -949,9 +949,12 @@ interface HistoryWindow {
  * so passing these payloads through unchanged silently records zero rows
  * (issue #467 follow-up, PR #470 review).
  *
- * Anthropic, codex and xai already report in the `{ five_hour, seven_day }` /
+ * Anthropic and codex already report in the `{ five_hour, seven_day }` /
  * `limits[]` shape `recordSnapshot` understands natively and pass through
- * unchanged (same object reference, no copy). kilo and alibaba-coding-plan
+ * unchanged (same object reference, no copy). xai reports
+ * `{ credits: { utilization, resets_at } }` and also passes through:
+ * `recordSnapshot` reads every top-level window-shaped key, so it records a
+ * `credits` row. kilo and alibaba-coding-plan
  * are excluded from `supportsUsagePauseThreshold`/usage-pause wiring entirely
  * (dollar-credits balance / no pollable API respectively) and never reach
  * this function via `createUsageSnapshotRecorder` in practice, so no branch

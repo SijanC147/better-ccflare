@@ -16,7 +16,7 @@
 import { describe, expect, it } from "bun:test";
 import "@better-ccflare/core";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
-import { runMigrationsPg } from "../migrations-pg";
+import { ensureSchemaPg, runMigrationsPg } from "../migrations-pg";
 
 interface RecordingAdapter {
 	executed: string[];
@@ -105,5 +105,85 @@ describe("runMigrationsPg — api_keys.role backfill parity (Codex P1)", () => {
 
 		expect(addedRole).toBe(false);
 		expect(backfilled).toBe(false);
+	});
+});
+
+/**
+ * SB23-3691: the reset condition's two columns (SB23-2575) on PostgreSQL. The
+ * fake reports exactly the columns named in `missing` as absent, so the test
+ * sees the ALTERs an upgrade from a database without them would emit, and no
+ * others.
+ */
+function makeColumnAdapter(missing: ReadonlySet<string>): {
+	adapter: BunSqlAdapter;
+	executed: string[];
+} {
+	const executed: string[] = [];
+	const adapter = {
+		async get<R>(_sql: string, params: unknown[] = []): Promise<R | null> {
+			const [table, column] = params as [string, string];
+			return { exists: missing.has(`${table}.${column}`) ? 0 : 1 } as R;
+		},
+		async unsafe(sql: string): Promise<unknown> {
+			executed.push(sql.replace(/\s+/g, " ").trim());
+			return undefined;
+		},
+		async run(sql: string): Promise<void> {
+			executed.push(sql.replace(/\s+/g, " ").trim());
+		},
+	} as unknown as BunSqlAdapter;
+	return { adapter, executed };
+}
+
+const RESET_COLUMNS = [
+	"usage_pause_five_hour_min_reset_remaining_ms",
+	"usage_pause_weekly_min_reset_remaining_ms",
+] as const;
+
+describe("PostgreSQL usage pause reset columns (SB23-3691)", () => {
+	it("adds both reset columns as BIGINT to a database that lacks them", async () => {
+		const { adapter, executed } = makeColumnAdapter(
+			new Set(RESET_COLUMNS.map((column) => `accounts.${column}`)),
+		);
+
+		await runMigrationsPg(adapter);
+
+		for (const column of RESET_COLUMNS) {
+			expect(
+				executed.filter(
+					(sql) => sql === `ALTER TABLE accounts ADD COLUMN ${column} BIGINT`,
+				),
+			).toHaveLength(1);
+		}
+		// Only the missing columns: every other column reads present.
+		expect(
+			executed.filter((sql) => sql.startsWith("ALTER TABLE accounts ADD")),
+		).toHaveLength(2);
+	});
+
+	it("adds neither when both are already there", async () => {
+		const { adapter, executed } = makeColumnAdapter(new Set());
+
+		await runMigrationsPg(adapter);
+
+		for (const column of RESET_COLUMNS) {
+			expect(executed.some((sql) => sql.includes(`ADD COLUMN ${column}`))).toBe(
+				false,
+			);
+		}
+	});
+
+	it("creates both reset columns as BIGINT in a fresh accounts table", async () => {
+		const { adapter, executed } = makeColumnAdapter(new Set());
+
+		await ensureSchemaPg(adapter);
+
+		const accounts = executed.filter((sql) =>
+			sql.startsWith("CREATE TABLE IF NOT EXISTS accounts ("),
+		);
+		expect(accounts).toHaveLength(1);
+		for (const column of RESET_COLUMNS) {
+			expect(accounts[0]).toContain(`${column} BIGINT,`);
+		}
 	});
 });

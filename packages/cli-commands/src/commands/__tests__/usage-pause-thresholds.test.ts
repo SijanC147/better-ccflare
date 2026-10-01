@@ -109,6 +109,21 @@ describe("setUsagePauseThresholds: reset hours (SB23-2575)", () => {
 		}
 		expect(writes).toStrictEqual([]);
 	});
+
+	it("refuses a 5-hour threshold on an xAI account, which reports no such window (SB23-3686)", async () => {
+		db.run(`UPDATE accounts SET provider = 'xai' WHERE id = 'acc-1'`);
+		const result = await setUsagePauseThresholds(dbOps, "acc", "80", "90");
+		expect(result).toStrictEqual({
+			success: false,
+			message:
+				"Provider 'xai' does not report a 5-hour usage window, so it cannot be switched on; its one window, Grok credits, is the weekly slot",
+		});
+		expect(writes).toStrictEqual([]);
+
+		const weeklyOnly = await setUsagePauseThresholds(dbOps, "acc", null, "90");
+		expect(weeklyOnly.success).toBe(true);
+		expect(writes).toHaveLength(1);
+	});
 });
 
 describe("setUsagePauseThresholds: zero-hours warning (SB23-2575)", () => {

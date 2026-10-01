@@ -420,6 +420,8 @@ Each field is a whole percentage from 1 to 100, or `null` to turn that window's 
 
 `enabled` says whether the window is in force. `percent` sets the stored percentage and `minResetRemainingMs` the reset condition, in milliseconds from 0 to `MAX_MIN_RESET_REMAINING_MS` (the combo slot field's unit and bound; the dashboard takes hours). Omitting either (as in `weekly` above) keeps whatever was already stored for that window, so a client can disable a window without having to look up and resend its numbers. Sending `null` explicitly clears it. A window with `enabled: true` and neither condition set is refused with a 400, since it would pause at nothing. `{ "enabled": true, "percent": null, "minResetRemainingMs": 7200000 }` is legal: it pauses the account while that window still has at least two hours to run, whatever its usage.
 
+**xAI accounts** report one usage window, Grok Build credits, and it is the `weekly` field. xAI reports no 5-hour window, so `fiveHour` switched on is refused with a 400 (`Provider 'xai' does not report a 5-hour usage window, so it cannot be switched on; ...`); `fiveHour` off, with or without its numbers, is accepted. The dashboard labels the weekly row "Grok credits" and shows the 5-hour row as unavailable. A 5-hour setting stored before this rule is ignored by the poller, so it can neither pause the account nor hold a credits pause in place.
+
 **Response:**
 ```json
 {

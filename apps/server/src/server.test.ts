@@ -1520,6 +1520,152 @@ describe("applyUsagePauseThresholds", () => {
 		]);
 		expect(resumed).toStrictEqual([]);
 	});
+	// SB23-3686. The xAI fetcher's own output shape (`XaiUsageData`), not a
+	// flat Anthropic one: before the dedicated reader both windows read null
+	// and these thresholds could never fire.
+	describe("xAI accounts (SB23-3686)", () => {
+		const xaiPayload = (utilization: number, resetsInMs: number | null) => ({
+			credits: {
+				utilization,
+				resets_at:
+					resetsInMs === null
+						? null
+						: new Date(Date.now() + resetsInMs).toISOString(),
+			},
+		});
+
+		it("pauses at the configured percent of the Grok credits window", async () => {
+			const { dbOps, paused, resumed } = makeDbOps({
+				provider: "xai",
+				usage_pause_weekly_threshold: 80,
+				usage_pause_weekly_enabled: true,
+			});
+
+			await applyUsagePauseThresholds(
+				"acc-1",
+				xaiPayload(84, 3 * 86_400_000),
+				dbOps,
+				logger,
+			);
+
+			expect(paused).toStrictEqual([
+				{ accountId: "acc-1", reason: "usage_threshold" },
+			]);
+			expect(resumed).toStrictEqual([]);
+		});
+
+		it("does not pause below the configured percent", async () => {
+			const { dbOps, paused } = makeDbOps({
+				provider: "xai",
+				usage_pause_weekly_threshold: 80,
+				usage_pause_weekly_enabled: true,
+			});
+
+			await applyUsagePauseThresholds(
+				"acc-1",
+				xaiPayload(79, 3 * 86_400_000),
+				dbOps,
+				logger,
+			);
+
+			expect(paused).toStrictEqual([]);
+		});
+
+		it("honours the reset condition on the credits window", async () => {
+			const far = makeDbOps({
+				provider: "xai",
+				usage_pause_weekly_enabled: true,
+				usage_pause_weekly_min_reset_remaining_ms: 24 * 3_600_000,
+			});
+			await applyUsagePauseThresholds(
+				"acc-1",
+				xaiPayload(10, 3 * 86_400_000),
+				far.dbOps,
+				logger,
+			);
+			expect(far.paused).toStrictEqual([
+				{ accountId: "acc-1", reason: "usage_threshold" },
+			]);
+
+			const near = makeDbOps({
+				provider: "xai",
+				usage_pause_weekly_enabled: true,
+				usage_pause_weekly_min_reset_remaining_ms: 24 * 3_600_000,
+			});
+			await applyUsagePauseThresholds(
+				"acc-1",
+				xaiPayload(10, 2 * 3_600_000),
+				near.dbOps,
+				logger,
+			);
+			expect(near.paused).toStrictEqual([]);
+		});
+
+		it("resumes an xAI account the credits window paused although a stale 5-hour window is on", async () => {
+			const { dbOps, paused, resumed } = makeDbOps({
+				provider: "xai",
+				paused: true,
+				pause_reason: "usage_threshold",
+				usage_pause_five_hour_threshold: 50,
+				usage_pause_five_hour_enabled: true,
+				usage_pause_weekly_threshold: 80,
+				usage_pause_weekly_enabled: true,
+			});
+
+			await applyUsagePauseThresholds(
+				"acc-1",
+				xaiPayload(4, 6 * 86_400_000),
+				dbOps,
+				logger,
+			);
+
+			expect(resumed).toStrictEqual(["acc-1:usage_threshold"]);
+			expect(paused).toStrictEqual([]);
+		});
+
+		it("never pauses an xAI account on a 5-hour setting, which xAI cannot report", async () => {
+			const { dbOps, paused } = makeDbOps({
+				provider: "xai",
+				usage_pause_five_hour_threshold: 1,
+				usage_pause_five_hour_enabled: true,
+			});
+
+			await applyUsagePauseThresholds(
+				"acc-1",
+				xaiPayload(99, 3 * 86_400_000),
+				dbOps,
+				logger,
+			);
+
+			expect(paused).toStrictEqual([]);
+		});
+
+		// The provider decides, never the `credits` key: a Codex payload carries
+		// one too. A Codex account whose windows are under its thresholds must
+		// stay in play whatever its credit balance says.
+		it("leaves a Codex account whose payload carries a credits balance on its own windows", async () => {
+			const { dbOps, paused } = makeDbOps({
+				provider: "codex",
+				usage_pause_weekly_threshold: 80,
+				usage_pause_weekly_enabled: true,
+			});
+
+			await applyUsagePauseThresholds(
+				"acc-1",
+				{
+					seven_day: { utilization: 85, resets_at: null },
+					credits: { has_credits: true, unlimited: false, balance: "3.00" },
+				},
+				dbOps,
+				logger,
+			);
+
+			expect(paused).toStrictEqual([
+				{ accountId: "acc-1", reason: "usage_threshold" },
+			]);
+		});
+	});
+
 	// SB23-2575. A window with only a reset minimum has no percent, so the
 	// poller's early-return gate must ask whether the window is configured, not
 	// whether it has a percent. Mutating the gate back to the percent alone
@@ -1647,6 +1793,25 @@ describe("applyUsagePauseThresholds", () => {
 });
 
 describe("describeUsagePause (SB23-2575)", () => {
+	// SB23-3686: the log names xAI's window the way the dashboard does, not by
+	// a period the code does not know.
+	it("names xAI's weekly slot as its Grok credits window", () => {
+		const decision = {
+			action: "pause" as const,
+			window: "weekly" as const,
+			utilization: 84,
+			threshold: 80,
+			resetRemainingMs: null,
+			minResetRemainingMs: null,
+		};
+		expect(describeUsagePause(decision, "xai")).toBe(
+			"Grok credits window usage at 84% reached the configured 80% threshold",
+		);
+		expect(describeUsagePause(decision, "anthropic")).toBe(
+			"weekly window usage at 84% reached the configured 80% threshold",
+		);
+	});
+
 	it("names only the configured clauses", () => {
 		expect(
 			describeUsagePause({

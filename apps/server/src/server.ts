@@ -20,6 +20,7 @@ import {
 	readUsageUtilization,
 	registerCleanup,
 	registerDisposable,
+	restrictToReportedWindows,
 	setForceAccountModel,
 	setPricingLogger,
 	shutdown,
@@ -293,12 +294,21 @@ export function createUsageSnapshotRecorder(
  * has configured: a reset-only pause has no utilization figure to quote, and
  * printing "null% reached null%" for it would say nothing.
  *
+ * xAI's weekly slot is its Grok credits window, whose period the code does
+ * not know, so the line names the window the dashboard names (SB23-3686).
+ *
  * Exported for tests.
  */
 export function describeUsagePause(
 	decision: Extract<UsagePauseDecision, { action: "pause" }>,
+	provider?: string | null,
 ): string {
-	const window = decision.window === "five_hour" ? "5-hour" : "weekly";
+	const window =
+		decision.window === "five_hour"
+			? "5-hour"
+			: provider === "xai"
+				? "Grok credits"
+				: "weekly";
 	const clauses: string[] = [];
 	if (decision.threshold !== null) {
 		clauses.push(
@@ -336,20 +346,26 @@ export async function applyUsagePauseThresholds(
 		const account = await dbOps.getAccount(accountId);
 		if (!account) return;
 
-		const thresholds = {
-			fiveHour: {
-				enabled: account.usage_pause_five_hour_enabled,
-				percent: account.usage_pause_five_hour_threshold ?? null,
-				minResetRemainingMs:
-					account.usage_pause_five_hour_min_reset_remaining_ms ?? null,
+		// A window the provider never reports is dropped here rather than left
+		// to read `unknown` on every poll, which would block the resume of an
+		// account its other window paused (SB23-3686: an xAI 5-hour setting).
+		const thresholds = restrictToReportedWindows(
+			{
+				fiveHour: {
+					enabled: account.usage_pause_five_hour_enabled,
+					percent: account.usage_pause_five_hour_threshold ?? null,
+					minResetRemainingMs:
+						account.usage_pause_five_hour_min_reset_remaining_ms ?? null,
+				},
+				weekly: {
+					enabled: account.usage_pause_weekly_enabled,
+					percent: account.usage_pause_weekly_threshold ?? null,
+					minResetRemainingMs:
+						account.usage_pause_weekly_min_reset_remaining_ms ?? null,
+				},
 			},
-			weekly: {
-				enabled: account.usage_pause_weekly_enabled,
-				percent: account.usage_pause_weekly_threshold ?? null,
-				minResetRemainingMs:
-					account.usage_pause_weekly_min_reset_remaining_ms ?? null,
-			},
-		};
+			account.provider,
+		);
 		// Nothing in force and nothing of ours to lift — the common case, and not
 		// worth a read of the payload. "In force" is either condition, not the
 		// percent alone: a window with only a reset minimum is configured too.
@@ -376,7 +392,7 @@ export async function applyUsagePauseThresholds(
 		// or cleared outright (resume).
 		if (decision.action === "pause") {
 			logger.info(
-				`Pausing account '${account.name}' (${accountId}): ${describeUsagePause(decision)}`,
+				`Pausing account '${account.name}' (${accountId}): ${describeUsagePause(decision, account.provider)}`,
 			);
 			await dbOps.pauseAccountForUsageThreshold(
 				accountId,

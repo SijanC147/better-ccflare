@@ -203,4 +203,35 @@ describe("usage pause thresholds: reset condition (SB23-2575)", () => {
 		expect(account?.usagePauseFiveHourMinResetRemainingMs).toBe(0);
 		expect(account?.usagePauseWeeklyMinResetRemainingMs).toBe(24 * HOUR);
 	});
+
+	// SB23-3686: xAI reports no 5-hour window, so switching one on would store
+	// a setting the poller drops on every snapshot.
+	it("refuses to switch on a window the provider does not report (xAI 5-hour)", async () => {
+		db.run(`UPDATE accounts SET provider = 'xai' WHERE id = 'acc-1'`);
+		const res = await post({
+			fiveHour: { enabled: true, percent: 80, minResetRemainingMs: null },
+			weekly: { enabled: false, percent: null, minResetRemainingMs: null },
+		});
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error?: string; message?: string };
+		expect(JSON.stringify(body)).toContain(
+			"Provider 'xai' does not report a 5-hour usage window, so it cannot be switched on; its one window, Grok credits, is the weekly slot",
+		);
+		expect(writes).toStrictEqual([]);
+	});
+
+	it("stores an xAI credits (weekly) window, with the 5-hour window off", async () => {
+		db.run(`UPDATE accounts SET provider = 'xai' WHERE id = 'acc-1'`);
+		const res = await post({
+			fiveHour: { enabled: false, percent: 50, minResetRemainingMs: null },
+			weekly: { enabled: true, percent: 80, minResetRemainingMs: 24 * HOUR },
+		});
+		expect(res.status).toBe(200);
+		expect(writes).toStrictEqual([
+			{
+				fiveHour: { enabled: false, percent: 50, minResetRemainingMs: null },
+				weekly: { enabled: true, percent: 80, minResetRemainingMs: 24 * HOUR },
+			},
+		]);
+	});
 });
