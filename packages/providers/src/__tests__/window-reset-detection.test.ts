@@ -1,13 +1,56 @@
 import { describe, expect, it, mock } from "bun:test";
+import type { NanoGPTUsageData, ZaiUsageWindow } from "@better-ccflare/types";
 import { makeZaiUsage } from "../testing/zai-usage-fixture";
 import type { AnyUsageData, UsageData } from "../usage-fetcher";
 import {
 	extractWeeklyResetTime,
 	extractWeeklyUtilization,
 	extractWindowResetTime,
+	getRepresentativeUsageResetMs,
+	getRepresentativeUsageSnapshotForProvider,
+	getRepresentativeUtilizationForProvider,
 	usageCache,
 } from "../usage-fetcher";
 import type { XaiUsageData } from "../xai-usage-fetcher";
+
+// Typed fixtures for the providers the weekly helpers do not read. Each one
+// carries real data, so a null from a weekly helper is a statement about the
+// provider rather than about an empty object (SB23-2455: the `{} as any` they
+// replace was not a value of any of these types).
+
+function zaiWindow(
+	percentage: number,
+	resetAt: number | null,
+	type: string,
+): ZaiUsageWindow {
+	return {
+		used: percentage,
+		remaining: 100 - percentage,
+		percentage,
+		resetAt,
+		type,
+	};
+}
+
+/** zai with both token windows set, the weekly one the more used. */
+const ZAI_BOTH_WINDOWS = makeZaiUsage({
+	tokens_limit: zaiWindow(40, 1_000, "tokens_limit"),
+	tokens_limit_weekly: zaiWindow(90, 9_000, "tokens_limit_weekly"),
+});
+
+const XAI_WITH_CREDITS: XaiUsageData = {
+	credits: { utilization: 75, resets_at: "2030-03-08T00:00:00.000Z" },
+};
+
+const NANOGPT_ACTIVE: NanoGPTUsageData = {
+	active: true,
+	limits: { daily: 100, monthly: 1000 },
+	enforceDailyLimit: false,
+	daily: { used: 50, remaining: 50, percentUsed: 0.5, resetAt: 2_000 },
+	monthly: { used: 700, remaining: 300, percentUsed: 0.7, resetAt: 3_000 },
+	state: "active",
+	graceUntil: null,
+};
 
 // ── extractWindowResetTime ────────────────────────────────────────────────────
 
@@ -117,9 +160,11 @@ describe("extractWeeklyResetTime", () => {
 	});
 
 	it("returns null for providers without a weekly_all window (zai, xai, unsupported)", () => {
-		expect(extractWeeklyResetTime({} as any, "zai")).toBeNull();
-		expect(extractWeeklyResetTime({} as any, "xai")).toBeNull();
-		expect(extractWeeklyResetTime({} as any, "nanogpt")).toBeNull();
+		expect(extractWeeklyResetTime(makeZaiUsage(), "zai")).toBeNull();
+		// zai's own weekly token window is not a weekly_all window.
+		expect(extractWeeklyResetTime(ZAI_BOTH_WINDOWS, "zai")).toBeNull();
+		expect(extractWeeklyResetTime(XAI_WITH_CREDITS, "xai")).toBeNull();
+		expect(extractWeeklyResetTime(NANOGPT_ACTIVE, "nanogpt")).toBeNull();
 	});
 });
 
@@ -157,13 +202,121 @@ describe("extractWeeklyUtilization", () => {
 	});
 
 	it("returns null for providers without a weekly_all window (zai, xai, unsupported)", () => {
-		expect(extractWeeklyUtilization({} as any, "zai")).toBeNull();
-		expect(extractWeeklyUtilization({} as any, "xai")).toBeNull();
-		expect(extractWeeklyUtilization({} as any, "nanogpt")).toBeNull();
+		expect(extractWeeklyUtilization(makeZaiUsage(), "zai")).toBeNull();
+		expect(extractWeeklyUtilization(ZAI_BOTH_WINDOWS, "zai")).toBeNull();
+		expect(extractWeeklyUtilization(XAI_WITH_CREDITS, "xai")).toBeNull();
+		expect(extractWeeklyUtilization(NANOGPT_ACTIVE, "nanogpt")).toBeNull();
 	});
 
 	it("returns null when neither seven_day nor limits[] weekly_all is present", () => {
 		expect(extractWeeklyUtilization({} as UsageData, "anthropic")).toBeNull();
+	});
+});
+
+// ── zai: the 5-hour and weekly token windows together ─────────────────────
+// SB23-2455. Every zai fixture in this file used to leave tokens_limit_weekly
+// null, so the selection between the two token windows ran on one candidate.
+// These set both and assert which one wins, through the three exported paths
+// that read it: the reset (token windows only), the utilization (the max of
+// every window) and the snapshot (the winner across all three windows).
+
+describe("zai weekly token window", () => {
+	it("the more-used weekly window wins: its reset and its utilization", () => {
+		expect(getRepresentativeUsageResetMs(ZAI_BOTH_WINDOWS, "zai")).toBe(9_000);
+		expect(
+			getRepresentativeUtilizationForProvider(ZAI_BOTH_WINDOWS, "zai"),
+		).toBe(90);
+		expect(
+			getRepresentativeUsageSnapshotForProvider(ZAI_BOTH_WINDOWS, "zai"),
+		).toEqual({ utilization: 90, resetMs: 9_000 });
+	});
+
+	it("the more-used 5-hour window wins over a lighter weekly one", () => {
+		const data = makeZaiUsage({
+			tokens_limit: zaiWindow(95, 1_000, "tokens_limit"),
+			tokens_limit_weekly: zaiWindow(30, 9_000, "tokens_limit_weekly"),
+		});
+		expect(getRepresentativeUsageResetMs(data, "zai")).toBe(1_000);
+		expect(getRepresentativeUtilizationForProvider(data, "zai")).toBe(95);
+		expect(getRepresentativeUsageSnapshotForProvider(data, "zai")).toEqual({
+			utilization: 95,
+			resetMs: 1_000,
+		});
+	});
+
+	it("a weekly window alone is still read", () => {
+		const data = makeZaiUsage({
+			tokens_limit_weekly: zaiWindow(60, 7_000, "tokens_limit_weekly"),
+		});
+		expect(getRepresentativeUsageResetMs(data, "zai")).toBe(7_000);
+		expect(getRepresentativeUsageSnapshotForProvider(data, "zai")).toEqual({
+			utilization: 60,
+			resetMs: 7_000,
+		});
+	});
+
+	it("equal percentages prefer the later reset, whichever window holds it", () => {
+		const weeklyLater = makeZaiUsage({
+			tokens_limit: zaiWindow(100, 1_000, "tokens_limit"),
+			tokens_limit_weekly: zaiWindow(100, 9_000, "tokens_limit_weekly"),
+		});
+		expect(getRepresentativeUsageResetMs(weeklyLater, "zai")).toBe(9_000);
+		expect(
+			getRepresentativeUsageSnapshotForProvider(weeklyLater, "zai"),
+		).toEqual({ utilization: 100, resetMs: 9_000 });
+
+		// The same tie with the order of the resets reversed, so a rule that
+		// simply preferred one window would fail one of the two cases.
+		const fiveHourLater = makeZaiUsage({
+			tokens_limit: zaiWindow(100, 9_000, "tokens_limit"),
+			tokens_limit_weekly: zaiWindow(100, 1_000, "tokens_limit_weekly"),
+		});
+		expect(getRepresentativeUsageResetMs(fiveHourLater, "zai")).toBe(9_000);
+		expect(
+			getRepresentativeUsageSnapshotForProvider(fiveHourLater, "zai"),
+		).toEqual({ utilization: 100, resetMs: 9_000 });
+	});
+
+	it("on a tie, an unknown reset outranks a known one", () => {
+		// Unknown is treated as latest: the account is not known to be back.
+		for (const [fiveHourReset, weeklyReset] of [
+			[null, 9_000],
+			[9_000, null],
+		] as const) {
+			const data = makeZaiUsage({
+				tokens_limit: zaiWindow(100, fiveHourReset, "tokens_limit"),
+				tokens_limit_weekly: zaiWindow(100, weeklyReset, "tokens_limit_weekly"),
+			});
+			expect(getRepresentativeUsageResetMs(data, "zai")).toBeNull();
+			expect(getRepresentativeUsageSnapshotForProvider(data, "zai")).toEqual({
+				utilization: 100,
+				resetMs: null,
+			});
+		}
+	});
+
+	it("the reset reads token windows only; the snapshot also weighs time_limit", () => {
+		const data = makeZaiUsage({
+			time_limit: zaiWindow(99, 5_000, "time_limit"),
+			tokens_limit: zaiWindow(40, 1_000, "tokens_limit"),
+			tokens_limit_weekly: zaiWindow(90, 9_000, "tokens_limit_weekly"),
+		});
+		expect(getRepresentativeUsageResetMs(data, "zai")).toBe(9_000);
+		expect(getRepresentativeUtilizationForProvider(data, "zai")).toBe(99);
+		expect(getRepresentativeUsageSnapshotForProvider(data, "zai")).toEqual({
+			utilization: 99,
+			resetMs: 5_000,
+		});
+	});
+
+	it("no windows at all is no opinion", () => {
+		expect(getRepresentativeUsageResetMs(makeZaiUsage(), "zai")).toBeNull();
+		expect(
+			getRepresentativeUtilizationForProvider(makeZaiUsage(), "zai"),
+		).toBeNull();
+		expect(
+			getRepresentativeUsageSnapshotForProvider(makeZaiUsage(), "zai"),
+		).toBeNull();
 	});
 });
 
