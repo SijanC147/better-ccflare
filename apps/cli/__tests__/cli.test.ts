@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // The CLI reports its version from apps/cli/package.json in source mode. Deriving
@@ -29,7 +30,16 @@ const createdConfigHomes = new Set<string>();
  */
 function runCLI(
 	args: string[],
-	options: { cwd?: string; env?: Record<string, string> } = {},
+	options: {
+		cwd?: string;
+		env?: Record<string, string>;
+		// Kill the CLI as soon as stdout contains this text, instead of at the
+		// deadline. For a test that means "this command does start a server":
+		// it waits for proof rather than for the clock.
+		until?: string;
+		// Deadline before the CLI is SIGKILLed. Defaults to 3000ms.
+		timeoutMs?: number;
+	} = {},
 ): Promise<{
 	stdout: string;
 	stderr: string;
@@ -90,6 +100,10 @@ function runCLI(
 
 		proc.stdout?.on("data", (data) => {
 			stdout += data.toString();
+			if (options.until && !killed && stdout.includes(options.until)) {
+				killed = true;
+				proc.kill("SIGKILL");
+			}
 		});
 
 		proc.stderr?.on("data", (data) => {
@@ -105,7 +119,7 @@ function runCLI(
 		timeoutHandle = setTimeout(() => {
 			killed = true;
 			proc.kill("SIGKILL");
-		}, 3000);
+		}, options.timeoutMs ?? 3000);
 	});
 }
 
@@ -624,6 +638,106 @@ describe("CLI Integration Tests", () => {
 			);
 			expect(result.stdout).toBe("");
 		});
+	});
+
+	describe("unknown arguments", () => {
+		const lastLines = (text: string, count: number) =>
+			text.trimEnd().split("\n").slice(-count);
+
+		// Before SB23-3729 an unknown argument was skipped and the no-argument
+		// path started the server. If that ever regresses, the server these
+		// tests would start must not land on the live 8080: PORT names a
+		// throwaway port, and the two network pollers a server starts are off.
+		let serverEnv: Record<string, string>;
+		beforeEach(async () => {
+			const probe = createServer();
+			await new Promise<void>((resolve) =>
+				probe.listen(0, "127.0.0.1", resolve),
+			);
+			const { port } = probe.address() as AddressInfo;
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+			serverEnv = {
+				PORT: String(port),
+				BETTER_CCFLARE_SERVICE_STATUS_REFRESH_SECONDS: "0",
+				CF_PRICING_OFFLINE: "1",
+			};
+		});
+
+		// `stdout === ""` is the assertion that the server-start path was never
+		// reached: it prints "Starting better-ccflare server..." before it
+		// builds anything. The exit code alone cannot say so, because a server
+		// that fails to bind also exits 1.
+		it("exits 1 on a mistyped flag, suggesting the nearest one", async () => {
+			const result = await runCLI(["--lsit"], { env: serverEnv });
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toBe("");
+			expect(lastLines(result.stderr, 3)).toEqual([
+				"❌ unknown argument: --lsit",
+				"Did you mean: --list?",
+				"Run better-ccflare --help to see every option.",
+			]);
+		});
+
+		it("exits 1 on an unknown positional argument", async () => {
+			const result = await runCLI(["serve"], { env: serverEnv });
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toBe("");
+			expect(lastLines(result.stderr, 3)).toEqual([
+				"❌ unknown argument: serve",
+				"Did you mean: --serve?",
+				"Run better-ccflare --help to see every option.",
+			]);
+		});
+
+		it("exits 1 on an unknown argument after known ones", async () => {
+			const result = await runCLI(["--port", serverEnv.PORT, "--bogus"], {
+				env: serverEnv,
+			});
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toBe("");
+			expect(lastLines(result.stderr, 2)).toEqual([
+				"❌ unknown argument: --bogus",
+				"Run better-ccflare --help to see every option.",
+			]);
+		});
+
+		it("exits 1 on tui anywhere but first", async () => {
+			const result = await runCLI(["--list", "tui"], { env: serverEnv });
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toBe("");
+			expect(lastLines(result.stderr, 3)).toEqual([
+				"❌ unknown argument: tui",
+				"tui is a subcommand and must be the first argument: better-ccflare tui --help",
+				"Run better-ccflare --help to see every option.",
+			]);
+		});
+
+		it("accepts --smol, which docs/systemd.md puts on ExecStart", async () => {
+			const result = await runCLI(["--smol", "--version"], { env: serverEnv });
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toContain(EXPECTED_VERSION_LINE);
+		});
+
+		// `brew services` runs the binary with no arguments (docs/release.md),
+		// so the bare invocation must keep starting the server. "Server will be
+		// available at" is printed inside startServerWithConfig, so seeing it
+		// means the start function was reached; the CLI is killed right there.
+		it("still starts the server with no arguments", async () => {
+			const result = await runCLI([], {
+				env: serverEnv,
+				until: "Server will be available at",
+				timeoutMs: 30_000,
+			});
+			expect(result.stdout).toContain("Starting better-ccflare server...");
+			expect(result.stdout).toContain(
+				`Server will be available at http://localhost:${serverEnv.PORT}`,
+			);
+		}, 35_000);
 	});
 
 	describe("Error Handling", () => {

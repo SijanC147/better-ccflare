@@ -1188,7 +1188,7 @@ healthcheck:
 
 ```bash
 # Daily: Check recent logs
-better-ccflare --logs 100 | grep ERROR
+tail -n 100 "${BETTER_CCFLARE_LOG_DIR:-${TMPDIR:-/tmp}/better-ccflare-logs}/app.log" | grep ERROR
 
 # Weekly: Database maintenance
 # Linux/macOS:

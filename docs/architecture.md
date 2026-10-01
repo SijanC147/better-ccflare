@@ -242,14 +242,12 @@ graph TB
             LIST[--list]
             REMOVE[--remove]
             STATS[--stats]
-            LOGS[--logs]
             ANALYZE[--analyze]
             CLI_CMDS --> SERVE
             CLI_CMDS --> ADD
             CLI_CMDS --> LIST
             CLI_CMDS --> REMOVE
             CLI_CMDS --> STATS
-            CLI_CMDS --> LOGS
             CLI_CMDS --> ANALYZE
         end
     end
