@@ -32,6 +32,8 @@
  *     diagnostics. A program that fails to build lists nothing, which would read as zero
  *     coverage. That fails in the safe direction, by over-reporting, but an instrument that
  *     cannot build its program is not measuring the tree, so it says so;
+ *   - `git ls-files` fails, or lists no TypeScript file at all. Once the allowlist empties, an
+ *     empty population would otherwise pass as a clean tree;
  *   - the allowlist is missing, malformed, has an entry without a reason, or has a duplicate.
  *
  * WHAT IT DOES NOT CATCH, stated so a pass is not over-read:
@@ -206,11 +208,24 @@ for (const [project, script] of targets) {
 // ---------------------------------------------------------------------------------------------
 // Tracked files and the allowlist.
 
-const lsFiles = Bun.spawnSync(["git", "-C", root, "ls-files", "-z", "--", ...TRACKED_PATHSPECS]);
+// A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a hook or a wrapper overrides
+// `-C`, so `ls-files` would read another index and could report nothing with exit 0.
+const gitEnv = Object.fromEntries(
+	Object.entries(process.env).filter(([key]) => !["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"].includes(key)),
+);
+const lsFiles = Bun.spawnSync(["git", "-C", root, "ls-files", "-z", "--", ...TRACKED_PATHSPECS], {
+	env: gitEnv,
+});
 if (lsFiles.exitCode !== 0) {
 	cannotRun(`git ls-files failed in ${root}: ${lsFiles.stderr.toString().trim()}`);
 }
 const tracked = lsFiles.stdout.toString().split("\0").filter(Boolean).sort();
+// The floor. With the allowlist emptied, an `ls-files` that lists nothing would otherwise read as
+// a clean tree, which is the same shape as #226's unreachable strict branch. A wrong root, a
+// sparse checkout or an empty index lists nothing; no real tree this gate guards does.
+if (tracked.length === 0) {
+	cannotRun(`git ls-files listed no TypeScript files in ${root}, so there is nothing to measure`);
+}
 const trackedSet = new Set(tracked);
 
 function coverOf(relative: string): string | undefined {

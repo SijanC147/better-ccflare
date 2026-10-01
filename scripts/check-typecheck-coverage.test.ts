@@ -93,8 +93,11 @@ function makeRepo(fixture: Fixture = {}): string {
 	return dir;
 }
 
-function runGate(root: string) {
-	const result = Bun.spawnSync(["bun", "run", gate, "--root", root], { cwd: repoRoot });
+function runGate(root: string, extraEnv: Record<string, string> = {}) {
+	const result = Bun.spawnSync(["bun", "run", gate, "--root", root], {
+		cwd: repoRoot,
+		env: { ...process.env, ...extraEnv },
+	});
 	return {
 		exitCode: result.exitCode,
 		stdout: result.stdout.toString(),
@@ -134,6 +137,41 @@ describe("check-typecheck-coverage", () => {
 		const result = runGate(root);
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toContain("UNGATED    web/view.tsx\n");
+	});
+
+	test.each(["lib/esm.mts", "lib/cjs.cts"])("fails on an ungated %s", (file) => {
+		const root = makeRepo({ files: { [file]: "export const m = 1;\n" } });
+		const result = runGate(root);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(`UNGATED    ${file}\n`);
+	});
+
+	test("refuses to run when no TypeScript file is tracked at all", () => {
+		// The floor: with an empty allowlist, nothing tracked would otherwise read as clean.
+		const root = makeRepo({ track: ["package.json", "scripts/typecheck-coverage-allowlist.json"] });
+		const result = runGate(root);
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toContain("git ls-files listed no TypeScript files");
+	});
+
+	test("refuses to run when the root is not a git repository", () => {
+		const root = makeDir("typecheck-coverage-nogit-");
+		for (const [relative, content] of Object.entries(DEFAULT_FILES)) write(root, relative, content);
+		write(root, "package.json", JSON.stringify({ scripts: DEFAULT_SCRIPTS }));
+		write(root, "scripts/typecheck-coverage-allowlist.json", "[]");
+		const result = runGate(root, { GIT_CEILING_DIRECTORIES: path.dirname(root) });
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toContain("git ls-files failed");
+	});
+
+	test("ignores an inherited GIT_INDEX_FILE, which would point ls-files at another index", () => {
+		const root = makeRepo();
+		const result = runGate(root, { GIT_INDEX_FILE: path.join(root, "no-such-index") });
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(summaryOf(result.stdout)).toBe(
+			"check-typecheck-coverage: ok: 2 targets, 2 tracked, 2 covered, 0 ungated (0 allowlisted)",
+		);
 	});
 
 	test("ignores a stray file that is on disk but not tracked", () => {
@@ -375,7 +413,15 @@ describe("check-typecheck-coverage is wired into CI", () => {
 		const pkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 		expect(pkg.scripts["check:typecheck-coverage"]).toBe("bun run scripts/check-typecheck-coverage.ts");
 		const ci = readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
-		expect(ci).toContain(
+		// Inside `Bun and release tooling`, the required job whose name the ruleset pins, and not
+		// merely somewhere in the file.
+		const start = ci.indexOf("\n  quality:\n");
+		const end = ci.indexOf("\n  hextap-contract:\n");
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const quality = ci.slice(start, end);
+		expect(quality).toContain("    name: Bun and release tooling\n");
+		expect(quality).toContain(
 			"      - name: Check every tracked TypeScript file is in a typecheck target\n" +
 				"        if: steps.changes.outputs.relevant != 'false'\n" +
 				"        run: bun run check:typecheck-coverage\n",
