@@ -27,6 +27,7 @@ import {
 	isAnthropicExtraUsageExhausted,
 	isAnthropicOrgPermissionDenied,
 	isAnthropicOutOfCredits,
+	type ProviderRequestContext,
 	recoverCodexMessagesContinuation,
 	usageCache,
 } from "@better-ccflare/providers";
@@ -1068,9 +1069,21 @@ export async function proxyWithAccount(
 			? ""
 			: await getValidAccessToken(account, ctx);
 
+		// The per-request carrier (SB23-2508): one object for this attempt, handed
+		// by reference to prepareRequest, buildUrl and every processResponse call
+		// below, the in-place retries included. A provider keys anything it
+		// derives here on this object, never on `account`, which outlives the
+		// request. A failover re-enters this function and gets a fresh one.
+		const providerContext: ProviderRequestContext = {};
+
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
 		if (provider.prepareRequest) {
-			provider.prepareRequest(req, effectiveBodyBuffer, account);
+			provider.prepareRequest(
+				req,
+				effectiveBodyBuffer,
+				account,
+				providerContext,
+			);
 		}
 
 		// Prepare request using account-specific provider
@@ -1127,7 +1140,12 @@ export async function proxyWithAccount(
 			account,
 			getXaiConvId(requestMeta),
 		);
-		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
+		const targetUrl = provider.buildUrl(
+			url.pathname,
+			url.search,
+			account,
+			providerContext,
+		);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
 			method: req.method,
@@ -2288,12 +2306,13 @@ export async function proxyWithAccount(
 		});
 
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
+		providerContext.requestModel = outgoing.model || null;
 		let response = await provider.processResponse(
 			taggedRawResponse,
 			account,
 			req.headers,
 			drainAbortController,
-			{ requestModel: outgoing.model || null },
+			providerContext,
 		);
 
 		// Failover to next account on upstream 401 — credentials are invalid/expired
@@ -2344,12 +2363,17 @@ export async function proxyWithAccount(
 				statusText: retryRaw.statusText,
 				headers: retryTaggedHeaders,
 			});
+			// Re-read at retry time, as the literal this replaced was. Every
+			// recovery that changes the model runs before the first response, so
+			// today this equals the value set there; it is re-read so a recovery
+			// added after that point cannot hand a retry a stale model.
+			providerContext.requestModel = outgoing.model || null;
 			return provider.processResponse(
 				retryTaggedRaw,
 				account,
 				req.headers,
 				drainAbortController,
-				{ requestModel: outgoing.model || null },
+				providerContext,
 			);
 		};
 

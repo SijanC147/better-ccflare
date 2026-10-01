@@ -1,22 +1,25 @@
 /**
- * SB23-2457. `packages/providers/src/providers/vertex-ai/provider.ts` stores
- * per-request state on the `Account` object it is handed and reads it back
- * after the upstream fetch. That is only safe because two concurrent requests
- * on one account row are handed two DIFFERENT objects, and nothing in the type
- * system, the interfaces or any other test says so.
- *
- * The property is `rows.map(toAccount)` in `AccountRepository.findAll`: one
- * fresh object per row per call. A cache added anywhere between the SELECT and
- * the caller — memoizing `findAll`, or holding the returned array across
- * requests — would hand the same object to both, and the vertex-ai provider's
- * `_originalModel` would then be read by the wrong request. That failure is
- * demonstrated deliberately in
- * `packages/providers/src/providers/vertex-ai/__tests__/shared-account-state.test.ts`.
- *
- * So this file pins the property rather than the provider. It is not about
- * renewal days or column lists; it is about object identity, which is why the
- * assertions are all `toBe` / `not.toBe` on references and none of them look at
+ * SB23-2457, revisited in SB23-2508. `AccountRepository.findAll` hands out one
+ * fresh object per row per call (`rows.map(toAccount)`). This file pins that
+ * property by reference: every assertion is `toBe` / `not.toBe`, none looks at
  * a field value.
+ *
+ * It was written because vertex-ai stored per-request state on the `Account`
+ * and was correct only while no two requests shared an object. That reason is
+ * gone: since SB23-2508 vertex-ai keys that state on the per-attempt
+ * `ProviderRequestContext`, and
+ * `packages/providers/src/providers/vertex-ai/__tests__/shared-account-state.test.ts`
+ * shows two requests on one shared account object staying apart.
+ *
+ * The file stays for a different reason. The proxy still writes persisted
+ * fields onto the account object it was handed, mid-request: token refreshes in
+ * `packages/proxy/src/handlers/token-manager.ts`, the cooldown in
+ * `rate-limit-cooldown.ts`, the rate-limit reset in `response-processor.ts`.
+ * Today each write stays on that request's object until the next read from the
+ * table. A cache between the SELECT and the caller would make those writes
+ * visible to every concurrent request holding the same object, mid-flight.
+ * Whether that would be harmful is not established; the point is that it would
+ * change behaviour silently, and this file makes such a change a deliberate one.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
