@@ -82,9 +82,13 @@ juniper_tide, cedar_ember, amber_gauge
   The router still gives `spend.enabled` precedence
   (`packages/proxy/src/handlers/model-capacity.ts`), and the dashboard follows.
 - `spend.cap.money` equalled `spend.limit` on all three that had one.
-- New: the `spend` and `limits` blocks, `member_dashboard_available`,
-  `omelette_promotional`, and the five-hour window's `*_dollars` and
-  `locked_reason` keys.
+- New since 2025-11-25:
+  - the `spend` and `limits` blocks;
+  - `member_dashboard_available`, `omelette_promotional`, `seven_day_cowork`,
+    `seven_day_omelette` and `seven_day_breakdown`;
+  - the five-hour window's `*_dollars` and `locked_reason` keys;
+  - the twelve codename keys listed above, besides `iguana_necktie`, which
+    2025-11-25 already had.
 
 **Resets and promotional credits**:
 `GET /api/oauth/usage` is the only Anthropic endpoint better-ccflare reads for
