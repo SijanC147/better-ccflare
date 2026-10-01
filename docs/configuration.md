@@ -124,7 +124,19 @@ Three conditions stop this process writing the config at all:
 
 Each refused save logs `Config not saved: ...` every time, because each one is a setting that did not persist. The setting stays in memory until the process exits.
 
-While saves are refused, `local_control_secret` is never written. The process keeps the secret it already holds, or generates one the first time it is needed, and every part of that process uses the same value until it exits. Separate processes cannot see it: the CLI is one, and it reads the secret from the file. So while the refusal lasts, CLI notifications such as `--reauthenticate` and `--force-reset-rate-limit` fail to authenticate against a server that has API keys active. Repairing the file does not end that by itself: the server read its secret once at startup and keeps it. Fix the file, then restart the server: it adopts the secret the repaired file holds, or writes a fresh one, and the CLI reads the same value.
+While saves are refused, `local_control_secret` is never written to the config. The process keeps the secret it already holds, or generates one the first time it is needed, and every part of that process uses the same value until it exits. Another process learns it from the local control secret file below, which the server writes whether or not the config can be saved. Where that file cannot be written either, CLI notifications such as `--reauthenticate` and `--force-reset-rate-limit` fail to authenticate against a server that has API keys active until the config is fixed and the server restarted.
+
+### The local control secret file
+
+On every start the server writes the `local_control_secret` it holds to `<config>.local-control`, beside the configured path, for example `~/.config/better-ccflare/better-ccflare.json.local-control`. The file is mode 0600 and holds one JSON field. It is written the way the config is saved: a new file with its mode set through its descriptor and read back, then renamed over the old one, so a symlink or hard link at that name is replaced rather than written through. A start that finds the file already holding the value writes nothing. The log says `Published the local control secret to <path> at 0600` when it does write.
+
+The CLI reads this file before the config, so it sends the value the running server holds even when the config could not be saved, or held a `local_control_secret` the server refused to adopt. The server never reads it: the config stays the source of the secret, so editing `local_control_secret` in the config and restarting the server still rotates it.
+
+The server writes the file only when the directory holding it belongs to you or to root and is not writable by group or other. In a sticky directory such as `/tmp` that is true only once an entry of yours exists at that name, so the first start there does not write it. When the file is not written the log says `Did not write the local control secret file <path>`, once per process.
+
+The CLI believes the file only when, in addition, it is a regular file, not a symlink, has exactly one hard link, belongs to the CLI's own user, and has no group or other permission bits. Anything else is ignored with `Ignoring the local control secret file <path>: <reason>`, once per process, and the CLI falls back to the config. On a filesystem that does not enforce Unix modes, such as a Docker bind mount from a macOS or Windows host or a FAT or exFAT volume, the file always reads as accessible to others, so it is ignored on every CLI run. Windows has neither file: the checks mean nothing there, so the CLI reads the config as it did before.
+
+An absent file is not reported. That is a server older than this file, or one that could not write it.
 
 ## Configuration Options
 
