@@ -235,6 +235,19 @@ describe("runOverviewLoop", () => {
 		expect(f.timers()).toEqual([]);
 	});
 
+	it("restores the terminal when a SIGWINCH repaint throws", async () => {
+		const f = fakeIO();
+		const done = start(f);
+		f.io.now = () => {
+			throw new Error("clock gone");
+		};
+		f.signal("SIGWINCH");
+		expect(await done).toBe(1);
+		expect(f.rawModes).toEqual([true, false]);
+		expect(f.writes[f.writes.length - 1]).toBe(LEAVE_SCREEN);
+		expect(f.errors).toEqual(["❌ clock gone\n"]);
+	});
+
 	it("arms no timer when stopped while a fetch is in flight", async () => {
 		const f = fakeIO();
 		let release: (r: OverviewFetchResult) => void = () => {};
