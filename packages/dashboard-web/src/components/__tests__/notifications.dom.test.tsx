@@ -617,12 +617,12 @@ describe("navigation and route", () => {
 		);
 		try {
 			const link = view.host.querySelector('a[href="/notifications"]');
-			expect(link).not.toBeNull();
-			expect(link?.textContent).toContain("Notifications");
-			expect(link?.querySelector("svg")).not.toBeNull();
-			expect(link?.querySelector("button")?.className).toContain(
-				"bg-primary/10",
-			);
+			if (!link) throw new Error("no sidebar link to /notifications");
+			expect(link.textContent).toContain("Notifications");
+			expect(link.querySelector("svg")).not.toBeNull();
+			const button = link.querySelector("button");
+			if (!button) throw new Error("the sidebar link has no button");
+			expect(button.className).toContain("bg-primary/10");
 		} finally {
 			await view.unmount();
 		}
