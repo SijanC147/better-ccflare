@@ -87,3 +87,4 @@ registry.registerProvider(new AnthropicCompatibleProvider());
 registry.registerProvider(new MetaProvider());
 
 export { recoverCodexMessagesContinuation } from "./providers/codex/provider";
+export { CODEX_INTERNAL_REPLAY_HEADER } from "./providers/codex/turn-state";

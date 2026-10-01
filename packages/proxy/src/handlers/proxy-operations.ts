@@ -22,6 +22,7 @@ import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-forma
 import {
 	type AnyUsageData,
 	applyXaiConvIdHeader,
+	CODEX_INTERNAL_REPLAY_HEADER,
 	getProvider,
 	isAnthropicExtraUsageExhausted,
 	isAnthropicOrgPermissionDenied,
@@ -1102,6 +1103,11 @@ export async function proxyWithAccount(
 			if (isTrustedNativeResponses(requestMeta)) {
 				headers.set("x-better-ccflare-native-responses", "true");
 			}
+			// A keepalive or probe replays a client's body; it must not move or
+			// poison the turn that body names (SB23-3629). prepareHeaders has
+			// already dropped any client copy of this header.
+			if (isSyntheticInternal)
+				headers.set(CODEX_INTERNAL_REPLAY_HEADER, "true");
 		}
 		// Synthetic-response markers are internal provider-to-proxy signals. Strip
 		// client-supplied copies before providers transform the outbound request.
