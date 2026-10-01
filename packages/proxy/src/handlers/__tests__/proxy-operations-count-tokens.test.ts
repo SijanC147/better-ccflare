@@ -302,7 +302,9 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 			);
 
 			if (!(result instanceof Response)) {
-				throw new Error("proxyWithAccount returned no Response for a 200 upstream");
+				throw new Error(
+					"proxyWithAccount returned no Response for a 200 upstream",
+				);
 			}
 			expect(result.status).toBe(200);
 			// Issue #444 regression guard: a real (non-synthetic) upstream response
