@@ -91,10 +91,36 @@
  *   - a member call on the result of a callee the value flowed into. `p.then(() =>
  *     s?.read()).catch(() => {})` is not reported, because `.then(...).then(cb)` passes the
  *     value to `cb` and the climb cannot tell `catch` from `then` by what it does.
- *   - a statement inside ANY function `expect(...)` holds is never reported, including
- *     `expect(() => { s?.f(); }).not.toThrow()`, where the skip is in fact silent. The
- *     exemption exists for `toThrow` and `rejects`, and narrowing it to those matchers is
- *     possible but was not measured here.
+ *   - a guard inside an expression-bodied arrow is recorded in the enclosing block whether or
+ *     not that arrow ever runs, so `const check = () => expect(x).toBeDefined(); x?.f();`
+ *     reports `x?.f()` with no guard having run. N4's third point in PR #288's review; zero
+ *     instances measured and left as is, because a guard inside `waitFor(() => expect(...))`
+ *     is the common shape and does run.
+ *   - a statement inside a function `expect(fn).toThrow()` holds is exempt even when some
+ *     OTHER statement in `fn` is what throws, so `expect(() => { s?.f(); boom(); }).toThrow()`
+ *     passes with `s` nullish. Telling which statement throws needs flow analysis.
+ *
+ * SB23-3836 closed three misses this list used to carry, each measured on Bun 1.3.14 and 1.4.2:
+ *   - `expect(() => { s?.f(); }).not.toThrow()` was exempt because ANY `expect(fn)` exempted
+ *     everything inside `fn`. Only `toThrow` / `toThrowError` with no net `.not`, and any
+ *     `.rejects` chain, fail when `fn` runs without throwing, so only they exempt now
+ *     (expectObservesSkip).
+ *   - `const act = () => { s?.f(); }; expect(act).toThrow();` was REPORTED although `toThrow`
+ *     observes the skip, because the arrow's holder is the `const`. A function stored under a
+ *     `const` or a name now follows the name to the `expect`, by binding (isHeldThroughName).
+ *   - `expect(store.get("k")).toBeDefined(); store.get("k")?.clear()` was reported because two
+ *     calls with identical text were one key. A subject passing through a call is a new value
+ *     at each evaluation, as the alias rule already said for `const v = store.get("k")`, so no
+ *     guard licenses it. Measured on the tree at b9446617: the survey went from 323 guarded
+ *     chains to 321, the two dropped both `events.at(-1)` reads in `pool-exhausted.test.ts`,
+ *     and offences stayed 0.
+ *
+ * Condition 4b's verdicts come from `silent-skip-matchers.ts`, which a test runs against the
+ * Bun executing the suite, so a Bun bump that changes how a matcher treats `undefined` fails CI.
+ * Four matchers depend on their argument and are read from it: `toBe` / `toEqual` /
+ * `toStrictEqual(undefined)`, `toBeTypeOf("undefined")`, `toBeOneOf([undefined, ...])` and
+ * `toContainKeys([])`. `toSatisfy(fn)` is never reported, because whether a predicate holds
+ * for `undefined` is not in the source text.
  * Caught correctly, for contrast: `try { s?.close(); } catch {}` and the last statement of a
  * block-bodied arrow.
  *
@@ -152,6 +178,13 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import * as path from "node:path";
 import ts from "typescript";
+import {
+	type ArgShape,
+	matcherVerdictOnUndefined,
+	NO_ARG_TYPE_MATCHERS,
+	PRESENT_TYPEOF,
+	TYPE_AND_SHAPE_MATCHERS,
+} from "./silent-skip-matchers";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 
@@ -244,27 +277,10 @@ type GuardMatch = {
 
 /**
  * SB23-2498. Matchers that also fail on a missing value although they were not written to
- * say "this exists". Each one fails on `undefined`, so a `?.` on its subject below it is the
- * same silent skip as one under `toBeDefined()`.
+ * say "this exists". `TYPE_AND_SHAPE_MATCHERS`, `NO_ARG_TYPE_MATCHERS` and `PRESENT_TYPEOF` live
+ * in `silent-skip-matchers.ts`, where a test runs each one on `undefined` under the running Bun.
  */
-const TYPE_AND_SHAPE_MATCHERS = new Set([
-	"toBeInstanceOf",
-	"toHaveProperty",
-	"toHaveLength",
-	"toMatchObject",
-	"toContain",
-	"toContainEqual",
-]);
-const NO_ARG_TYPE_MATCHERS = new Set([
-	"toBeFunction",
-	"toBeArray",
-	"toBeString",
-	"toBeNumber",
-	"toBeBoolean",
-]);
 const ASYMMETRIC_PRESENT = new Set(["any", "anything", "objectContaining", "arrayContaining"]);
-/** `typeof x` values that a missing `x` cannot produce. `"object"` is absent: `typeof null`. */
-const PRESENT_TYPEOF = new Set(["function", "string", "number", "boolean", "bigint", "symbol"]);
 
 function isNullLiteral(e: ts.Expression): boolean {
 	return e.kind === ts.SyntaxKind.NullKeyword;
@@ -425,8 +441,17 @@ type ResolveAlias = (name: string) => string | null | undefined;
  * so a guard written in one spelling covers a chain written in another. `viaAlias` records
  * whether a `const` alias was followed, so the survey can split that axis out.
  */
-function canonicalKey(expr: ts.Expression, resolveAlias: ResolveAlias): { key: string; viaAlias: boolean } {
+function containsCall(node: ts.Node): boolean {
+	if (ts.isCallExpression(node) || ts.isNewExpression(node)) return true;
+	return ts.forEachChild(node, containsCall) === true;
+}
+
+function canonicalKey(
+	expr: ts.Expression,
+	resolveAlias: ResolveAlias,
+): { key: string; viaAlias: boolean; hasCall: boolean } {
 	let viaAlias = false;
+	let hasCall = false;
 	const walk = (node: ts.Expression): string => {
 		const e = unwrapValue(node);
 		if (ts.isIdentifier(e)) {
@@ -447,14 +472,18 @@ function canonicalKey(expr: ts.Expression, resolveAlias: ResolveAlias): { key: s
 					: `${walk(e.expression)}[${JSON.stringify(key.text)}]`;
 			}
 			if (ts.isNumericLiteral(key)) return `${walk(e.expression)}[${Number(key.text)}]`;
+			// `arr[next()]` read twice is two reads at two indices. PR #295's reviewer.
+			if (containsCall(key)) hasCall = true;
 			return `${walk(e.expression)}[${normalise(key.getText())}]`;
 		}
 		if (ts.isCallExpression(e)) {
+			hasCall = true;
 			return `${walk(e.expression)}(${e.arguments.map((a) => normalise(a.getText())).join(",")})`;
 		}
 		return normalise(e.getText());
 	};
-	return { key: walk(expr), viaAlias };
+	const key = walk(expr);
+	return { key, viaAlias, hasCall };
 }
 
 /**
@@ -567,61 +596,30 @@ function climbOutOfExpression(node: ts.Node): { current: ts.Node; parent: ts.Nod
 	return { current, parent };
 }
 
-/**
- * The matchers that PASS when handed `undefined`, so a chain short-circuiting into one of
- * them is not observed by anything. `toBeNull` is deliberately absent: `expect(undefined)
- * .toBeNull()` fails, so it rejects a skip.
- */
-const UNDEFINED_TOLERANT_MATCHERS = new Set([
-	"toBeUndefined",
-	// `expect(undefined).toBeEmpty()` passes in Bun 1.4, measured by PR #288's reviewer.
-	"toBeEmpty",
-	"toBeFalsy",
-	"toBeNil",
-	"toBeNullish",
-]);
 
 /**
- * Matchers that FAIL on `undefined` even under `.not`, because they reject a value of the
- * wrong type before comparing anything. Every entry was measured, 2026-10-01 on Bun 1.4,
- * with `expect(undefined).not.<matcher>(...)` failing. The SB23-2498 widening is what found
- * the gap: `expect(inv?.argv).not.toContain("--resume")` was reported as silent, and it is
- * not. The same probe found `not.toHaveProperty`, `not.toBeInstanceOf`, `not.toStartWith`,
- * `not.toEndWith`, `not.toInclude`, `not.toContainKeys` and `not.toContainValue` PASS on
- * `undefined`, so those stay tolerant.
+ * What the source says about one matcher argument, for the verdicts in
+ * silent-skip-matchers.ts. Only literals are known; an identifier, a call or a spread is
+ * `unknown`, because its runtime value is not in the file.
  */
-const REJECTS_UNDEFINED_EVEN_NEGATED = new Set([
-	"toContain",
-	"toContainEqual",
-	"toContainKey",
-	"toHaveLength",
-	"toMatch",
-	"toMatchObject",
-	"toBeEmpty",
-	"toBeCloseTo",
-	"toBeGreaterThan",
-	"toBeGreaterThanOrEqual",
-	"toBeLessThan",
-	"toBeLessThanOrEqual",
-	"toHaveBeenCalled",
-	"toHaveBeenCalledWith",
-	"toHaveBeenCalledTimes",
-	"toHaveBeenLastCalledWith",
-	"toHaveBeenNthCalledWith",
-	"toThrow",
-	"toThrowError",
-	// Added by PR #288's reviewer, each measured failing under `.not` on undefined.
-	"toContainAllKeys",
-	"toContainValues",
-	"toIncludeRepeated",
-	"toHaveReturned",
-	"toHaveReturnedTimes",
-	"toHaveReturnedWith",
-	"toHaveLastReturnedWith",
-	"toHaveNthReturnedWith",
-]);
-
-const EQUALITY_MATCHERS = new Set(["toBe", "toEqual", "toStrictEqual"]);
+function argShape(node: ts.Expression): ArgShape {
+	const e = unwrapValue(node);
+	if (isUndefinedIdentifier(e)) return { kind: "undefined" };
+	if (isNullLiteral(e)) return { kind: "null" };
+	if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return { kind: "string", value: e.text };
+	if (ts.isNumericLiteral(e) || ts.isBigIntLiteral(e)) return { kind: "number" };
+	if (ts.isPrefixUnaryExpression(e) && ts.isNumericLiteral(e.operand)) return { kind: "number" };
+	if (e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword) return { kind: "boolean" };
+	if (ts.isArrayLiteralExpression(e)) {
+		return {
+			kind: "array",
+			elements: e.elements.map((el) => (ts.isSpreadElement(el) || ts.isOmittedExpression(el) ? { kind: "unknown" } : argShape(el))),
+		};
+	}
+	if (ts.isObjectLiteralExpression(e)) return { kind: "object" };
+	if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return { kind: "function" };
+	return { kind: "unknown" };
+}
 
 /**
  * True when this chain's value is handed to an `expect(...)` whose matcher PASSES on
@@ -660,26 +658,18 @@ function isConsumedByUndefinedTolerantMatcher(node: ts.Node): boolean {
 		// `.resolves` / `.rejects` change what is asserted about, so the skip is observed by
 		// the promise machinery rather than by the matcher. Treat as rejecting.
 		if (name === "resolves" || name === "rejects") return false;
-		// `toBe(undefined)` passes on undefined and `not.toBe(undefined)` fails on it, so for
-		// the equality matchers the argument decides, not the name. PR #288's reviewer found
-		// `not.toBe(undefined)` reported although it rejects a skip.
+		// The verdict comes from silent-skip-matchers.ts, which a test runs against the Bun
+		// executing the suite (SB23-3836). Some matchers throw on a value they cannot inspect
+		// whichever way round they are asked, so `not.` does not make them tolerant; for
+		// `toBe(undefined)`, `toBeTypeOf("undefined")`, `toBeOneOf([undefined])` and
+		// `toContainKeys([])` the argument decides, not the name. An `unknown` verdict counts
+		// as rejecting, the direction that cannot fail a correct build.
 		const call = chain.parent;
-		if (
-			EQUALITY_MATCHERS.has(name) &&
-			call !== undefined &&
-			ts.isCallExpression(call) &&
-			call.expression === chain &&
-			call.arguments.length === 1 &&
-			call.arguments[0] !== undefined &&
-			isUndefinedIdentifier(call.arguments[0])
-		) {
-			return !negated;
-		}
-		// Some matchers throw on a value they cannot inspect whichever way round they are
-		// asked, so `not.` does not make them tolerant. Measured in Bun 1.4: see the set.
-		if (negated && REJECTS_UNDEFINED_EVEN_NEGATED.has(name)) return false;
-		const tolerantWhenPositive = UNDEFINED_TOLERANT_MATCHERS.has(name);
-		return negated ? !tolerantWhenPositive : tolerantWhenPositive;
+		const args =
+			call !== undefined && ts.isCallExpression(call) && call.expression === chain
+				? call.arguments.map(argShape)
+				: [];
+		return matcherVerdictOnUndefined(name, negated, args) === "tolerates";
 	}
 	return false;
 }
@@ -889,16 +879,152 @@ function isValueDiscarded(node: ts.Node, readsThroughMembers = false): boolean {
 }
 
 /**
- * True when ANY function enclosing this node is held by `expect(...)`, in which case a skip
- * IS observed: `expect(() => { h?.dispatch("x"); }).toThrow(/bad/)` fails when `h` is null,
- * because nothing throws. Reporting it would fail a correct build, which is the one failure
- * mode a required gate cannot survive.
+ * True when the assertion hanging off this `expect(fn)` fails if `fn` runs without throwing or
+ * rejecting, so a call skipped inside `fn` is observed. Measured on Bun 1.3.14 and 1.4.2
+ * (SB23-3836): `expect(() => {}).toThrow()` and `.toThrowError()` fail, any `.rejects` chain on
+ * an async function that resolves fails, and `expect(() => {}).not.toThrow()` PASSES, as does
+ * every matcher that never calls the function (`toBeFunction`, `toBeDefined`). So only those
+ * two shapes observe a skip.
+ */
+const THROW_MATCHERS = new Set([
+	"toThrow",
+	"toThrowError",
+	// PR #295's reviewer: both fail when the function does not throw, measured on Bun 1.4.2.
+	"toThrowErrorMatchingSnapshot",
+	"toThrowErrorMatchingInlineSnapshot",
+]);
+
+function expectObservesSkip(expectCall: ts.CallExpression): boolean {
+	let node: ts.Node = expectCall;
+	let negated = false;
+	let rejects = false;
+	while (node.parent !== undefined && ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node) {
+		const name = node.parent.name.text;
+		if (name === "not") negated = !negated;
+		else if (name === "rejects") rejects = true;
+		else if (name !== "resolves") {
+			const call = node.parent.parent;
+			if (call === undefined || !ts.isCallExpression(call) || call.expression !== node.parent) return false;
+			return rejects || (!negated && THROW_MATCHERS.has(name));
+		}
+		node = node.parent;
+	}
+	return false;
+}
+
+/** True when this function, or `expect(this function)` through parentheses, is held by an observing `expect`. */
+function isHeldDirectly(held: ts.Node, holder: ts.Node | undefined): boolean {
+	return (
+		holder !== undefined &&
+		ts.isCallExpression(holder) &&
+		isExpectCall(holder) &&
+		holder.arguments.length === 1 &&
+		holder.arguments[0] === held &&
+		expectObservesSkip(holder)
+	);
+}
+
+/** True when `scope` itself declares `name`, as a parameter or as a statement in its body. */
+function declaresName(scope: ts.Node, name: string): boolean {
+	const binds = (binding: ts.BindingName): boolean =>
+		ts.isIdentifier(binding)
+			? binding.text === name
+			: binding.elements.some((el) => !ts.isOmittedExpression(el) && binds(el.name));
+	if (isFunctionLike(scope)) {
+		return (scope as ts.SignatureDeclaration).parameters.some((p) => binds(p.name));
+	}
+	if (ts.isCatchClause(scope)) {
+		return scope.variableDeclaration !== undefined && binds(scope.variableDeclaration.name);
+	}
+	// `for (const act of fns) expect(act).toThrow()` binds a different `act`. PR #295's reviewer.
+	if (ts.isForOfStatement(scope) || ts.isForInStatement(scope) || ts.isForStatement(scope)) {
+		const init = scope.initializer;
+		return init !== undefined && ts.isVariableDeclarationList(init) && init.declarations.some((d) => binds(d.name));
+	}
+	const statements =
+		ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) || ts.isCaseClause(scope) || ts.isDefaultClause(scope)
+			? scope.statements
+			: undefined;
+	if (statements === undefined) return false;
+	return statements.some(
+		(st) =>
+			(ts.isVariableStatement(st) && st.declarationList.declarations.some((d) => binds(d.name))) ||
+			((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name?.text === name),
+	);
+}
+
+/**
+ * N4 from PR #288's review, fixed in SB23-3836: `const act = () => { h?.dispatch("x"); };
+ * expect(act).toThrow();` observes the skip exactly as the inline form does, and was reported
+ * because the arrow's holder is the `const`, not the `expect`. A function stored under a
+ * `const` or declared by name is held by `expect` when any `expect(<that name>)` in the
+ * declaring scope observes a skip and its identifier binds to this declaration, not to an
+ * inner parameter or declaration of the same name. One observing call is enough: the skip
+ * happens on every invocation, so the first observed one fails the test.
+ */
+function isHeldThroughName(fn: ts.Node, held: ts.Node, holder: ts.Node | undefined): boolean {
+	let name: string | undefined;
+	let declaringScope: ts.Node | undefined;
+	if (ts.isFunctionDeclaration(fn) && fn.name !== undefined) {
+		name = fn.name.text;
+		declaringScope = fn.parent;
+	} else if (
+		holder !== undefined &&
+		ts.isVariableDeclaration(holder) &&
+		holder.initializer === held &&
+		ts.isIdentifier(holder.name) &&
+		(ts.getCombinedNodeFlags(holder) & ts.NodeFlags.Const) !== 0
+	) {
+		name = holder.name.text;
+		declaringScope = holder.parent?.parent?.parent;
+	}
+	if (name === undefined || declaringScope === undefined) return false;
+	const target = name;
+	const scope = declaringScope;
+	let found = false;
+	const visit = (n: ts.Node): void => {
+		if (found) return;
+		if (
+			ts.isCallExpression(n) &&
+			isExpectCall(n) &&
+			n.arguments.length === 1 &&
+			n.arguments[0] !== undefined &&
+			ts.isIdentifier(n.arguments[0]) &&
+			n.arguments[0].text === target &&
+			expectObservesSkip(n)
+		) {
+			let up: ts.Node | undefined = n.parent;
+			let shadowed = false;
+			while (up !== undefined && up !== scope) {
+				if (declaresName(up, target)) {
+					shadowed = true;
+					break;
+				}
+				up = up.parent;
+			}
+			if (!shadowed && up === scope) found = true;
+		}
+		ts.forEachChild(n, visit);
+	};
+	visit(scope);
+	return found;
+}
+
+/**
+ * True when a function enclosing this node is held by an `expect(...)` that observes a skip,
+ * in which case reporting the skip would fail a correct build: `expect(() => { h?.dispatch("x");
+ * }).toThrow(/bad/)` fails when `h` is null, because nothing throws.
  *
  * Every enclosing function, not only the nearest. Before SB23-2499 only the nearest was
  * checked, so `expect(() => { xs.forEach((k) => { s?.f(k); }); }).toThrow()` was reported
- * although a skip there is exactly as observed. That is a deliberate narrowing, made in the
- * same change that widened the callback positions, because the widening is what makes
- * nested callbacks common.
+ * although a skip there is exactly as observed.
+ *
+ * SB23-3836 narrowed WHICH `expect` counts. Until then any `expect(fn)` exempted everything
+ * inside `fn`, including `expect(() => { s?.f(); }).not.toThrow()`, where a nullish `s` calls
+ * nothing, nothing throws, and the test passes: a silent skip the gate waved through. Now only
+ * `toThrow` / `toThrowError` with no net `.not`, and any `.rejects` chain, exempt; see
+ * expectObservesSkip. The same change follows a function stored under a `const` or a name to
+ * the `expect` that holds it (isHeldThroughName).
  */
 function isHeldByExpect(node: ts.Node): boolean {
 	let scope: ts.Node | undefined = node.parent;
@@ -910,14 +1036,7 @@ function isHeldByExpect(node: ts.Node): boolean {
 				held = holder;
 				holder = holder.parent;
 			}
-			if (
-				holder !== undefined &&
-				ts.isCallExpression(holder) &&
-				isExpectCall(holder) &&
-				holder.arguments.includes(held as ts.Expression)
-			) {
-				return true;
-			}
+			if (isHeldDirectly(held, holder) || isHeldThroughName(scope, held, holder)) return true;
 		}
 		scope = scope.parent;
 	}
@@ -1175,7 +1294,13 @@ for (const root of searchRoots) {
 				const chain = canonicalKey(optional.subjectNode, resolveAlias);
 				const chainBinding = bindingOf(rootIdentifier(optional.subjectNode));
 				let matched: { guard: Guard; rank: number; axes: string[] } | undefined;
-				for (let i = scopes.length - 1; i >= 0 && matched?.rank !== 0; i--) {
+				// N4 from PR #288's review, fixed in SB23-3836: a subject that passes through a
+				// call names a NEW value each time it is evaluated, so no earlier guard proves it.
+				// `expect(store.get("k")).toBeDefined(); store.get("k")?.clear()` compares two
+				// calls; the alias rule already refused `const v = store.get("k")` for the same
+				// reason, and the text rule did not. `store?.clear()` under that guard is still
+				// matched, because the receiver `store` precedes the call.
+				for (let i = scopes.length - 1; i >= 0 && matched?.rank !== 0 && !chain.hasCall; i--) {
 					const scope = scopes[i];
 					if (!scope) continue;
 					for (const g of scope.guards) {

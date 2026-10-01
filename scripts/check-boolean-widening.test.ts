@@ -11,9 +11,16 @@ const gate = path.join(repoRoot, "scripts", "check-boolean-widening.ts");
  * bare path and falls back to `os.tmpdir()` is `rm -rf /tmp` on a machine where the fallback
  * fires, so the directory is asserted non-empty, asserted not to be the live worktree, and
  * recorded for teardown before anything is written into it.
+ *
+ * `extraFiles` maps a file name to its source, written beside `subject.ts`. Every one of them is
+ * listed in `include`, because an ambient `.d.ts` that nothing imports is otherwise outside the
+ * program and a fixture relying on it would measure nothing.
  */
 const created: string[] = [];
-function makeFixture(source: string): string {
+function makeFixture(
+	source: string,
+	extraFiles: Record<string, string> = {},
+): string {
 	const dir = mkdtempSync(path.join(tmpdir(), "boolean-widening-"));
 	expect(dir.length).toBeGreaterThan(0);
 	expect(dir).not.toBe(repoRoot);
@@ -30,10 +37,13 @@ function makeFixture(source: string): string {
 				moduleResolution: "bundler",
 				skipLibCheck: true,
 			},
-			include: ["subject.ts"],
+			include: ["subject.ts", ...Object.keys(extraFiles)],
 		}),
 	);
 	writeFileSync(path.join(dir, "subject.ts"), source);
+	for (const [name, text] of Object.entries(extraFiles)) {
+		writeFileSync(path.join(dir, name), text);
+	}
 	return dir;
 }
 
@@ -292,8 +302,8 @@ describe("check-boolean-widening", () => {
 		// primitives. Measured 2026-09-21: the shipped gate went silent on this.
 		//
 		// `isGlobalObjectInterface` matches on the symbol plus at least one declaration in
-		// a `.d.ts`; this symbol has neither, so it is reported. Replacing that function
-		// with `checker.typeToString(type) === "Object"` makes this case exit 0.
+		// a default-library file; this symbol has none, so it is reported. Replacing that
+		// function with `checker.typeToString(type) === "Object"` makes this case exit 0.
 		const dir = makeFixture(
 			[
 				"interface Object { localOnly: 1 }",
@@ -314,8 +324,8 @@ describe("check-boolean-widening", () => {
 		// The other direction of the test above, and the case `isGlobalObjectInterface`
 		// uses `.some` rather than `.every` for. This file has no import and no export, so
 		// it is a SCRIPT rather than a module and its `interface Object` merges with the
-		// one in `lib.es5.d.ts`. The merged symbol therefore has declarations in both a
-		// `.d.ts` and this file, and the merged type still accepts every non-nullish
+		// one in `lib.es5.d.ts`. The merged symbol therefore has declarations in both
+		// `lib.es5.d.ts` and this file, and the merged type still accepts every non-nullish
 		// primitive, so it must stay silent.
 		//
 		// Written because a mutation found the gap, not because the case was foreseen:
@@ -346,6 +356,128 @@ describe("check-boolean-widening", () => {
 		// Without this the clean case is vacuous: a gate that parsed nothing also reports
 		// zero, and this fixture has exactly one boolean context to find.
 		expect(stdout).toContain("1 boolean contexts examined");
+	});
+
+	// SB23-2490. The four cases below, plus the two above, pin `isGlobalObjectInterface`
+	// from both sides. The predicate before it, "a declaration in any `.d.ts`", went silent
+	// on the first one, and the two candidates the issue proposed go silent on the last
+	// two. Each is its own case with its own line assertion so a mutation that swaps one
+	// outcome for another cannot hide inside an aggregate count.
+	test("fails on an `interface Object` exported from a project `.d.ts` module", () => {
+		// The SB23-2490 reproduction. The interface sits in a declaration file, but the file
+		// is a module, so it does not merge with the global `Object` and is an ordinary
+		// always-truthy type. The old predicate exited 0 here with 0 offences.
+		const dir = makeFixture(
+			[
+				'import type { Object as Obj } from "./types";',
+				"declare function local(): Obj;",
+				"export function guard(): boolean {",
+				"\tif (local()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+			{ "types.d.ts": "export interface Object { localOnly: 1 }\n" },
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:4:6");
+	});
+
+	test("stays silent on a `declare global` augmentation of `Object` in a `.ts` module", () => {
+		// `aug.ts` is a module, but `declare global` merges its `interface Object` into the
+		// symbol `lib.es5.d.ts` declares, so the merged type still accepts primitives.
+		const dir = makeFixture(
+			[
+				"declare function boxed(): Object;",
+				"export function guard(): boolean {",
+				"\tif (boxed()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+			{
+				"aug.ts":
+					"export {};\ndeclare global {\n\tinterface Object {\n\t\taugmented: 1;\n\t}\n}\n",
+			},
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("0 offences");
+		expect(stdout).toContain("1 boolean contexts examined");
+		expect(stderr).not.toContain("subject.ts:3:6");
+	});
+
+	test("stays silent on a `declare global` augmentation of `Object` in a `.d.ts` module", () => {
+		// The same augmentation in a declaration file. Listed in `include` because nothing
+		// imports it, so without that it would be outside the program and this case would
+		// pass against the plain global `Object` instead.
+		const dir = makeFixture(
+			[
+				"declare function boxed(): Object;",
+				"export function guard(): boolean {",
+				"\tif (boxed()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+			{
+				"aug.d.ts":
+					"export {};\ndeclare global {\n\tinterface Object {\n\t\taugmented: 1;\n\t}\n}\n",
+			},
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("0 offences");
+		expect(stdout).toContain("1 boolean contexts examined");
+		expect(stderr).not.toContain("subject.ts:3:6");
+	});
+
+	test("fails on an `interface Object` inside a namespace in a `.ts` script", () => {
+		// The file is a script, not a module, so asking "is the declaring file a module" calls
+		// this global and goes silent. It is `N.Object`, not the global, and the predicate
+		// before SB23-2490 reported it. Measured 2026-10-01: `!ts.isExternalModule(file)` and
+		// `checker.getSymbolAtLocation(file) === undefined` both exit 0 here.
+		const dir = makeFixture(
+			[
+				"namespace N {",
+				"\texport interface Object {",
+				"\t\tlocalOnly: 1;",
+				"\t}",
+				"}",
+				"declare function local(): N.Object;",
+				"function guard(): boolean {",
+				"\tif (local()) return true;",
+				"\treturn false;",
+				"}",
+				"guard();",
+			].join("\n"),
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:8:6");
+	});
+
+	test("fails on an `interface Object` inside a `declare module` block in a script `.d.ts`", () => {
+		// A declaration file that is a script, so both the old `.d.ts` test and the
+		// is-it-a-module candidates call this global. It is the `amb` module's own export.
+		const dir = makeFixture(
+			[
+				'import type { Object as Obj } from "amb";',
+				"declare function local(): Obj;",
+				"export function guard(): boolean {",
+				"\tif (local()) return true;",
+				"\treturn false;",
+				"}",
+			].join("\n"),
+			{
+				"amb.d.ts":
+					'declare module "amb" {\n\texport interface Object {\n\t\tlocalOnly: 1;\n\t}\n}\n',
+			},
+		);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stdout).toContain("1 offences");
+		expect(stderr).toContain("subject.ts:4:6");
 	});
 
 	test("separates the `false` literal from the `true` literal, through an alias too", () => {

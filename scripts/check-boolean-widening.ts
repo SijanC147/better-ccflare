@@ -28,18 +28,21 @@
  *   - `??`, the comma operator, and a ternary's `whenTrue` / `whenFalse` branches under a
  *     condition root. None of those positions is truthy-tested, so descending into them
  *     would report values rather than conditions.
- *   - anything named `Object` carrying at least one declaration in ANY `.d.ts`, including one
- *     of the project's own. The global `Object` accepts every non-nullish primitive by
- *     assignability rather than by structure, so it cannot be recognised structurally and is
- *     matched by symbol name plus a declaration in a declaration file. A global augmentation
- *     of `Object` in a project's ambient file therefore stays silent, which is CORRECT,
- *     because the augmented type still accepts primitives. An `interface Object` exported
- *     from a project `.d.ts` MODULE stays silent too, and that one is WRONG: it does not
- *     merge with the global `Object` and is an ordinary always-truthy type. `SB23-2490`,
- *     found by this PR's reviewer. The same interface written in a `.ts` file IS reported,
- *     so today the file extension alone decides it. This paragraph states what the code
- *     does rather than what it was meant to do, on purpose: the two disagreed, and the
- *     disagreement was in the silent direction.
+ *   - the global `Object` interface, and anything named `Object` that has at least one
+ *     declaration in a file the program treats as a default library. The global `Object`
+ *     accepts every non-nullish primitive by assignability rather than by structure, so it
+ *     cannot be recognised structurally and is matched by symbol name plus a declaration in a
+ *     default-library file (`program.isSourceFileDefaultLibrary`). A global augmentation of
+ *     `Object`, whether in a script or in a `declare global` block inside a `.ts` or `.d.ts`
+ *     module, merges into the symbol `lib.es5.d.ts` declares and stays silent, which is
+ *     correct because the merged type still accepts primitives. Every other `interface
+ *     Object`, module-scoped, exported from a project `.d.ts` module, inside a namespace or
+ *     inside a `declare module` block, has no default-library declaration and IS reported.
+ *     On TypeScript 6.0.2 a default-library file is one the program loaded as a lib file
+ *     (`libFiles.has(file.path)`), so a project file cannot claim the silence by carrying a
+ *     `/// <reference no-default-lib="true"/>` directive; measured 2026-10-01, it does not
+ *     change the answer. `SB23-2490` replaced the earlier test, a declaration in ANY `.d.ts`,
+ *     which went silent on an `interface Object` exported from a project `.d.ts` module.
  *   - an always-truthy value reached through an identifier or a property rather than a call:
  *     `while (true)`, `!process.env`, `if (map[key])` under `noUncheckedIndexedAccess: false`.
  *     Measured 2026-09-21: 109 such sites in 72 files, nearly all correct as written.
@@ -92,23 +95,46 @@ const checker = program.getTypeChecker();
  * genuinely can be false and must not be reported. Structure cannot tell it apart: it has
  * seven members, which is exactly what an always-truthy object type looks like.
  *
- * Matched by symbol name plus at least one declaration in a `.d.ts`, not by
- * `checker.typeToString(type) === "Object"`, which was the shipped test and is the same
- * rendered-name instrument SB23-2451 removed from the empty-object branch. Measured
- * 2026-09-21: a module-scoped `interface Object { localOnly: 1 }` renders as `Object`, so the
- * rendered-name test silenced a genuinely always-truthy call result. Its symbol has no
- * declaration in a declaration file, so this one reports it.
+ * Matched by symbol name plus at least one declaration in a file the program treats as a
+ * default library, not by `checker.typeToString(type) === "Object"`, which was the shipped test
+ * and is the same rendered-name instrument SB23-2451 removed from the empty-object branch.
+ * Measured 2026-09-21: a module-scoped `interface Object { localOnly: 1 }` renders as `Object`,
+ * so the rendered-name test silenced a genuinely always-truthy call result.
  *
- * `.some` rather than `.every` on purpose. A project that augments the global `Object` in its
- * own ambient file gives that symbol declarations in both a `.d.ts` and its own file, and the
- * augmented type still accepts primitives, so it must stay silent.
+ * SB23-2490. The next test was "at least one declaration in any `.d.ts`", and it went silent on
+ * `export interface Object` in a project `.d.ts` MODULE, which does not merge with the global
+ * and is an ordinary always-truthy type. The question is whether the symbol IS the global one,
+ * not which extension its file has. The real global `Object` always carries a declaration in
+ * `lib.es5.d.ts`, and every augmentation (a script's `interface Object`, or `declare global`
+ * inside a `.ts` or `.d.ts` module) merges into that same symbol, so it keeps that declaration.
+ *
+ * Measured 2026-10-01 against eight fixtures, with and without the repository's `lib` setting.
+ * The two candidates named on the issue, `!ts.isExternalModule(file)` and
+ * `checker.getSymbolAtLocation(file) === undefined`, both get the four acceptance cases right
+ * and both go silent on an `interface Object` inside a namespace in a `.ts` script, which the
+ * `.d.ts` test reported, and inside a `declare module` block in a script `.d.ts`. Asking about
+ * the default library gets all eight right. A `/// <reference no-default-lib="true"/>`
+ * directive in a project `.d.ts` module does not make it a default library on TypeScript 6.0.2,
+ * where the check is membership of the program's lib files, measured the same day.
+ *
+ * One configuration this does not cover, found by PR #295's reviewer: a project with `noLib:
+ * true` and a hand-written lib file has no default-library file at all, so the real global
+ * `Object` would be reported. This repository does not use `noLib`; comparing against the
+ * symbol `checker.resolveName("Object", ...)` returns would cover both, and is the change to
+ * make if one ever does.
+ *
+ * `.some` rather than `.every` on purpose. An augmented global `Object` has declarations in
+ * `lib.es5.d.ts` and in the project's own file, and the merged type still accepts primitives,
+ * so it must stay silent.
  */
 function isGlobalObjectInterface(type: ts.Type): boolean {
 	const symbol = type.getSymbol();
 	if (symbol?.name !== "Object") return false;
 	const declarations = symbol.getDeclarations();
 	if (declarations === undefined) return false;
-	return declarations.some((d) => d.getSourceFile().isDeclarationFile);
+	return declarations.some((d) =>
+		program.isSourceFileDefaultLibrary(d.getSourceFile()),
+	);
 }
 
 /**
