@@ -311,6 +311,21 @@ describe("gateway POST /responses with a model set", () => {
 	});
 });
 
+describe("gateway answer label fallback", () => {
+	test("an upstream answer naming no model is labelled with the client's name", async () => {
+		const { model: _omitted, ...withoutModel } = ANTHROPIC_MESSAGE;
+		const proxy: HandleProxyFn = async () => Response.json(withoutModel);
+		const resp = await dispatch(
+			"/v1/gateways/gpt/responses",
+			proxy,
+			responsesBody("standard"),
+		);
+		const body = (await resp.json()) as { model: string };
+		// The client's alias, as the chat path reports it, not the entry's id.
+		expect(body.model).toBe("standard");
+	});
+});
+
 describe("gateway POST /responses without a model set", () => {
 	test("passes the client's model through and keeps Codex's raw id", async () => {
 		const [proxy, captured] = stubProxy();
@@ -418,5 +433,30 @@ describe("plain POST /v1/responses is unchanged", () => {
 		expect(captured.req?.headers.get(EXCLUDE)).toBe("anthropic-oauth");
 		expect(captured.req?.headers.get(REPORT_UPSTREAM_MODEL_HEADER)).toBeNull();
 		expect(captured.req?.headers.get(FORCED_ACCOUNT)).toBe("acct-1");
+	});
+});
+
+describe("plain POST /v1/responses SSE label", () => {
+	test("a streamed answer keeps the requested label even when message_start names another model", async () => {
+		const [proxy] = stubProxy();
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(responsesBody("gpt-5.5", { stream: true })),
+		});
+		const resp = await handleResponsesRequest(req, new URL(req.url), proxy, {});
+		const text = await resp.text();
+		const created = text
+			.split("\n\n")
+			.find((frame) => frame.startsWith("event: response.created"));
+		expect(created).toBeDefined();
+		const data = JSON.parse(
+			(created ?? "")
+				.split("\n")
+				.find((l) => l.startsWith("data: "))
+				?.slice(6) ?? "{}",
+		) as { response: { model: string } };
+		// message_start names ANSWERING_MODEL; the plain path does not report it.
+		expect(data.response.model).toBe("gpt-5.5");
 	});
 });

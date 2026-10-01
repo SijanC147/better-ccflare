@@ -471,6 +471,10 @@ export async function handleResponsesRequest(
 	// before anything is validated or routed, and the routing headers come
 	// from the entry alone: the client's copies are removed first.
 	const syntheticHeaders = new Headers(req.headers);
+	// The client's name for the model. The answer falls back to it when the
+	// upstream names none, as the chat path does, even after a gateway entry
+	// rewrites `body.model` to its upstream id.
+	const clientModel = body.model;
 	let gatewayEntry: OpenAIGatewayModelEntry | null = null;
 	if (gateway) {
 		const resolved = resolveGatewayModel(body.model, syntheticHeaders, gateway);
@@ -831,7 +835,7 @@ export async function handleResponsesRequest(
 		return translateAnthropicStreamToResponses(
 			anthropicResp,
 			responseId,
-			body.model,
+			clientModel,
 			getRequestTools(body),
 			{ reportUpstreamModel: gateway !== undefined },
 		);
@@ -858,7 +862,7 @@ export async function handleResponsesRequest(
 		translated = translateAnthropicResponseToResponses(
 			respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
 			responseId,
-			gateway ? answeringModel(respBody, body.model) : body.model,
+			gateway ? answeringModel(respBody, clientModel) : clientModel,
 			getRequestTools(body),
 		);
 	} catch {
