@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import { logBus } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
 import {
@@ -6,6 +6,7 @@ import {
 	setDerivedProviderModelDefaults,
 } from "../../provider-model-defaults";
 import { makeAccount as baseAccount } from "../../testing/account-fixture";
+import { settle, whenAborted } from "../../testing/fake-timers";
 import { fetchCodexUsageOnDemand } from "./on-demand-fetch";
 import {
 	CODEX_CACHE_KEY_MODE_ENV,
@@ -41,24 +42,6 @@ const eventLine = (name: string, data: unknown) => [
 	`data: ${typeof data === "string" ? data : JSON.stringify(data)}`,
 	"",
 ];
-
-// The upstream drain (cancelUpstreamOnce -> drainUpstream) now runs detached
-// from writer.close() (fire-and-forget, matching the Anthropic
-// terminal-recovery pattern): the client-visible stream can reach EOF before
-// the background drain has hit its deadline and aborted drainAbort. Poll
-// instead of asserting immediately after stream completion.
-async function waitForAbort(
-	signal: AbortSignal,
-	timeoutMs: number,
-): Promise<void> {
-	const start = Date.now();
-	while (!signal.aborted) {
-		if (Date.now() - start > timeoutMs) {
-			throw new Error("drainAbort did not abort within expected time");
-		}
-		await Bun.sleep(5);
-	}
-}
 
 describe("CodexProvider request headers", () => {
 	it("removes ingress proxy headers and cookies while preserving Codex session metadata", () => {
@@ -110,8 +93,25 @@ describe("CodexProvider request headers", () => {
 	});
 });
 
+// Every clock these tests depend on is a `setTimeout` or `performance.now()`:
+// the heartbeat and raw-silence deadlines in CodexStreamLiveness and the drain
+// deadline in utils/stream-drain.ts. On real timers a loaded machine stretched
+// them past each other: the 200 ms raw-silence deadline fired before the
+// second 20 ms heartbeat at 206 ms into a full suite (SB23-3951), and its
+// error path writes `message_start` first, so the test read that instead of a
+// ping. On fake timers the clock moves only inside `settle`, so each deadline
+// fires at an exact instant and the tests assert those instants.
+const PING = 'event: ping\ndata: {"type":"ping"}\n\n';
+
 describe("CodexProvider stream liveness", () => {
+	afterEach(() => {
+		// A failing assertion skips a test's own restore, and a fake clock left
+		// installed would freeze every later file in this process.
+		jest.useRealTimers();
+	});
+
 	it("keeps a silent SSE stream alive until response.completed arrives", async () => {
+		jest.useFakeTimers();
 		const provider = new CodexProvider({
 			streamHeartbeatIntervalMs: 20,
 			streamRawSilenceTimeoutMs: 200,
@@ -148,6 +148,7 @@ describe("CodexProvider stream liveness", () => {
 			},
 		});
 		const drainAbort = new AbortController();
+		const startedAt = performance.now();
 		const transformed = await provider.processResponse(
 			new Response(upstream, {
 				status: 200,
@@ -161,19 +162,16 @@ describe("CodexProvider stream liveness", () => {
 		if (!reader) throw new Error("transformed response has no body");
 		const decoder = new TextDecoder();
 
-		const first = await reader.read();
-		expect(decoder.decode(first.value)).toBe(
-			'event: ping\ndata: {"type":"ping"}\n\n',
-		);
-		const second = await Promise.race([
-			reader.read(),
-			Bun.sleep(100).then(() => {
-				throw new Error("Codex heartbeat did not arrive");
-			}),
-		]);
-		expect(decoder.decode(second.value)).toBe(
-			'event: ping\ndata: {"type":"ping"}\n\n',
-		);
+		// `response.in_progress` emits nothing, so the stream is silent and the
+		// heartbeat is the only thing that can produce a frame. Each ping lands
+		// exactly one interval after the last downstream write, and both land
+		// well inside the 200 ms raw-silence deadline.
+		const first = await settle(reader.read());
+		expect(decoder.decode(first.value)).toBe(PING);
+		expect(performance.now() - startedAt).toBe(20);
+		const second = await settle(reader.read());
+		expect(decoder.decode(second.value)).toBe(PING);
+		expect(performance.now() - startedAt).toBe(40);
 
 		// `start` runs synchronously inside the `ReadableStream` constructor
 		// per the Streams spec, so `start()` above has already assigned this.
@@ -197,21 +195,24 @@ describe("CodexProvider stream liveness", () => {
 		);
 		// Never resolve the upstream stream after this point: the drain loop's
 		// reader.read() calls will hang until streamDrainDeadlineMs fires.
-
 		let terminalBody = "";
 		while (true) {
-			const { value, done } = await reader.read();
+			const { value, done } = await settle(reader.read());
 			if (done) break;
 			terminalBody += decoder.decode(value, { stream: true });
 		}
 		expect(terminalBody).toContain("event: message_stop");
 		expect(terminalBody).not.toContain("event: ping");
-		// The drain runs detached from writer.close() now, so it may not have
-		// hit its deadline yet at stream EOF; wait for it to abort.
-		await waitForAbort(drainAbort.signal, 1000);
+		// The client stream ends at the terminal event, not at the drain.
+		expect(performance.now() - startedAt).toBe(40);
+		// The drain runs detached from writer.close() and is bounded by its own
+		// deadline, armed when response.completed was handled.
+		await settle(whenAborted(drainAbort.signal));
+		expect(performance.now() - startedAt).toBe(40 + 300);
 	});
 
 	it("terminates raw upstream silence after synthetic heartbeats", async () => {
+		jest.useFakeTimers();
 		const provider = new CodexProvider({
 			streamHeartbeatIntervalMs: 15,
 			streamRawSilenceTimeoutMs: 70,
@@ -226,6 +227,7 @@ describe("CodexProvider stream liveness", () => {
 			},
 		});
 		const drainAbort = new AbortController();
+		const startedAt = performance.now();
 		const transformed = await provider.processResponse(
 			new Response(upstream, {
 				status: 200,
@@ -236,23 +238,22 @@ describe("CodexProvider stream liveness", () => {
 			drainAbort,
 		);
 
-		const body = await Promise.race([
-			transformed.text(),
-			Bun.sleep(500).then(() => {
-				throw new Error("timed-out Codex stream did not terminate");
-			}),
-		]);
+		const body = await settle(transformed.text());
+		// Pings at 15, 30, 45 and 60 ms, then the raw-silence deadline at 70:
+		// the heartbeats kept the client alive and never moved that deadline.
+		expect(body.match(/event: ping\n/g)?.length ?? 0).toBe(4);
+		expect(performance.now() - startedAt).toBe(70);
 		expect(body).toContain("event: error");
 		expect(body).toContain(
 			"Codex upstream timed out while waiting for response data.",
 		);
 		expect(body).not.toContain("rawSilenceTimeoutMs");
-		// The drain runs detached from writer.close() now, so it may not have
-		// hit its deadline yet at stream EOF; wait for it to abort.
-		await waitForAbort(drainAbort.signal, 1000);
+		await settle(whenAborted(drainAbort.signal));
+		expect(performance.now() - startedAt).toBe(70 + 150);
 	});
 
 	it("does not await a hanging upstream drain after a terminal event", async () => {
+		jest.useFakeTimers();
 		const provider = new CodexProvider({
 			streamHeartbeatIntervalMs: 100,
 			streamRawSilenceTimeoutMs: 500,
@@ -288,6 +289,7 @@ describe("CodexProvider stream liveness", () => {
 			},
 		});
 		const drainAbort = new AbortController();
+		const startedAt = performance.now();
 		const transformed = await provider.processResponse(
 			new Response(upstream, {
 				status: 200,
@@ -297,16 +299,14 @@ describe("CodexProvider stream liveness", () => {
 			undefined,
 			drainAbort,
 		);
-		const body = await Promise.race([
-			transformed.text(),
-			Bun.sleep(500).then(() => {
-				throw new Error("terminal Codex stream did not reach EOF");
-			}),
-		]);
+		const body = await settle(transformed.text());
 		expect(body).toContain("event: message_stop");
-		// The drain runs detached from writer.close() now, so it may not have
-		// hit its deadline yet at stream EOF; wait for it to abort.
-		await waitForAbort(drainAbort.signal, 1000);
+		// No time passed: the client stream closed without waiting for the
+		// drain, which only gives up at its 150 ms deadline.
+		expect(performance.now() - startedAt).toBe(0);
+		expect(drainAbort.signal.aborted).toBe(false);
+		await settle(whenAborted(drainAbort.signal));
+		expect(performance.now() - startedAt).toBe(150);
 	});
 });
 
