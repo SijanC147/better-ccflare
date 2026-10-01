@@ -250,13 +250,13 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		expect(MAX_PROBE_GATES).toBe(10_000);
 	});
 
-	it("the cap seam refuses a cap that could never hold a lease", () => {
-		expect(() => setRateLimitProbeGateCapForTests(0)).toThrow(
-			"probe gate cap must be a positive integer, got 0",
-		);
-		expect(() => setRateLimitProbeGateCapForTests(1.5)).toThrow(
-			"probe gate cap must be a positive integer, got 1.5",
-		);
+	it("the cap seam refuses a cap at which no lease could ever be suppressed", () => {
+		for (const cap of [0, 1, 1.5]) {
+			expect(() => setRateLimitProbeGateCapForTests(cap)).toThrow(
+				`probe gate cap must be an integer of at least 2, got ${cap}`,
+			);
+		}
+		setRateLimitProbeGateCapForTests(2);
 	});
 });
 

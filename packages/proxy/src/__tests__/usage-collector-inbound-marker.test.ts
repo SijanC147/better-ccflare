@@ -110,8 +110,9 @@ describe("UsageCollector - inbound marker", () => {
 		collector.dispose();
 		await collector.drain();
 		DatabaseFactory.reset();
-		if (Bun.which("trash")) Bun.spawnSync(["trash", dir]);
-		else rmSync(dir, { recursive: true, force: true });
+		const trashed =
+			Bun.which("trash") && Bun.spawnSync(["trash", dir]).exitCode === 0;
+		if (!trashed) rmSync(dir, { recursive: true, force: true });
 	}, 30_000);
 
 	function makeStart(

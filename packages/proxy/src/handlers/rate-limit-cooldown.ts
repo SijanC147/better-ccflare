@@ -172,8 +172,12 @@ export function resetRateLimitProbeGatesForTests(): void {
  * `resetRateLimitProbeGatesForTests` restores the real cap.
  */
 export function setRateLimitProbeGateCapForTests(cap: number): void {
-	if (!Number.isInteger(cap) || cap < 1) {
-		throw new Error(`probe gate cap must be a positive integer, got ${cap}`);
+	// At cap 1 every admission evicts the only lease before setting its own,
+	// so no account could ever be suppressed and the gate would be untestable.
+	if (!Number.isInteger(cap) || cap < 2) {
+		throw new Error(
+			`probe gate cap must be an integer of at least 2, got ${cap}`,
+		);
 	}
 	probeGateCap = cap;
 }

@@ -62,9 +62,11 @@ export interface FakeClaude {
  * call however many there are. Each `trash` spawn measured 523 ms at the
  * median and 5101 ms at the worst (588 calls, 12 copies of handler.test.ts at
  * load average 138), so one call per test was enough on its own to pass a
- * 5000 ms `afterEach` limit (SB23-3861). Every path came from mkdtemp below,
- * so removing it cannot touch anything else. `trash` is macOS-only; the CI
- * runner is Linux.
+ * 5000 ms `afterEach` limit (SB23-3861). The guard below refuses any path
+ * outside `os.tmpdir()`; the one caller passes only directories that
+ * `makeFakeClaude` made with mkdtemp. `trash` is macOS-only; the CI runner is
+ * Linux. A `trash` that exits non-zero falls back to `fs.rmSync` rather than
+ * leaving the directories behind.
  */
 export function removeFakeDirs(dirs: string[]): void {
 	if (dirs.length === 0) return;
@@ -73,8 +75,9 @@ export function removeFakeDirs(dirs: string[]): void {
 			throw new Error(`not a fake-claude fixture directory: ${dir}`);
 		}
 	}
-	if (Bun.which("trash")) Bun.spawnSync(["trash", ...dirs]);
-	else for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+	if (Bun.which("trash") && Bun.spawnSync(["trash", ...dirs]).exitCode === 0)
+		return;
+	for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 }
 
 export function makeFakeClaude(options: {
@@ -135,7 +138,8 @@ if (cfg.mode === "resume-missing" && resuming) { process.stderr.write("No conver
 out({ type: "system", subtype: "init", session_id: sessionId });
 const toolCall = () => out({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t1", name: "Bash", input: {} } } });
 if (cfg.mode === "resume-fail-after-tool" && resuming) { toolCall(); process.exit(1); }
-if (cfg.mode === "slow-start") { toolCall(); while (!fs.existsSync(cfg.gate)) await new Promise((r) => setTimeout(r, 10)); }
+// The deadline sits above the test's 30 s limit, so a test that fails before openGate() leaves no fake polling forever.
+if (cfg.mode === "slow-start") { toolCall(); const deadline = Date.now() + 60_000; while (!fs.existsSync(cfg.gate)) { if (Date.now() > deadline) process.exit(1); await new Promise((r) => setTimeout(r, 10)); } }
 if (cfg.mode === "subagent") {
   out({ type: "stream_event", parent_tool_use_id: "toolu_sub", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
   out({ type: "stream_event", parent_tool_use_id: "toolu_sub", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "SUBAGENT-SECRET" } } });
