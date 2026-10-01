@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, jest } from "bun:test";
 import {
 	CODEX_STREAM_HEARTBEAT_INTERVAL_MS,
 	CODEX_STREAM_RAW_SILENCE_TIMEOUT_MS,
@@ -26,6 +26,44 @@ function makeSilentReader() {
 	};
 }
 
+/**
+ * Runs `promise` to settlement on fake timers: flush microtasks, and while it
+ * is still pending jump the clock to the next timer. `next()` awaits a
+ * microtask before it arms its timer, so the flush comes first. The clock moves
+ * only here, so `performance.now()` differences are exact, where on real
+ * timers a loaded machine stretched them past the deadlines under test
+ * (SB23-3567).
+ */
+async function settle<T>(promise: Promise<T>): Promise<T> {
+	let settled = false;
+	let value: T | undefined;
+	let failure: unknown;
+	let failed = false;
+	promise.then(
+		(result) => {
+			settled = true;
+			value = result;
+		},
+		(error: unknown) => {
+			failed = true;
+			failure = error;
+		},
+	);
+	for (let step = 0; step < 1_000; step++) {
+		for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+		if (failed) throw failure;
+		if (settled) return value as T;
+		jest.advanceTimersToNextTimer();
+	}
+	throw new Error("settle: the promise never settled");
+}
+
+async function advanceBy(ms: number): Promise<void> {
+	for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+	jest.advanceTimersByTime(ms);
+	for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+}
+
 describe("CodexStreamLiveness", () => {
 	it("keeps production deadlines inside the proxy liveness contract", () => {
 		expect(CODEX_STREAM_HEARTBEAT_INTERVAL_MS).toBe(25_000);
@@ -34,58 +72,80 @@ describe("CodexStreamLiveness", () => {
 	});
 
 	it("emits periodic heartbeat deadlines until canonical output resets the clock", async () => {
-		const upstream = makeSilentReader();
-		const liveness = new CodexStreamLiveness({
-			heartbeatIntervalMs: 20,
-			rawSilenceTimeoutMs: 250,
-		});
+		jest.useFakeTimers();
+		try {
+			const upstream = makeSilentReader();
+			const liveness = new CodexStreamLiveness({
+				heartbeatIntervalMs: 20,
+				rawSilenceTimeoutMs: 250,
+			});
+			const createdAt = performance.now();
 
-		const first = await liveness.next(upstream.reader);
-		expect(first.type).toBe("heartbeat_due");
-		liveness.recordDownstreamWrite();
+			const first = await settle(liveness.next(upstream.reader));
+			expect(first.type).toBe("heartbeat_due");
+			expect(performance.now() - createdAt).toBe(20);
+			liveness.recordDownstreamWrite();
 
-		await Bun.sleep(12);
-		liveness.recordDownstreamWrite();
-		const resetAt = performance.now();
-		const second = await liveness.next(upstream.reader);
+			// Without this write the next heartbeat would be due 8 ms later.
+			await advanceBy(12);
+			liveness.recordDownstreamWrite();
+			const resetAt = performance.now();
+			const second = await settle(liveness.next(upstream.reader));
 
-		expect(second.type).toBe("heartbeat_due");
-		expect(performance.now() - resetAt).toBeGreaterThanOrEqual(15);
+			expect(second.type).toBe("heartbeat_due");
+			expect(performance.now() - resetAt).toBe(20);
 
-		liveness.stop();
-		await upstream.reader.cancel("test complete");
+			liveness.stop();
+			await upstream.reader.cancel("test complete");
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	it("resets the hard raw-silence deadline only when actual upstream bytes arrive", async () => {
-		const upstream = makeSilentReader();
-		const liveness = new CodexStreamLiveness({
-			heartbeatIntervalMs: 15,
-			rawSilenceTimeoutMs: 75,
-		});
+		jest.useFakeTimers();
+		try {
+			const upstream = makeSilentReader();
+			const liveness = new CodexStreamLiveness({
+				heartbeatIntervalMs: 15,
+				rawSilenceTimeoutMs: 75,
+			});
+			const createdAt = performance.now();
 
-		const first = await liveness.next(upstream.reader);
-		expect(first.type).toBe("heartbeat_due");
-		liveness.recordDownstreamWrite();
-
-		await Bun.sleep(25);
-		upstream.push([1, 2, 3]);
-		const bytes = await liveness.next(upstream.reader);
-		expect(bytes).toMatchObject({ type: "upstream" });
-		if (bytes.type === "upstream") {
-			expect(bytes.result.value?.byteLength).toBe(3);
-		}
-
-		const resetAt = performance.now();
-		let outcome = await liveness.next(upstream.reader);
-		while (outcome.type === "heartbeat_due") {
+			const first = await settle(liveness.next(upstream.reader));
+			expect(first.type).toBe("heartbeat_due");
 			liveness.recordDownstreamWrite();
-			outcome = await liveness.next(upstream.reader);
-		}
 
-		expect(outcome.type).toBe("raw_silence_timeout");
-		expect(performance.now() - resetAt).toBeGreaterThanOrEqual(65);
-		expect((await liveness.next(upstream.reader)).type).toBe("stopped");
-		await upstream.reader.cancel("test complete");
+			await advanceBy(25);
+			upstream.push([1, 2, 3]);
+			const bytes = await settle(liveness.next(upstream.reader));
+			expect(bytes).toMatchObject({ type: "upstream" });
+			if (bytes.type === "upstream") {
+				expect(bytes.result.value?.byteLength).toBe(3);
+			}
+			const resetAt = performance.now();
+			expect(resetAt - createdAt).toBe(40);
+
+			// Heartbeats keep writing downstream, and none of them may move the
+			// raw-silence deadline. The bound stops a deadline they did move
+			// from looping forever on a clock that never runs out.
+			let heartbeats = 0;
+			let outcome = await settle(liveness.next(upstream.reader));
+			while (outcome.type === "heartbeat_due" && heartbeats < 100) {
+				heartbeats++;
+				liveness.recordDownstreamWrite();
+				outcome = await settle(liveness.next(upstream.reader));
+			}
+
+			expect(outcome.type).toBe("raw_silence_timeout");
+			expect(heartbeats).toBeGreaterThan(0);
+			// 75 ms after the bytes, not 75 ms after construction (35 ms from here).
+			expect(performance.now() - resetAt).toBe(75);
+			expect((await liveness.next(upstream.reader)).type).toBe("stopped");
+			await upstream.reader.cancel("test complete");
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	it("stops a pending deadline without leaving a heartbeat timer active", async () => {
