@@ -81,6 +81,9 @@ export function shouldWrapUpstreamError(
 	pathname: string,
 ): boolean {
 	if (response.status < 400 || response.body === null) return false;
+	// Someone else is reading it; relaying it unchanged beats a locked-stream
+	// TypeError in the client's read.
+	if (response.body.locked) return false;
 	if (!isClientApiPath(pathname)) return false;
 	const mediaType = mediaTypeOf(response.headers.get("content-type"));
 	if (mediaType === null) return true;
@@ -124,11 +127,13 @@ function decodeEntities(text: string): string {
 export function summarizeUpstreamErrorText(raw: string): string {
 	const text = decodeEntities(
 		raw
-			.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+			.replace(/<(script|style)\b[^<>]*>[\s\S]*?<\/\1\s*>/gi, " ")
 			.replace(/<!--[\s\S]*?(?:-->|$)/g, " ")
-			.replace(/<[^>]*>/g, " ")
+			// `[^<>]`, not `[^>]`: a body of many `<` and no `>` would otherwise
+			// cost quadratic time on the request thread (review of #265).
+			.replace(/<[^<>]*>/g, " ")
 			// A read cut off inside a tag leaves it unclosed.
-			.replace(/<[^>]*$/, " "),
+			.replace(/<[^<>]*$/, " "),
 	)
 		.replace(/\s+/g, " ")
 		.trim();
@@ -168,10 +173,11 @@ function envelopeBody(
 	status: number,
 	contentType: string | null,
 ): ReadableStream<Uint8Array> {
-	let started = false;
+	// No cancel(): with the default strategy the stream pulls once at
+	// construction, so the read below is already under way, and it drains the
+	// source past the cap whether or not the client is still there.
 	return new ReadableStream<Uint8Array>({
 		async pull(controller) {
-			started = true;
 			const reader = source.getReader();
 			const decoder = new TextDecoder();
 			let text = "";
@@ -203,9 +209,6 @@ function envelopeBody(
 			} catch {
 				// The client went away while the upstream body was being read.
 			}
-		},
-		cancel() {
-			if (!started && !source.locked) void drainBody(source).catch(() => {});
 		},
 	});
 }

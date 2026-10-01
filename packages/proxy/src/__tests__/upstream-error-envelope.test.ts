@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { teeStream } from "../stream-tee";
 import {
 	buildUpstreamErrorEnvelope,
 	summarizeUpstreamErrorText,
@@ -240,5 +241,110 @@ describe("buildUpstreamErrorEnvelope", () => {
 					"Upstream returned HTTP 429 with a non-JSON body (text/html): slow down",
 			},
 		});
+	});
+});
+
+describe("the body past the read cap (review of #265)", () => {
+	const CHUNK = 10 * 1024;
+
+	function chunked(count: number): {
+		stream: ReadableStream<Uint8Array>;
+		pulls: () => number;
+	} {
+		let sent = 0;
+		return {
+			stream: new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					await Bun.sleep(0);
+					if (sent === count) {
+						controller.close();
+						return;
+					}
+					sent++;
+					controller.enqueue(new Uint8Array(CHUNK).fill(0x61));
+				},
+			}),
+			pulls: () => sent,
+		};
+	}
+
+	async function settle(): Promise<void> {
+		for (let i = 0; i < 20; i++) await Bun.sleep(2);
+	}
+
+	function wrapTee(source: ReadableStream<Uint8Array>, record: number[]) {
+		const tee = teeStream(source, {
+			maxBytes: 256 * 1024,
+			onClose(buffered) {
+				record.push(buffered.reduce((n, b) => n + b.byteLength, 0));
+			},
+		});
+		return wrapNonJsonUpstreamError(
+			respond(tee, 502, "text/html"),
+			"/v1/messages",
+		);
+	}
+
+	it("drains the rest, so the analytics tee closes once with the whole body", async () => {
+		const closes: number[] = [];
+		const { stream } = chunked(20);
+		const wrapped = wrapTee(stream, closes);
+		expect(wrapped.status).toBe(502);
+		await wrapped.json();
+		await settle();
+		expect(closes).toEqual([20 * CHUNK]);
+	});
+
+	it("still drains when the client cancels mid-read", async () => {
+		const closes: number[] = [];
+		const { stream, pulls } = chunked(20);
+		const wrapped = wrapTee(stream, closes);
+		const reader = wrapped.body?.getReader();
+		if (!reader) throw new Error("wrapped response has no body");
+		await Bun.sleep(5);
+		await reader.cancel();
+		await settle();
+		expect(pulls()).toBe(20);
+		expect(closes).toEqual([20 * CHUNK]);
+	});
+
+	it("answers an endless body instead of reading it forever", async () => {
+		const endless = new ReadableStream<Uint8Array>({
+			async pull(controller) {
+				await Bun.sleep(1);
+				controller.enqueue(new Uint8Array(16 * 1024).fill(0x62));
+			},
+		});
+		const wrapped = wrapNonJsonUpstreamError(
+			respond(endless, 503, "text/html"),
+			"/v1/messages",
+		);
+		const result = await Promise.race([
+			wrapped.json(),
+			Bun.sleep(2000).then(() => "timeout"),
+		]);
+		expect(result).not.toBe("timeout");
+	});
+});
+
+describe("the summariser on hostile markup (review of #265)", () => {
+	for (const [name, input] of [
+		["64 KiB of <", "<".repeat(65536)],
+		["<a repeated", "<a".repeat(32768)],
+		["< ... > nested", `${"<".repeat(32768)}${">".repeat(32768)}`],
+	] as const) {
+		it(`${name} finishes in well under a second`, () => {
+			const started = performance.now();
+			summarizeUpstreamErrorText(input);
+			expect(performance.now() - started).toBeLessThan(250);
+		});
+	}
+});
+
+describe("a body someone else is reading", () => {
+	it("is relayed unchanged rather than failing the client's read", () => {
+		const response = respond(CLOUDFLARE_400, 400, "text/html");
+		response.body?.getReader();
+		expect(wrapNonJsonUpstreamError(response, "/v1/messages")).toBe(response);
 	});
 });
