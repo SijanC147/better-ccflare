@@ -46,6 +46,14 @@ export type ResponseItem =
 	| CustomToolCallItem
 	| CustomToolCallOutputItem;
 
+/**
+ * A `ResponsesRequest` whose `input` has been normalised from the wire type's
+ * `string | ResponseItem[]` to an item array, which is what
+ * `translateRequestToAnthropic` takes. The handler does that normalisation
+ * before translating.
+ */
+export type TranslatableRequest = ResponsesRequest & { input: ResponseItem[] };
+
 export interface AdditionalToolsItem {
 	type: "additional_tools";
 	id?: string;

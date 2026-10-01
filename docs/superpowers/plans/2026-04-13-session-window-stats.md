@@ -48,6 +48,8 @@ Then in the `AccountResponse` interface, add after `billingType`:
 
 - [ ] **Step 2: Add `sessionStats: null` to `toAccountResponse()` default**
 
+> **Stale as of 2026-10-01.** `toAccountResponse()` had no caller and was deleted in SB23-2280. `GET /api/accounts` builds its response object in `createAccountsListHandler` (`packages/http-api/src/handlers/accounts.ts`), the only builder, so a new `AccountResponse` field is set there.
+
 In `packages/types/src/account.ts`, in the `toAccountResponse()` function's return object, add after `billingType`:
 
 ```typescript

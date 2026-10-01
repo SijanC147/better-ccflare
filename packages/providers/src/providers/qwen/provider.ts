@@ -162,7 +162,7 @@ export class QwenProvider extends OpenAICompatibleProvider {
 	/**
 	 * Inject Qwen-specific model mappings when the account has no custom mappings.
 	 */
-	override beforeConvert(
+	protected override beforeConvert(
 		_body: Record<string, unknown>,
 		account?: Account,
 	): Account | undefined {
@@ -177,7 +177,7 @@ export class QwenProvider extends OpenAICompatibleProvider {
 	/**
 	 * Inject Qwen-specific fields after converting to OpenAI format.
 	 */
-	override afterConvert(body: OpenAIRequest): void {
+	protected override afterConvert(body: OpenAIRequest): void {
 		for (const msg of body.messages) {
 			if (msg.role === "system" && Array.isArray(msg.content)) {
 				msg.content = msg.content

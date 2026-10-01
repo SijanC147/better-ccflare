@@ -5,13 +5,16 @@ import { OpenAICompatibleProvider } from "../providers/openai/provider";
 import { makeAccount } from "../testing/account-fixture";
 
 /**
- * Widens `beforeConvert` to public so this file can drive it directly.
+ * Widens the three conversion steps to public so this file can drive each one
+ * directly.
  *
- * `beforeConvert` is protected on `OpenAICompatibleProvider` and the five call
- * sites below reached past that. Declaring the widening here keeps the reach
- * explicit and local to the tests that need it, and leaves the production
- * visibility alone. `super` is called unchanged, so the behaviour under test is
- * the base class's own.
+ * `beforeConvert`, `afterConvert` and `injectDashScopeReasoning` are protected
+ * on `OpenAICompatibleProvider`. Until SB23-2454 the last two were reached with
+ * `(provider as any)` casts, seven of them, and `injectDashScopeReasoning` was
+ * private, which no subclass can widen. Declaring the widening here keeps the
+ * reach explicit, local to these tests and type-checked: a signature change in
+ * any of the three fails this file rather than being cast past. `super` is
+ * called unchanged, so the behaviour under test is the base class's own.
  */
 class TestOpenAICompatibleProvider extends OpenAICompatibleProvider {
 	public override beforeConvert(
@@ -19,6 +22,23 @@ class TestOpenAICompatibleProvider extends OpenAICompatibleProvider {
 		account?: Account,
 	): Account | undefined {
 		return super.beforeConvert(body, account);
+	}
+
+	public override afterConvert(
+		body: OpenAIRequest,
+		endpoint?: string,
+		model?: string,
+	): void {
+		super.afterConvert(body, endpoint, model);
+	}
+
+	public override injectDashScopeReasoning(
+		openaiBody: OpenAIRequest,
+		anthropicBody: Record<string, unknown>,
+		endpoint?: string,
+		model?: string,
+	): void {
+		super.injectDashScopeReasoning(openaiBody, anthropicBody, endpoint, model);
 	}
 }
 
@@ -67,27 +87,31 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			};
 
 			// Call afterConvert to inject caching
-			(provider as any).afterConvert(
+			provider.afterConvert(
 				openaiBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
 
-			// Verify system message has cache_control
+			// The injection turns string content into a one-part array carrying
+			// cache_control. Asserted whole, rather than guarded on
+			// `Array.isArray`, so a skipped injection fails here instead of
+			// silently skipping every assertion about it.
 			const systemMsg = openaiBody.messages[0];
 			expect(systemMsg.role).toBe("system");
-			if (Array.isArray(systemMsg.content)) {
-				expect(systemMsg.content[0]).toHaveProperty("cache_control");
-				expect(systemMsg.content[0].cache_control).toEqual({
-					type: "ephemeral",
-				});
-			}
+			expect(systemMsg.content).toEqual([
+				{
+					type: "text",
+					text: "You are a helpful assistant",
+					cache_control: { type: "ephemeral" },
+				},
+			]);
 
-			// Verify last message has cache_control
+			// The last message is cached too.
 			const lastMsg = openaiBody.messages[openaiBody.messages.length - 1];
-			if (Array.isArray(lastMsg.content)) {
-				expect(lastMsg.content[0]).toHaveProperty("cache_control");
-			}
+			expect(lastMsg.content).toEqual([
+				{ type: "text", text: "Hi", cache_control: { type: "ephemeral" } },
+			]);
 		});
 
 		it("should NOT inject cache_control for non-Qwen models", async () => {
@@ -111,9 +135,9 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				],
 			};
 
-			(provider as any).afterConvert(
+			provider.afterConvert(
 				openaiBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
 
@@ -143,9 +167,9 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			};
 
-			(provider as any).afterConvert(
+			provider.afterConvert(
 				openaiBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
 
@@ -173,18 +197,17 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			};
 
 			// Call afterConvert first (injects caching)
-			(provider as any).afterConvert(
+			provider.afterConvert(
 				openaiBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
 
 			// Then call injectDashScopeReasoning (as done in transformRequestBody)
-			// biome-ignore lint/suspicious/noExplicitAny: accessing a private method for testing; there's no public seam for this behavior
-			(provider as any).injectDashScopeReasoning(
+			provider.injectDashScopeReasoning(
 				openaiBody,
 				anthropicBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
 
@@ -210,16 +233,15 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			};
 
-			(provider as any).afterConvert(
+			provider.afterConvert(
 				openaiBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
-			// biome-ignore lint/suspicious/noExplicitAny: accessing a private method for testing; there's no public seam for this behavior
-			(provider as any).injectDashScopeReasoning(
+			provider.injectDashScopeReasoning(
 				openaiBody,
 				anthropicBody,
-				mockAccount.custom_endpoint,
+				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
 
@@ -227,6 +249,74 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 				(openaiBody as OpenAIRequest & { enable_thinking?: boolean })
 					.enable_thinking,
 			).toBeUndefined();
+		});
+	});
+
+	/**
+	 * The tests above drive each step alone, which proves the steps and says
+	 * nothing about whether `transformRequestBody` calls them. Deleting its
+	 * `afterConvert` call or its `injectDashScopeReasoning` call left all 1080
+	 * providers tests green (SB23-2454), so these go through the public entry
+	 * point and read the body it actually sends.
+	 */
+	describe("through transformRequestBody", () => {
+		async function sentBody(
+			account: Account,
+			anthropicBody: Record<string, unknown>,
+		): Promise<Record<string, unknown>> {
+			const request = new Request("http://localhost/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(anthropicBody),
+			});
+			const out = await provider.transformRequestBody(request, account);
+			return (await out.json()) as Record<string, unknown>;
+		}
+
+		it("caches and enables thinking for a Qwen model on DashScope", async () => {
+			const body = await sentBody(mockAccount, {
+				model: "qwen3.5-plus",
+				system: "You are a helpful assistant",
+				messages: [{ role: "user", content: "Hello" }],
+				max_tokens: 16,
+			});
+
+			expect(body.enable_thinking).toBe(true);
+			const messages = body.messages as Array<{
+				role: string;
+				content: unknown;
+			}>;
+			expect(messages[0]).toEqual({
+				role: "system",
+				content: [
+					{
+						type: "text",
+						text: "You are a helpful assistant",
+						cache_control: { type: "ephemeral" },
+					},
+				],
+			});
+		});
+
+		it("adds neither off DashScope", async () => {
+			const body = await sentBody(
+				{ ...mockAccount, custom_endpoint: "https://api.openai.com" },
+				{
+					model: "qwen3.5-plus",
+					system: "You are a helpful assistant",
+					messages: [{ role: "user", content: "Hello" }],
+					max_tokens: 16,
+				},
+			);
+
+			// The conversion still ran (the system prompt moved into `messages`),
+			// so the absences below are the endpoint gate, not a skipped pipeline.
+			expect((body.messages as unknown[])[0]).toEqual({
+				role: "system",
+				content: "You are a helpful assistant",
+			});
+			expect(body).not.toHaveProperty("enable_thinking");
+			expect(JSON.stringify(body)).not.toContain("cache_control");
 		});
 	});
 });

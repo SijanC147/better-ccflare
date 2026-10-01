@@ -1,29 +1,12 @@
 import { Logger } from "@better-ccflare/logger";
+import type { NanoGPTUsageData } from "@better-ccflare/types";
+
+export type {
+	NanoGPTUsageData,
+	NanoGPTUsageWindow,
+} from "@better-ccflare/types";
 
 const log = new Logger("NanoGPTUsageFetcher");
-
-export interface NanoGPTUsageWindow {
-	used: number;
-	remaining: number;
-	percentUsed: number; // 0-1 decimal range from API
-	resetAt: number; // Unix timestamp in milliseconds
-}
-
-export interface NanoGPTUsageData {
-	active: boolean; // true = subscription active, false = PayG mode
-	limits: {
-		daily: number;
-		monthly: number;
-	};
-	enforceDailyLimit: boolean; // If true, both daily AND monthly required; if false, only monthly
-	daily: NanoGPTUsageWindow;
-	monthly: NanoGPTUsageWindow;
-	state: "active" | "grace" | "inactive";
-	graceUntil: string | null; // ISO timestamp
-	period?: {
-		currentPeriodEnd?: string; // ISO timestamp
-	};
-}
 
 /**
  * Fetch usage data from NanoGPT's subscription usage endpoint

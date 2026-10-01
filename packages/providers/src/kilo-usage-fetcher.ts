@@ -1,15 +1,9 @@
 import { Logger } from "@better-ccflare/logger";
+import type { KiloUsageData } from "@better-ccflare/types";
+
+export type { KiloUsageData } from "@better-ccflare/types";
 
 const log = new Logger("KiloUsageFetcher");
-
-export interface KiloUsageData {
-	microdollarsUsed: number;
-	totalMicrodollarsAcquired: number;
-	/** Remaining credits in USD */
-	remainingUsd: number;
-	/** Utilization as percentage 0-100 */
-	utilizationPercent: number;
-}
 
 /**
  * Fetch usage data from Kilo's user endpoint

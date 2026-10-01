@@ -288,8 +288,8 @@ export interface UsageWindowData {
 // all-models weekly come as kind "session" / "weekly_all"; per-model weekly caps
 // (Fable/Opus/Sonnet) come ONLY as kind "weekly_scoped" with scope.model.
 export interface UsageLimit {
-	kind: string;
-	group?: string;
+	kind: string; // "session" | "weekly_all" | "weekly_scoped" | ...
+	group?: string; // "session" | "weekly"
 	percent: number | null;
 	severity?: "normal" | "warning" | "critical" | string;
 	resets_at: string | null;
@@ -375,6 +375,16 @@ export interface AnthropicUsageData {
 	credits?: CodexCreditsData;
 }
 
+// Per-provider usage payloads. Each one is declared here and only here:
+// `@better-ccflare/providers` re-exports these from its fetcher modules
+// rather than declaring its own copy, because two structurally identical
+// declarations compile cleanly while they drift apart (SB23-2453). Types is
+// the source because it cannot import providers, and `FullUsageData` below
+// needs every member. `packages/providers/src/__tests__/usage-type-identity.test.ts`
+// fails the providers typecheck if a fetcher declares its own copy again and
+// that copy differs from this one in any field. An identical copy passes it,
+// so do not take green as proof that no second declaration exists.
+
 // Usage data types for NanoGPT accounts
 export interface NanoGPTUsageWindow {
 	used: number;
@@ -389,11 +399,14 @@ export interface NanoGPTUsageData {
 		daily: number;
 		monthly: number;
 	};
-	enforceDailyLimit: boolean;
+	enforceDailyLimit: boolean; // If true, both daily AND monthly required; if false, only monthly
 	daily: NanoGPTUsageWindow;
 	monthly: NanoGPTUsageWindow;
 	state: "active" | "grace" | "inactive";
-	graceUntil: string | null;
+	graceUntil: string | null; // ISO timestamp
+	period?: {
+		currentPeriodEnd?: string; // ISO timestamp
+	};
 }
 
 // Usage data types for Zai accounts
@@ -415,17 +428,20 @@ export interface ZaiUsageData {
 
 // Usage data types for Kilo accounts
 export interface KiloUsageData {
-	remainingUsd: number; // Remaining credits in USD
+	/** Remaining credits in USD */
+	remainingUsd: number;
 	microdollarsUsed: number;
 	totalMicrodollarsAcquired: number;
-	utilizationPercent: number; // 0-100
+	/** Utilization as percentage 0-100 */
+	utilizationPercent: number;
 }
 
 // Usage data types for Alibaba Coding Plan accounts
 export interface AlibabaCodingPlanQuotaWindow {
 	used: number;
 	total: number;
-	percentUsed: number; // 0-100
+	/** Percentage 0-100 */
+	percentUsed: number;
 	resetAt: number | null; // Unix timestamp in milliseconds
 }
 
@@ -433,8 +449,11 @@ export interface AlibabaCodingPlanUsageData {
 	five_hour: AlibabaCodingPlanQuotaWindow;
 	weekly: AlibabaCodingPlanQuotaWindow;
 	monthly: AlibabaCodingPlanQuotaWindow;
+	/** Plan name e.g. "Coding Plan Lite" */
 	planName: string | null;
+	/** Plan status e.g. "VALID" */
 	status: string | null;
+	/** Remaining days in billing period */
 	remainingDays: number | null;
 }
 
@@ -448,19 +467,23 @@ export interface XaiUsageData {
 	credits: XaiUsageWindow;
 }
 
-// Usage data types for MiniMax Token Plan accounts. Mirrors
-// MinimaxUsageWindow/MinimaxUsageData in
-// packages/providers/src/minimax-usage-fetcher.ts — camelCase `resetAt`
+// Usage data types for MiniMax Token Plan accounts: camelCase `resetAt`
 // (epoch ms), distinct from the Anthropic-style snake_case `resets_at`.
 export interface MinimaxUsageWindow {
-	utilization: number; // 0-100. 0 = fully available, 100 = exhausted.
-	remainingPercent: number; // 0-100, straight from the API.
-	resetAt: number | null; // Epoch milliseconds.
-	intervalMs: number | null; // Window length in ms.
+	/** Utilization percent (0-100). 0 = fully available, 100 = exhausted. */
+	utilization: number;
+	/** Remaining percent (0-100) straight from the API. */
+	remainingPercent: number;
+	/** Reset time as epoch milliseconds. */
+	resetAt: number | null;
+	/** Window length in ms, derived from end_time - start_time per entry. */
+	intervalMs: number | null;
 }
 
 export interface MinimaxUsageData {
+	/** 5h-style per-model-class window derived from the `general` entry. */
 	five_hour: MinimaxUsageWindow | null;
+	/** 7d weekly window derived from the same `general` entry. */
 	seven_day: MinimaxUsageWindow | null;
 }
 
@@ -659,30 +682,6 @@ export interface AccountResponse {
 	daysUntilRenewal: number | null;
 }
 
-// UI display type - used in CLI and web dashboard
-export interface AccountDisplay {
-	id: string;
-	name: string;
-	provider: string;
-	created: Date;
-	lastUsed: Date | null;
-	requestCount: number;
-	totalRequests: number;
-	tokenStatus: "valid" | "expired";
-	rateLimitStatus: string;
-	sessionInfo: string;
-	paused: boolean;
-	rate_limited_until?: number | null;
-	rate_limited_reason?: RateLimitReason | null;
-	rate_limited_at?: number | null;
-	session_start?: number | null;
-	session_request_count?: number;
-	access_token?: string | null;
-	priority: number;
-	autoFallbackEnabled: boolean;
-	autoRefreshEnabled: boolean;
-}
-
 // CLI list item type
 export interface AccountListItem {
 	id: string;
@@ -820,169 +819,5 @@ export function toAccount(row: AccountRow): Account {
 		last_manual_reauth_at: toNumOrNull(row.last_manual_reauth_at),
 		consecutive_rate_limits: toNum(row.consecutive_rate_limits),
 		renewal_day: toNumOrNull(row.renewal_day),
-	};
-}
-
-export function toAccountResponse(account: Account): AccountResponse {
-	const tokenStatus = account.access_token ? "valid" : "expired";
-	const isRateLimited =
-		account.rate_limited_until && account.rate_limited_until > Date.now();
-	const rateLimitStatus =
-		isRateLimited && account.rate_limited_until
-			? `Rate limited until ${new Date(account.rate_limited_until).toLocaleString(undefined, { hourCycle: "h23" })}`
-			: "OK";
-
-	const sessionInfo = account.session_start
-		? `Session: ${account.session_request_count} requests`
-		: "No active session";
-
-	// Parse model mappings (supported for any provider)
-	let modelMappings: { [key: string]: string } | null = null;
-	if (account.model_mappings) {
-		try {
-			const parsed = JSON.parse(account.model_mappings);
-			// Stored as flat {"model": "target"} object
-			modelMappings =
-				typeof parsed === "object" && parsed !== null ? parsed : null;
-		} catch {
-			// If parsing fails, ignore model mappings
-			modelMappings = null;
-		}
-	} else if (account.custom_endpoint) {
-		// Also try parsing from custom_endpoint for backwards compatibility
-		try {
-			const parsed = JSON.parse(account.custom_endpoint);
-			if (parsed.modelMappings) {
-				modelMappings = parsed.modelMappings;
-			}
-		} catch {
-			// If parsing fails, ignore model mappings
-			modelMappings = null;
-		}
-	}
-
-	// Parse model fallbacks for all providers
-	let modelFallbacks: { [key: string]: string } | null = null;
-	if (account.model_fallbacks) {
-		try {
-			modelFallbacks = JSON.parse(account.model_fallbacks);
-		} catch {
-			modelFallbacks = null;
-		}
-	}
-
-	// Renewal is computed in UTC here because the server has no viewer zone to
-	// read. The dashboard recomputes it locally; see AccountResponse.nextRenewalAt.
-	const renewal = computeNextRenewal({ renewalDay: account.renewal_day });
-
-	// Manual reauthentication deadline (Claude OAuth accounts only, and only
-	// once they've been manually reauthenticated at least once under this
-	// feature — see computeReauthDeadline's doc comment for why there is no
-	// createdAt fallback).
-	const reauthDeadline = computeReauthDeadline({
-		eligible: isEligibleForReauthDeadline({
-			provider: account.provider,
-			refreshToken: account.refresh_token,
-			accessToken: account.access_token,
-		}),
-		lastManualReauthAt: account.last_manual_reauth_at,
-	});
-
-	return {
-		id: account.id,
-		name: account.name,
-		provider: account.provider,
-		requestCount: account.request_count,
-		totalRequests: account.total_requests,
-		lastUsed: account.last_used
-			? new Date(account.last_used).toISOString()
-			: null,
-		created: new Date(account.created_at).toISOString(),
-		paused: account.paused,
-		requiresReauth: account.requires_reauth,
-		pauseReason: account.pause_reason,
-		tokenStatus,
-		tokenExpiresAt: account.expires_at
-			? new Date(account.expires_at).toISOString()
-			: null,
-		rateLimitStatus,
-		rateLimitReset: account.rate_limit_reset
-			? new Date(account.rate_limit_reset).toISOString()
-			: null,
-		rateLimitRemaining: account.rate_limit_remaining,
-		rateLimitedUntil: account.rate_limited_until || null,
-		rateLimitedReason: account.rate_limited_reason ?? null,
-		rateLimitedAt: account.rate_limited_at ?? null,
-		sessionInfo,
-		priority: account.priority,
-		autoFallbackEnabled: account.auto_fallback_enabled,
-		autoRefreshEnabled: account.auto_refresh_enabled,
-		autoPauseOnOverageEnabled: account.auto_pause_on_overage_enabled,
-		peakHoursPauseEnabled: account.peak_hours_pause_enabled,
-		usagePauseFiveHourThreshold: account.usage_pause_five_hour_threshold,
-		usagePauseWeeklyThreshold: account.usage_pause_weekly_threshold,
-		usagePauseFiveHourEnabled: account.usage_pause_five_hour_enabled,
-		usagePauseWeeklyEnabled: account.usage_pause_weekly_enabled,
-		usagePauseFiveHourMinResetRemainingMs:
-			account.usage_pause_five_hour_min_reset_remaining_ms,
-		usagePauseWeeklyMinResetRemainingMs:
-			account.usage_pause_weekly_min_reset_remaining_ms,
-		customEndpoint: account.custom_endpoint,
-		modelMappings,
-		requestTransformer: account.request_transformer,
-		usageUtilization: null, // Will be filled in by API handler from cache
-		usageWindow: null, // Will be filled in by API handler from cache
-		usageData: null, // Will be filled in by API handler from cache
-		usageRateLimitedUntil: null, // Will be filled in by API handler from cache
-		usageThrottledUntil: null,
-		usageThrottledWindows: [],
-		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
-		crossRegionMode: account.cross_region_mode,
-		modelFallbacks,
-		billingType: account.billing_type,
-		sessionStats: null,
-		isPrimary: false,
-		lastManualReauthAt: account.last_manual_reauth_at,
-		reauthDeadlineStatus: reauthDeadline?.status ?? null,
-		daysUntilReauthRequired: reauthDeadline?.daysUntilDeadline ?? null,
-		hoursUntilReauthRequired: reauthDeadline?.hoursUntilDeadline ?? null,
-		renewalDay: account.renewal_day,
-		nextRenewalAt: renewal?.nextRenewalAt ?? null,
-		daysUntilRenewal: renewal?.daysUntilRenewal ?? null,
-	};
-}
-
-export function toAccountDisplay(account: Account): AccountDisplay {
-	const tokenStatus = account.access_token ? "valid" : "expired";
-	const isRateLimited =
-		account.rate_limited_until && account.rate_limited_until > Date.now();
-	const rateLimitStatus =
-		isRateLimited && account.rate_limited_until
-			? `Rate limited until ${new Date(account.rate_limited_until).toLocaleString(undefined, { hourCycle: "h23" })}`
-			: "OK";
-
-	const sessionInfo = account.session_start
-		? `Session: ${account.session_request_count} requests`
-		: "No active session";
-
-	return {
-		id: account.id,
-		name: account.name,
-		provider: account.provider,
-		created: new Date(account.created_at),
-		lastUsed: account.last_used ? new Date(account.last_used) : null,
-		requestCount: account.request_count,
-		totalRequests: account.total_requests,
-		tokenStatus,
-		rateLimitStatus,
-		sessionInfo,
-		paused: account.paused,
-		rate_limited_until: account.rate_limited_until,
-		session_start: account.session_start,
-		session_request_count: account.session_request_count,
-		access_token: account.access_token,
-		priority: account.priority,
-		autoFallbackEnabled: account.auto_fallback_enabled,
-		autoRefreshEnabled: account.auto_refresh_enabled,
 	};
 }

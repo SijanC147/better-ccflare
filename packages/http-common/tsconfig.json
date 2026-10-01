@@ -13,9 +13,15 @@
 	// outside this package's `src`. The count was identical at 90 with the test
 	// exclusion on and off, which is what proves `rootDir` was the cause rather
 	// than the tests. Removing the pair emits nothing differently: the root
-	// config sets `noEmit: true` and this file inherits it, every `tsc`
-	// invocation in the repo passes `--noEmit`, no `dist/` exists for any
-	// package, and the shipped binary is built by `bun build --compile` from
+	// config sets `noEmit: true` and this file inherits it, this package's own
+	// `typecheck` script passes `--noEmit`, no `dist/` exists for any package,
+	// and the shipped binary is built by `bun build --compile` from
 	// `apps/cli/src/main.ts` rather than by `tsc`.
+	//
+	// The inherited `noEmit: true` is the load-bearing fact, not how scripts
+	// are spelled: not every `tsc` invocation passes `--noEmit`.
+	// `packages/agents` declares a bare `tsc` build and a `tsc --watch` dev
+	// script, and they emit nothing only because that tsconfig also extends
+	// the root without overriding `noEmit` (SB23-2439).
 	"exclude": ["node_modules", "dist"]
 }
