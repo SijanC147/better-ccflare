@@ -447,6 +447,25 @@ describe("CodexTurnStateStore messages turns", () => {
 		});
 	});
 
+	it("poisons the key when a holder whose lease lapsed records after another took it", () => {
+		// From the #280 review (F8): the record-side lease check is the only
+		// thing that catches this; the token checks behind it cannot.
+		const c = clock();
+		const store = new CodexTurnStateStore(undefined, undefined, c.now);
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A", "r0"),
+			"A",
+			"tok",
+		);
+		const x = store.lookupMessagesTurn(turn(1), "A", "x");
+		c.advance(CODEX_MESSAGES_TURN_LEASE_MS + 1);
+		const y = store.lookupMessagesTurn(turn(2), "A", "y");
+		expect([x.token, y.token]).toEqual(["tok", "tok"]);
+		store.recordMessagesTurn(x, "A", null);
+		store.recordMessagesTurn(y, "A", null);
+		expect(store.lookupMessagesTurn(turn(3), "A", "y2").match).toBe("poisoned");
+	});
+
 	it("forgets a turn after the TTL and files no oversized token", () => {
 		const c = clock();
 		const store = new CodexTurnStateStore(1000, 100, c.now);
@@ -587,6 +606,78 @@ describe("CodexProvider pending derived turns", () => {
 		await send("from-b", "b".repeat(64));
 		// One caller's unanswered opening would make the other's read "other".
 		expect(pending.get("from-b\0acc-caller")?.lookup.match).toBe("fresh");
+	});
+
+	it("does not reuse an earlier transform's lookup when the same request is transformed again without one", async () => {
+		const provider = new CodexProvider();
+		const account = {
+			id: "acc-again",
+			name: "g",
+			provider: "codex",
+		} as Account;
+		const body = (messages: unknown[]) =>
+			JSON.stringify({
+				model: "gpt-5.5",
+				max_tokens: 16,
+				metadata: {
+					user_id: JSON.stringify({
+						session_id: "5e550000-0000-4000-8000-0000000000cd",
+					}),
+				},
+				messages,
+			});
+		const send = (requestId: string, payload: string, type: string) =>
+			provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": type,
+						"x-better-ccflare-request-id": requestId,
+					},
+					body: payload,
+				}),
+				account,
+			);
+		const opening = [{ role: "user", content: "go" }];
+		await send("o1", body(opening), "application/json");
+		await provider.processResponse(
+			new Response(
+				JSON.stringify({
+					id: "r",
+					object: "response",
+					model: "gpt-5.5",
+					status: "completed",
+					output: [],
+					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+				}),
+				{
+					status: 200,
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": "o1",
+						"x-better-ccflare-request-path": "/v1/messages",
+						[CODEX_TURN_STATE_HEADER]: "tok-o",
+					},
+				},
+			),
+			account,
+		);
+		const loop = body([
+			...opening,
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "t", name: "x", input: {} }],
+			},
+			{
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: "t", content: "" }],
+			},
+		]);
+		const first = await send("f1", loop, "application/json");
+		expect(first.headers.get(CODEX_TURN_STATE_HEADER)).toBe("tok-o");
+		// The same request id again, through a branch that derives nothing.
+		const again = await send("f1", loop, "text/plain");
+		expect(again.headers.get(CODEX_TURN_STATE_HEADER)).toBeNull();
 	});
 
 	it("strips the internal-replay marker on the passthrough branch too", async () => {

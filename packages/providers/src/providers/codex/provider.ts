@@ -844,6 +844,12 @@ export class CodexProvider extends BaseProvider {
 		// Read before the transform: these are the client's own values, which
 		// the outbound copy is about to be rewritten from (SB23-2370).
 		const requestId = request.headers.get("x-better-ccflare-request-id");
+		// A lookup belongs to the transform that made it: a second transform of
+		// the same request that derives nothing must not send the first's token.
+		if (requestId && account?.id)
+			this.messagesTurnByRequest.delete(
+				messagesTurnRequestKey(requestId, account.id),
+			);
 		const clientTurnHeaders = new Headers();
 		for (const name of [CODEX_TURN_STATE_HEADER, CODEX_TURN_METADATA_HEADER]) {
 			const value = request.headers.get(name);
