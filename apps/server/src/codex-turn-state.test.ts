@@ -40,6 +40,8 @@ interface Seen {
 }
 
 const seen: Seen[] = [];
+/** The internal-replay marker as each upstream request carried it (SB23-3629). */
+const markers: Array<string | null> = [];
 /**
  * Never reset: the provider's store is a registry singleton that outlives one
  * test, so a token value reused across tests would be a hit nothing earned.
@@ -86,6 +88,7 @@ beforeAll(() => {
 				turnState,
 				turnMetadata: req.headers.get(TURN_METADATA),
 			});
+			markers.push(req.headers.get("x-better-ccflare-internal-replay"));
 			const override = queued.get(account)?.shift();
 			if (override) return override();
 			const headers: Record<string, string> = {
@@ -209,6 +212,7 @@ function makeCtx(): ProxyContext {
 let collector: ReturnType<typeof spyOn> | null = null;
 beforeEach(() => {
 	seen.length = 0;
+	markers.length = 0;
 	queued.clear();
 	route = ["a", "b"];
 	answerJson = false;
@@ -688,6 +692,27 @@ describe("x-codex-turn-state replayed on turns derived from /v1/messages bodies 
 			["a", null],
 			["a", token],
 		]);
+		// The proxy's own marker never leaves it, the keepalive included.
+		expect(markers).toEqual([null, null, null]);
+	});
+
+	it("ignores a client's copy of the internal-replay marker: derivation stays on and nothing leaks upstream", async () => {
+		route = ["a"];
+		const s = newSession();
+		const forged = { "x-better-ccflare-internal-replay": "true" };
+		const first = await claudeCode(s, [fresh("list files")], forged);
+		const token = first.headers.get(TURN_STATE);
+		expect(token).toMatch(/^ts-a-\d+$/);
+		await claudeCode(
+			s,
+			[older("list files"), toolUse("t1"), toolResult("t1")],
+			forged,
+		);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", token],
+		]);
+		expect(markers).toEqual([null, null]);
 	});
 
 	it("treats a byte-identical re-send from the client as a different turn", async () => {

@@ -586,7 +586,7 @@ export class CodexProvider extends BaseProvider {
 	 */
 	private readonly messagesTurnByRequest = new Map<
 		string,
-		{ turn?: MessagesTurn; lookup?: MessagesTurnLookup; ts: number }
+		{ lookup: MessagesTurnLookup; ts: number }
 	>();
 	private readonly continuationByLane = new Map<string, ContinuationState>();
 	private continuationGeneration = 0;
@@ -872,13 +872,10 @@ export class CodexProvider extends BaseProvider {
 		accountId: string | undefined,
 	): void {
 		if (!requestId || !accountId) return;
-		const key = messagesTurnRequestKey(requestId, accountId);
-		const turn = this.messagesTurnByRequest.get(key)?.turn;
-		if (!turn) return;
-		const lookup = this.turnState.lookupMessagesTurn(turn, accountId);
-		// Keep the lookup only: the prefix digests are not needed past here.
-		this.pendMessagesTurn(key, { lookup, ts: this.now() });
-		if (lookup.token) outbound.set(CODEX_TURN_STATE_HEADER, lookup.token);
+		const lookup = this.messagesTurnByRequest.get(
+			messagesTurnRequestKey(requestId, accountId),
+		)?.lookup;
+		if (lookup?.token) outbound.set(CODEX_TURN_STATE_HEADER, lookup.token);
 	}
 
 	private recordMessagesTurn(
@@ -900,7 +897,7 @@ export class CodexProvider extends BaseProvider {
 
 	private pendMessagesTurn(
 		key: string,
-		entry: { turn?: MessagesTurn; lookup?: MessagesTurnLookup; ts: number },
+		entry: { lookup: MessagesTurnLookup; ts: number },
 	): void {
 		this.messagesTurnByRequest.delete(key);
 		this.messagesTurnByRequest.set(key, entry);
@@ -1001,6 +998,7 @@ export class CodexProvider extends BaseProvider {
 				);
 			}
 			delete body.__better_ccflare_codex_passthrough;
+			let derivedTurn: MessagesTurn | null = null;
 			// A turn named by the body (SB23-3629), only for a client that sends
 			// no Codex turn headers of its own, and never for the proxy's own
 			// replays of a client body.
@@ -1012,12 +1010,13 @@ export class CodexProvider extends BaseProvider {
 				!request.headers.has(CODEX_TURN_STATE_HEADER) &&
 				!request.headers.has(CODEX_TURN_METADATA_HEADER)
 			) {
-				const turn = messagesTurn(body);
-				if (turn)
-					this.pendMessagesTurn(messagesTurnRequestKey(requestId, account.id), {
-						turn,
-						ts: this.now(),
-					});
+				const caller = request.headers.get(
+					"x-better-ccflare-authenticated-caller",
+				);
+				derivedTurn = messagesTurn(
+					body,
+					caller && /^[0-9a-f]{64}$/.test(caller) ? caller : null,
+				);
 			}
 			// The passthrough object is part of the public JSON body and is therefore
 			// attacker-controlled. Native execution fields require the proxy's
@@ -1167,6 +1166,20 @@ export class CodexProvider extends BaseProvider {
 			newHeaders.delete("content-length");
 
 			const serializedBody = JSON.stringify(codexBody);
+
+			// Looked up only once nothing left can throw, and only the small
+			// lookup is kept for processResponse: the per-message digests die
+			// with this call, so a refused request pins nothing.
+			if (derivedTurn && requestId && account?.id) {
+				this.pendMessagesTurn(messagesTurnRequestKey(requestId, account.id), {
+					lookup: this.turnState.lookupMessagesTurn(
+						derivedTurn,
+						account.id,
+						requestId,
+					),
+					ts: this.now(),
+				});
+			}
 
 			return new Request(request.url, {
 				method: request.method,

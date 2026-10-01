@@ -41,15 +41,27 @@ interface Entry {
 
 /**
  * A turn derived from an Anthropic Messages body (SB23-3629). `token` is null
- * once the key has been poisoned. `length` and `prefix` name the last request
- * this account answered in the turn: the next one must extend it.
+ * until the request that opened the turn is answered with one. `length` and
+ * `prefix` name the last request this account answered in the turn, which
+ * the next one must extend. `lease` is the request id holding the key between
+ * its lookup and its answer, so a second request cannot use the turn in that
+ * window.
  */
 interface DerivedEntry {
 	token: string | null;
+	poisoned: boolean;
 	length: number;
 	prefix: string;
+	lease: string | null;
+	leasedAt: number;
 	expiresAt: number;
 }
+
+/**
+ * A lease older than this is treated as released. A 429 failover never
+ * reaches processResponse, so its lease is not otherwise given back.
+ */
+export const CODEX_MESSAGES_TURN_LEASE_MS = 2 * 60 * 1000;
 
 /**
  * How a request's body related to the turn the account had on file:
@@ -67,8 +79,8 @@ export interface MessagesTurnLookup {
 	prefix: string;
 	match: MessagesTurnMatch;
 	token: string | null;
-	/** The position an `extends` lookup extended, so a record can tell whether another request moved it since. */
-	from?: { length: number; prefix: string };
+	/** The request id whose lease a `fresh` or `extends` lookup holds. */
+	lease: string;
 }
 
 /**
@@ -172,13 +184,18 @@ export function turnAnchorIndex(messages: readonly unknown[]): number {
 }
 
 /**
- * The turn an Anthropic Messages body belongs to: a digest of its session id,
- * its model and `messages[0..k]` at the anchor. Null without a session id,
- * because a key from the messages alone collides across clients sending the
- * same prompt. `system` is left out because Claude Code changes it on almost
- * every request of a turn (131 of 132 measured follow-ups).
+ * The turn an Anthropic Messages body belongs to: a digest of the
+ * authenticated caller when there is one, its session id, its model and
+ * `messages[0..k]` at the anchor. Null without a session id, because a key
+ * from the messages alone collides across clients sending the same prompt.
+ * The caller keeps one API key from naming another's session. `system` is
+ * left out because Claude Code changes it on almost every request of a turn
+ * (131 of 132 measured follow-ups).
  */
-export function messagesTurn(body: unknown): MessagesTurn | null {
+export function messagesTurn(
+	body: unknown,
+	caller: string | null = null,
+): MessagesTurn | null {
 	const session = messagesSessionId(body);
 	const messages = (body as { messages?: unknown } | null)?.messages;
 	if (!session || !Array.isArray(messages) || messages.length === 0)
@@ -195,7 +212,7 @@ export function messagesTurn(body: unknown): MessagesTurn | null {
 	return {
 		key: digest(
 			"messages-turn",
-			`${session}\0${typeof model === "string" ? model : ""}\0${prefixes[anchor]}`,
+			`${caller ?? ""}\0${session}\0${typeof model === "string" ? model : ""}\0${prefixes[anchor]}`,
 		),
 		prefixes,
 	};
@@ -354,35 +371,76 @@ export class CodexTurnStateStore {
 		return entry;
 	}
 
+	private poison(entry: DerivedEntry): void {
+		entry.poisoned = true;
+		entry.token = null;
+		entry.lease = null;
+	}
+
 	/**
-	 * The token to replay to `accountId` for a request whose body names
-	 * `turn` (SB23-3629). Only a request that strictly extends the last one
-	 * this account answered in the turn gets one. Anything else under a key
-	 * the account has on file poisons that key for the TTL: a rewind that
-	 * resends the same prompt, a fork, or a byte-identical re-send cannot be
-	 * told from a different turn, and not replaying is the old behaviour.
+	 * The token to replay to `accountId` for request `requestId`, whose body
+	 * names `turn` (SB23-3629). Only a request that strictly extends the last
+	 * one this account answered in the turn gets one, and only while no other
+	 * request holds the turn. Anything else under a key the account has on
+	 * file poisons that key for the TTL: a rewind that resends the same prompt,
+	 * a fork, a byte-identical re-send or a concurrent sibling cannot be told
+	 * from a different turn, and not replaying is the old behaviour.
 	 */
 	lookupMessagesTurn(
 		turn: MessagesTurn,
 		accountId: string,
+		requestId: string,
 	): MessagesTurnLookup {
 		const length = turn.prefixes.length;
-		const base = { key: turn.key, length, prefix: turn.prefixes[length - 1] };
-		const entry = this.readDerived(this.slot(accountId, turn.key));
-		if (!entry) return { ...base, match: "fresh", token: null };
-		if (entry.token === null)
-			return { ...base, match: "poisoned", token: null };
+		const base = {
+			key: turn.key,
+			length,
+			prefix: turn.prefixes[length - 1],
+			lease: requestId,
+		};
+		const slot = this.slot(accountId, turn.key);
+		let entry = this.readDerived(slot);
+		if (
+			entry?.lease &&
+			this.now() - entry.leasedAt > CODEX_MESSAGES_TURN_LEASE_MS
+		) {
+			entry.lease = null;
+			// An opening that was never answered leaves nothing to keep.
+			if (entry.token === null && !entry.poisoned) {
+				this.derived.delete(slot);
+				entry = undefined;
+			}
+		}
+		if (!entry) {
+			this.derived.set(slot, {
+				token: null,
+				poisoned: false,
+				length,
+				prefix: base.prefix,
+				lease: requestId,
+				leasedAt: this.now(),
+				expiresAt: this.now() + this.ttlMs,
+			});
+			this.evictFrom(this.derived);
+			return { ...base, match: "fresh", token: null };
+		}
+		if (entry.poisoned) return { ...base, match: "poisoned", token: null };
+		// The same request transformed again (a retry that re-transforms) keeps
+		// its own lease; any other holder means two requests on one turn.
+		if (entry.lease !== null && entry.lease !== requestId) {
+			this.poison(entry);
+			return { ...base, match: "other", token: null };
+		}
+		if (entry.token === null) return { ...base, match: "fresh", token: null };
 		if (
 			length > entry.length &&
 			turn.prefixes[entry.length - 1] === entry.prefix
-		)
-			return {
-				...base,
-				match: "extends",
-				token: entry.token,
-				from: { length: entry.length, prefix: entry.prefix },
-			};
-		entry.token = null;
+		) {
+			entry.lease = requestId;
+			entry.leasedAt = this.now();
+			return { ...base, match: "extends", token: entry.token };
+		}
+		this.poison(entry);
 		return { ...base, match: "other", token: null };
 	}
 
@@ -390,43 +448,40 @@ export class CodexTurnStateStore {
 	 * Records a 2xx answer to a request looked up with `lookupMessagesTurn`.
 	 * A fresh turn files the token `accountId` issued; a follow-up moves the
 	 * turn's position forward and keeps the first token, as the Codex client
-	 * keeps its first. Two requests racing on one key, two fresh starts or
-	 * two follow-ups of one position, poison it: siblings look like that.
+	 * keeps its first. Only the request holding the lease can do either: an
+	 * evicted or taken-over placeholder files nothing, and a lease held by
+	 * another request poisons the key.
 	 */
 	recordMessagesTurn(
 		lookup: MessagesTurnLookup,
 		accountId: string,
 		issued: string | null,
 	): void {
+		if (lookup.match !== "fresh" && lookup.match !== "extends") return;
 		const slot = this.slot(accountId, lookup.key);
 		const entry = this.readDerived(slot);
-		if (lookup.match === "fresh") {
-			if (entry) {
-				entry.token = null;
-				return;
-			}
-			if (!issued || issued.length > MAX_TOKEN_LENGTH) return;
-			this.derived.set(slot, {
-				token: issued,
-				length: lookup.length,
-				prefix: lookup.prefix,
-				expiresAt: this.now() + this.ttlMs,
-			});
-			this.evictFrom(this.derived);
+		if (!entry || entry.poisoned) return;
+		if (entry.lease !== lookup.lease) {
+			this.poison(entry);
 			return;
 		}
-		if (lookup.match !== "extends" || !entry || entry.token === null) return;
-		if (
-			!lookup.from ||
-			entry.token !== lookup.token ||
-			entry.length !== lookup.from.length ||
-			entry.prefix !== lookup.from.prefix
-		) {
-			entry.token = null;
+		if (lookup.match === "fresh") {
+			if (entry.token !== null) {
+				this.poison(entry);
+				return;
+			}
+			if (!issued || issued.length > MAX_TOKEN_LENGTH) {
+				this.derived.delete(slot);
+				return;
+			}
+			entry.token = issued;
+		} else if (entry.token !== lookup.token) {
+			this.poison(entry);
 			return;
 		}
 		entry.length = lookup.length;
 		entry.prefix = lookup.prefix;
+		entry.lease = null;
 	}
 
 	/**
