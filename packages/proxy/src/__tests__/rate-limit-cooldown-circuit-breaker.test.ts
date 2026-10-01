@@ -24,6 +24,7 @@ import type { CircuitKey } from "../circuit-breaker";
 import { CircuitBreaker } from "../circuit-breaker";
 import type { ProxyContext } from "../handlers/proxy-types";
 import { applyRateLimitCooldown } from "../handlers/rate-limit-cooldown";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * The literal `"model_fallback_429"` below is sourced from
@@ -80,20 +81,16 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 function makeContext(): ProxyContext {
-	return {
-		strategy: {} as never,
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(async () => ({
 				consecutiveRateLimits: 1,
 				applied: true,
 			})),
-		} as never,
-		runtime: {} as never,
-		config: {} as never,
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+		},
+		provider: { name: "anthropic" },
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 const KEY: CircuitKey = { provider: "anthropic", accountId: "acc-cooldown-cb" };

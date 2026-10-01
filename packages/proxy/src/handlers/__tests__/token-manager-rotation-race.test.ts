@@ -8,7 +8,9 @@ import {
 	mock,
 } from "bun:test";
 import { type AuthFailureEvt, authFailureEvents } from "@better-ccflare/core";
+import type { TokenRefreshResult } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	clearAllPendingRotationsForTests,
 	getPendingRotation,
@@ -97,15 +99,15 @@ function makeContext(opts: {
 	const refreshToken = mock(async (account: Account) => {
 		refreshCalls.push({ refreshTokenAtCall: account.refresh_token });
 		if (opts.refreshError) throw opts.refreshError;
-		return (
-			opts.refreshResult ?? {
-				accessToken: "new-access-token",
-				expiresAt: Date.now() + 3_600_000,
-			}
-		);
+		// Narrowest cast: these results may omit refreshToken, a shape
+		// TokenRefreshResult does not admit, and token-manager branches on it.
+		return (opts.refreshResult ?? {
+			accessToken: "new-access-token",
+			expiresAt: Date.now() + 3_600_000,
+		}) as TokenRefreshResult;
 	});
 	return {
-		ctx: {
+		ctx: makeProxyContext({
 			provider: { name: "fake-refresh-provider", refreshToken },
 			dbOps: {
 				getAccount: mock(async () => opts.dbAccount ?? null),
@@ -125,11 +127,10 @@ function makeContext(opts: {
 				flagRequiresReauthIfTokenMatches: mock(async () => true),
 			},
 			runtime: { clientId: "test-client" },
-			refreshInFlight: new Map(),
 			asyncWriter: {
 				enqueue: mock((job: () => Promise<void>) => queuedJobs.push(job)),
 			},
-		},
+		}),
 		queuedJobs,
 		setRequiresReauth,
 		refreshToken,
@@ -152,7 +153,7 @@ describe("refreshAccessTokenSafe — rotation-race pre-refresh guard", () => {
 		});
 		const { ctx, refreshToken } = makeContext({ dbAccount });
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("fresh-access");
 		expect(refreshToken).not.toHaveBeenCalled();
@@ -180,7 +181,7 @@ describe("refreshAccessTokenSafe — rotation-race pre-refresh guard", () => {
 			},
 		});
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("brand-new");
 		expect(refreshToken).toHaveBeenCalledTimes(1);
@@ -208,7 +209,7 @@ describe("refreshAccessTokenSafe — rotation-race pre-refresh guard", () => {
 			},
 		});
 
-		await refreshAccessTokenSafe(account as never, ctx as never);
+		await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(refreshCalls[0]?.refreshTokenAtCall).toBe("RT2-current");
 	});
@@ -227,7 +228,7 @@ describe("refreshAccessTokenSafe — rotation-race pre-refresh guard", () => {
 			},
 		});
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("brand-new");
 		expect(refreshToken).toHaveBeenCalledTimes(1);
@@ -258,7 +259,7 @@ describe("refreshAccessTokenSafe — rotation-race pre-refresh guard", () => {
 			},
 		});
 
-		await refreshAccessTokenSafe(account as never, ctx as never);
+		await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(refreshCalls[0]?.refreshTokenAtCall).toBe("RT2");
 		expect(account.refresh_token).toBe("RT2");
@@ -279,7 +280,7 @@ describe("refreshAccessTokenSafe — rotation-race pre-refresh guard", () => {
 		});
 		const { ctx, refreshToken } = makeContext({ dbAccount });
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe(sharedAccessToken);
 		expect(refreshToken).not.toHaveBeenCalled();
@@ -322,10 +323,7 @@ describe("refreshAccessTokenSafe — benign race on invalid_grant", () => {
 		const listener = (e: AuthFailureEvt) => events.push(e);
 		authFailureEvents.on("event", listener);
 		try {
-			const token = await refreshAccessTokenSafe(
-				account as never,
-				ctx as never,
-			);
+			const token = await refreshAccessTokenSafe(account as never, ctx);
 			expect(token).toBe("fresh-access");
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -362,7 +360,7 @@ describe("refreshAccessTokenSafe — benign race on invalid_grant", () => {
 		);
 
 		await expect(
-			refreshAccessTokenSafe(account as never, ctx as never),
+			refreshAccessTokenSafe(account as never, ctx),
 		).rejects.toThrow();
 
 		for (const job of queuedJobs) await job();
@@ -391,7 +389,7 @@ describe("refreshAccessTokenSafe — benign race on invalid_grant", () => {
 		authFailureEvents.on("event", listener);
 		try {
 			await expect(
-				refreshAccessTokenSafe(account as never, ctx as never),
+				refreshAccessTokenSafe(account as never, ctx),
 			).rejects.toThrow();
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -426,7 +424,7 @@ describe("refreshAccessTokenSafe — benign race on invalid_grant", () => {
 		authFailureEvents.on("event", listener);
 		try {
 			await expect(
-				refreshAccessTokenSafe(account as never, ctx as never),
+				refreshAccessTokenSafe(account as never, ctx),
 			).rejects.toThrow();
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -458,7 +456,7 @@ describe("refreshAccessTokenSafe — benign race on invalid_grant", () => {
 		authFailureEvents.on("event", listener);
 		try {
 			await expect(
-				refreshAccessTokenSafe(account as never, ctx as never),
+				refreshAccessTokenSafe(account as never, ctx),
 			).rejects.toThrow();
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -493,7 +491,7 @@ describe("refreshAccessTokenSafe — benign race on invalid_grant", () => {
 		authFailureEvents.on("event", listener);
 		try {
 			await expect(
-				refreshAccessTokenSafe(account as never, ctx as never),
+				refreshAccessTokenSafe(account as never, ctx),
 			).rejects.toThrow("Failed to refresh access token");
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -529,7 +527,7 @@ describe("refreshAccessTokenSafe — persist-in-promise and identity-safe cleanu
 			return true;
 		});
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("brand-new");
 		// The CAS write's tick-delayed resolution must have already happened by
@@ -564,7 +562,7 @@ describe("refreshAccessTokenSafe — persist-in-promise and identity-safe cleanu
 			},
 		});
 
-		await refreshAccessTokenSafe(account as never, ctx as never);
+		await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(
 			ctx.dbOps.updateAccountTokensIfRefreshTokenMatches,
@@ -586,13 +584,15 @@ describe("refreshAccessTokenSafe — persist-in-promise and identity-safe cleanu
 		const { ctx } = makeContext({ dbAccount: null });
 		ctx.provider.refreshToken = mock(async () => {
 			await new Promise((resolve) => setTimeout(resolve, 20));
+			// Narrowest cast: the result omits refreshToken, a shape
+			// TokenRefreshResult does not admit, and token-manager branches on it.
 			return {
 				accessToken: "brand-new",
 				expiresAt: Date.now() + 3_600_000,
-			};
+			} as TokenRefreshResult;
 		});
 
-		const pending = refreshAccessTokenSafe(account as never, ctx as never);
+		const pending = refreshAccessTokenSafe(account as never, ctx);
 
 		// Let the synchronous setup (adoption guard's await + refreshInFlight
 		// install) run to completion before mutating the map — both are
@@ -624,7 +624,7 @@ describe("refreshAccessTokenSafe — join in-flight before backoff", () => {
 		// Seed a recent (transient, non-auth) failure so the account is now in
 		// its backoff window.
 		await expect(
-			refreshAccessTokenSafe(account as never, ctx as never),
+			refreshAccessTokenSafe(account as never, ctx),
 		).rejects.toThrow();
 		expect(ctx.refreshInFlight.has(account.id)).toBe(false);
 		expect(refreshToken).toHaveBeenCalledTimes(1);
@@ -636,10 +636,12 @@ describe("refreshAccessTokenSafe — join in-flight before backoff", () => {
 		// refreshes can join it.
 		const joinedRefresh = mock(async () => {
 			await new Promise((resolve) => setTimeout(resolve, 20));
+			// Narrowest cast: the result omits refreshToken, a shape
+			// TokenRefreshResult does not admit, and token-manager branches on it.
 			return {
 				accessToken: "refresh-1-token",
 				expiresAt: Date.now() + 3_600_000,
-			};
+			} as TokenRefreshResult;
 		});
 		ctx.provider.refreshToken = joinedRefresh;
 		const inFlightPromise = joinedRefresh().then(
@@ -650,7 +652,7 @@ describe("refreshAccessTokenSafe — join in-flight before backoff", () => {
 		// Still well within the backoff window — a fresh caller with no
 		// in-flight entry would be blocked here; this caller must instead join
 		// the in-flight promise rather than throw ServiceUnavailableError.
-		const joined = await refreshAccessTokenSafe(account as never, ctx as never);
+		const joined = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(joined).toBe("refresh-1-token");
 		// The original seeding mock was never called again by the joiner...
@@ -679,7 +681,7 @@ describe("refreshAccessTokenSafe — accounts with no refresh token to CAS again
 			},
 		});
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("brand-new");
 		expect(
@@ -711,7 +713,7 @@ describe("refreshAccessTokenSafe — accounts with no refresh token to CAS again
 		});
 		ctx.dbOps.updateAccountTokensIfRefreshTokenAbsent = mock(async () => false);
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("brand-new");
 	});
@@ -732,7 +734,7 @@ describe("refreshAccessTokenSafe — accounts with no refresh token to CAS again
 		authFailureEvents.on("event", listener);
 		try {
 			await expect(
-				refreshAccessTokenSafe(account as never, ctx as never),
+				refreshAccessTokenSafe(account as never, ctx),
 			).rejects.toThrow("Failed to refresh access token");
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -762,7 +764,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 			throw new Error("disk full");
 		});
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("new-access");
 		const pending = getPendingRotation("pending-persist-fail-1");
@@ -792,7 +794,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 		seed.ctx.dbOps.updateAccountTokensIfRefreshTokenMatches = mock(async () => {
 			throw new Error("disk full");
 		});
-		await refreshAccessTokenSafe(seedAccount as never, seed.ctx as never);
+		await refreshAccessTokenSafe(seedAccount as never, seed.ctx);
 		expect(getPendingRotation(accountId)).toBeTruthy();
 
 		// A fresh caller shows up with a STALE snapshot (still RT1, still
@@ -814,10 +816,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 		// This time the CAS write underlying the flush succeeds.
 		ctx.dbOps.updateAccountTokensIfRefreshTokenMatches = mock(async () => true);
 
-		const token = await refreshAccessTokenSafe(
-			staleAccount as never,
-			ctx as never,
-		);
+		const token = await refreshAccessTokenSafe(staleAccount as never, ctx);
 
 		expect(token).toBe("rotated-access");
 		expect(refreshToken).not.toHaveBeenCalled();
@@ -846,7 +845,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 		seed.ctx.dbOps.updateAccountTokensIfRefreshTokenMatches = mock(async () => {
 			throw new Error("disk full");
 		});
-		await refreshAccessTokenSafe(seedAccount as never, seed.ctx as never);
+		await refreshAccessTokenSafe(seedAccount as never, seed.ctx);
 		expect(getPendingRotation(accountId)).toBeTruthy();
 
 		const account = makeAccount(accountId, {
@@ -876,7 +875,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 		authFailureEvents.on("event", listener);
 		try {
 			await expect(
-				refreshAccessTokenSafe(account as never, ctx as never),
+				refreshAccessTokenSafe(account as never, ctx),
 			).rejects.toThrow();
 		} finally {
 			authFailureEvents.off("event", listener);
@@ -908,7 +907,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 		seed.ctx.dbOps.updateAccountTokensIfRefreshTokenMatches = mock(async () => {
 			throw new Error("disk full");
 		});
-		await refreshAccessTokenSafe(seedAccount as never, seed.ctx as never);
+		await refreshAccessTokenSafe(seedAccount as never, seed.ctx);
 		const seeded = getPendingRotation(accountId);
 		expect(seeded?.attemptedRefreshToken).toBe("RT1");
 		expect(seeded?.refreshToken).toBe("RT2");
@@ -935,7 +934,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 			},
 		);
 
-		await refreshAccessTokenSafe(secondAccount as never, second.ctx as never);
+		await refreshAccessTokenSafe(secondAccount as never, second.ctx);
 
 		const chained = getPendingRotation(accountId);
 		expect(chained?.attemptedRefreshToken).toBe("RT1");
@@ -957,7 +956,7 @@ describe("refreshAccessTokenSafe — pending-rotation registry (round 3, item 1)
 		});
 		const { ctx, refreshToken } = makeContext({ dbAccount });
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("fresh-access-from-db");
 		expect(refreshToken).not.toHaveBeenCalled();
@@ -1004,7 +1003,7 @@ describe("refreshAccessTokenSafe — adopts authoritative DB credentials when th
 			async () => false,
 		);
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		// The adopted DB row's access token is still comfortably valid, so the
 		// caller must be served THAT token — not the losing rotated one, which
@@ -1057,7 +1056,7 @@ describe("refreshAccessTokenSafe — adopts authoritative DB credentials when th
 			async () => false,
 		);
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		// The adopted access token is not servable, so the caller still gets
 		// the token this refresh just minted.
@@ -1096,7 +1095,7 @@ describe("refreshAccessTokenSafe — adopts authoritative DB credentials when th
 			async () => false,
 		);
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("new-access-from-provider");
 		// Re-read failed — falls back to the pre-existing behavior of
@@ -1127,7 +1126,7 @@ describe("refreshAccessTokenSafe — serves the newest pending entry recorded du
 		seed.ctx.dbOps.updateAccountTokensIfRefreshTokenMatches = mock(async () => {
 			throw new Error("disk full");
 		});
-		await refreshAccessTokenSafe(seedAccount as never, seed.ctx as never);
+		await refreshAccessTokenSafe(seedAccount as never, seed.ctx);
 		expect(getPendingRotation(accountId)?.accessToken).toBe("access-1");
 
 		// A second caller triggers a flush whose CAS write, before resolving,
@@ -1151,7 +1150,7 @@ describe("refreshAccessTokenSafe — serves the newest pending entry recorded du
 			},
 		);
 
-		const token = await refreshAccessTokenSafe(account as never, ctx as never);
+		const token = await refreshAccessTokenSafe(account as never, ctx);
 
 		expect(token).toBe("access-2");
 		expect(refreshToken).not.toHaveBeenCalled();

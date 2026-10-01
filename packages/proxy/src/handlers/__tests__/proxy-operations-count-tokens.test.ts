@@ -10,6 +10,7 @@ import {
 import { CodexProvider } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import * as usageCollectorModule from "../../usage-collector";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -73,26 +74,23 @@ function makeRequestMeta(path = "/v1/messages/count_tokens"): RequestMeta {
 	};
 }
 
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 			),
 			saveRequest: mock(() => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
-		provider: new CodexProvider() as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => true } as never,
-	};
+			// Absent on the old literal, which answered undefined for both.
+			getAccount: undefined,
+			resolverManager: undefined,
+		},
+		runtime: { clientId: "test" },
+		provider: new CodexProvider(),
+		asyncWriter: { enqueue: mock(() => {}) },
+		config: { getStorePayloads: () => true },
+	});
 }
 
 function makeCountTokensRequest(body: ArrayBuffer) {
@@ -148,7 +146,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 				messages: [{ role: "user", content: "hello world" }],
 			}),
 		).buffer;
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const result = await proxyWithAccount(
 			makeCountTokensRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages/count_tokens"),
@@ -181,7 +179,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 		fetchSlot.fetch = fetchMock;
 
 		const bodyBuffer = new TextEncoder().encode("{not-json").buffer;
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const result = await proxyWithAccount(
 			makeCountTokensRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages/count_tokens"),
@@ -221,7 +219,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 				messages: [{ role: "user", content: "hello world" }],
 			}),
 		).buffer;
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const result = await proxyWithAccount(
 			makeCountTokensRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages/count_tokens"),
@@ -298,7 +296,7 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(),
+				makeContext(),
 			);
 
 			if (!(result instanceof Response)) {

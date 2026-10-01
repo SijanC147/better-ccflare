@@ -5,15 +5,13 @@ import type {
 	ComboWithSlots,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { clearCodexModelCacheForTests } from "../../codex-model-catalog";
 import {
 	getComboSlotInfo,
 	selectAccountsForRequest,
 } from "../account-selector";
-import {
-	INTERNAL_PROBE_SECRET_HEADER,
-	type ProxyContext,
-} from "../proxy-types";
+import { INTERNAL_PROBE_SECRET_HEADER } from "../proxy-types";
 
 // "Force account model" is a promise about the model, not about the account:
 // the request may move between accounts freely, and may never be served by an
@@ -85,7 +83,7 @@ function makeCtx(opts: {
 	internalProbeSecret?: string;
 }) {
 	const getActiveComboForFamily = mock(async () => opts.combo ?? null);
-	const ctx = {
+	const ctx = makeProxyContext({
 		strategy: {
 			select: mock((_all: Account[], _meta: RequestMeta) => opts.accounts),
 		},
@@ -93,14 +91,15 @@ function makeCtx(opts: {
 			getAllAccounts: mock(async () => opts.accounts),
 			getActiveComboForFamily,
 		},
-		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
 		config: {
 			getForceAccountModel: () => opts.forceAccountModel,
 			getCombosEnabled: () => true,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getModelScopedCapacityRouting: undefined,
 		},
 		internalProbeSecret: opts.internalProbeSecret,
-	} as unknown as ProxyContext;
+	});
 	return { ctx, getActiveComboForFamily };
 }
 

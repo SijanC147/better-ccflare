@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { type AuthFailureEvt, authFailureEvents } from "@better-ccflare/core";
+import type { DatabaseOperations } from "@better-ccflare/database";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 // These tests drive the REAL xAI/Codex providers (via row.provider) and mock
 // global.fetch to return an OAuth error, so the whole provider→scheduler detection
@@ -70,14 +72,10 @@ function makeDb(queryRows: ProactiveRow[]) {
 	return { db, dbOps, runCalls, flagCalls, persistCalls, queries };
 }
 
-function makeScheduler(db: unknown, dbOps: unknown) {
+function makeScheduler(db: unknown, dbOps: Partial<DatabaseOperations>) {
 	return new AutoRefreshScheduler(
 		db as never,
-		{
-			runtime: { port: 8080, clientId: "test-client" },
-			refreshInFlight: new Map(),
-			dbOps,
-		} as never,
+		makeProxyContext({ dbOps }),
 	) as unknown as {
 		checkAndRefreshOpenAICompatibleOAuthTokens(): Promise<void>;
 		checkAndRefreshCodexTokens(): Promise<void>;

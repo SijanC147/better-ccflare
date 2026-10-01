@@ -28,6 +28,7 @@ import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 function stubUsageCollector() {
 	return spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue({
@@ -93,7 +94,7 @@ function makeContext(
 	accounts: Account[],
 	opts?: { throttlingEnabled?: boolean },
 ): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: (accs: Account[]) => {
 				const now = Date.now();
@@ -103,26 +104,30 @@ function makeContext(
 						(!acc.rate_limited_until || acc.rate_limited_until <= now),
 				);
 			},
-		} as never,
+		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => opts?.throttlingEnabled ?? false,
 			getUsageThrottlingWeeklyEnabled: () => opts?.throttlingEnabled ?? false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
 			getForceAccountModel: () => true,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
 		provider: {
 			name: "anthropic",
 			canHandle: () => true,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 function makeRequest(headers: Record<string, string> = {}): Request {

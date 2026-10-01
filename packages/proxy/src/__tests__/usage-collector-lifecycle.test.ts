@@ -580,6 +580,22 @@ describe("UsageCollector request lifecycle", () => {
 	});
 
 	it("clears the pricing deadline timer when estimation finishes quickly", async () => {
+		// Two halves, because the absence of the timeout warning alone cannot
+		// see the thing this test is named for (SB23-2537). The deadline
+		// callback opens with `if (settled) return;`, so with the
+		// `clearTimeout` in `estimateCostWithDeadline`'s finally deleted, the
+		// timer still fires, returns early, and logs nothing: the warning stays
+		// absent and an absence-only test stays green. Measured on darwin:
+		//
+		// - delete the `clearTimeout`: the handle assertion below goes red,
+		//   the warning assertion stays green;
+		// - delete the `clearTimeout` AND the `if (settled) return;`: the
+		//   warning appears for the fast estimate and the absence goes red.
+		//
+		// A red on the handle assertion means the deadline timer outlives a
+		// fast estimate. A red on the positive control at the end means the
+		// capture is not seeing WARN lines at all (a renamed message, or a
+		// LOG_LEVEL above WARN), so the absence above it proved nothing.
 		process.env.CF_PRICING_TIMEOUT_MS = "20";
 		pricingImplementation = async () => 0.25;
 		const { collector, summaryCosts } = harness();
@@ -593,6 +609,26 @@ describe("UsageCollector request lifecycle", () => {
 		};
 		logBus.on("log", onLog);
 
+		// Record the one timer armed with the 20ms deadline and whether it is
+		// cleared. Read at call time, so only the code under test is wrapped.
+		const realSetTimeout = globalThis.setTimeout;
+		const realClearTimeout = globalThis.clearTimeout;
+		const deadlineTimers: unknown[] = [];
+		const clearedTimers = new Set<unknown>();
+		globalThis.setTimeout = ((
+			handler: Parameters<typeof setTimeout>[0],
+			ms?: number,
+			...rest: unknown[]
+		) => {
+			const handle = realSetTimeout(handler, ms, ...rest);
+			if (ms === 20) deadlineTimers.push(handle);
+			return handle;
+		}) as typeof setTimeout;
+		globalThis.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+			clearedTimers.add(handle);
+			return realClearTimeout(handle);
+		}) as typeof clearTimeout;
+
 		try {
 			collector.handleStart(makeStartMessage("fast-pricing"));
 			collector.handleChunk("fast-pricing", modelBearingChunk());
@@ -601,12 +637,37 @@ describe("UsageCollector request lifecycle", () => {
 				requestId: "fast-pricing",
 				success: true,
 			});
+			globalThis.setTimeout = realSetTimeout;
+			globalThis.clearTimeout = realClearTimeout;
 			await collector.drain();
 			await new Promise((resolve) => setTimeout(resolve, 40));
 
 			expect(summaryCosts.get("fast-pricing")).toBe(0.25);
+			expect(deadlineTimers).toHaveLength(1);
+			expect(clearedTimers.has(deadlineTimers[0])).toBe(true);
 			expect(pricingWarnings).toEqual([]);
+
+			// Positive control: the same capture sees the warning once the
+			// condition holds, so the empty list above is a measurement.
+			pricingImplementation = () => new Promise<number>(() => {});
+			const { collector: hung } = harness();
+			hung.handleStart(makeStartMessage("hung-pricing"));
+			hung.handleChunk("hung-pricing", modelBearingChunk());
+			await hung.handleEnd({
+				type: "end",
+				requestId: "hung-pricing",
+				success: true,
+			});
+			expect(pricingWarnings.map((event) => event.data)).toEqual([
+				{
+					model: "claude-sonnet-4-5-20250929",
+					requestId: "hung-pricing",
+					timeoutMs: 20,
+				},
+			]);
 		} finally {
+			globalThis.setTimeout = realSetTimeout;
+			globalThis.clearTimeout = realClearTimeout;
 			logBus.off("log", onLog);
 		}
 	});

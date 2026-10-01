@@ -4,6 +4,7 @@ import type {
 	ComboWithSlots,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	getComboSlotInfo,
 	resolveEffectiveModel,
@@ -97,7 +98,7 @@ function makeCtx(
 	opts: { accounts?: Account[]; activeCombo?: ComboWithSlots | null } = {},
 ): ProxyContext {
 	const accounts = opts.accounts ?? [makeAccount()];
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: mock((_all: Account[], _meta: RequestMeta) => accounts),
 		},
@@ -105,9 +106,14 @@ function makeCtx(
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => opts.activeCombo ?? null),
 		},
-		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
-	} as unknown as ProxyContext;
+		config: {
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getCombosEnabled: undefined,
+			getForceAccountModel: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
+	});
 }
 
 // ── setComboSlotInfo / getComboSlotInfo ───────────────────────────────────────
@@ -176,16 +182,14 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
 		// Strategy mock returns only the active account (simulates SessionStrategy filtering)
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [pausedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({ "x-better-ccflare-account-id": "acc-paused" }),
 		});
@@ -204,16 +208,14 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
 		// Strategy mock returns only the active account (simulates SessionStrategy filtering)
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [rateLimitedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({ "x-better-ccflare-account-id": "acc-rl" }),
 		});
@@ -247,17 +249,15 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 		selectable: Account[],
 		opts: { withSecret?: boolean } = {},
 	): ProxyContext {
-		return {
+		return makeProxyContext({
 			strategy: { select: mock(() => selectable) },
 			dbOps: {
 				getAllAccounts: mock(async () => allAccounts),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 			internalProbeSecret: opts.withSecret === false ? undefined : PROBE_SECRET,
-		} as unknown as ProxyContext;
+		});
 	}
 
 	it("lets a verified auto-refresh probe reach a failure_threshold-paused account", async () => {
@@ -341,7 +341,7 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 	// another account — which is the case being closed here.
 	function makeFlakyLookupCtx(healthy: Account[]): ProxyContext {
 		let calls = 0;
-		return {
+		return makeProxyContext({
 			strategy: { select: mock(() => healthy) },
 			dbOps: {
 				getAllAccounts: mock(async () => {
@@ -351,11 +351,9 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 				}),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 			internalProbeSecret: PROBE_SECRET,
-		} as unknown as ProxyContext;
+		});
 	}
 
 	it("refuses a probe when the forced-account lookup itself fails", async () => {
@@ -599,7 +597,7 @@ describe("selectAccountsForRequest — combo routing", () => {
 			},
 		]);
 
-		const ctx = {
+		const ctx = makeProxyContext({
 			strategy: {
 				select: mock(() => [fallbackAcc]),
 			},
@@ -607,10 +605,15 @@ describe("selectAccountsForRequest — combo routing", () => {
 				getAllAccounts: mock(async () => [rateLimitedAcc, fallbackAcc]),
 				getActiveComboForFamily: mock(async () => combo),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+			config: {
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+				getModelScopedCapacityRouting: undefined,
+				getComboSessionFallback: undefined,
+			},
+		});
 
 		const meta = makeRequestMeta();
 		const result = await selectAccountsForRequest(
@@ -646,16 +649,21 @@ describe("selectAccountsForRequest — combo routing", () => {
 		]);
 
 		const select = mock(() => [fallbackAcc]);
-		const ctx = {
+		const ctx = makeProxyContext({
 			strategy: { select },
 			dbOps: {
 				getAllAccounts: mock(async () => [rateLimitedAcc, fallbackAcc]),
 				getActiveComboForFamily: mock(async () => combo),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			config: { getComboSessionFallback: () => false },
-		} as unknown as ProxyContext;
+			config: {
+				getComboSessionFallback: () => false,
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+				getModelScopedCapacityRouting: undefined,
+			},
+		});
 
 		const meta = makeRequestMeta();
 		const result = await selectAccountsForRequest(
@@ -708,11 +716,7 @@ describe("selectAccountsForRequest — combo routing", () => {
 			"gpt-4-turbo-unknown",
 		);
 		// getActiveComboForFamily should not be called for unknown families.
-		// dbOps is a plain mock object (not a real DatabaseOperations instance),
-		// so the mock-specific assertion methods require escaping the type here.
-		// biome-ignore lint/suspicious/noExplicitAny: accessing bun:test mock assertion API on a test double
-		const ctxAny = ctx as any;
-		expect(ctxAny.dbOps.getActiveComboForFamily).not.toHaveBeenCalled();
+		expect(ctx.dbOps.getActiveComboForFamily).not.toHaveBeenCalled();
 		expect(result[0]?.id).toBe("acc-normal");
 	});
 
@@ -772,16 +776,14 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			pause_reason: "overage",
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [overagePausedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({
 				"x-better-ccflare-account-id": "acc-overage",
@@ -803,16 +805,14 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			auto_pause_on_overage_enabled: true,
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [overagePausedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({
 				"x-better-ccflare-account-id": "acc-overage",
@@ -839,16 +839,14 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			pause_reason: "manual",
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [manualPausedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({
 				"x-better-ccflare-account-id": "acc-manual",
@@ -873,16 +871,14 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			rate_limited_until: Date.now() + 3_600_000,
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [rateLimitedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({
 				"x-better-ccflare-account-id": "acc-rl",
@@ -905,16 +901,14 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			auto_pause_on_overage_enabled: false,
 		});
 		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
-		const ctx: ProxyContext = {
+		const ctx = makeProxyContext({
 			strategy: { select: mock(() => [activeAcc]) },
 			dbOps: {
 				getAllAccounts: mock(async () => [failurePausedAcc, activeAcc]),
 				getActiveComboForFamily: mock(async () => null),
 			},
-			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
-		} as unknown as ProxyContext;
+		});
 		const meta = makeRequestMeta({
 			headers: new Headers({
 				"x-better-ccflare-account-id": "acc-broken",

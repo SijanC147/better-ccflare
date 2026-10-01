@@ -14,6 +14,7 @@ import {
 	refreshModelCatalog,
 	resetModelCatalogForTest,
 } from "../model-catalog";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -71,20 +72,15 @@ function makeCtx(
 	options?: { oauthRefreshEnabled?: boolean },
 ): ProxyContext {
 	const oauthRefreshEnabled = options?.oauthRefreshEnabled ?? false;
-	return {
-		strategy: {} as never,
-		// biome-ignore lint/suspicious/noExplicitAny: minimal test double
-		dbOps: { getAllAccounts: async () => accounts } as any,
-		runtime: { port: 8080, clientId: "test-client" } as never,
+	return makeProxyContext({
+		dbOps: { getAllAccounts: async () => accounts },
 		config: {
 			getModelCatalogOAuthRefreshEnabled: () => oauthRefreshEnabled,
-		} as never,
+		},
 		// biome-ignore lint/style/noNonNullAssertion: anthropic provider is always registered in this test environment
 		provider: getProvider("anthropic")!,
-		refreshInFlight: new Map(),
-		// biome-ignore lint/suspicious/noExplicitAny: minimal test double
-		asyncWriter: { enqueue: (fn: () => unknown) => fn() } as any,
-	};
+		asyncWriter: { enqueue: (fn: () => unknown) => fn() },
+	});
 }
 
 // One directory per process. `tmpdir()` is per user, not per checkout, so a

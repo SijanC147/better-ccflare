@@ -24,6 +24,7 @@ import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * Unlike the auto-refresh probe marker, `x-better-ccflare-keepalive` is not
@@ -99,27 +100,37 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
  * depending on any real provider's upstream-shape assumptions.
  */
 function makeContext(account: Account): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: (accounts: Account[]) => accounts,
-		} as never,
+		},
 		dbOps: {
 			getAllAccounts: mock(async () => [account]),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => true,
 			getUsageThrottlingWeeklyEnabled: () => true,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+			getStorePayloads: undefined,
+		},
 		provider: {
 			name: "test-provider",
 			canHandle: () => true,
 			buildUrl: () => "https://fake.local/v1/messages",
 			prepareHeaders: () => new Headers(),
 			transformRequestBody: undefined,
+			// Optional members production checks for; undefined keeps the path the old literal took.
+			extractUsageInfo: undefined,
+			observeRequest: undefined,
+			observeUpstream: undefined,
+			prepareRequest: undefined,
 			processResponse: async (r: Response) => r,
 			parseRateLimit: () => ({
 				isRateLimited: false,
@@ -128,13 +139,12 @@ function makeContext(account: Account): ProxyContext {
 				remaining: undefined,
 			}),
 			isStreamingResponse: () => false,
-		} as never,
-		refreshInFlight: new Map(),
+		},
 		// No-op enqueue: background bookkeeping jobs are never invoked, so this
 		// test does not need to mock ctx.dbOps.getAdapter/updateAccountUsage/etc.
-		asyncWriter: { enqueue: mock(() => {}) } as never,
+		asyncWriter: { enqueue: mock(() => {}) },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeThrottledRequest(headers: Record<string, string> = {}): Request {

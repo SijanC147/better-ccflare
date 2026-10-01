@@ -4,6 +4,7 @@ import type {
 	ComboWithSlots,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	getComboSlotInfo,
 	selectAccountsForRequest,
@@ -102,7 +103,7 @@ function makeCtx(opts: {
 	combosEnabled?: boolean;
 }) {
 	const getActiveComboForFamily = mock(async () => opts.combo);
-	const ctx = {
+	const overrides = {
 		strategy: {
 			select: mock((_all: Account[], _meta: RequestMeta) => opts.accounts),
 		},
@@ -110,12 +111,28 @@ function makeCtx(opts: {
 			getAllAccounts: mock(async () => opts.accounts),
 			getActiveComboForFamily,
 		},
-		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
-		...(opts.combosEnabled === undefined
-			? {}
-			: { config: { getCombosEnabled: () => opts.combosEnabled } }),
-	} as unknown as ProxyContext;
+	};
+	const combosEnabled = opts.combosEnabled;
+	if (combosEnabled === undefined) {
+		// Kept as an assertion on purpose: this case pins the `ctx.config?.`
+		// guard for a context built with no config at all, and makeProxyContext()
+		// always supplies one, so the missing field cannot be expressed through it.
+		const ctx = {
+			...makeProxyContext(overrides),
+			config: undefined,
+		} as unknown as ProxyContext;
+		return { ctx, getActiveComboForFamily };
+	}
+	const ctx = makeProxyContext({
+		...overrides,
+		config: {
+			getCombosEnabled: () => combosEnabled,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
+	});
 	return { ctx, getActiveComboForFamily };
 }
 

@@ -16,6 +16,7 @@ import type { ProxyContext } from "../handlers";
 import { applyRateLimitCooldown } from "../handlers/rate-limit-cooldown";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * Characterization tests for the 2026-07-09 incident: upstream 429s on every
@@ -69,7 +70,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 function makeContext(accounts: Account[]): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			// Mirrors the real availability predicate (core isAccountAvailable):
 			// unpaused and no active cooldown.
@@ -81,7 +82,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 						(!acc.rate_limited_until || acc.rate_limited_until <= now),
 				);
 			},
-		} as never,
+		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
@@ -89,21 +90,26 @@ function makeContext(accounts: Account[]): ProxyContext {
 				consecutiveRateLimits: 1,
 				applied: true,
 			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
 		provider: {
 			name: "anthropic",
 			canHandle: () => true,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 function makeRequest(): Request {

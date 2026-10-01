@@ -35,6 +35,7 @@ import { usageCache } from "@better-ccflare/providers";
 import type { Account, ComboFamily, RequestMeta } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { selectAccountsForRequest } from "../handlers/account-selector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 const NOW = Date.UTC(2026, 8, 30, 12, 0, 0);
 const HOUR = 60 * 60 * 1000;
@@ -182,25 +183,27 @@ describe("family combo slot thresholds survive the repository read", () => {
 	/** The accounts stay in memory; the combo read is the repository's. */
 	function makeContext(): ProxyContext {
 		const accounts = [makeAccount(FIRST), makeAccount(SECOND)];
-		return {
-			strategy: { select: mock((accs: Account[]) => accs) } as never,
+		return makeProxyContext({
+			strategy: { select: mock((accs: Account[]) => accs) },
 			dbOps: {
 				getAllAccounts: mock(async () => accounts),
 				getActiveComboForFamily: (family: ComboFamily) =>
 					dbOps.getActiveComboForFamily(family),
-			} as never,
-			runtime: { port: 8080, clientId: "test" } as never,
+			},
+			runtime: { clientId: "test" },
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,
 				getAgentFrontmatterModelFallback: () => false,
 				getModelScopedCapacityRouting: () => "off",
-			} as never,
-			provider: { name: "anthropic" } as never,
-			refreshInFlight: new Map(),
-			asyncWriter: { enqueue: mock(() => {}) } as never,
-		};
+				// Absent in production means the default; undefined keeps the path the old literal took.
+				getCombosEnabled: undefined,
+				getForceAccountModel: undefined,
+			},
+			provider: { name: "anthropic" },
+			asyncWriter: { enqueue: mock(() => {}) },
+		});
 	}
 
 	/**

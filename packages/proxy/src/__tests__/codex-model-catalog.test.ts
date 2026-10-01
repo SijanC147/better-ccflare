@@ -8,6 +8,7 @@ import {
 } from "../codex-model-catalog";
 import type { ProxyContext } from "../handlers/proxy-types";
 import { fetchSlot } from "./fetch-slot";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * The per-subscription model list, and what happens when OpenAI stops
@@ -35,12 +36,11 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 function makeCtx(account: Account | null): ProxyContext {
-	return {
+	return makeProxyContext({
 		dbOps: {
 			getAccount: async () => account,
 		},
-		refreshInFlight: new Map(),
-	} as unknown as ProxyContext;
+	});
 }
 
 // Shaped after what a real subscription account returned on 2026-08-09,

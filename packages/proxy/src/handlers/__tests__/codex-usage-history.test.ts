@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type {
+	BunSqlAdapter,
+	DatabaseOperations,
+} from "@better-ccflare/database";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	earliestCodexResetMs,
 	recordCodexUsageSnapshot,
 	resetCodexUsageHistoryThrottle,
 } from "../../codex-usage-history";
-import type { ProxyContext } from "../proxy-types";
 import { updateAccountMetadata } from "../response-processor";
 
 type SnapshotCall = {
@@ -206,7 +209,7 @@ function makeCodexAccount(): Account {
 function makeCodexCtx() {
 	const snapshots: SnapshotCall[] = [];
 	const jobs: Array<() => void | Promise<void>> = [];
-	const ctx = {
+	const ctx = makeProxyContext({
 		provider: {
 			name: "codex",
 			parseRateLimit: () => ({
@@ -223,12 +226,13 @@ function makeCodexCtx() {
 			getCodexFiveHourWindowEnabled: () => false,
 		},
 		dbOps: {
-			updateAccountUsage: () => {},
-			updateAccountRateLimitMeta: () => {},
-			getAdapter: () => ({
-				get: async () => ({ rate_limited_until: null }),
-				run: async () => {},
-			}),
+			updateAccountUsage: async () => {},
+			// A partial adapter: every getAdapter() caller in the proxy calls only
+			// run(), and a BunSqlAdapter cannot be built without a database.
+			getAdapter: () =>
+				({
+					run: async (_sql: string, _params?: unknown[]) => {},
+				}) as BunSqlAdapter,
 			updateRequestUsage: async () => {},
 			resetAccountSession: async () => {},
 			recordUsageSnapshot: async (
@@ -244,7 +248,7 @@ function makeCodexCtx() {
 				jobs.push(job);
 			},
 		},
-	} as unknown as ProxyContext;
+	});
 	return { ctx, snapshots, jobs };
 }
 
