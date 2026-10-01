@@ -12,6 +12,13 @@ import {
 	resolveGatewayModel,
 	setInboundMarker,
 } from "./gateway";
+import {
+	anthropicMessageStartModel,
+	modelSubstitution,
+	peekSseModel,
+	responsesCreatedModel,
+	substitutionHeaders,
+} from "./model-substitution";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
@@ -777,6 +784,20 @@ export async function handleResponsesRequest(
 		});
 	}
 
+	// Under a named gateway the answer names the model that ran (REPORT is
+	// set above), and a different one is also reported in a header
+	// (SB23-2781). Only a gateway entry's own mapping is not a substitution:
+	// the translator's `gpt-*` to Claude-family mapping is routing, and an
+	// answer from that family is exactly what a client asking for GPT needs
+	// to be told about. Plain `/v1/responses` aliases the body's model back to
+	// the client's name upstream of here, so it has nothing honest to report.
+	const substitution = (answered: unknown): Record<string, string> =>
+		gateway
+			? substitutionHeaders(
+					modelSubstitution(clientModel, gatewayEntry?.model, answered),
+				)
+			: {};
+
 	// Set regardless of whether the original request streamed, so this check
 	// must run before the body.stream branch below.
 	const responseFormat = anthropicResp.headers.get(
@@ -786,7 +807,17 @@ export async function handleResponsesRequest(
 		if (body.stream) {
 			const headers = new Headers(anthropicResp.headers);
 			headers.delete("x-better-ccflare-codex-response-format");
-			return new Response(inspectNativeResponsesStream(anthropicResp.body), {
+			let streamBody: ReadableStream<Uint8Array> | null = anthropicResp.body;
+			if (gateway && streamBody) {
+				const peeked = await peekSseModel(streamBody, responsesCreatedModel);
+				streamBody = peeked.body;
+				for (const [name, value] of Object.entries(
+					substitution(peeked.model),
+				)) {
+					headers.set(name, value);
+				}
+			}
+			return new Response(inspectNativeResponsesStream(streamBody), {
 				status: anthropicResp.status,
 				headers,
 			});
@@ -826,6 +857,11 @@ export async function handleResponsesRequest(
 		const headers = new Headers(anthropicResp.headers);
 		headers.delete("x-better-ccflare-codex-response-format");
 		headers.set("content-type", "application/json");
+		for (const [name, value] of Object.entries(
+			substitution(nativeResponse.model),
+		)) {
+			headers.set(name, value);
+		}
 		return new Response(JSON.stringify(nativeResponse), {
 			status: 200,
 			headers,
@@ -834,13 +870,37 @@ export async function handleResponsesRequest(
 
 	// 8. Stream path
 	if (body.stream) {
-		return translateAnthropicStreamToResponses(
-			anthropicResp,
+		if (!gateway || !anthropicResp.body) {
+			return translateAnthropicStreamToResponses(
+				anthropicResp,
+				responseId,
+				clientModel,
+				getRequestTools(body),
+				{ reportUpstreamModel: gateway !== undefined },
+			);
+		}
+		const peeked = await peekSseModel(
+			anthropicResp.body,
+			anthropicMessageStartModel,
+		);
+		const translatedStream = translateAnthropicStreamToResponses(
+			new Response(peeked.body, {
+				status: anthropicResp.status,
+				headers: anthropicResp.headers,
+			}),
 			responseId,
 			clientModel,
 			getRequestTools(body),
-			{ reportUpstreamModel: gateway !== undefined },
+			{ reportUpstreamModel: true },
 		);
+		const headers = new Headers(translatedStream.headers);
+		for (const [name, value] of Object.entries(substitution(peeked.model))) {
+			headers.set(name, value);
+		}
+		return new Response(translatedStream.body, {
+			status: translatedStream.status,
+			headers,
+		});
 	}
 
 	// 9. Non-stream path
@@ -882,6 +942,13 @@ export async function handleResponsesRequest(
 	}
 	return new Response(JSON.stringify(translated), {
 		status: 200,
-		headers: { "Content-Type": "application/json" },
+		headers: {
+			"Content-Type": "application/json",
+			...substitution(
+				respBody !== null && typeof respBody === "object"
+					? (respBody as { model?: unknown }).model
+					: undefined,
+			),
+		},
 	});
 }
