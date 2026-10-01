@@ -1,6 +1,16 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
+import {
+	type OpenAIGatewayModelEntry,
+	REPORT_UPSTREAM_MODEL_HEADER,
+} from "@better-ccflare/types";
 import { getRequestTools } from "./custom-tools";
+import {
+	applyGatewayExclusions,
+	EXCLUDE_PROVIDERS_HEADER,
+	type OpenAIGatewayOptions,
+	resolveGatewayModel,
+} from "./gateway";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
@@ -381,6 +391,18 @@ function extractTerminalNativeResponse(
 	return null;
 }
 
+/**
+ * The model an upstream Messages answer names, else the requested one. Used
+ * under a gateway, where a failover can land on another model (SB23-2781).
+ */
+function answeringModel(respBody: unknown, requested: string): string {
+	const model =
+		respBody !== null && typeof respBody === "object"
+			? (respBody as { model?: unknown }).model
+			: undefined;
+	return typeof model === "string" && model.length > 0 ? model : requested;
+}
+
 export async function handleResponsesRequest(
 	req: Request,
 	url: URL,
@@ -388,6 +410,12 @@ export async function handleResponsesRequest(
 	ctx: unknown,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+	/**
+	 * Set only when a named gateway serves the request (SB23-3469): its
+	 * exclusions join this handler's own, its model set is enforced, and the
+	 * answer reports the model that answered. The plain path passes nothing.
+	 */
+	gateway?: OpenAIGatewayOptions,
 ): Promise<Response> {
 	// 1. Parse body — Codex CLI compresses request bodies (zstd, gzip, deflate).
 	// Bun decompresses response bodies automatically but not request bodies,
@@ -437,6 +465,22 @@ export async function handleResponsesRequest(
 			}),
 			{ status: 400, headers: { "Content-Type": "application/json" } },
 		);
+	}
+
+	// 1b. A named gateway's model set. An unlisted model is refused here,
+	// before anything is validated or routed, and the routing headers come
+	// from the entry alone: the client's copies are removed first.
+	const syntheticHeaders = new Headers(req.headers);
+	// The client's name for the model. The answer falls back to it when the
+	// upstream names none, as the chat path does, even after a gateway entry
+	// rewrites `body.model` to its upstream id.
+	const clientModel = body.model;
+	let gatewayEntry: OpenAIGatewayModelEntry | null = null;
+	if (gateway) {
+		const resolved = resolveGatewayModel(body.model, syntheticHeaders, gateway);
+		if ("refusal" in resolved) return resolved.refusal;
+		gatewayEntry = resolved.entry;
+		if (gatewayEntry) body = { ...body, model: gatewayEntry.model };
 	}
 	const unsupportedFields = Object.keys(body).filter(
 		(field) => !SUPPORTED_RESPONSES_REQUEST_FIELDS.has(field),
@@ -517,6 +561,11 @@ export async function handleResponsesRequest(
 	const anthropicBody = translateRequestToAnthropic(
 		body as typeof body & { input: ResponseItem[] },
 	);
+	// A gateway entry names its upstream model outright. The selector routes
+	// on the synthetic body's model, so it must see that id for the entry's
+	// ladder and model filter, not the Claude family the translator maps
+	// `gpt-*` to (which would keep Claude accounts and drop Codex ones).
+	if (gatewayEntry) anthropicBody.model = gatewayEntry.model;
 
 	// 4b. Preserve the client's session identity. Codex CLI identifies its
 	// conversation via prompt_cache_key (some versions also send a session_id
@@ -537,7 +586,6 @@ export async function handleResponsesRequest(
 	// 5. Build synthetic request targeting /v1/messages
 	const messagesUrl = new URL(url.toString());
 	messagesUrl.pathname = "/v1/messages";
-	const syntheticHeaders = new Headers(req.headers);
 	const forwardedSessionId =
 		req.headers.get("session-id") ??
 		req.headers.get("x-better-ccflare-session-id");
@@ -565,8 +613,15 @@ export async function handleResponsesRequest(
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
 	// claude-oauth accounts use Claude's OAuth tokens — Anthropic bans them
-	// when used outside Claude CLI. Always exclude from Codex CLI traffic.
-	syntheticHeaders.set("x-better-ccflare-exclude-providers", "anthropic-oauth");
+	// when used outside Claude CLI. Always exclude from Codex CLI traffic,
+	// and under a gateway keep that exclusion beside the gateway's own.
+	if (gateway) {
+		applyGatewayExclusions(syntheticHeaders, gateway, ["anthropic-oauth"]);
+		// Report the model that answered, not the requested name (SB23-2781).
+		syntheticHeaders.set(REPORT_UPSTREAM_MODEL_HEADER, "1");
+	} else {
+		syntheticHeaders.set(EXCLUDE_PROVIDERS_HEADER, "anthropic-oauth");
+	}
 	// Preserve Codex-only fields.
 	const codexPassthrough: Record<string, unknown> = {};
 	if (typeof apiKeyId === "string" && apiKeyId.length > 0) {
@@ -581,7 +636,11 @@ export async function handleResponsesRequest(
 	if (exactPromptCacheControlsApplied(body, req.headers)) {
 		codexPassthrough.cache_controls_applied = true;
 	}
-	if (body.model !== undefined) codexPassthrough.model = body.model;
+	// A gateway entry's id is already the synthetic body's model. Leaving the
+	// passthrough unset lets a combo slot's model override reach Codex, which
+	// otherwise prefers the passthrough model (convertToCodexFormat).
+	if (body.model !== undefined && !gatewayEntry)
+		codexPassthrough.model = body.model;
 	if (body.reasoning !== undefined) codexPassthrough.reasoning = body.reasoning;
 	if (body.prompt_cache_key !== undefined)
 		codexPassthrough.prompt_cache_key = body.prompt_cache_key;
@@ -776,8 +835,9 @@ export async function handleResponsesRequest(
 		return translateAnthropicStreamToResponses(
 			anthropicResp,
 			responseId,
-			body.model,
+			clientModel,
 			getRequestTools(body),
+			{ reportUpstreamModel: gateway !== undefined },
 		);
 	}
 
@@ -802,7 +862,7 @@ export async function handleResponsesRequest(
 		translated = translateAnthropicResponseToResponses(
 			respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
 			responseId,
-			body.model,
+			gateway ? answeringModel(respBody, clientModel) : clientModel,
 			getRequestTools(body),
 		);
 	} catch {

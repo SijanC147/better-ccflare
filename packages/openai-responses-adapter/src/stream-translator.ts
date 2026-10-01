@@ -35,6 +35,8 @@ interface State {
 	doneSent: boolean;
 	outputItems: Array<Record<string, unknown>>;
 	streamError: { type: string; message: string } | null;
+	/** Take the model `message_start` names over the requested one (SB23-2781). */
+	reportUpstreamModel: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -96,6 +98,15 @@ function processEvent(
 		const usage = message?.usage as Record<string, number> | undefined;
 		if (usage) {
 			state.inputTokens = usage.input_tokens ?? 0;
+		}
+		// message_start precedes every event that carries the model, so the
+		// answering model is known before response.created is emitted.
+		if (
+			state.reportUpstreamModel &&
+			typeof message?.model === "string" &&
+			message.model.length > 0
+		) {
+			state.model = message.model;
 		}
 
 		if (!state.hasSentCreated) {
@@ -511,6 +522,7 @@ export function translateAnthropicStreamToResponses(
 	responseId: string,
 	model: string,
 	tools?: ResponsesTool[],
+	options?: { reportUpstreamModel?: boolean },
 ): Response {
 	if (!anthropicResponse.body) {
 		return new Response(null, { status: anthropicResponse.status });
@@ -537,6 +549,7 @@ export function translateAnthropicStreamToResponses(
 		doneSent: false,
 		outputItems: [],
 		streamError: null,
+		reportUpstreamModel: options?.reportUpstreamModel === true,
 	};
 
 	const transformedBody = anthropicResponse.body.pipeThrough(

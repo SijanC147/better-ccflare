@@ -4,13 +4,13 @@ export {
 	handleOpenAIModelsRequest,
 	isOpenAIChatCompletionsRequest,
 	isOpenAIGatewayPath,
-	type OpenAIGatewayOptions,
 } from "./chat/handler";
 export {
 	type ClaudeCodeRunnerDeps,
 	handleClaudeCodeEndpointRequest,
 	resetClaudeCodeRunnerStateForTests,
 } from "./claude-code";
+export type { OpenAIGatewayOptions } from "./gateway";
 export { handleResponsesRequest } from "./handler";
 export type {
 	HandleProxyFn,

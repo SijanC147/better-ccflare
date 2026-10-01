@@ -1,0 +1,26 @@
+$kind: http-request
+description: |-
+  The Responses API Codex speaks. Set `gateway` and `model`; with a model set, `model` must be one of its names or the answer is 404 `model_not_found`. The gateway's exclusions apply, and Claude OAuth accounts are always excluded on this path. No `max_output_tokens`, which the Codex subscription endpoint refuses.
+method: POST
+url: '{{baseUrl}}/v1/gateways/{{gateway}}/responses'
+order: 5000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {
+      "model": "{{model}}",
+      "input": "Reply with the single word: pong"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("status is 200", () => pm.response.to.have.status(200));
+      pm.test("response object with output", () => {
+        const body = pm.response.json();
+        pm.expect(body.object).to.eql("response");
+        pm.expect(body.output).to.be.an("array").and.not.empty;
+      });
