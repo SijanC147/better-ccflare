@@ -239,6 +239,17 @@ export function createClaudeCodeEndpointHandlers(
 				return errorResponse(BadRequest(result.error));
 			}
 
+			// Roots first, so a path outside them is refused before anything
+			// says whether it exists: the reply must not probe the host.
+			const { roots } = claudeCodeDirectoryRoots(config, facts);
+			if (!isClaudeCodeDirectoryAllowed(result.value.directory, roots)) {
+				return errorResponse(
+					BadRequest(
+						claudeCodeDirectoryRootsMessage(result.value.directory, roots),
+					),
+				);
+			}
+
 			let isDirectory = false;
 			try {
 				isDirectory = statSync(result.value.directory).isDirectory();
@@ -253,15 +264,6 @@ export function createClaudeCodeEndpointHandlers(
 				return errorResponse(
 					BadRequest(
 						`directory ${JSON.stringify(result.value.directory)} is not a directory`,
-					),
-				);
-			}
-
-			const { roots } = claudeCodeDirectoryRoots(config, facts);
-			if (!isClaudeCodeDirectoryAllowed(result.value.directory, roots)) {
-				return errorResponse(
-					BadRequest(
-						claudeCodeDirectoryRootsMessage(result.value.directory, roots),
 					),
 				);
 			}

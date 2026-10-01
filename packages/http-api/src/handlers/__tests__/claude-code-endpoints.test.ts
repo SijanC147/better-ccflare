@@ -515,6 +515,21 @@ describe("claude code endpoints API: directory roots (SB23-3408 item 7)", () => 
 		expect(stored(path, CLAUDE_CODE_ENDPOINTS_CONFIG_KEY)).toBeUndefined();
 	});
 
+	it("refuses a missing path outside the roots without saying it is missing", async () => {
+		const { outside, root, config } = rootedConfig();
+		const handlers = handlersFor(config);
+		const missing = join(outside, "does-not-exist");
+		const response = await handlers.putEndpoint(
+			put({ directory: missing }),
+			"demo",
+		);
+		expect(response.status).toBe(400);
+		// The roots answer, so the reply cannot probe whether a path exists.
+		expect(await response.json()).toEqual({
+			error: claudeCodeDirectoryRootsMessage(missing, [root]),
+		});
+	});
+
 	it("refuses a '..' path that climbs out of the root", async () => {
 		const { outside, root, config, path } = rootedConfig();
 		const handlers = handlersFor(config);
