@@ -596,6 +596,8 @@ describe("CLI Integration Tests", () => {
 	});
 
 	describe("tui", () => {
+		const lastLine = (text: string) => text.trimEnd().split("\n").at(-1);
+
 		// `tui` must be dispatched before anything that starts a server: before
 		// this subcommand existed, an unrecognised `tui` fell through to the
 		// default server start. `killed: false` says the CLI exited on its own
@@ -604,9 +606,12 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["tui", "nosuch"]);
 			expect(result.killed).toBe(false);
 			expect(result.exitCode).toBe(1);
-			expect(result.stderr).toBe(
-				"❌ Unknown dashboard: nosuch. Known dashboards: overview\n",
+			// Last line only: an import-time warning such as "Dashboard assets
+			// not found" (no built dashboard, as in CI) may precede it.
+			expect(lastLine(result.stderr)).toBe(
+				"❌ Unknown dashboard: nosuch. Known dashboards: overview",
 			);
+			expect(result.stdout).toBe("");
 		});
 
 		it("exits 1 naming the URL when nothing listens, without starting a server", async () => {
@@ -614,8 +619,8 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["tui", "overview", "--port", "1", "--once"]);
 			expect(result.killed).toBe(false);
 			expect(result.exitCode).toBe(1);
-			expect(result.stderr).toBe(
-				"❌ server not running on http://127.0.0.1:1\n",
+			expect(lastLine(result.stderr)).toBe(
+				"❌ server not running on http://127.0.0.1:1",
 			);
 			expect(result.stdout).toBe("");
 		});
