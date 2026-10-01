@@ -38,7 +38,7 @@ import * as path from "node:path";
 import ts from "typescript";
 
 const PACKAGE_DIR = path.resolve(import.meta.dir, "../..");
-const SRC_DIR = path.join(PACKAGE_DIR, "src");
+const REPO_DIR = path.resolve(PACKAGE_DIR, "../..");
 const FIXTURE = path.join(import.meta.dir, "fixtures", "hour-cycle.fixture.ts");
 
 /** A program build costs about 6s unloaded; give it room under a full suite. */
@@ -172,7 +172,7 @@ function scanFile(checker: ts.TypeChecker, sf: ts.SourceFile): ScanResult {
 	const report = (node: ts.Node, rule: string) => {
 		const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
 		offences.push({
-			file: path.relative(SRC_DIR, sf.fileName),
+			file: path.relative(REPO_DIR, sf.fileName),
 			line: line + 1,
 			rule,
 			text: node.getText(sf).split("\n")[0].trim(),
@@ -299,17 +299,22 @@ const byPosition = (
 
 describe("dashboard 24-hour clock", () => {
 	it(
-		"pins hourCycle h23 on every hour-bearing formatter in the package",
+		"pins hourCycle h23 on every hour-bearing formatter the dashboard reaches",
 		() => {
+			// Every workspace source in the program, not only this package's: the
+			// `@better-ccflare/*` path map pulls in ui-common's formatTimestamp,
+			// which the error modal renders.
 			const { offences, pinned } = scan(
 				(sf) =>
-					sf.fileName.startsWith(SRC_DIR + path.sep) &&
-					!isTestPath(sf.fileName),
+					sf.fileName.startsWith(REPO_DIR + path.sep) &&
+					!sf.fileName.split(path.sep).includes("node_modules") &&
+					!isTestPath(sf.fileName) &&
+					sf.fileName !== FIXTURE,
 			);
 
 			expect(offences).toEqual([]);
-			// 25 when this was written; fewer means the scan stopped matching.
-			expect(pinned).toBeGreaterThanOrEqual(25);
+			// 28 when this was written; fewer means the scan stopped matching.
+			expect(pinned).toBeGreaterThanOrEqual(28);
 		},
 		SCAN_TIMEOUT_MS,
 	);
