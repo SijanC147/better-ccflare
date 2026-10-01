@@ -117,7 +117,18 @@ export function stickyFixture(label: string): StickyFixture {
 	// the overlap check is written for: measured here, the refusal left
 	// `<worktree>/tmp-probe/better-ccflare-...-dir-ul8Ll0` behind at mode 1777,
 	// inside the repository, which is the outcome the guard exists to prevent.
-	const refuse = (message: string): never => {
+	//
+	// The never is on the VARIABLE, not on the arrow's return (SB23-2363).
+	// TypeScript treats a call as ending control flow only when the callee is a
+	// const with an explicit variable type annotation; a return-type annotation
+	// on an arrow assigned to a bare const does not count. Measured with tsc
+	// --strict: `const r = (m: string): never => { throw ... }` leaves TS2454 at a
+	// later use of a variable assigned only on the other branch, while
+	// `const r: (m: string) => never = ...` is clean. In this form a branch added
+	// to the body that does not throw is TS2322 here, so each call site below
+	// really does stop, rather than running on into statSync(dir) on a directory
+	// that just failed its precondition.
+	const refuse: (message: string) => never = (message) => {
 		if (createdByUs) rmSync(made, { recursive: true, force: true });
 		throw new Error(message);
 	};
