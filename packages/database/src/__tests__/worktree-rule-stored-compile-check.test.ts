@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
+import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 import { DatabaseOperations } from "../database-operations";
+import { WorktreeRuleRepository } from "../repositories/worktree-rule.repository";
 
 /**
  * SB23-2377. `WorktreeRuleRepository.create` and `update` refuse a bad pattern
@@ -120,6 +122,29 @@ describe("rebuildResolver re-checks stored worktree rules", () => {
 		await dbOps.rebuildResolver();
 
 		expect(warnings).toHaveLength(1);
+	});
+
+	it("logs once when two rebuilds race over the same bad row", async () => {
+		// The discovery tick and a handler can rebuild at the same moment. Both
+		// read the row before either writes, so the single diagnosis rests on
+		// the write being conditional and the warning following the write.
+		insertRaw("rel", "directory", "relative/worktrees");
+
+		await Promise.all([dbOps.rebuildResolver(), dbOps.rebuildResolver()]);
+
+		expect(warnings).toHaveLength(1);
+		expect(row("rel").enabled).toBe(0);
+	});
+
+	it("recordCompileError reports whether it wrote, and never overwrites", async () => {
+		insertRaw("rel", "directory", "relative/worktrees");
+		const repo = new WorktreeRuleRepository(
+			new BunSqlAdapter(dbOps.getDatabase()),
+		);
+
+		expect(await repo.recordCompileError("rel", "first")).toBe(true);
+		expect(await repo.recordCompileError("rel", "second")).toBe(false);
+		expect(row("rel")).toEqual({ enabled: 0, compile_error: "first" });
 	});
 
 	it("never overwrites a diagnosis already on the row", async () => {
