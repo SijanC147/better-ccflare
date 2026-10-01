@@ -3676,6 +3676,9 @@ describe("CodexProvider native Responses preservation", () => {
 	// them, and tuple 2's `failed` status is rejected a third time by the
 	// status check. They prove that mixed failure signals never advance a
 	// checkpoint, which is worth keeping, not that the conflict guard works.
+	// The failure-terminal check alone is killed by the next case's
+	// "a well-formed ... before a valid completion" rows (SB23-3898), not by
+	// any tuple here.
 	it.each([
 		["response.failed", "response.completed", "completed"],
 		["response.completed", "response.failed", "failed"],
@@ -3768,6 +3771,67 @@ describe("CodexProvider native Responses preservation", () => {
 		});
 		expect(next.previous_response_id).toBe("resp_lifecycle");
 		expect(next.input).toEqual([inputItem("tail")]);
+	});
+
+	// SB23-3898. The failure-terminal check in `observeNativeTerminalEvent` is
+	// the only thing that rejects a WELL-FORMED failure event: event and data
+	// agree, so the conflict guard passes it, and no completion is pending yet,
+	// so the trailing-data guard passes it too. Without the check it falls
+	// through as a non-completion and leaves the pending continuation in place,
+	// so the valid `response.completed` after it becomes the terminal candidate
+	// and the next turn advances. Mutation, measured on darwin: replacing
+	// `isFailureTerminal(eventName) || isFailureTerminal(dataType)` with
+	// `false` turns both failure rows red (`previous_response_id` becomes
+	// "resp_after_failure"), and the `null` row is the unmutated control.
+	it.each([
+		[null, "resp_after_failure"],
+		["response.failed", undefined],
+		["response.incomplete", undefined],
+	] as const)("a well-formed %s event before a valid completion decides whether the next turn advances", async (failure, expected) => {
+		const provider = new CodexProvider();
+		const base = [inputItem(`failure-then-completed:${failure}`)];
+		const requestId = `request-failure-then-completed-${failure}`;
+		await transformContinuationTurn(provider, { requestId, input: base });
+		const failureEvent = failure
+			? eventLine(failure, {
+					type: failure,
+					response: {
+						id: "resp_after_failure",
+						status: failure === "response.failed" ? "failed" : "incomplete",
+					},
+				})
+			: [];
+		const response = await provider.processResponse(
+			new Response(
+				sseBody([
+					...failureEvent,
+					...eventLine("response.completed", {
+						type: "response.completed",
+						response: {
+							id: "resp_after_failure",
+							status: "completed",
+							output: [],
+						},
+					}),
+				]),
+				{
+					status: 200,
+					headers: {
+						"content-type": "text/event-stream",
+						"x-better-ccflare-native-responses": "true",
+						"x-better-ccflare-request-id": requestId,
+					},
+				},
+			),
+			null,
+		);
+		await response.text();
+		const next = await transformContinuationTurn(provider, {
+			requestId: `${requestId}-next`,
+			input: [...base, inputItem("tail")],
+		});
+		expect(next.previous_response_id).toBe(expected);
+		expect(next.input).toHaveLength(expected ? 1 : 2);
 	});
 
 	it("does not advance on a later failure, duplicate completion, truncation, or stream error", async () => {
