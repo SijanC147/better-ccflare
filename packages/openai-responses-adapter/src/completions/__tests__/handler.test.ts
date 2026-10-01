@@ -2,10 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
 	INBOUND_FORMAT_HEADER,
 	INBOUND_GATEWAY_HEADER,
+	MODEL_SUBSTITUTED_HEADER,
 	matchOpenAIGatewayPath,
 	parseOpenAIGateways,
 } from "@better-ccflare/types";
-import { dispatchOpenAIGatewayRequest } from "../../chat/handler";
+import { dispatchOpenAIGatewayRequest } from "../../gateway-dispatch";
 import type { HandleProxyFn } from "../../types";
 import {
 	handleCompletionsRequest,
@@ -309,6 +310,53 @@ describe("handleCompletionsRequest", () => {
 		expect(chunks.every((c) => c.object === "text_completion")).toBe(true);
 		expect(chunks.map((c) => c.choices[0]?.text).join("")).toBe("Hello there");
 		expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe("stop");
+	});
+
+	test("streaming echo with include_usage: the echo chunk carries usage: null too", async () => {
+		const [proxy] = stubProxy(() => sseResponse(ANTHROPIC_SSE));
+		const resp = await call(
+			completionRequest({
+				...BASIC,
+				prompt: "Say: ",
+				stream: true,
+				echo: true,
+				stream_options: { include_usage: true },
+			}),
+			proxy,
+		);
+		const chunks = frames(await resp.text()).slice(0, -1) as Array<{
+			choices: Array<{ text: string }>;
+			usage?: unknown;
+		}>;
+		expect(chunks[0]?.choices[0]?.text).toBe("Say: ");
+		expect(chunks[0]).toHaveProperty("usage", null);
+	});
+
+	test("a different answering model is reported in the header, both branches", async () => {
+		// SB23-2781: the reshape must keep the chat core's headers.
+		const answered = { ...ANTHROPIC_MESSAGE, model: "claude-sonnet-4-5" };
+		const [jsonProxy] = stubProxy(() => Response.json(answered));
+		const json = await call(completionRequest(BASIC), jsonProxy);
+		expect(json.headers.get(MODEL_SUBSTITUTED_HEADER)).toBe(
+			"claude-haiku-4-5 -> claude-sonnet-4-5",
+		);
+		expect(((await json.json()) as { model: string }).model).toBe(
+			"claude-sonnet-4-5",
+		);
+
+		const [sseProxy] = stubProxy(() =>
+			sseResponse(
+				ANTHROPIC_SSE.replaceAll("claude-haiku-4-5", "claude-sonnet-4-5"),
+			),
+		);
+		const stream = await call(
+			completionRequest({ ...BASIC, stream: true }),
+			sseProxy,
+		);
+		expect(stream.headers.get(MODEL_SUBSTITUTED_HEADER)).toBe(
+			"claude-haiku-4-5 -> claude-sonnet-4-5",
+		);
+		await stream.text();
 	});
 
 	test("a mid-stream upstream error passes through as the OpenAI error frame", async () => {

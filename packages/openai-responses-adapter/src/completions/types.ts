@@ -40,7 +40,8 @@ export interface CompletionRequest {
 
 /**
  * Applied when the client sends no `max_tokens`: the legacy API's own
- * default, not the chat path's `DEFAULT_MAX_TOKENS`. A client relying on the
+ * default (`CreateCompletionRequest.max_tokens`, `default: 16`, in
+ * openai/openai-openapi), not the chat path's `DEFAULT_MAX_TOKENS`. A client relying on the
  * default gets the short completion OpenAI would have given it.
  */
 export const DEFAULT_COMPLETION_MAX_TOKENS = 16;

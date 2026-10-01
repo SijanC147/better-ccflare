@@ -30,7 +30,7 @@ import type { HeaderGetter } from "./gateway-hint-headers";
 
 export interface InboundMarker {
 	format: InboundFormat | null;
-	/** Null for the plain `/v1/chat/completions` and `/v1/responses`. */
+	/** Null for the plain `/v1/chat/completions`, `/v1/completions` and `/v1/responses`. */
 	gateway: string | null;
 }
 

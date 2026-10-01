@@ -7,8 +7,8 @@ import {
 	type OpenAIGateways,
 	validateOpenAIGatewayConfig,
 } from "@better-ccflare/types";
+import { dispatchOpenAIGatewayRequest } from "../../gateway-dispatch";
 import type { HandleProxyFn } from "../../types";
-import { dispatchOpenAIGatewayRequest } from "../handler";
 
 const ANTHROPIC_MESSAGE = {
 	id: "msg_1",

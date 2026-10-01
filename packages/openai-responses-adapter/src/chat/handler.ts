@@ -2,18 +2,15 @@ import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
 import {
 	type InboundFormat,
-	type OpenAIGateways,
 	REPORT_UPSTREAM_MODEL_HEADER,
 	UPSTREAM_CONTENT_TYPE_HEADER,
 } from "@better-ccflare/types";
-import { handleCompletionsRequest } from "../completions/handler";
 import {
 	applyGatewayExclusions,
 	type OpenAIGatewayOptions,
 	resolveGatewayModel,
 	setInboundMarker,
 } from "../gateway";
-import { handleResponsesRequest } from "../handler";
 import {
 	anthropicMessageStartModel,
 	modelSubstitution,
@@ -44,7 +41,7 @@ const SSE_HEADERS = {
 	connection: "keep-alive",
 };
 
-function jsonResponse(
+export function jsonResponse(
 	status: number,
 	body: unknown,
 	extraHeaders?: Record<string, string>,
@@ -517,12 +514,6 @@ export async function handleOpenAIModelsRequest(
 	return upstream;
 }
 
-function notFound(message: string, code: string): Response {
-	return jsonResponse(404, {
-		error: { message, type: "invalid_request_error", param: null, code },
-	});
-}
-
 /**
  * True for every path under the gateway prefix, including ones whose name
  * fails validation. The server answers all of them in the gateway branch:
@@ -531,109 +522,4 @@ function notFound(message: string, code: string): Response {
  */
 export function isOpenAIGatewayPath(pathname: string): boolean {
 	return pathname === "/v1/gateways" || pathname.startsWith("/v1/gateways/");
-}
-
-/**
- * Serves a path for which `isOpenAIGatewayPath` is true, given what
- * `matchOpenAIGatewayPath` made of it. A null match (an invalid or empty name)
- * is a 404 and never reaches `handleProxy`. Pure over its inputs so the
- * routing is testable without the server.
- */
-export async function dispatchOpenAIGatewayRequest(
-	req: Request,
-	url: URL,
-	match: { name: string; rest: string } | null,
-	gateways: OpenAIGateways,
-	handleProxy: HandleProxyFn,
-	ctx: unknown,
-	apiKeyId?: string | null,
-	apiKeyName?: string | null,
-): Promise<Response> {
-	if (!match) {
-		return notFound(
-			"Gateway names are lowercase letters, digits, - and _, starting with a letter or digit.",
-			"gateway_not_found",
-		);
-	}
-	const gateway = Object.hasOwn(gateways, match.name)
-		? gateways[match.name]
-		: undefined;
-	if (!gateway) {
-		return notFound(
-			`No OpenAI gateway named "${match.name}" is configured.`,
-			"gateway_not_found",
-		);
-	}
-	const options: OpenAIGatewayOptions = {
-		name: match.name,
-		excludeProviders: gateway.exclude_providers ?? [],
-		models: gateway.models,
-	};
-	const isResponsesPath =
-		match.rest === "/responses" || match.rest === "/responses/compact";
-	// Codex tries WebSocket transport first. Refused exactly as on the plain
-	// /v1/responses path (server.ts), so the client falls back to HTTPS.
-	if (
-		isResponsesPath &&
-		req.headers.get("upgrade")?.toLowerCase() === "websocket"
-	) {
-		return jsonResponse(503, {
-			type: "error",
-			error: {
-				type: "not_supported_error",
-				message:
-					"WebSocket transport is not supported. Codex will retry over HTTPS automatically.",
-			},
-		});
-	}
-	// The Responses API, which is all Codex speaks (SB23-3469). Compact is
-	// served by the same handler, as on the plain path.
-	if (req.method === "POST" && isResponsesPath) {
-		return handleResponsesRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	if (req.method === "POST" && match.rest === "/completions") {
-		return handleCompletionsRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	if (req.method === "POST" && match.rest === "/chat/completions") {
-		return handleChatCompletionsRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	if (req.method === "GET" && match.rest === "/models") {
-		return handleOpenAIModelsRequest(
-			req,
-			url,
-			handleProxy,
-			ctx,
-			apiKeyId,
-			apiKeyName,
-			options,
-		);
-	}
-	return notFound(
-		`${req.method} ${match.rest || "/"} is not served by gateway "${match.name}". Use POST /chat/completions, POST /completions, POST /responses, POST /responses/compact or GET /models.`,
-		"unknown_endpoint",
-	);
 }

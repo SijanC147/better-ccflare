@@ -1,5 +1,4 @@
 export {
-	dispatchOpenAIGatewayRequest,
 	handleChatCompletionsRequest,
 	handleOpenAIModelsRequest,
 	isOpenAIChatCompletionsRequest,
@@ -15,6 +14,7 @@ export {
 	isOpenAICompletionsRequest,
 } from "./completions/handler";
 export { dropClientGatewayHeaders, type OpenAIGatewayOptions } from "./gateway";
+export { dispatchOpenAIGatewayRequest } from "./gateway-dispatch";
 export { handleResponsesRequest } from "./handler";
 export type {
 	HandleProxyFn,
