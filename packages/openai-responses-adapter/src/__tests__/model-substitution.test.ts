@@ -316,6 +316,16 @@ describe("gateway responses report a substituted model (SB23-2781)", () => {
 		);
 	});
 
+	test("a model-set entry answered by its own upstream id sets no header", async () => {
+		const resp = await dispatch(
+			"/v1/gateways/gpt/responses",
+			proxyAnswering("gpt-5.6-terra"),
+			body("standard"),
+		);
+		expect(resp.status).toBe(200);
+		expect(resp.headers.has(MODEL_SUBSTITUTED_HEADER)).toBe(false);
+	});
+
 	test("translated stream", async () => {
 		const resp = await dispatch(
 			"/v1/gateways/open/responses",
