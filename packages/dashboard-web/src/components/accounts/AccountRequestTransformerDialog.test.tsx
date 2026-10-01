@@ -59,6 +59,8 @@ const account: Account = {
 	usagePauseWeeklyThreshold: null,
 	usagePauseFiveHourEnabled: false,
 	usagePauseWeeklyEnabled: false,
+	usagePauseFiveHourMinResetRemainingMs: null,
+	usagePauseWeeklyMinResetRemainingMs: null,
 };
 
 describe("AccountRequestTransformerDialog", () => {

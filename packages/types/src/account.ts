@@ -511,6 +511,8 @@ export interface AccountRow {
 	usage_pause_weekly_threshold?: number | null;
 	usage_pause_five_hour_enabled?: boolean | number | null;
 	usage_pause_weekly_enabled?: boolean | number | null;
+	usage_pause_five_hour_min_reset_remaining_ms?: number | null;
+	usage_pause_weekly_min_reset_remaining_ms?: number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	request_transformer?: RequestTransformer | null;
@@ -560,6 +562,14 @@ export interface Account {
 	usage_pause_five_hour_enabled: boolean;
 	/** Whether the weekly threshold above is in force. */
 	usage_pause_weekly_enabled: boolean;
+	/**
+	 * Reset condition for the 5-hour pause: only pause while the window still
+	 * has at least this many milliseconds until it resets. null = condition off.
+	 * Same unit and bound as `ComboSlot.min_reset_remaining_ms` (SB23-2575).
+	 */
+	usage_pause_five_hour_min_reset_remaining_ms: number | null;
+	/** Reset condition for the weekly pause, as above. null = condition off. */
+	usage_pause_weekly_min_reset_remaining_ms: number | null;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	request_transformer: RequestTransformer | null;
@@ -615,6 +625,8 @@ export interface AccountResponse {
 	usagePauseWeeklyThreshold: number | null; // Stored weekly percentage; null = never set
 	usagePauseFiveHourEnabled: boolean; // Whether the 5-hour threshold is in force
 	usagePauseWeeklyEnabled: boolean; // Whether the weekly threshold is in force
+	usagePauseFiveHourMinResetRemainingMs: number | null; // 5-hour reset condition in ms; null = off
+	usagePauseWeeklyMinResetRemainingMs: number | null; // Weekly reset condition in ms; null = off
 	customEndpoint: string | null;
 	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
 	requestTransformer: RequestTransformer | null;
@@ -745,6 +757,13 @@ function toNumOrNull(v: unknown): number | null {
 	return Number.isFinite(n) && n !== 0 ? n : v != null && v !== 0 ? n : null;
 }
 
+/** A nullable integer column where 0 is a real value, not "unset". */
+function msOrNull(v: unknown): number | null {
+	if (v === null || v === undefined) return null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
+}
+
 // Type mappers
 export function toAccount(row: AccountRow): Account {
 	return {
@@ -780,6 +799,16 @@ export function toAccount(row: AccountRow): Account {
 		usage_pause_weekly_threshold: toNumOrNull(row.usage_pause_weekly_threshold),
 		usage_pause_five_hour_enabled: !!row.usage_pause_five_hour_enabled,
 		usage_pause_weekly_enabled: !!row.usage_pause_weekly_enabled,
+		// Not toNumOrNull: that maps a stored 0 to null, and 0 ms is a legal reset
+		// minimum (it holds for any reset still ahead), the same as on a combo
+		// slot. The null guard comes first so 0 stays 0, mirroring toComboSlot.
+		// PostgreSQL hands BIGINT back as a string, which Number() covers.
+		usage_pause_five_hour_min_reset_remaining_ms: msOrNull(
+			row.usage_pause_five_hour_min_reset_remaining_ms,
+		),
+		usage_pause_weekly_min_reset_remaining_ms: msOrNull(
+			row.usage_pause_weekly_min_reset_remaining_ms,
+		),
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
 		request_transformer: row.request_transformer ?? null,
@@ -894,6 +923,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 		usagePauseWeeklyThreshold: account.usage_pause_weekly_threshold,
 		usagePauseFiveHourEnabled: account.usage_pause_five_hour_enabled,
 		usagePauseWeeklyEnabled: account.usage_pause_weekly_enabled,
+		usagePauseFiveHourMinResetRemainingMs:
+			account.usage_pause_five_hour_min_reset_remaining_ms,
+		usagePauseWeeklyMinResetRemainingMs:
+			account.usage_pause_weekly_min_reset_remaining_ms,
 		customEndpoint: account.custom_endpoint,
 		modelMappings,
 		requestTransformer: account.request_transformer,

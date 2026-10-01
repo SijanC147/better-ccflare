@@ -1353,6 +1353,8 @@ describe("applyUsagePauseThresholds", () => {
 							usage_pause_weekly_threshold: null,
 							usage_pause_five_hour_enabled: false,
 							usage_pause_weekly_enabled: false,
+							usage_pause_five_hour_min_reset_remaining_ms: null,
+							usage_pause_weekly_min_reset_remaining_ms: null,
 							...account,
 						} as Account),
 			pauseAccountForUsageThreshold: async (
@@ -1451,6 +1453,8 @@ describe("applyUsagePauseThresholds", () => {
 		const { dbOps, paused } = makeDbOps({
 			usage_pause_weekly_threshold: 50,
 			usage_pause_weekly_enabled: true,
+			usage_pause_five_hour_min_reset_remaining_ms: null,
+			usage_pause_weekly_min_reset_remaining_ms: null,
 		});
 
 		await applyUsagePauseThresholds(
@@ -1535,6 +1539,8 @@ describe("applyUsagePauseThresholds — switched-off windows", () => {
 					usage_pause_five_hour_enabled: false,
 					usage_pause_weekly_threshold: null,
 					usage_pause_weekly_enabled: false,
+					usage_pause_five_hour_min_reset_remaining_ms: null,
+					usage_pause_weekly_min_reset_remaining_ms: null,
 				}) as unknown as Account,
 			pauseAccountForUsageThreshold: async (
 				accountId: string,

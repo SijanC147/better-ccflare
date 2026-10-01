@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Config } from "@better-ccflare/config";
 import type { ModelMapping } from "@better-ccflare/core";
 import {
+	parseUsagePauseMinResetMs,
 	parseUsagePauseThreshold,
 	supportsUsagePauseThreshold,
 	type UsagePauseSetting,
@@ -27,7 +28,7 @@ import {
 	initiateDeviceFlow as initiateQwenDeviceFlow,
 	pollForToken as pollQwenForToken,
 } from "@better-ccflare/providers/qwen";
-import type { AccountListItem } from "@better-ccflare/types";
+import { type AccountListItem, MS_PER_HOUR } from "@better-ccflare/types";
 import {
 	type PromptAdapter,
 	promptAccountRemovalConfirmation,
@@ -2168,19 +2169,51 @@ export async function setAccountPriority(
 }
 
 /**
+ * Hours from a CLI token, as the whole milliseconds the reset condition is
+ * stored in. The CLI takes hours because the dashboard does; the conversion
+ * and the bound are the slot field's (`parseHoursField` rounds, the handler
+ * bounds), so the shared parser makes the final call.
+ */
+function parseResetHoursToken(raw: string | number | null): number | null {
+	if (raw === null) return null;
+	const hours = typeof raw === "string" ? Number(raw) : raw;
+	if (
+		(typeof raw === "string" && raw.trim() === "") ||
+		!Number.isFinite(hours) ||
+		hours < 0
+	) {
+		throw new Error(
+			`Reset hours must be a number of hours of 0 or more, or 'off' (got '${raw}')`,
+		);
+	}
+	return parseUsagePauseMinResetMs(Math.round(hours * MS_PER_HOUR));
+}
+
+/**
  * Set an account's usage-window pause settings by account name.
  *
- * Each argument is a whole percentage (as a number, or the raw CLI token so
- * malformed input like "80.5" or "80junk" is rejected rather than truncated),
- * or null to switch that window off. Switching a window off keeps the
- * percentage already stored for it, so turning it back on does not mean typing
- * the number again. Both windows are written on every call.
+ * Each percentage argument is a whole percentage (as a number, or the raw CLI
+ * token so malformed input like "80.5" or "80junk" is rejected rather than
+ * truncated), or null for "no percent condition".
+ *
+ * `resetHours`, when given, is the pair of reset conditions in hours (the
+ * dashboard's unit), each null for "no reset condition" (SB23-2575). Only the
+ * configured conditions are considered and every one must hold, so a window
+ * with a reset and no percent pauses on time-to-reset alone. A window is on
+ * when either of its conditions is set.
+ *
+ * Without `resetHours` the call behaves exactly as it did before the reset
+ * condition existed: a percent switches the window on, null switches it off,
+ * and the stored reset condition is kept as it is. Switching a window off keeps
+ * its stored numbers, so turning it back on does not mean typing them again.
+ * Both windows are written on every call.
  */
 export async function setUsagePauseThresholds(
 	dbOps: DatabaseOperations,
 	name: string,
 	fiveHour: string | number | null,
 	weekly: string | number | null,
+	resetHours?: [string | number | null, string | number | null],
 ): Promise<{ success: boolean; message: string }> {
 	const adapter = dbOps.getAdapter();
 
@@ -2189,8 +2222,10 @@ export async function setUsagePauseThresholds(
 		provider: string | null;
 		usage_pause_five_hour_threshold: number | null;
 		usage_pause_weekly_threshold: number | null;
+		usage_pause_five_hour_min_reset_remaining_ms: number | string | null;
+		usage_pause_weekly_min_reset_remaining_ms: number | string | null;
 	}>(
-		"SELECT id, provider, usage_pause_five_hour_threshold, usage_pause_weekly_threshold FROM accounts WHERE name = ?",
+		"SELECT id, provider, usage_pause_five_hour_threshold, usage_pause_weekly_threshold, usage_pause_five_hour_min_reset_remaining_ms, usage_pause_weekly_min_reset_remaining_ms FROM accounts WHERE name = ?",
 		[name],
 	);
 
@@ -2208,22 +2243,63 @@ export async function setUsagePauseThresholds(
 		};
 	}
 
+	const storedMs = (value: number | string | null): number | null =>
+		value === null ? null : Number(value);
+
+	const buildWindow = (
+		percent: number | null,
+		reset: number | null | undefined,
+		storedPercent: number | null,
+		storedReset: number | null,
+	): UsagePauseSetting => {
+		if (reset === undefined) {
+			// The pre-SB23-2575 form: the percent alone decides on or off.
+			return {
+				enabled: percent !== null,
+				// Keep the stored number when switching the window off.
+				percent: percent ?? storedPercent,
+				minResetRemainingMs: storedReset,
+			};
+		}
+		if (percent === null && reset === null) {
+			// Both off: switch the window off and keep what was stored.
+			return {
+				enabled: false,
+				percent: storedPercent,
+				minResetRemainingMs: storedReset,
+			};
+		}
+		// At least one condition is on, so the window is on, and a condition
+		// given as off must really be off rather than a remembered number that
+		// the enabled window would then apply.
+		return { enabled: true, percent, minResetRemainingMs: reset };
+	};
+
 	const validated = (():
 		| { fiveHour: UsagePauseSetting; weekly: UsagePauseSetting }
 		| string => {
 		try {
 			const five = parseUsagePauseThreshold(fiveHour);
 			const week = parseUsagePauseThreshold(weekly);
+			const fiveReset = resetHours
+				? parseResetHoursToken(resetHours[0])
+				: undefined;
+			const weekReset = resetHours
+				? parseResetHoursToken(resetHours[1])
+				: undefined;
 			return {
-				fiveHour: {
-					enabled: five !== null,
-					// Keep the stored number when switching the window off.
-					percent: five ?? account.usage_pause_five_hour_threshold ?? null,
-				},
-				weekly: {
-					enabled: week !== null,
-					percent: week ?? account.usage_pause_weekly_threshold ?? null,
-				},
+				fiveHour: buildWindow(
+					five,
+					fiveReset,
+					account.usage_pause_five_hour_threshold ?? null,
+					storedMs(account.usage_pause_five_hour_min_reset_remaining_ms),
+				),
+				weekly: buildWindow(
+					week,
+					weekReset,
+					account.usage_pause_weekly_threshold ?? null,
+					storedMs(account.usage_pause_weekly_min_reset_remaining_ms),
+				),
 			};
 		} catch (err) {
 			return err instanceof Error ? err.message : String(err);
@@ -2240,12 +2316,20 @@ export async function setUsagePauseThresholds(
 		validated.weekly,
 	);
 
-	const describe = (setting: UsagePauseSetting) =>
-		setting.enabled && setting.percent !== null
-			? `${setting.percent}%`
-			: setting.percent !== null
-				? `off (${setting.percent}% remembered)`
-				: "off";
+	const hours = (ms: number) => `${ms / MS_PER_HOUR}h`;
+	const conditions = (setting: UsagePauseSetting) => {
+		const parts: string[] = [];
+		if (setting.percent !== null) parts.push(`${setting.percent}%`);
+		if (setting.minResetRemainingMs !== null) {
+			parts.push(`reset >= ${hours(setting.minResetRemainingMs)} away`);
+		}
+		return parts.join(" and ");
+	};
+	const describe = (setting: UsagePauseSetting) => {
+		const text = conditions(setting);
+		if (setting.enabled) return text;
+		return text ? `off (${text} remembered)` : "off";
+	};
 
 	return {
 		success: true,

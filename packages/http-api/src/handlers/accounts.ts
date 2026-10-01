@@ -5,6 +5,7 @@ import { join } from "node:path";
 import * as cliCommands from "@better-ccflare/cli-commands";
 import type { Config } from "@better-ccflare/config";
 import {
+	parseUsagePauseMinResetMs,
 	parseUsagePauseThreshold,
 	patterns,
 	sanitizers,
@@ -361,6 +362,8 @@ export function createAccountsListHandler(
 			usage_pause_weekly_threshold: number | null;
 			usage_pause_five_hour_enabled: 0 | 1;
 			usage_pause_weekly_enabled: 0 | 1;
+			usage_pause_five_hour_min_reset_remaining_ms: number | string | null;
+			usage_pause_weekly_min_reset_remaining_ms: number | string | null;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			request_transformer: RequestTransformer | null;
@@ -404,6 +407,8 @@ export function createAccountsListHandler(
 					usage_pause_weekly_threshold,
 					COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
 					COALESCE(usage_pause_weekly_enabled, 0) as usage_pause_weekly_enabled,
+					usage_pause_five_hour_min_reset_remaining_ms,
+					usage_pause_weekly_min_reset_remaining_ms,
 
 					model_mappings,
 					request_transformer,
@@ -834,6 +839,16 @@ export function createAccountsListHandler(
 					usagePauseFiveHourEnabled:
 						account.usage_pause_five_hour_enabled === 1,
 					usagePauseWeeklyEnabled: account.usage_pause_weekly_enabled === 1,
+					// Null-guarded rather than `?? null` after Number(): a stored 0 is a
+					// real reset minimum, and PostgreSQL returns BIGINT as a string.
+					usagePauseFiveHourMinResetRemainingMs:
+						account.usage_pause_five_hour_min_reset_remaining_ms === null
+							? null
+							: Number(account.usage_pause_five_hour_min_reset_remaining_ms),
+					usagePauseWeeklyMinResetRemainingMs:
+						account.usage_pause_weekly_min_reset_remaining_ms === null
+							? null
+							: Number(account.usage_pause_weekly_min_reset_remaining_ms),
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
 					requestTransformer: account.request_transformer,
@@ -3126,15 +3141,22 @@ export function createAccountAutoPauseOnOverageHandler(
 /**
  * Create a handler for the per-account usage-window pause thresholds.
  *
- * Body: `{ fiveHour: { enabled, percent }, weekly: { enabled, percent } }`.
- * `percent` is a whole percentage or null, and `enabled` says whether that
- * window is in force — the two are separate so switching a window off keeps
- * its number. Omitting `percent` keeps the value already stored for that
- * window (the dialog always resends it, but a raw API caller that only wants
- * to flip `enabled` should not have to look the number up first); sending
- * `percent: null` explicitly still clears it. Both windows are written
- * together, so a body that omits one switches it off; that keeps the stored
- * pair and the form that submits it in step.
+ * Body: `{ fiveHour: { enabled, percent, minResetRemainingMs }, weekly: {...} }`.
+ * `percent` is a whole percentage or null, `minResetRemainingMs` is how far the
+ * window's reset must still be (milliseconds, 0 to `MAX_MIN_RESET_REMAINING_MS`)
+ * or null, and `enabled` says whether that window is in force. Only the
+ * conditions that are set are considered and every one of them must hold, the
+ * combo slot rule (SB23-1269, SB23-2575), so a window may carry a percent, a
+ * reset minimum, or both. A window switched on with neither is refused, since
+ * it would pause at nothing.
+ *
+ * `enabled` is separate from the numbers so switching a window off keeps them.
+ * Omitting `percent` or `minResetRemainingMs` keeps the value already stored
+ * for that window (the dialog always resends them, but a raw API caller that
+ * only wants to flip `enabled` should not have to look them up first); sending
+ * `null` explicitly still clears it. Both windows are written together, so a
+ * body that omits one switches it off; that keeps the stored pair and the form
+ * that submits it in step.
  */
 export function createAccountUsagePauseThresholdsHandler(
 	dbOps: DatabaseOperations,
@@ -3149,8 +3171,10 @@ export function createAccountUsagePauseThresholdsHandler(
 				provider: string | null;
 				usage_pause_five_hour_threshold: number | null;
 				usage_pause_weekly_threshold: number | null;
+				usage_pause_five_hour_min_reset_remaining_ms: number | string | null;
+				usage_pause_weekly_min_reset_remaining_ms: number | string | null;
 			}>(
-				"SELECT name, provider, usage_pause_five_hour_threshold, usage_pause_weekly_threshold FROM accounts WHERE id = ?",
+				"SELECT name, provider, usage_pause_five_hour_threshold, usage_pause_weekly_threshold, usage_pause_five_hour_min_reset_remaining_ms, usage_pause_weekly_min_reset_remaining_ms FROM accounts WHERE id = ?",
 				[accountId],
 			);
 
@@ -3166,30 +3190,58 @@ export function createAccountUsagePauseThresholdsHandler(
 				);
 			}
 
+			const storedMs = (value: number | string | null): number | null =>
+				value === null ? null : Number(value);
+
 			// A window may arrive as the object the dialog sends, or as a bare
 			// percentage/null from a simpler client; a bare percentage means
-			// "switch this window on at N". When `percent` is omitted entirely
+			// "switch this window on at N". When a field is omitted entirely
 			// (not even sent as null), keep the value already stored for that
 			// window — otherwise disabling a window from the raw API, without
-			// resending its number, would silently erase it. This mirrors the
+			// resending its numbers, would silently erase them. This mirrors the
 			// CLI's `setUsagePauseThresholds` fallback.
 			const readWindow = (
+				name: string,
 				raw: unknown,
 				storedPercent: number | null,
+				storedMinResetMs: number | null,
 			): UsagePauseSetting => {
+				let setting: UsagePauseSetting;
 				if (typeof raw === "object" && raw !== null) {
-					const value = raw as { enabled?: unknown; percent?: unknown };
-					const percent =
-						value.percent === undefined
-							? storedPercent
-							: parseUsagePauseThreshold(value.percent);
-					return {
+					const value = raw as {
+						enabled?: unknown;
+						percent?: unknown;
+						minResetRemainingMs?: unknown;
+					};
+					setting = {
 						enabled: value.enabled === true || value.enabled === 1,
+						percent:
+							value.percent === undefined
+								? storedPercent
+								: parseUsagePauseThreshold(value.percent),
+						minResetRemainingMs:
+							value.minResetRemainingMs === undefined
+								? storedMinResetMs
+								: parseUsagePauseMinResetMs(value.minResetRemainingMs),
+					};
+				} else {
+					const percent = parseUsagePauseThreshold(raw);
+					setting = {
+						enabled: percent !== null,
 						percent,
+						minResetRemainingMs: storedMinResetMs,
 					};
 				}
-				const percent = parseUsagePauseThreshold(raw);
-				return { enabled: percent !== null, percent };
+				if (
+					setting.enabled &&
+					setting.percent === null &&
+					setting.minResetRemainingMs === null
+				) {
+					throw new Error(
+						`${name} is switched on with no condition: set percent, minResetRemainingMs, or both`,
+					);
+				}
+				return setting;
 			};
 
 			const parsed = (():
@@ -3198,12 +3250,16 @@ export function createAccountUsagePauseThresholdsHandler(
 				try {
 					return {
 						fiveHour: readWindow(
+							"fiveHour",
 							body.fiveHour,
 							account.usage_pause_five_hour_threshold,
+							storedMs(account.usage_pause_five_hour_min_reset_remaining_ms),
 						),
 						weekly: readWindow(
+							"weekly",
 							body.weekly,
 							account.usage_pause_weekly_threshold,
+							storedMs(account.usage_pause_weekly_min_reset_remaining_ms),
 						),
 					};
 				} catch (err) {
@@ -3222,8 +3278,10 @@ export function createAccountUsagePauseThresholdsHandler(
 				message: `Usage pause thresholds updated for account '${account.name}'`,
 				usagePauseFiveHourThreshold: fiveHour.percent,
 				usagePauseFiveHourEnabled: fiveHour.enabled,
+				usagePauseFiveHourMinResetRemainingMs: fiveHour.minResetRemainingMs,
 				usagePauseWeeklyThreshold: weekly.percent,
 				usagePauseWeeklyEnabled: weekly.enabled,
+				usagePauseWeeklyMinResetRemainingMs: weekly.minResetRemainingMs,
 			});
 		} catch (error) {
 			log.error("Account usage pause thresholds error:", error);

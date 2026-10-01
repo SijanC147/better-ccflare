@@ -1,3 +1,4 @@
+import type { UsagePauseSetting } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
 	type Account,
@@ -51,6 +52,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				usage_pause_weekly_threshold,
 				COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
 				COALESCE(usage_pause_weekly_enabled, 0) as usage_pause_weekly_enabled,
+				usage_pause_five_hour_min_reset_remaining_ms,
+				usage_pause_weekly_min_reset_remaining_ms,
 				custom_endpoint,
 				model_mappings,
 				request_transformer,
@@ -87,6 +90,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				usage_pause_weekly_threshold,
 				COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
 				COALESCE(usage_pause_weekly_enabled, 0) as usage_pause_weekly_enabled,
+				usage_pause_five_hour_min_reset_remaining_ms,
+				usage_pause_weekly_min_reset_remaining_ms,
 				custom_endpoint,
 				model_mappings,
 				request_transformer,
@@ -511,22 +516,24 @@ export class AccountRepository extends BaseRepository<Account> {
 	/**
 	 * Set the per-window usage-pause settings.
 	 *
-	 * The percentage and the on/off flag are stored separately, so a window
-	 * that is switched off keeps its number for next time. Both windows are
+	 * The conditions and the on/off flag are stored separately, so a window
+	 * that is switched off keeps its numbers for next time. Both windows are
 	 * written together so a caller cannot leave the pair half-updated.
 	 */
 	async setUsagePauseThresholds(
 		accountId: string,
-		fiveHour: { enabled: boolean; percent: number | null },
-		weekly: { enabled: boolean; percent: number | null },
+		fiveHour: UsagePauseSetting,
+		weekly: UsagePauseSetting,
 	): Promise<void> {
 		await this.run(
-			`UPDATE accounts SET usage_pause_five_hour_threshold = ?, usage_pause_five_hour_enabled = ?, usage_pause_weekly_threshold = ?, usage_pause_weekly_enabled = ? WHERE id = ?`,
+			`UPDATE accounts SET usage_pause_five_hour_threshold = ?, usage_pause_five_hour_enabled = ?, usage_pause_five_hour_min_reset_remaining_ms = ?, usage_pause_weekly_threshold = ?, usage_pause_weekly_enabled = ?, usage_pause_weekly_min_reset_remaining_ms = ? WHERE id = ?`,
 			[
 				fiveHour.percent,
 				fiveHour.enabled ? 1 : 0,
+				fiveHour.minResetRemainingMs,
 				weekly.percent,
 				weekly.enabled ? 1 : 0,
+				weekly.minResetRemainingMs,
 				accountId,
 			],
 		);

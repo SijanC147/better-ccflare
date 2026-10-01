@@ -29,6 +29,8 @@ const baseAccount: Account = {
 	usagePauseWeeklyThreshold: null,
 	usagePauseFiveHourEnabled: false,
 	usagePauseWeeklyEnabled: false,
+	usagePauseFiveHourMinResetRemainingMs: null,
+	usagePauseWeeklyMinResetRemainingMs: null,
 	customEndpoint: null,
 	modelMappings: null,
 	requestTransformer: null,

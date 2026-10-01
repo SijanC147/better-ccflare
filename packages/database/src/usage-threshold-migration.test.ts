@@ -264,6 +264,35 @@ describe("usage-pause threshold columns", () => {
 		).toStrictEqual({ five: 0, week: 1 });
 	});
 
+	it("adds the reset minimums to an old schema through the legacy rebuild, NULL so nothing changes (SB23-2575)", () => {
+		// The old-schema fixture: a legacy accounts table with refresh_token NOT
+		// NULL and none of the usage_pause columns. The rebuild runs first and
+		// copies a fixed list, which does not and cannot name the new columns,
+		// so they must arrive after it.
+		db = makeLegacyDb();
+		db.run(
+			`INSERT INTO accounts (id, name, created_at, refresh_token) VALUES ('acc-1', 'legacy', ?, 'tok')`,
+			[Date.now()],
+		);
+
+		runMigrations(db);
+		runMigrations(db);
+
+		expect(columnNames(db)).toContain(
+			"usage_pause_five_hour_min_reset_remaining_ms",
+		);
+		expect(columnNames(db)).toContain(
+			"usage_pause_weekly_min_reset_remaining_ms",
+		);
+		expect(
+			db
+				.query(
+					"SELECT usage_pause_five_hour_min_reset_remaining_ms AS fiveHour, usage_pause_weekly_min_reset_remaining_ms AS weekly FROM accounts WHERE id = ?",
+				)
+				.get("acc-1"),
+		).toStrictEqual({ fiveHour: null, weekly: null });
+	});
+
 	it("is idempotent across repeated runs", () => {
 		db = makeModernDb();
 
