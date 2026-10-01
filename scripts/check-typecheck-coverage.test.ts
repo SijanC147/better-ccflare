@@ -306,7 +306,7 @@ describe("ci-changed-paths treats TypeScript as relevant wherever it sits", () =
 	 * The coverage gate reads every tracked `.ts`, so a `.ts` added under a directory the script
 	 * otherwise treats as inert would skip the gate on its own PR and fail the next one instead.
 	 */
-	function changed(job: "quality" | "contract", file: string): string {
+	function commitChange(file: string) {
 		const dir = makeDir("ci-changed-paths-");
 		git(dir, "init", "-q");
 		write(dir, "README.md", "base\n");
@@ -317,22 +317,25 @@ describe("ci-changed-paths treats TypeScript as relevant wherever it sits", () =
 		git(dir, "add", "--", file);
 		git(dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "change");
 		const head = git(dir, "rev-parse", "HEAD").trim();
-		// The verdict is read from GITHUB_OUTPUT pointed at a fixture file, the channel CI reads,
-		// and never from the script's `/dev/stdout` fallback. Measured on Linux CI at `c05e8117`:
-		// with stdout captured by Bun, the `>> /dev/stdout` line came back empty in all nine rows
-		// while passing on darwin. Pointing it here also keeps a run inside CI from appending to
-		// the real `Test` step's output file.
+		return { dir, env: { PATH: process.env.PATH ?? "", HOME: dir, BASE_SHA: base, HEAD_SHA: head } };
+	}
+
+	function changedViaStdout(file: string) {
+		const { dir, env } = commitChange(file);
+		const result = Bun.spawnSync(["bash", changedPaths, "quality"], { cwd: dir, env });
+		return { exitCode: result.exitCode, stdout: result.stdout.toString() };
+	}
+
+	function changed(job: "quality" | "contract", file: string): string {
+		const { dir, env } = commitChange(file);
+		// The verdict is read from GITHUB_OUTPUT pointed at a fixture file, which is the channel CI
+		// reads. Pointing it here also keeps a run inside CI from appending to the real `Test`
+		// step's output file. The stdout fallback has its own rows below.
 		const output = path.join(dir, "github-output");
 		writeFileSync(output, "");
 		const result = Bun.spawnSync(["bash", changedPaths, job], {
 			cwd: dir,
-			env: {
-				PATH: process.env.PATH ?? "",
-				HOME: dir,
-				BASE_SHA: base,
-				HEAD_SHA: head,
-				GITHUB_OUTPUT: output,
-			},
+			env: { ...env, GITHUB_OUTPUT: output },
 		});
 		expect(result.exitCode).toBe(0);
 		const lines = readFileSync(output, "utf8").split("\n").filter(Boolean);
@@ -352,6 +355,18 @@ describe("ci-changed-paths treats TypeScript as relevant wherever it sits", () =
 		["contract", "docs/example.md", "relevant=false"],
 	] as const)("%s: %s gives %s", (job, file, expected) => {
 		expect(changed(job, file)).toBe(expected);
+	});
+
+	test.each([
+		["docs/example.ts", "relevant=true"],
+		["docs/example.md", "relevant=false"],
+	] as const)("without GITHUB_OUTPUT the verdict for %s reaches stdout as %s", (file, expected) => {
+		// The documented local fallback. It used to be `>> /dev/stdout`, which on Linux reopens a
+		// captured stdout at its own offset so the explanation echoed afterwards overwrote the
+		// verdict. Linux CI at `c05e8117` read an empty verdict with exit 0 in every row.
+		const result = changedViaStdout(file);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.split("\n")[0]).toBe(expected);
 	});
 });
 
