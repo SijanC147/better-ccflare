@@ -116,7 +116,7 @@ describe("vertex-ai per-request state (SB23-2457, SB23-2508)", () => {
 	it("writes nothing onto the account", () => {
 		const provider = new VertexAIProvider();
 		const account = vertexAccount();
-		const before = Object.keys(account).sort();
+		const before = structuredClone(account);
 
 		provider.prepareRequest(
 			new Request("https://example.invalid/v1/messages"),
@@ -125,7 +125,7 @@ describe("vertex-ai per-request state (SB23-2457, SB23-2508)", () => {
 			carrier(),
 		);
 
-		expect(Object.keys(account).sort()).toEqual(before);
+		expect(account).toEqual(before);
 	});
 
 	/**

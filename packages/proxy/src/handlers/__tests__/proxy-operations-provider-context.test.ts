@@ -357,13 +357,28 @@ describe("proxyWithAccount — per-request provider carrier (SB23-2508)", () => 
 			return out;
 		};
 
+		// If a request never reaches fetch, the other waits on the gate forever;
+		// fail with the cause instead of Bun's test timeout.
+		let stallTimer: ReturnType<typeof setTimeout> | undefined;
+		const stalled = new Promise<never>((_, reject) => {
+			stallTimer = setTimeout(
+				() =>
+					reject(new Error(`only ${urls.length} of 2 requests reached fetch`)),
+				3000,
+			);
+		});
 		try {
 			const ctx = makeContext({});
-			await Promise.all([
-				dispatch(shared, "req-a", bodyFor(MODEL_A), ctx),
-				dispatch(shared, "req-b", bodyFor(MODEL_B), ctx),
+			await Promise.race([
+				Promise.all([
+					dispatch(shared, "req-a", bodyFor(MODEL_A), ctx),
+					dispatch(shared, "req-b", bodyFor(MODEL_B), ctx),
+				]),
+				stalled,
 			]);
 		} finally {
+			clearTimeout(stallTimer);
+			releaseAll();
 			vertex.processResponse = originalProcessResponse;
 		}
 

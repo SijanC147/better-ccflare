@@ -31,8 +31,9 @@ export interface RateLimitInfo {
 export interface ProviderRequestContext {
 	/**
 	 * Model in the final request body sent upstream, after account
-	 * mapping/fallback. Set by the proxy once the request is built, so it is
-	 * populated by the time `processResponse` runs and absent before that.
+	 * mapping/fallback. Set by the proxy immediately before each
+	 * `processResponse` call, so it is absent during `prepareRequest` and
+	 * `buildUrl`.
 	 */
 	requestModel?: string | null;
 }
