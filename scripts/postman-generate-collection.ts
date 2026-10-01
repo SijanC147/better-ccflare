@@ -8,7 +8,8 @@
  *   refusals the OpenAI gateway answers before routing). Safe against 8080
  *   on v3.28.0 or later; before v3.28.0 the two POSTs fall through to accounts.
  * - `OpenAI gateway`: `/v1/models` and `/v1/chat/completions`, plain and
- *   named-gateway. These route to real accounts on a real server.
+ *   named-gateway, plus a named gateway's `/responses`. These route to real
+ *   accounts on a real server.
  *
  * Regenerate after any catalog change, then `postman workspace push`:
  *
@@ -162,6 +163,25 @@ const chatCompletionTest = [
 	"});",
 ].join("\n");
 
+const responsesBody = () =>
+	JSON.stringify(
+		{
+			model: "{{model}}",
+			input: "Reply with the single word: pong",
+		},
+		null,
+		2,
+	);
+
+const responseTest = [
+	statusTest(200),
+	'pm.test("response object with output", () => {',
+	"  const body = pm.response.json();",
+	'  pm.expect(body.object).to.eql("response");',
+	'  pm.expect(body.output).to.be.an("array").and.not.empty;',
+	"});",
+].join("\n");
+
 const streamTest = [
 	statusTest(200),
 	'pm.test("SSE chunks ending in [DONE]", () => {',
@@ -268,6 +288,17 @@ const gateway: RequestSpec[] = [
 		headers: JSON_HEADER,
 		body: chatBody(),
 		tests: chatCompletionTest,
+	},
+	{
+		name: "Response via named gateway",
+		method: "POST",
+		url: "{{baseUrl}}/v1/gateways/{{gateway}}/responses",
+		order: 5000,
+		description:
+			"The Responses API Codex speaks. Set `gateway` and `model`; with a model set, `model` must be one of its names or the answer is 404 `model_not_found`. The gateway's exclusions apply, and Claude OAuth accounts are always excluded on this path. No `max_output_tokens`, which the Codex subscription endpoint refuses.",
+		headers: JSON_HEADER,
+		body: responsesBody(),
+		tests: responseTest,
 	},
 ];
 

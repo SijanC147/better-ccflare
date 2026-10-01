@@ -459,6 +459,8 @@ Known limitations:
 - Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are silently skipped; only `type: "function"` tools are forwarded to Anthropic
 - Claude OAuth accounts (Claude Pro/Team, `provider=anthropic` with OAuth tokens) are automatically excluded from Codex CLI traffic — Anthropic bans these when used outside Claude CLI. Anthropic API key accounts are fine and will be used normally.
 
+To give Codex a fixed list of models with fallback ladders, point it at a named gateway instead. See **Codex through a gateway** under [Named gateways](#named-gateways).
+
 ### Using better-ccflare as an OpenAI-compatible provider
 
 Any client that accepts a custom OpenAI-compatible provider can send Chat Completions requests to better-ccflare. The server intercepts `POST /v1/chat/completions`, translates it to an Anthropic `POST /v1/messages` request, routes it through your account pool with the usual combos and failover, and translates the answer back.
@@ -490,7 +492,7 @@ The default base URL above applies no rules and can route to every account in th
 }
 ```
 
-The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and calls `/chat/completions` and `/models` under it. Any other path or method under a gateway answers 404 with `code: "unknown_endpoint"`, and an unconfigured name answers 404 with `code: "gateway_not_found"`. The path stays under `/v1/`, so API-key authentication and API-only keys work exactly as on the default URL.
+The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and calls `/chat/completions`, `/responses`, `/responses/compact` and `/models` under it. Any other path or method under a gateway answers 404 with `code: "unknown_endpoint"`, and an unconfigured name answers 404 with `code: "gateway_not_found"`. The path stays under `/v1/`, so API-key authentication and API-only keys work exactly as on the default URL.
 
 `exclude_providers` names the accounts a gateway never routes to. `anthropic-oauth` means Anthropic accounts holding a refresh token, which leaves Anthropic API-key accounts eligible. Any other value is matched exactly against an account's `provider`, for example `codex`. A gateway with `anthropic-oauth` excluded is the way to keep Claude OAuth accounts out of an app's traffic while the default URL still includes them.
 
@@ -515,6 +517,23 @@ The app then uses `http://<host>:8080/v1/gateways/no-oauth` as its base URL and 
 ```
 
 With a model set, `GET /models` lists exactly those names, and a request naming any other model answers 404 with `code: "model_not_found"` before anything is sent upstream. An entry without a combo goes to any account that can serve its model, so a GPT id never reaches a Claude account. An entry with a combo walks that combo's enabled slots in priority order, each slot's account and model in turn, with the slot throttles applied. The ladder is the whole route: when every slot is unavailable or has failed, the request fails rather than widening to the rest of the pool. A `combo` that names no enabled combo refuses the same way. A gateway ladder applies whatever the global combos switch says, because it was configured for that entry specifically. The response still reports the model that actually answered.
+
+**Codex through a gateway.** A gateway also serves `POST /responses` and `POST /responses/compact`, the Responses API that Codex speaks, with the same exclusions, model set and ladders as `/chat/completions`. Claude OAuth accounts stay excluded on these two paths whatever the gateway lists, as on the plain `/v1/responses`. A model-set entry is routed on its upstream id, so a `gpt-*` request is never answered by a Claude model under the requested name, and the answer reports the model that answered. Point Codex at the gateway with a custom provider in `~/.codex/config.toml`:
+
+```toml
+model_provider = "ccflare-gpt"
+model = "gpt-5.5"
+
+[model_providers.ccflare-gpt]
+name = "better-ccflare gpt gateway"
+base_url = "http://127.0.0.1:8080/gpt/v1"
+env_key = "CCFLARE_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+```
+
+Run `export CCFLARE_API_KEY=dummy` before starting Codex when API-key authentication is off, or set it to a better-ccflare API key when it is on. Keep `requires_openai_auth = false`: with `true`, Codex sends its own ChatGPT account id, which would then travel under a different account's token. A WebSocket upgrade on a gateway's `/responses` answers 503, as on the plain path. `model` must be a `name` from the gateway's set, and `GET /gpt/v1/models` lists exactly those names in the OpenAI list shape. Whether the Codex desktop app reads `model_providers`, and accepts that list in its model picker, has not been verified.
 
 Gateways are read from the config on every request, so an edit applies without a restart. An invalid entry is skipped with a warning in the log and does not disable the others. `GET /api/openai-gateways` lists the configured gateways.
 
