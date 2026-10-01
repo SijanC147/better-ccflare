@@ -6,6 +6,8 @@ export * from "./commands/database-doctor";
 export * from "./commands/database-repair";
 export * from "./commands/help";
 export * from "./commands/stats";
+export * from "./commands/tui";
+export * from "./commands/tui-overview";
 
 // Export prompts
 export * from "./prompts/index";
