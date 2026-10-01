@@ -21,8 +21,8 @@ import { drainBody } from "./handlers/discard-body-cancel";
  *
  * Wrapped: status 400 or above, a body, a `/v1` path, and a content type that
  * is absent or textual (`text/*` other than `text/event-stream`, or XML).
- * Untouched: anything below 400, a JSON body (`application/json` or `+json`),
- * an event stream, a binary type, and every path outside `/v1`.
+ * Untouched: anything below 400, a JSON body (`application/json`, `+json`,
+ * `text/json`), an event stream, a binary type, and every path outside `/v1`.
  */
 
 export { UPSTREAM_CONTENT_TYPE_HEADER };
@@ -48,8 +48,16 @@ function mediaTypeOf(contentType: string | null): string | null {
 	return mediaType === "" ? null : mediaType;
 }
 
+/**
+ * JSON under any of its names. `text/json` and `text/x-json` are the reason
+ * this check exists: the textual test below would otherwise wrap them.
+ */
 function isJsonMediaType(mediaType: string): boolean {
-	return mediaType === "application/json" || mediaType.endsWith("+json");
+	return (
+		mediaType.endsWith("/json") ||
+		mediaType.endsWith("+json") ||
+		mediaType === "text/x-json"
+	);
 }
 
 /** The textual types an edge answers errors in. An event stream is not one. */

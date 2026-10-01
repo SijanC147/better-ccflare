@@ -50,6 +50,16 @@ describe("wrapNonJsonUpstreamError leaves these responses as the same object", (
 			"/v1/messages",
 		],
 		[
+			"a text/json 400",
+			() => respond('{"error":"bad"}', 400, "text/json"),
+			"/v1/messages",
+		],
+		[
+			"a text/x-json 400",
+			() => respond('{"error":"bad"}', 400, "text/x-json; charset=utf-8"),
+			"/v1/messages",
+		],
+		[
 			"an SSE 200",
 			() => respond("event: ping\n\n", 200, "text/event-stream"),
 			"/v1/messages",
