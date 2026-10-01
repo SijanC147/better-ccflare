@@ -88,6 +88,9 @@
  *     because Hono's `app.on(method, path, handler)` returns the handler's value as the
  *     response. See IGNORES_CALLBACK_RESULT.
  *   - the LEFT operand of `&&` / `||` / `??`, whose value is read as a condition.
+ *   - a member call on the result of a callee the value flowed into. `p.then(() =>
+ *     s?.read()).catch(() => {})` is not reported, because `.then(...).then(cb)` passes the
+ *     value to `cb` and the climb cannot tell `catch` from `then` by what it does.
  *   - a statement inside ANY function `expect(...)` holds is never reported, including
  *     `expect(() => { s?.f(); }).not.toThrow()`, where the skip is in fact silent. The
  *     exemption exists for `toThrow` and `rejects`, and narrowing it to those matchers is
@@ -382,7 +385,16 @@ function recogniseGuard(node: ts.Node): GuardMatch | null {
 		ts.isPropertyAccessExpression(one.expression) &&
 		ts.isIdentifier(one.expression.expression) &&
 		one.expression.expression.text === "expect" &&
-		ASYMMETRIC_PRESENT.has(one.expression.name.text)
+		ASYMMETRIC_PRESENT.has(one.expression.name.text) &&
+		// `expect(null).toEqual(expect.any(Object))` PASSES, measured in Bun 1.4 as in Jest,
+		// because `typeof null` is "object". Found by PR #288's reviewer.
+		!(
+			one.expression.name.text === "any" &&
+			one.arguments.length === 1 &&
+			one.arguments[0] !== undefined &&
+			ts.isIdentifier(one.arguments[0]) &&
+			one.arguments[0].text === "Object"
+		)
 	) {
 		return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
 	}
@@ -486,10 +498,21 @@ type Guard = {
 	viaAlias: boolean;
 	implied: Array<{ key: string; viaAlias: boolean }>;
 	extended: boolean;
+	/** The scope that binds the target's root name when the guard was read, or null. */
+	rootBinding: object | null;
 	end: number;
 	matcher: string;
 	line: number;
 };
+
+/** The identifier a chain or guard target starts from: `a` for `a.b?.c()` and `(a!).b`. */
+function rootIdentifier(expr: ts.Expression): string | undefined {
+	let e = unwrapValue(expr);
+	while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isCallExpression(e)) {
+		e = unwrapValue(e.expression);
+	}
+	return ts.isIdentifier(e) ? e.text : undefined;
+}
 
 /**
  * True when this optional access is what a call is being made THROUGH, so short-circuiting
@@ -551,6 +574,8 @@ function climbOutOfExpression(node: ts.Node): { current: ts.Node; parent: ts.Nod
  */
 const UNDEFINED_TOLERANT_MATCHERS = new Set([
 	"toBeUndefined",
+	// `expect(undefined).toBeEmpty()` passes in Bun 1.4, measured by PR #288's reviewer.
+	"toBeEmpty",
 	"toBeFalsy",
 	"toBeNil",
 	"toBeNullish",
@@ -585,7 +610,18 @@ const REJECTS_UNDEFINED_EVEN_NEGATED = new Set([
 	"toHaveBeenNthCalledWith",
 	"toThrow",
 	"toThrowError",
+	// Added by PR #288's reviewer, each measured failing under `.not` on undefined.
+	"toContainAllKeys",
+	"toContainValues",
+	"toIncludeRepeated",
+	"toHaveReturned",
+	"toHaveReturnedTimes",
+	"toHaveReturnedWith",
+	"toHaveLastReturnedWith",
+	"toHaveNthReturnedWith",
 ]);
+
+const EQUALITY_MATCHERS = new Set(["toBe", "toEqual", "toStrictEqual"]);
 
 /**
  * True when this chain's value is handed to an `expect(...)` whose matcher PASSES on
@@ -624,6 +660,21 @@ function isConsumedByUndefinedTolerantMatcher(node: ts.Node): boolean {
 		// `.resolves` / `.rejects` change what is asserted about, so the skip is observed by
 		// the promise machinery rather than by the matcher. Treat as rejecting.
 		if (name === "resolves" || name === "rejects") return false;
+		// `toBe(undefined)` passes on undefined and `not.toBe(undefined)` fails on it, so for
+		// the equality matchers the argument decides, not the name. PR #288's reviewer found
+		// `not.toBe(undefined)` reported although it rejects a skip.
+		const call = chain.parent;
+		if (
+			EQUALITY_MATCHERS.has(name) &&
+			call !== undefined &&
+			ts.isCallExpression(call) &&
+			call.expression === chain &&
+			call.arguments.length === 1 &&
+			call.arguments[0] !== undefined &&
+			isUndefinedIdentifier(call.arguments[0])
+		) {
+			return !negated;
+		}
 		// Some matchers throw on a value they cannot inspect whichever way round they are
 		// asked, so `not.` does not make them tolerant. Measured in Bun 1.4: see the set.
 		if (negated && REJECTS_UNDEFINED_EVEN_NEGATED.has(name)) return false;
@@ -649,6 +700,8 @@ const IGNORES_CALLBACK_RESULT = new Set([
 	"setInterval",
 	"setImmediate",
 	"queueMicrotask",
+	// `p.finally(cb)` resolves to `p`'s value whatever `cb` returns.
+	"finally",
 	"nextTick",
 	"requestAnimationFrame",
 	"addEventListener",
@@ -671,7 +724,6 @@ const IGNORES_CALLBACK_RESULT = new Set([
 const CALLBACK_RESULT_FLOWS_INTO_CALL = new Set([
 	"then",
 	"catch",
-	"finally",
 	"map",
 	"flatMap",
 	"filter",
@@ -754,7 +806,7 @@ function isReturnValueDiscarded(fn: ts.Node): boolean {
 	const name = calleeName(parent.expression);
 	if (name === undefined) return false;
 	if (IGNORES_CALLBACK_RESULT.has(name)) return true;
-	if (CALLBACK_RESULT_FLOWS_INTO_CALL.has(name)) return isValueDiscarded(parent);
+	if (CALLBACK_RESULT_FLOWS_INTO_CALL.has(name)) return isValueDiscarded(parent, true);
 	return false;
 }
 
@@ -771,14 +823,22 @@ function isReturnValueDiscarded(fn: ts.Node): boolean {
  * 4b, and widening it would change which matchers count as receiving the chain's value,
  * which neither SB23-2499 nor any measurement asked for.
  */
-function isValueDiscarded(node: ts.Node): boolean {
+function isValueDiscarded(node: ts.Node, readsThroughMembers = false): boolean {
 	let current: ts.Node = node;
 	let parent = current.parent;
 	while (parent !== undefined) {
-		const passesValueThrough =
-			((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+		// Climbing through `.foo` and `.foo()` is right for the `?.` chain itself, because a
+		// short-circuit skips the whole chain. It is wrong for the result of a callee the value
+		// FLOWED into: in `p.then(() => s?.read()).then((v) => expect(v).toBe(1))` the second
+		// `.then` receives the value. Found by PR #288's reviewer; a member access there now
+		// counts as reading it, so `p.then(...).catch(() => {})` is a miss rather than a report.
+		const throughMember =
+			!readsThroughMembers &&
+			(((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
 				parent.expression === current) ||
-			(ts.isCallExpression(parent) && parent.expression === current) ||
+				(ts.isCallExpression(parent) && parent.expression === current));
+		const passesValueThrough =
+			throughMember ||
 			ts.isParenthesizedExpression(parent) ||
 			ts.isAwaitExpression(parent) ||
 			ts.isNonNullExpression(parent) ||
@@ -1021,6 +1081,16 @@ for (const root of searchRoots) {
 			}
 			return undefined;
 		};
+		// The scope that binds a name, so two spellings of `h` can be told apart when an inner
+		// parameter or `const` rebinds it. Names nothing in the file binds share `null`.
+		const bindingOf = (name: string | undefined): object | null => {
+			if (name === undefined) return null;
+			for (let i = scopes.length - 1; i >= 0; i--) {
+				const scope = scopes[i];
+				if (scope?.aliases.has(name)) return scope;
+			}
+			return null;
+		};
 		const shadow = (binding: ts.BindingName, into: Scope | undefined): void => {
 			if (!into) return;
 			if (ts.isIdentifier(binding)) into.aliases.set(binding.text, null);
@@ -1084,6 +1154,7 @@ for (const root of searchRoots) {
 						canonicalKey(r, resolveAlias),
 					),
 					extended: guard.extended,
+					rootBinding: bindingOf(rootIdentifier(guard.target)),
 					end: node.getEnd(),
 					matcher: guard.matcher,
 					line: line + 1,
@@ -1102,12 +1173,17 @@ for (const root of searchRoots) {
 				// guard proves present. Ties go to the innermost, earliest guard.
 				const start = node.getStart();
 				const chain = canonicalKey(optional.subjectNode, resolveAlias);
+				const chainBinding = bindingOf(rootIdentifier(optional.subjectNode));
 				let matched: { guard: Guard; rank: number; axes: string[] } | undefined;
 				for (let i = scopes.length - 1; i >= 0 && matched?.rank !== 0; i--) {
 					const scope = scopes[i];
 					if (!scope) continue;
 					for (const g of scope.guards) {
 						if (g.end > start) continue;
+						// `hs.forEach((h) => h?.())` under `expect(h).not.toBeNull()` names a
+						// different `h`. Found by PR #288's reviewer: the callback widening made
+						// it reachable. An alias on either side compared resolved keys instead.
+						if (!g.viaAlias && !chain.viaAlias && g.rootBinding !== chainBinding) continue;
 						let candidate: { rank: number; axes: string[] } | undefined;
 						if (g.exact !== null && g.exact === optional.subject) {
 							candidate = { rank: 0, axes: [] };
