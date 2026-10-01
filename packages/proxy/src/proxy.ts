@@ -484,6 +484,7 @@ async function handleProxyRequest(
 		for (const account of accounts) {
 			const throttleUntil = getUsageThrottleUntil(
 				usageCache.get(account.id),
+				account.provider,
 				settings,
 				now,
 				{

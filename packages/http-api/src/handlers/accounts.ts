@@ -260,7 +260,17 @@ async function getCachedOrPersistedCodexUsage(
 				payloadTimestamp,
 			);
 			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
-			return normalizedUsage;
+			// Return what the cache now serves, not the payload just written. The
+			// two differ when the stored balance is older than
+			// CODEX_CREDITS_MAX_AGE_MS: get() withholds it. Returning the written
+			// payload put a day-old balance on the card and fed it to the status
+			// label, while routing read the entry without it, so every card field
+			// disagreed with the router until the entry expired (PR #267 review).
+			// get() cannot return null here, since the entry was installed a line
+			// above; the fallback only keeps the type honest.
+			return (
+				(usageCache.get(accountId) as FullUsageData | null) ?? normalizedUsage
+			);
 		} catch (error) {
 			log.warn(
 				`Failed to recover Codex usage from stored payload for ${accountName}:`,
@@ -647,7 +657,22 @@ export function createAccountsListHandler(
 					fullUsageData
 				) {
 					const usageThrottleStatus = getUsageThrottleStatus(
-						fullUsageData as AnyUsageData,
+						// The entry the router throttles on (proxy.ts reads
+						// usageCache.get), not the payload the card renders. They differ
+						// on the Codex persisted-payload path: getCachedOrPersistedCodexUsage
+						// returns the reparsed payload with its balance intact, while the
+						// cache it wrote withholds that balance once it is older than
+						// CODEX_CREDITS_MAX_AGE_MS. Throttling the card on the returned
+						// payload would show a day-old balance clearing the weekly window
+						// that routing still throttles. fullUsageData stays the fallback
+						// for paths that never write the cache (the weekly snapshot).
+						(usageCache.get(account.id) ?? fullUsageData) as AnyUsageData,
+						// The same provider the router passes (proxy.ts), so the card
+						// shows the throttle state routing acts on: a credit-covered
+						// Codex account is not throttled on its weekly window here
+						// either (SB23-2541). The `?? "anthropic"` is the default
+						// toAccount() applies when it builds the router's Account.
+						account.provider ?? "anthropic",
 						usageThrottleSettings,
 						now,
 						// Display path: surface ALL per-model caps (m3 amber highlight);
