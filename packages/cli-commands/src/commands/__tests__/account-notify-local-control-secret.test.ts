@@ -52,10 +52,22 @@ const { forceResetRateLimit, reauthenticateAccount } = await import(
 const LOCAL_CONTROL_SECRET_HEADER = "x-better-ccflare-local-control-secret";
 const TEST_SECRET = "test-local-control-secret";
 
+/**
+ * A port nothing in this file listens on; fetch is stubbed throughout. Not
+ * 8080 or 8081, so a regression to the old fixed pair shows up as a URL this
+ * file never configured (SB23-4035).
+ */
+const TARGET = "http://127.0.0.1:18765";
+
 function makeConfig(): Config {
 	return {
-		getRuntime: () => ({ port: 8080, tlsEnabled: false }),
-		getLocalControlSecret: () => TEST_SECRET,
+		getLocalControlTarget: () => ({
+			kind: "configured",
+			secret: TEST_SECRET,
+			baseUrl: TARGET,
+		}),
+		getLocalControlSidecarPath: () =>
+			"/nonexistent/better-ccflare.json.local-control",
 	} as unknown as Config;
 }
 
@@ -121,9 +133,12 @@ describe("CLI notify-server calls send the local-control-secret (#216)", () => {
 		const result = await forceResetRateLimit(dbOps, "force-reset-acct", config);
 
 		expect(result.success).toBe(true);
-		expect(capturedRequests.length).toBeGreaterThan(0);
+		// Exactly one request, to the target the config names: never the fixed
+		// localhost:8080 and :8081 pair the CLI used to try (SB23-4035).
+		expect(capturedRequests.map((r) => r.url)).toEqual([
+			`${TARGET}/api/accounts/${accountId}/force-reset-rate-limit`,
+		]);
 		for (const req of capturedRequests) {
-			expect(req.url).toContain("/force-reset-rate-limit");
 			expect(req.headers[LOCAL_CONTROL_SECRET_HEADER]).toBe(TEST_SECRET);
 		}
 	});
@@ -161,7 +176,9 @@ describe("CLI notify-server calls send the local-control-secret (#216)", () => {
 		const reloadRequests = capturedRequests.filter((r) =>
 			r.url.includes("/reload"),
 		);
-		expect(reloadRequests.length).toBeGreaterThan(0);
+		expect(reloadRequests.map((r) => r.url)).toEqual([
+			`${TARGET}/api/accounts/${accountId}/reload`,
+		]);
 		for (const req of reloadRequests) {
 			expect(req.headers[LOCAL_CONTROL_SECRET_HEADER]).toBe(TEST_SECRET);
 		}

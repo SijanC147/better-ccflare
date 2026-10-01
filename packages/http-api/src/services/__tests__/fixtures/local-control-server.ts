@@ -2,8 +2,8 @@
  * Child process for local-control-sidecar-two-process.test.ts (SB23-3809).
  *
  * Plays the server's half exactly as apps/server does it: construct a Config
- * on the given path, call publishLocalControlSecret(), and hand the result to
- * a real AuthService. API keys are active (countActiveApiKeys answers 1), so a
+ * on the given path, hand getServerLocalControlSecret() to a real AuthService,
+ * and once listening publish it with publishLocalControlSecret(). API keys are active (countActiveApiKeys answers 1), so a
  * request authenticates only through isLocalControlRequest or a valid key, and
  * there is no valid key.
  *
@@ -20,7 +20,8 @@ if (!configPath) {
 	throw new Error("usage: local-control-server.ts <config path>");
 }
 
-const secret = new Config(configPath).publishLocalControlSecret();
+const config = new Config(configPath);
+const secret = config.getServerLocalControlSecret();
 
 // Only the three methods authenticateRequest() can reach with no valid key.
 const dbOps = {
@@ -43,4 +44,14 @@ const server = Bun.serve({
 	},
 });
 
-console.log(`LOCAL_CONTROL_SERVER_PORT=${server.port}`);
+// Published once listening, as apps/server does, with the port it bound
+// (SB23-4035).
+const port = server.port;
+if (typeof port !== "number") throw new Error("the fixture server has no port");
+config.publishLocalControlSecret({
+	host: "127.0.0.1",
+	port,
+	pid: process.pid,
+});
+
+console.log(`LOCAL_CONTROL_SERVER_PORT=${port}`);
