@@ -37,11 +37,18 @@ import * as usageCollectorModule from "../usage-collector";
 
 let collectorSpy: { mockRestore(): void } | null = null;
 
+/** The real `fetch`, captured before any test can replace it. */
+const ORIGINAL_FETCH = globalThis.fetch;
+
 // An unrestored spy leaves getUsageCollector stubbed for every test file that
-// runs later in the process (SB23-2776).
+// runs later in the process (SB23-2776). The same holds for the `fetch` stub
+// below, so its restore is checked here rather than trusted.
 afterEach(() => {
 	if (collectorSpy) collectorSpy.mockRestore();
 	collectorSpy = null;
+	const leaked = globalThis.fetch !== ORIGINAL_FETCH;
+	globalThis.fetch = ORIGINAL_FETCH;
+	expect(leaked).toBe(false);
 });
 
 function stubUsageCollector() {
@@ -243,53 +250,95 @@ async function readOutcome(response: Response): Promise<Outcome> {
 	return typeof code === "string" ? code : `json-no-code:${response.status}`;
 }
 
+/** The message every blocked upstream call throws with. */
+const UPSTREAM_BLOCKED = "hermetic stub: upstream is never contacted";
+
 /**
- * Run `handleProxy` past the guard **hermetically** and report only what the
- * guard did: the refusal code, or `null` for anything else.
+ * Run `fn` with `globalThis.fetch` replaced by a stub that records each URL
+ * and throws, and hand back what it recorded.
  *
- * The `buildUrl` stub is what makes this hermetic, and it is load-bearing.
- * Without it, a request that gets past the guard enters the attempt loop,
- * where `getValidAccessToken` (token-manager.ts) finds a stale access token
- * and **makes a real HTTP call to Anthropic's OAuth token endpoint**. That is
- * a network call from a unit test: it is slow, it is non-deterministic, and
- * how it fails differs between a developer's machine and a CI runner. An
- * earlier version of these two tests did exactly that — they were green on
- * macOS and the `/v1/messages` one was **red on Linux CI**, reported at 678 ms,
- * which is a network round trip rather than a guard check.
+ * This is the only thing standing between these tests and the network. An
+ * earlier version stubbed `ctx.provider.buildUrl` instead, and called that
+ * hermetic. **It was dead code for every account here**:
+ * `proxy-operations.ts` resolves `getProvider(account.provider) ||
+ * ctx.provider`, and the registry has a real provider for both `anthropic`
+ * and `claude-console-api`, so `ctx.provider` never ran. Measured 2026-10-01
+ * with a preload that logs and blocks `fetch`: one run of this file sent **21
+ * requests to `api.anthropic.com`**, 7 to `/v1/messages` and 14 to
+ * `/v1/chat/completions`, with fake tokens, on every machine and in CI.
  *
- * Throwing from `buildUrl` stops the request the moment it reaches the
- * provider, which is already past the guard, so the distinction this function
- * exists to draw is preserved exactly. **The assertion is not weakened**: the
- * guard returns a response and never throws, so any throw means it did not
- * fire, and if it wrongly fires we still see the code. What is removed is the
- * network, not the discrimination.
+ * That is also the whole of SB23-2576. The "HTML 400 on `/v1/messages`" was
+ * Cloudflare's stock `400 Bad Request` page from Anthropic's edge (`server:
+ * cloudflare`, a `cf-ray`), relayed verbatim; better-ccflare generates no
+ * HTML. A developer's network got that answer and CI's got something that
+ * failed the account, which is the macOS/Linux split this file used to accept
+ * as two valid outcomes.
+ *
+ * Callers assert on `upstreamCalls`, and that is what keeps the stub honest:
+ * with the real `fetch` in place nothing is recorded, so a stub that was never
+ * installed fails the count rather than passing quietly. `fetch` is process
+ * global, so it is restored in `finally` or it leaks into every later test
+ * file in the run (the SB23-2776 class).
+ */
+async function withUpstreamBlocked<T>(
+	fn: () => Promise<T>,
+): Promise<{ value: T; upstreamCalls: string[] }> {
+	const realFetch = globalThis.fetch;
+	const upstreamCalls: string[] = [];
+	globalThis.fetch = (async (input: RequestInfo | URL) => {
+		upstreamCalls.push(
+			input instanceof Request
+				? input.url
+				: input instanceof URL
+					? input.href
+					: String(input),
+		);
+		throw new Error(UPSTREAM_BLOCKED);
+	}) as unknown as typeof fetch;
+	try {
+		return { value: await fn(), upstreamCalls };
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+}
+
+/**
+ * Run `handleProxy` past the guard with the upstream blocked, and report what
+ * the guard did plus every upstream URL the attempt loop tried.
+ *
+ * Blocking at `fetch` stops the request the moment it leaves for the provider,
+ * which is already past the guard, so the distinction this function exists to
+ * draw is preserved exactly. The guard returns a response and never throws, so
+ * any throw means it did not fire, and if it wrongly fires we still see the
+ * code.
  */
 async function guardOutcome(
 	url: string,
 	accounts: Account[],
 	body?: unknown,
-): Promise<Outcome> {
-	const ctx = makeContext(accounts, {
-		buildUrl: () => {
-			throw new Error("hermetic stub: upstream is never contacted");
-		},
-	} as Partial<Provider>);
+): Promise<{ outcome: Outcome; upstreamCalls: string[] }> {
+	const ctx = makeContext(accounts);
 
-	try {
-		return await readOutcome(
-			await handleProxy(makeChatRequest(url, body), new URL(url), ctx),
-		);
-	} catch (err) {
-		// WHICH throw matters. `All accounts failed` is raised only at the end of
-		// the attempt loop (proxy.ts step 11), so it proves execution travelled
-		// all the way past the guard — that is what the old
-		// `.rejects.toThrow(/All accounts failed/)` was buying, and collapsing it
-		// to a bare `null` threw the proof away.
-		const msg = err instanceof Error ? err.message : String(err);
-		return /All accounts failed/.test(msg)
-			? "reached-loop"
-			: `threw-early:${msg}`;
-	}
+	const { value: outcome, upstreamCalls } = await withUpstreamBlocked(
+		async (): Promise<Outcome> => {
+			try {
+				return await readOutcome(
+					await handleProxy(makeChatRequest(url, body), new URL(url), ctx),
+				);
+			} catch (err) {
+				// WHICH throw matters. `All accounts failed` is raised only at the
+				// end of the attempt loop (proxy.ts step 11), so it proves execution
+				// travelled all the way past the guard — that is what the old
+				// `.rejects.toThrow(/All accounts failed/)` was buying, and
+				// collapsing it to a bare `null` threw the proof away.
+				const msg = err instanceof Error ? err.message : String(err);
+				return /All accounts failed/.test(msg)
+					? "reached-loop"
+					: `threw-early:${msg}`;
+			}
+		},
+	);
+	return { outcome, upstreamCalls };
 }
 
 /** Seven OAuth accounts — the live pool size in the incident. */
@@ -302,21 +351,16 @@ function sevenOAuthAccounts(): Account[] {
 describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 	it("refuses with status 400 and names the discriminating error code, without forwarding", async () => {
 		stubUsageCollector();
-		const accounts = sevenOAuthAccounts();
-		// A provider whose buildUrl throws: reaching upstream at all is the
-		// failure this guard exists to prevent, so make it loud rather than
-		// letting a silent forward pass as a refusal.
-		const ctx = makeContext(accounts, {
-			buildUrl: () => {
-				throw new Error("upstream must not be reached for an OAuth account");
-			},
-		} as Partial<Provider>);
+		const ctx = makeContext(sevenOAuthAccounts());
 
-		const response = await handleProxy(
-			makeChatRequest(),
-			new URL(CHAT_URL),
-			ctx,
+		// Reaching upstream at all is the failure this guard exists to prevent,
+		// so it is counted rather than trusted. An earlier version made a
+		// `ctx.provider.buildUrl` throw here, which the registry provider
+		// bypasses, so a forward would have gone to the network unnoticed.
+		const { value: response, upstreamCalls } = await withUpstreamBlocked(() =>
+			handleProxy(makeChatRequest(), new URL(CHAT_URL), ctx),
 		);
+		expect(upstreamCalls).toEqual([]);
 
 		// The status number, named. Not "the request failed".
 		expect(response.status).toBe(400);
@@ -340,7 +384,10 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		const { handleStart, handleEnd } = stubUsageCollector();
 		const ctx = makeContext(sevenOAuthAccounts());
 
-		await handleProxy(makeChatRequest(), new URL(CHAT_URL), ctx);
+		const { upstreamCalls } = await withUpstreamBlocked(() =>
+			handleProxy(makeChatRequest(), new URL(CHAT_URL), ctx),
+		);
+		expect(upstreamCalls).toEqual([]);
 
 		expect(handleStart).toHaveBeenCalledTimes(1);
 		const staged = handleStart.mock.calls[0][0] as unknown as {
@@ -365,18 +412,13 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		stubUsageCollector();
 
 		const messagesUrl = "https://proxy.local/v1/messages";
-		const outcome = await guardOutcome(
+		const { outcome, upstreamCalls } = await guardOutcome(
 			messagesUrl,
 			sevenOAuthAccounts(),
-			// A VALID Anthropic body. This is load-bearing and is the second
-			// platform bug in this one test: sending the OpenAI-shaped body here
-			// made the outcome depend on `/v1/messages` validation, which rejected
-			// it on macOS (an HTML 400) and did not on Linux (straight into the
-			// attempt loop). CI read `reached-loop` against a macOS
-			// `non-json:400`. The body was never the point of this test, so the
-			// fix is to stop the test depending on how it is judged rather than to
-			// accept both answers — accepting both is the collapse this file has
-			// already been bitten by twice.
+			// A VALID Anthropic body, so the proxy's own `/v1/messages`
+			// validation (proxy.ts step 3a) passes and the request goes on to the
+			// attempt loop. The request shape is not what split this test by
+			// platform; the network was (see `withUpstreamBlocked`).
 			{
 				model: "claude-opus-5",
 				max_tokens: 16,
@@ -384,25 +426,26 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 			},
 		);
 
-		// A CLOSED SET of two named values, not a negation and not one value.
+		// ONE value. This line used to accept a closed set of two,
+		// `reached-loop` and `non-json:400`, because the request reached
+		// `api.anthropic.com` and the answer depended on whose network sent it:
+		// Cloudflare's HTML 400 on a developer's Mac, a failed account in CI.
+		// With the upstream blocked there is nothing left to split on
+		// (SB23-2576), so a second value appearing here is a real change.
 		//
-		// Both members mean the same thing — execution got past step 2 and the
-		// guard declined — and they differ only by platform. `/v1/messages`
-		// under this harness answers an HTML 400 on macOS and runs on into the
-		// attempt loop on Linux. CI caught that after an earlier version of this
-		// line pinned the macOS value; the Linux answer is `reached-loop`.
-		// Supplying a valid Anthropic body does NOT remove the split, so the
-		// cause is not body validation. It is filed as SB23-2576, and **when
-		// that issue is fixed this set should shrink to one member** — if it
-		// does not, the shapes have drifted again.
-		//
-		// This is an allowlist rather than `not.toBe(REFUSAL_CODE)` on purpose.
-		// The negation was satisfied by any outcome at all, including "the guard
-		// was unreachable", which is how it passed against a proxy that could
-		// never have run the guard. Here a throw planted ahead of the guard
-		// yields `threw-early:…`, which is not in the set and fails; a guard
-		// that wrongly fires yields the refusal code, also not in the set.
-		expect(["reached-loop", "non-json:400"]).toContain(outcome);
+		// This is a single named value rather than `not.toBe(REFUSAL_CODE)` on
+		// purpose. The negation was satisfied by any outcome at all, including
+		// "the guard was unreachable", which is how it passed against a proxy
+		// that could never have run the guard. A throw planted ahead of the
+		// guard yields `threw-early:…` and a guard that wrongly fires yields
+		// the refusal code, and both fail here.
+		expect(outcome).toBe("reached-loop");
+		// One blocked attempt per account, all to the Anthropic messages
+		// endpoint. An empty list would mean the stub was never installed and
+		// the network was reached instead.
+		expect(upstreamCalls).toEqual(
+			Array(7).fill("https://api.anthropic.com/v1/messages"),
+		);
 	});
 
 	it("does not refuse when an API-key Anthropic account is in the pool", async () => {
@@ -411,7 +454,7 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		// Anthropic documents this path for API keys, so an operator who has
 		// one must still reach it; refusing here would be a regression, not a
 		// fix.
-		const outcome = await guardOutcome(CHAT_URL, [
+		const { outcome, upstreamCalls } = await guardOutcome(CHAT_URL, [
 			...sevenOAuthAccounts(),
 			makeApiKeyAccount(),
 		]);
@@ -421,6 +464,13 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		// guard. A bare `not.toBe(REFUSAL_CODE)` was satisfied by any throw
 		// anywhere, including one planted before the guard could run.
 		expect(outcome).toBe("reached-loop");
+		// Seven blocked attempts were measured for this pool of eight; the
+		// count is not what this test is about, so it asserts only that the
+		// loop reached the upstream and that nothing else did.
+		expect(upstreamCalls.length).toBeGreaterThan(0);
+		expect(new Set(upstreamCalls)).toEqual(
+			new Set(["https://api.anthropic.com/v1/chat/completions"]),
+		);
 	});
 
 	it("can be switched off, and the refusal says how", async () => {
@@ -435,8 +485,13 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		try {
 			// `reached-loop`, not merely "not the refusal": with the guard off the
 			// request must travel all the way to the end of the attempt loop.
-			expect(await guardOutcome(CHAT_URL, sevenOAuthAccounts())).toBe(
-				"reached-loop",
+			const { outcome, upstreamCalls } = await guardOutcome(
+				CHAT_URL,
+				sevenOAuthAccounts(),
+			);
+			expect(outcome).toBe("reached-loop");
+			expect(upstreamCalls).toEqual(
+				Array(7).fill("https://api.anthropic.com/v1/chat/completions"),
 			);
 		} finally {
 			if (saved === undefined) delete process.env[OPENAI_COMPAT_OVERRIDE_ENV];
@@ -461,12 +516,48 @@ describe("SB23-2570 — /v1/chat/completions across an all-OAuth pool", () => {
 		// account, same path: this one must NOT throw. Without this pair, a
 		// guard that never fired and a guard that always fired would each pass
 		// one of the two tests alone.
-		const response = await handleProxy(
-			makeChatRequest(),
-			new URL(CHAT_URL),
-			ctx,
+		const { value: response, upstreamCalls } = await withUpstreamBlocked(() =>
+			handleProxy(makeChatRequest(), new URL(CHAT_URL), ctx),
 		);
 		expect(await readOutcome(response)).toBe(REFUSAL_CODE);
+		expect(upstreamCalls).toEqual([]);
+	});
+});
+
+describe("SB23-2576 — the /v1/messages validation 400 is JSON", () => {
+	it("answers a body with no messages field with a parseable JSON error, not HTML", async () => {
+		// The only 400 better-ccflare itself generates on this path is step 3a
+		// in proxy.ts. SB23-2576 was filed believing it answered HTML; the HTML
+		// was Cloudflare's, from a test that reached api.anthropic.com. This
+		// pins the real one. A status-only assertion passes either way, so the
+		// content type and the parsed body are what carry the test.
+		stubUsageCollector();
+		const url = "https://proxy.local/v1/messages";
+		const ctx = makeContext(sevenOAuthAccounts());
+
+		const { value: response, upstreamCalls } = await withUpstreamBlocked(() =>
+			handleProxy(
+				makeChatRequest(url, { model: "claude-opus-5", max_tokens: 16 }),
+				new URL(url),
+				ctx,
+			),
+		);
+
+		expect(upstreamCalls).toEqual([]);
+		expect(response.status).toBe(400);
+		expect(response.headers.get("content-type")).toBe("application/json");
+		const body = (await response.json()) as {
+			type: string;
+			error: { type: string; message: string };
+		};
+		expect(body).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message:
+					"messages: Field required for /v1/messages endpoint. Internal events should not be proxied.",
+			},
+		});
 	});
 });
 
