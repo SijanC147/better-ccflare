@@ -511,6 +511,14 @@ it("records a joined local refusal without inventing an upstream attempt", async
 		});
 		expect(events.at(-1)?.request_digest).toMatch(/^[0-9a-f]{64}$/);
 		expect(events.at(-1)?.ingress_digest).toBe(events[0].ingress_digest);
+		// A tripwire, not a guard on anything reachable today (SB23-2537). The
+		// observer is handed `req.headers` only (proxy.ts, `observeRequest`), so
+		// the prompt never reaches the facts. Measured on darwin: logging the
+		// raw facts instead of `sanitizeCacheFacts(facts)` leaves this green.
+		// It goes red only if a change hands the body to the observer, which is
+		// the regression it is kept for. The `events` assertions above are its
+		// positive control: they prove the capture saw all three lifecycle
+		// events, so an empty capture cannot pass it vacuously.
 		expect(JSON.stringify(events)).not.toContain("hello");
 	} finally {
 		if (saved === undefined) delete process.env.CCFLARE_CODEX_CACHE_DIAGNOSTICS;

@@ -71,6 +71,26 @@ const contentBlockDelta =
 const overloadedError =
 	'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n';
 
+// Twenty-two cases below assert `onRecovery` or `onCancelError` was NOT
+// called. In production each callback does nothing but log a WARN
+// (response-handler.ts, `anthropic_terminal_message_stop_recovered` and
+// `anthropic_terminal_upstream_cancel_failed`), so these are log-absence
+// assertions one step removed, the easiest vacuous test to write (SB23-2537).
+//
+// They are not vacuous, measured on darwin, and the measurement is the
+// positive control rather than a second scenario inside each case:
+//
+// - fire `reportRecovery("eof")` from `fireTerminalState`, so every stream
+//   that reaches any terminal state reports a recovery: all 20 `onRecovery`
+//   absence cases go red (26 fail of 37 in this file);
+// - fire `reportCancelError` from `cancelUpstream` on every call: both
+//   `onCancelError` absence cases go red (3 fail of 37).
+//
+// The modes a same-test positive control guards against for a captured log
+// line (a filter selecting the wrong population, a renamed message, a
+// LOG_LEVEL that drops the line) cannot occur here, because the subject is
+// the injected callback itself. A red on one of these means the stream
+// reported a recovery or a cancel failure it should not have.
 describe("createAnthropicTerminalRecoveryStream", () => {
 	it("leaves a healthy stream byte-for-byte unchanged", async () => {
 		const original = `${terminalDelta}${messageStop}`;

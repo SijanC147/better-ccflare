@@ -640,8 +640,32 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		// needing a disabled branch of its own. If this ever starts failing,
 		// the 529 message has moved out of the guard and needs the same
 		// three-way split the 1305 messages have.
+		//
+		// The predicate is the suffix all three 529 exits share, not
+		// `includes("529 retr")`, which matched two of them and missed
+		// "stopped retrying 529 after ... on an upstream reset hint" (SB23-2537).
+		// Measured on darwin:
+		//
+		// - drop `retryCfg.enabled` from the guard: the absence goes red (with
+		//   one scripted 529 it did not: the loop ran out of script before its
+		//   exit, and only the fetch count caught it);
+		// - emit only the reset-hint exit while retry is disabled: the absence
+		//   goes red here and stayed green under the old predicate;
+		// - rename the shared suffix: the positive control at the end goes
+		//   red, so the absence above it would have proved nothing.
+		const exitLines = (lines: string[]) =>
+			lines.filter(
+				(l) =>
+					l.includes("529") && l.includes("applying cooldown and failing over"),
+			);
+
+		// Three 529s scripted although one fetch is expected: if the guard
+		// stops reading `enabled`, the loop must be able to run to its exit
+		// and log it, or the absence below has nothing to see.
 		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED = "false";
 		const counters = installScriptedFetch([
+			() => jsonResponse(529, overloadedBody),
+			() => jsonResponse(529, overloadedBody),
 			() => jsonResponse(529, overloadedBody),
 		]);
 		const warnings = captureWarnings();
@@ -651,8 +675,28 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 			warnings.stop();
 		}
 
-		expect(warnings.lines().filter((l) => l.includes("529 retr"))).toEqual([]);
+		expect(exitLines(warnings.lines())).toEqual([]);
 		expect(counters.fetches()).toBe(1);
+
+		// Positive control: the same predicate over the same capture sees the
+		// exit once the condition holds, retry on and the attempts spent.
+		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
+		const onCounters = installScriptedFetch([
+			() => jsonResponse(529, overloadedBody),
+			() => jsonResponse(529, overloadedBody),
+			() => jsonResponse(529, overloadedBody),
+		]);
+		const onWarnings = captureWarnings();
+		try {
+			await runProxy(makeAccount({ name: "acc-on" }), makeContext());
+		} finally {
+			onWarnings.stop();
+		}
+
+		expect(exitLines(onWarnings.lines())).toEqual([
+			"Account acc-on: all 2 in-place 529 retries exhausted, applying cooldown and failing over",
+		]);
+		expect(onCounters.fetches()).toBe(3);
 	});
 
 	it.each([
