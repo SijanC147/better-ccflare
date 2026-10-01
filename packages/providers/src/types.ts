@@ -13,10 +13,33 @@ export interface RateLimitInfo {
 	remaining?: number | undefined;
 }
 
-export interface ProviderResponseContext {
-	/** Model in the final request body sent upstream, after account mapping/fallback. */
+/**
+ * The per-request carrier (SB23-2508). The proxy creates exactly one of these
+ * for each upstream attempt, before `prepareRequest`, and passes that same
+ * object to `prepareRequest`, `buildUrl` and every `processResponse` call the
+ * attempt makes, the in-place retries included. A failover to another account
+ * is a new attempt and gets a new object.
+ *
+ * A provider that derives something in one hook and needs it in a later one
+ * keys it on this object, typically in a module-private
+ * `WeakMap<ProviderRequestContext, T>`, so the value lives exactly as long as
+ * the attempt and no other request can reach it. It must never be written onto
+ * the `Account` or onto the provider instance: both outlive the request, and an
+ * account object shared by two requests would hand one request the other's
+ * value (SB23-2457).
+ */
+export interface ProviderRequestContext {
+	/**
+	 * Model in the final request body sent upstream, after account
+	 * mapping/fallback. Set by the proxy immediately before each
+	 * `processResponse` call, so it is absent during `prepareRequest` and
+	 * `buildUrl`.
+	 */
 	requestModel?: string | null;
 }
+
+/** The name this type had when only `processResponse` received it. */
+export type ProviderResponseContext = ProviderRequestContext;
 
 export interface Provider {
 	name: string;
@@ -44,19 +67,30 @@ export interface Provider {
 	refreshToken(account: Account, clientId: string): Promise<TokenRefreshResult>;
 
 	/**
-	 * Build the target URL for the provider
+	 * Build the target URL for the provider.
+	 *
+	 * `context` is the attempt's carrier when the proxy is dispatching a request,
+	 * the same object `prepareRequest` received. Callers that build a URL outside
+	 * a request (the model catalog, the unauthenticated passthrough) pass none.
 	 */
-	buildUrl(path: string, query: string, account?: Account): string;
+	buildUrl(
+		path: string,
+		query: string,
+		account?: Account,
+		context?: ProviderRequestContext,
+	): string;
 
 	/**
 	 * Optional: Pre-process the request before building URL
 	 * This allows providers to extract information from the request body
-	 * before buildUrl is called (e.g., for including model in URL path)
+	 * before buildUrl is called (e.g., for including model in URL path).
+	 * Anything derived here that a later hook needs is keyed on `context`.
 	 */
 	prepareRequest?(
 		request: Request,
 		requestBodyBuffer: ArrayBuffer | null,
 		account: Account,
+		context: ProviderRequestContext,
 	): void;
 
 	/**
@@ -77,14 +111,15 @@ export interface Provider {
 	parseRateLimit(response: Response): RateLimitInfo;
 
 	/**
-	 * Process the response before returning to client
+	 * Process the response before returning to client. `context` is the same
+	 * carrier object `prepareRequest` and `buildUrl` received for this attempt.
 	 */
 	processResponse(
 		response: Response,
 		account: Account | null,
 		requestHeaders?: Headers,
 		drainAbort?: AbortController,
-		context?: ProviderResponseContext,
+		context?: ProviderRequestContext,
 	): Promise<Response>;
 
 	/**

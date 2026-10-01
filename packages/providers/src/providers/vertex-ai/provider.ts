@@ -2,7 +2,7 @@ import { TIME_CONSTANTS } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
 import { GoogleAuth } from "google-auth-library";
-import type { TokenRefreshResult } from "../../types";
+import type { ProviderRequestContext, TokenRefreshResult } from "../../types";
 import { getModelName } from "../../utils/model-mapping";
 import {
 	type AnthropicCompatibleConfig,
@@ -10,6 +10,25 @@ import {
 } from "../base-anthropic-compatible";
 
 const _log = new Logger("VertexAIProvider");
+
+/**
+ * What `prepareRequest` derives from the body and the two later hooks read
+ * back: `buildUrl` puts `vertexModel` in the URL path, `processResponse`
+ * restores `originalModel` into the response body.
+ */
+interface VertexRequestState {
+	vertexModel: string;
+	originalModel: string;
+}
+
+/**
+ * Keyed on the attempt's carrier (SB23-2508), so each request reads only what
+ * its own `prepareRequest` wrote and the entry is collected with the attempt.
+ * These two values used to be written onto the `Account` object, which was
+ * correct only because no two requests were ever handed the same one
+ * (SB23-2457).
+ */
+const requestState = new WeakMap<ProviderRequestContext, VertexRequestState>();
 
 // Vertex AI configuration stored in custom_endpoint field
 export interface VertexAIConfig {
@@ -134,6 +153,7 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 		_request: Request,
 		requestBodyBuffer: ArrayBuffer | null,
 		account: Account,
+		context: ProviderRequestContext,
 	): void {
 		try {
 			if (!requestBodyBuffer) {
@@ -163,47 +183,8 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 			const vertexModel = convertToVertexAIModel(transformedModel);
 			console.log(`[Vertex AI] prepareRequest - Vertex format: ${vertexModel}`);
 
-			// Store models on the account for buildUrl and processResponse to
-			// read back.
-			//
-			// SB23-2457 asked whether two concurrent requests on one account can
-			// read each other's model here. Measured answer: no, for two
-			// different reasons, and only one of them is enforced.
-			//
-			// `_vertexModel` is safe unconditionally. `proxy-operations.ts`
-			// calls prepareRequest at :858 and buildUrl at :906 with no `await`
-			// between them, so the write and the read are one atomic step on a
-			// single-threaded runtime and no other request can run inside it.
-			//
-			// `_originalModel` has no such window: it is read at
-			// `proxy-operations.ts:1735`, after the upstream fetch. It is safe
-			// only because two concurrent requests are handed two DIFFERENT
-			// account objects — every selection path calls `getAllAccounts()`,
-			// and `AccountRepository.findAll` maps each row through
-			// `toAccount`, so nothing is retained between requests. Add a cache
-			// anywhere between that SELECT and this line and the value becomes
-			// racy, silently: a request would restore the wrong model name into
-			// its response body and its history row.
-			//
-			// That property is pinned by
-			// `packages/database/src/repositories/__tests__/account-object-identity.test.ts`,
-			// and the corruption it prevents is demonstrated on purpose in
-			// `__tests__/shared-account-state.test.ts`. Neither the type system
-			// nor any typecheck gate can see this: the fields exist on no
-			// version of `Account`, the casts below conjure them per site, so
-			// there is no declaration to inspect and no error to count.
-			(
-				account as Account & {
-					_vertexModel?: string;
-					_originalModel?: string;
-				}
-			)._vertexModel = vertexModel;
-			(
-				account as Account & {
-					_vertexModel?: string;
-					_originalModel?: string;
-				}
-			)._originalModel = originalModel;
+			// For buildUrl and processResponse on this attempt only.
+			requestState.set(context, { vertexModel, originalModel });
 		} catch (error) {
 			console.log(
 				"[Vertex AI] prepareRequest - failed to extract model:",
@@ -217,25 +198,26 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 	 * Format: https://{region}-aiplatform.googleapis.com/v1/projects/{projectId}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict
 	 *
 	 * Note: buildUrl is called BEFORE transformRequestBody in the proxy flow, so
-	 * the model comes from the account object, written by prepareRequest.
-	 *
-	 * Written by prepareRequest on THIS request, not cached from a previous one:
-	 * `proxy-operations.ts` calls prepareRequest at :858 and this at :906 with
-	 * no `await` between them. An earlier version of this comment credited
-	 * transformRequestBody "on previous calls", which named the wrong writer and
-	 * implied a lifetime spanning requests. See the block comment at the write.
+	 * the model comes from what prepareRequest stored against this attempt's
+	 * carrier. A caller outside a request passes no carrier and gets the
+	 * fallback model.
 	 */
-	buildUrl(path: string, query: string, account?: Account): string {
+	buildUrl(
+		path: string,
+		query: string,
+		account?: Account,
+		context?: ProviderRequestContext,
+	): string {
 		if (!account) {
 			throw new Error("Account is required for Vertex AI provider");
 		}
 
 		const config = this.parseVertexConfig(account);
 
-		// Get model from temporary storage (written by prepareRequest, this request)
+		// Written by prepareRequest for this attempt.
 		// Fallback to sonnet in Vertex AI format if not set
 		const model =
-			(account as Account & { _vertexModel?: string })._vertexModel ||
+			(context && requestState.get(context)?.vertexModel) ||
 			"claude-sonnet-4-5@20250929";
 
 		console.log(`[Vertex AI] buildUrl called - using model: ${model}`);
@@ -301,13 +283,14 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 	async processResponse(
 		response: Response,
 		account: Account | null,
+		_requestHeaders?: Headers,
+		_drainAbort?: AbortController,
+		context?: ProviderRequestContext,
 	): Promise<Response> {
-		// Unlike buildUrl's read, this one is separated from its write by the
-		// whole upstream fetch (`proxy-operations.ts:1735`). It is correct only
-		// because this account object belongs to this request alone. See the
-		// block comment at the write in prepareRequest.
-		const originalModel = (account as Account & { _originalModel?: string })
-			?._originalModel;
+		// Separated from its write by the whole upstream fetch, so another
+		// request's prepareRequest can run in between. Keyed on this attempt's
+		// carrier, it cannot read that request's model.
+		const originalModel = context && requestState.get(context)?.originalModel;
 
 		console.log(
 			`[Vertex AI] processResponse - originalModel stored: ${originalModel}`,
