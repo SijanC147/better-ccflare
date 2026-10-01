@@ -21,7 +21,7 @@ import {
 } from "bun:test";
 import { makeAccount } from "../../testing/account-fixture";
 import type { ProviderRequestContext } from "../../types";
-import { CodexProvider } from "./provider";
+import { CodexProvider, recoverCodexMessagesContinuation } from "./provider";
 import { CODEX_TURN_STATE_HEADER } from "./turn-state";
 
 const account = makeAccount({ id: "acc-carrier", provider: "codex" });
@@ -292,6 +292,78 @@ describe("Codex per-request state survives the old maps' eviction on the carrier
 				)
 			).json()) as { previous_response_id?: string };
 			expect(next.previous_response_id).toBe("resp_cont-one");
+		});
+
+		test("a rejected continuation's full-history re-transform keeps its state on the same carrier", async () => {
+			const provider = new CodexProvider();
+			const sid = "33333333-3333-4333-8333-333333333333";
+			const send = async (
+				id: string,
+				messages: unknown[],
+				carrier: ProviderRequestContext,
+			) =>
+				(await (
+					await provider.transformRequestBody(
+						messagesRequest(id, { ...base, ...session(sid), messages }, caller),
+						account,
+						carrier,
+					)
+				).json()) as { previous_response_id?: string };
+			const finish = async (id: string, carrier: ProviderRequestContext) => {
+				const response = await provider.processResponse(
+					new Response(completedWire(id), {
+						headers: {
+							"content-type": "text/event-stream",
+							"x-better-ccflare-request-id": id,
+							"x-better-ccflare-request-stream": "false",
+						},
+					}),
+					account,
+					undefined,
+					undefined,
+					carrier,
+				);
+				await response.text();
+				await Promise.resolve();
+				return response;
+			};
+			const one: ProviderRequestContext = {};
+			await send("rec-one", history, one);
+			await finish("rec-one", one);
+			const retry: ProviderRequestContext = {};
+			expect((await send("rec-two", replay, retry)).previous_response_id).toBe(
+				"resp_rec-one",
+			);
+			const recovered = await recoverCodexMessagesContinuation(
+				provider,
+				new Response(
+					JSON.stringify({
+						error: {
+							type: "invalid_request_error",
+							code: "previous_response_not_found",
+						},
+					}),
+					{ status: 400 },
+				),
+				messagesRequest(
+					"rec-two",
+					{ ...base, ...session(sid), messages: replay },
+					caller,
+				),
+				account,
+				retry,
+			);
+			if (!recovered) throw new Error("missing full-history recovery");
+			expect(
+				((await recovered.json()) as { previous_response_id?: string })
+					.previous_response_id,
+			).toBeUndefined();
+			// The re-transform's pending continuation answers the retried request's
+			// response only if it was written to the carrier that response reads.
+			const answered = await finish("rec-two", retry);
+			expect(answered.headers.get("x-better-ccflare-continuation-result")).toBe(
+				"cold",
+			);
 		});
 	});
 });
