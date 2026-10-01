@@ -1101,6 +1101,9 @@ Terminal dashboard (reads the running server; never starts one):
     --api-key <key>          Admin API key (default: BETTER_CCFLARE_API_KEY)
     --once                   Print once and exit (default when stdout is not a terminal)
     --interval <seconds>     Seconds between repaints (default: 5)
+    --no-panel               Stay in this window (default in kitty: a right-edge panel)
+    --panel                  Require the kitty panel
+    --panel-edge <edge>      right, left, top or bottom (default: right)
   better-ccflare tui --help  Full tui options
 
 Examples:

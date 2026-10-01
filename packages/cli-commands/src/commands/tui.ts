@@ -4,6 +4,7 @@
  * `parseTuiArgs`, so `tui overview --port 8081` reads 8081 as the server to
  * query, never as a port to bind.
  */
+
 import {
 	DEFAULT_TUI_PORT,
 	type FetchLike,
@@ -13,6 +14,14 @@ import {
 	renderOverview,
 	runOverviewLoop,
 } from "./tui-overview";
+import {
+	defaultPanelDeps,
+	detectKittyPanelHost,
+	launchInPanel,
+	type PanelDeps,
+	resolvePanelEdge,
+	resolvePanelMode,
+} from "./tui-panel";
 
 /** Dashboards `tui` can render. Each further one is its own issue. */
 export const TUI_DASHBOARDS = ["overview"] as const;
@@ -32,14 +41,30 @@ export interface TuiOptions {
 	once: boolean;
 	intervalSeconds: number;
 	help: boolean;
+	/** `--panel` forces a kitty panel, `--no-panel` refuses one; null = auto. */
+	panel: "force" | "off" | null;
+	/** `--panel-edge`; else BETTER_CCFLARE_TUI_PANEL_EDGE, else right. */
+	panelEdge: string | null;
 }
 
 export type TuiParseResult =
 	| { ok: true; options: TuiOptions }
 	| { ok: false; message: string };
 
-const VALUE_FLAGS = new Set(["--url", "--port", "--api-key", "--interval"]);
-const BOOLEAN_FLAGS = new Set(["--once", "--help", "-h"]);
+const VALUE_FLAGS = new Set([
+	"--url",
+	"--port",
+	"--api-key",
+	"--interval",
+	"--panel-edge",
+]);
+const BOOLEAN_FLAGS = new Set([
+	"--once",
+	"--help",
+	"-h",
+	"--panel",
+	"--no-panel",
+]);
 
 function parsePort(raw: string): number | null {
 	if (!/^\d+$/.test(raw)) return null;
@@ -63,6 +88,8 @@ export function parseTuiArgs(args: string[]): TuiParseResult {
 		once: false,
 		intervalSeconds: DEFAULT_TUI_INTERVAL_SECONDS,
 		help: false,
+		panel: null,
+		panelEdge: null,
 	};
 	let dashboardSeen = false;
 
@@ -90,7 +117,16 @@ export function parseTuiArgs(args: string[]): TuiParseResult {
 				return { ok: false, message: `${flag} takes no value` };
 			}
 			if (flag === "--once") options.once = true;
-			else options.help = true;
+			else if (flag === "--panel" || flag === "--no-panel") {
+				const wanted = flag === "--panel" ? "force" : "off";
+				if (options.panel && options.panel !== wanted) {
+					return {
+						ok: false,
+						message: "--panel and --no-panel cannot be combined",
+					};
+				}
+				options.panel = wanted;
+			} else options.help = true;
 			continue;
 		}
 		if (!VALUE_FLAGS.has(flag)) {
@@ -151,9 +187,19 @@ export function parseTuiArgs(args: string[]): TuiParseResult {
 				options.intervalSeconds = seconds;
 				break;
 			}
+			case "--panel-edge":
+				options.panelEdge = value;
+				break;
 		}
 	}
 
+	if (options.panel === "force" && options.once) {
+		return {
+			ok: false,
+			message:
+				"--panel and --once cannot be combined: a panel runs the live view",
+		};
+	}
 	return { ok: true, options };
 }
 
@@ -206,6 +252,16 @@ Options:
   --once              Print once and exit, even in a terminal
   --interval <secs>   Seconds between repaints in live mode (default: 5)
 
+Kitty panel (live mode in a kitty window only):
+  In a kitty window with kitten on PATH, the live view opens in a panel
+  pinned to the screen edge and this command returns, printing the panel's
+  socket and how to close it. Anywhere else it runs in the current window.
+  --no-panel          Run in the current window
+                      (or BETTER_CCFLARE_TUI_PANEL=0)
+  --panel             Require the panel; exit 1 naming what is missing
+  --panel-edge <edge> right, left, top or bottom (default: right,
+                      or BETTER_CCFLARE_TUI_PANEL_EDGE)
+
 Reads GET /api/accounts from the running server. It never opens the
 database and never starts a server.
 `;
@@ -225,6 +281,8 @@ export interface TuiDeps {
 	now: () => number;
 	/** The live loop's terminal, signal and timer access. */
 	loop?: Omit<LoopIO, "stdout" | "stderr" | "now">;
+	/** Kitty panel access; absent means the panel is never tried. */
+	panel?: PanelDeps;
 	/**
 	 * Called once, just before the live loop takes the terminal, so the CLI's
 	 * own signal handlers can stand down. Not called for a one-shot print,
@@ -255,6 +313,7 @@ export function defaultTuiDeps(): TuiDeps {
 		stderr: process.stderr,
 		now: () => Date.now(),
 		loop: processLoopIO(),
+		panel: defaultPanelDeps(process.env),
 	};
 }
 
@@ -292,9 +351,60 @@ export async function runTui(
 		return 1;
 	}
 
+	const live = deps.stdout.isTTY === true && !options.once;
+	const panelMode = resolvePanelMode(options.panel, deps.env);
+	if (panelMode !== "off" && (live || panelMode === "force")) {
+		const edge = resolvePanelEdge(options.panelEdge, deps.env);
+		if (!edge.ok) {
+			deps.stderr.write(`❌ ${edge.message}\n`);
+			return 1;
+		}
+		const host = deps.panel
+			? detectKittyPanelHost(
+					deps.env,
+					deps.panel.which,
+					deps.stdout.isTTY === true,
+				)
+			: { ok: false as const, reason: "panel support is unavailable" };
+		if (host.ok && deps.panel) {
+			const launched = await launchInPanel(
+				{
+					kitten: host.kitten,
+					edge: edge.edge,
+					dashboard: options.dashboard,
+					baseUrl,
+					intervalSeconds: options.intervalSeconds,
+				},
+				apiKey,
+				deps.env,
+				deps.panel,
+			);
+			if (launched.ok) {
+				deps.stdout.write(
+					`${launched.alreadyRunning ? "The overview is already open in a kitty panel." : "Opened the overview in a kitty panel."}\n` +
+						`Socket: unix:${launched.socket}\n` +
+						`Close it: kitten @ --to unix:${launched.socket} close-window\n`,
+				);
+				return 0;
+			}
+			if (panelMode === "force") {
+				deps.stderr.write(`❌ --panel: ${launched.message}\n`);
+				return 1;
+			}
+			deps.stderr.write(
+				`⚠️  ${launched.message}; running in this window instead\n`,
+			);
+		} else if (panelMode === "force") {
+			deps.stderr.write(
+				`❌ --panel: ${host.ok ? "panel support is unavailable" : host.reason}\n`,
+			);
+			return 1;
+		}
+	}
+
 	// Live when stdout is a terminal, once otherwise (`| cat`, a file, cron),
 	// matching `top`. `--once` forces the single print on a terminal.
-	if (deps.stdout.isTTY === true && !options.once && deps.loop) {
+	if (live && deps.loop) {
 		deps.onLiveStart?.();
 		return runOverviewLoop({
 			baseUrl,
