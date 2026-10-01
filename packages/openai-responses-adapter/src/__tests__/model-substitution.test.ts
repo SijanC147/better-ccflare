@@ -217,6 +217,103 @@ describe("peekSseModel", () => {
 	});
 });
 
+/** The first SSE frame of `anthropicStream(model)`, its `message_start`. */
+function messageStartFrame(model: string): string {
+	return `${anthropicStream(model).split("\n\n")[0]}\n\n`;
+}
+
+describe("peekSseModel error and cancel propagation", () => {
+	test("an upstream error during the peek is replayed after the bytes read", async () => {
+		const boom = new Error("boom");
+		// Erroring a stream resets its queue, so the chunk is pulled before the
+		// error: the first pull enqueues a ping, the second errors.
+		let pulls = 0;
+		const source = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				if (pulls === 1) {
+					controller.enqueue(encoder.encode(sse("ping", { type: "ping" })));
+					return;
+				}
+				controller.error(boom);
+			},
+		});
+		const peeked = await peekSseModel(source, anthropicMessageStartModel);
+		expect(peeked.model).toBeNull();
+		const reader = peeked.body.getReader();
+		const first = await reader.read();
+		expect(first.done).toBe(false);
+		expect(new TextDecoder().decode(first.value)).toBe(
+			sse("ping", { type: "ping" }),
+		);
+		await expect(reader.read()).rejects.toBe(boom);
+	});
+
+	test("an upstream error after the peek reaches the replay reader", async () => {
+		const boom = new Error("later");
+		let pulls = 0;
+		const source = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				if (pulls === 1) {
+					controller.enqueue(encoder.encode(messageStartFrame("m-1")));
+					return;
+				}
+				controller.error(boom);
+			},
+		});
+		const peeked = await peekSseModel(source, anthropicMessageStartModel);
+		expect(peeked.model).toBe("m-1");
+		const reader = peeked.body.getReader();
+		expect((await reader.read()).done).toBe(false);
+		await expect(reader.read()).rejects.toBe(boom);
+	});
+
+	test("cancelling the replay cancels the upstream with the same reason, model found", async () => {
+		let cancelledWith: unknown = "not called";
+		const source = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.enqueue(encoder.encode(messageStartFrame("m-1")));
+			},
+			cancel(reason) {
+				cancelledWith = reason;
+			},
+		});
+		const peeked = await peekSseModel(source, anthropicMessageStartModel);
+		expect(peeked.model).toBe("m-1");
+		await peeked.body.cancel("client gone");
+		expect(cancelledWith).toBe("client gone");
+	});
+
+	test("cancelling the replay cancels the upstream, model not found and reader still live", async () => {
+		let cancelledWith: unknown = "not called";
+		const source = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.enqueue(encoder.encode(sse("ping", { type: "ping" })));
+			},
+			cancel(reason) {
+				cancelledWith = reason;
+			},
+		});
+		const peeked = await peekSseModel(source, anthropicMessageStartModel, 64);
+		expect(peeked.model).toBeNull();
+		await peeked.body.cancel("client gone");
+		expect(cancelledWith).toBe("client gone");
+	});
+
+	test("cancel after the peek consumed the upstream to its end resolves", async () => {
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(sse("ping", { type: "ping" })));
+				controller.close();
+			},
+		});
+		const peeked = await peekSseModel(source, anthropicMessageStartModel);
+		expect(peeked.model).toBeNull();
+		await expect(peeked.body.cancel("client gone")).resolves.toBeUndefined();
+	});
+});
+
 describe("chat completions report a substituted model (SB23-2781)", () => {
 	test("JSON: the header and the body both name the answering model", async () => {
 		const resp = await chat(proxyAnswering("gpt-5.6-sol"), "claude-opus-5-5");

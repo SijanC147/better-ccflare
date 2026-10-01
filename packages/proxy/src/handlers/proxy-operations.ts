@@ -1742,7 +1742,7 @@ export async function proxyWithAccount(
 					);
 					// A gateway request refused this way by an OAuth account is refused
 					// by every OAuth account; proxy.ts skips the rest (SB23-2781).
-					if (noteWindowlessOAuthRefusal(requestMeta, account, req.headers)) {
+					if (noteWindowlessOAuthRefusal(requestMeta, account, inbound)) {
 						log.warn(
 							`Account ${account.name}: OpenAI-gateway request refused with a windowless 429, skipping the remaining Anthropic OAuth accounts for this request`,
 						);

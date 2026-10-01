@@ -25,23 +25,22 @@
  * and was not part of the measurement.
  */
 import type { Account, RequestMeta } from "@better-ccflare/types";
-import { extractInboundMarkerFromRequest } from "../inbound-marker";
+import type { InboundMarker } from "../inbound-marker";
 import { sendsOAuthBearer } from "./openai-compat-path";
 
 /**
  * Records a windowless 429 from `account`. Marks the request when the account
- * is OAuth and the request was translated by the OpenAI gateway; returns
+ * is OAuth and the request was translated by the OpenAI gateway (`inbound` is
+ * the marker `proxyWithAccount` already read from the request); returns
  * whether it did, so the caller can say so in its log line.
  */
 export function noteWindowlessOAuthRefusal(
 	meta: RequestMeta,
 	account: Account,
-	requestHeaders: Headers,
+	inbound: InboundMarker,
 ): boolean {
 	if (!sendsOAuthBearer(account)) return false;
-	if (extractInboundMarkerFromRequest(requestHeaders).format === null) {
-		return false;
-	}
+	if (inbound.format === null) return false;
 	meta.gatewayOAuthRefused = true;
 	return true;
 }
