@@ -4,9 +4,11 @@ import {
 	collectAnthropicLimitRows,
 	collectAnthropicUsageRows,
 	displayLabel,
+	formatExtraUsageAmount,
 	formatWindowName,
 	isUsageWindow,
 	isWeeklyWindow,
+	resolveExtraUsageDisplay,
 	severityColor,
 } from "./rate-limit-helpers";
 
@@ -383,5 +385,200 @@ describe("collectAnthropicLimitRows — scoped identity (Greptile P2)", () => {
 		const windows = rows.map((r) => r.window);
 		expect(new Set(windows).size).toBe(3); // all distinct -> no duplicate React keys
 		expect(windows[0]).toBe("seven_day_fable"); // first stays byte-stable
+	});
+});
+
+describe("resolveExtraUsageDisplay", () => {
+	const extra = (
+		fields: Partial<NonNullable<AnthropicUsageData["extra_usage"]>>,
+	): AnthropicUsageData => ({
+		extra_usage: {
+			is_enabled: true,
+			monthly_limit: null,
+			used_credits: null,
+			utilization: null,
+			...fields,
+		},
+	});
+
+	it("is absent when neither flag is a boolean", () => {
+		expect(resolveExtraUsageDisplay(null)).toEqual({ kind: "absent" });
+		expect(resolveExtraUsageDisplay({})).toEqual({ kind: "absent" });
+		expect(resolveExtraUsageDisplay({ spend: { percent: 10 } })).toEqual({
+			kind: "absent",
+		});
+	});
+
+	it("lets spend.enabled outrank extra_usage.is_enabled, both ways", () => {
+		expect(
+			resolveExtraUsageDisplay({
+				...extra({ is_enabled: true, monthly_limit: 10, used_credits: 1 }),
+				spend: { enabled: false },
+			}).kind,
+		).toBe("off");
+		expect(
+			resolveExtraUsageDisplay({
+				...extra({ is_enabled: false, monthly_limit: 10, used_credits: 1 }),
+				spend: { enabled: true },
+			}).kind,
+		).toBe("on");
+	});
+
+	it("takes the off reason from spend first, then extra_usage, else null", () => {
+		expect(
+			resolveExtraUsageDisplay({
+				...extra({ is_enabled: false, disabled_reason: "b" }),
+				spend: { enabled: false, disabled_reason: "a" },
+			}),
+		).toEqual({ kind: "off", reason: "a" });
+		expect(
+			resolveExtraUsageDisplay(
+				extra({ is_enabled: false, disabled_reason: "b" }),
+			),
+		).toEqual({ kind: "off", reason: "b" });
+		expect(resolveExtraUsageDisplay(extra({ is_enabled: false }))).toEqual({
+			kind: "off",
+			reason: null,
+		});
+	});
+
+	it("clamps remaining at zero and reports the limit reached", () => {
+		const d = resolveExtraUsageDisplay(
+			extra({ monthly_limit: 1000, used_credits: 1123, utilization: 100 }),
+		);
+		expect(d).toEqual({
+			kind: "on",
+			used: 1123,
+			limit: 1000,
+			remaining: 0,
+			percent: 100,
+			unit: null,
+			limitReached: true,
+		});
+	});
+
+	it("prefers spend's money objects and their unit", () => {
+		const d = resolveExtraUsageDisplay({
+			...extra({ monthly_limit: 9, used_credits: 9 }),
+			spend: {
+				enabled: true,
+				used: { amount_minor: 250, currency: "USD", exponent: 2 },
+				limit: { amount_minor: 1000, currency: "USD", exponent: 2 },
+			},
+		});
+		expect(d).toMatchObject({
+			used: 250,
+			limit: 1000,
+			remaining: 750,
+			unit: { currency: "USD", exponent: 2 },
+		});
+	});
+
+	it("falls back to extra_usage when spend's money disagrees on unit or is malformed", () => {
+		for (const spend of [
+			{
+				enabled: true,
+				used: { amount_minor: 1, currency: "USD", exponent: 2 },
+				limit: { amount_minor: 5, currency: "EUR", exponent: 2 },
+			},
+			{
+				enabled: true,
+				// No exponent: the old row defaulted it to 2, which invents a unit.
+				used: { amount_minor: 1, currency: "USD" } as never,
+			},
+		]) {
+			expect(
+				resolveExtraUsageDisplay({
+					...extra({ monthly_limit: 1000, used_credits: 400 }),
+					spend,
+				}),
+			).toMatchObject({ used: 400, limit: 1000, remaining: 600, unit: null });
+		}
+	});
+
+	it("prefers a complete extra_usage reading over a spend reading missing its limit", () => {
+		const d = resolveExtraUsageDisplay({
+			...extra({
+				monthly_limit: 1000,
+				used_credits: 400,
+				currency: "USD",
+				decimal_places: 2,
+			}),
+			spend: {
+				enabled: true,
+				used: { amount_minor: 400, currency: "USD", exponent: 2 },
+				limit: null,
+			},
+		});
+		expect(d).toMatchObject({ used: 400, limit: 1000, remaining: 600 });
+	});
+
+	it("keeps a spend reading with only used when nothing better exists", () => {
+		const d = resolveExtraUsageDisplay({
+			spend: {
+				enabled: true,
+				used: { amount_minor: 0, currency: "USD", exponent: 2 },
+			},
+		});
+		expect(d).toMatchObject({ used: 0, limit: null, remaining: null });
+	});
+
+	it("takes percent from spend, then utilization, then the ratio", () => {
+		expect(
+			resolveExtraUsageDisplay({
+				...extra({ monthly_limit: 100, used_credits: 50, utilization: 7 }),
+				spend: { enabled: true, percent: 3 },
+			}),
+		).toMatchObject({ percent: 3 });
+		expect(
+			resolveExtraUsageDisplay(
+				extra({ monthly_limit: 100, used_credits: 50, utilization: 7 }),
+			),
+		).toMatchObject({ percent: 7 });
+		expect(
+			resolveExtraUsageDisplay(extra({ monthly_limit: 200, used_credits: 50 })),
+		).toMatchObject({ percent: 25 });
+		expect(
+			resolveExtraUsageDisplay(extra({ monthly_limit: 0, used_credits: 0 })),
+		).toMatchObject({ percent: null, limitReached: true });
+	});
+
+	it("reports the limit reached from spend_limit_reached alone", () => {
+		expect(
+			resolveExtraUsageDisplay(
+				extra({
+					monthly_limit: 100,
+					used_credits: 1,
+					spend_limit_reached: true,
+				}),
+			),
+		).toMatchObject({ remaining: 99, limitReached: true });
+	});
+
+	it("invents nothing when the pool is on with no figures", () => {
+		expect(resolveExtraUsageDisplay(extra({}))).toEqual({
+			kind: "on",
+			used: null,
+			limit: null,
+			remaining: null,
+			percent: null,
+			unit: null,
+			limitReached: false,
+		});
+	});
+});
+
+describe("formatExtraUsageAmount", () => {
+	it("formats minor units at the unit's precision, independent of locale", () => {
+		expect(formatExtraUsageAmount(1234, { currency: "USD", exponent: 2 })).toBe(
+			"USD 12.34",
+		);
+		expect(formatExtraUsageAmount(5, { currency: "JPY", exponent: 0 })).toBe(
+			"JPY 5",
+		);
+	});
+
+	it("prints a bare number when no unit was reported", () => {
+		expect(formatExtraUsageAmount(1123, null)).toBe("1123");
 	});
 });
