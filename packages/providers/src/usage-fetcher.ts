@@ -533,8 +533,12 @@ function getWinningZaiTokenWindow(usage: ZaiUsageData): ZaiUsageWindow | null {
  * five hours. Widening this to every window would be deciding something that
  * was not ruled on, in the direction that routes traffic at an account
  * upstream may refuse.
+ *
+ * Exported for the weekly usage throttle (`usage-throttling.ts`, SB23-2541),
+ * which must leave out the same window admission does or it re-benches the
+ * account admission just kept.
  */
-const CODEX_CREDIT_COVERED_WINDOW = "seven_day";
+export const CODEX_CREDIT_COVERED_WINDOW = "seven_day";
 
 /**
  * Whether this payload's weekly window should be left out of the admission
@@ -552,8 +556,17 @@ const CODEX_CREDIT_COVERED_WINDOW = "seven_day";
  * lockstep by construction: they cannot disagree about which windows are in
  * play, because they are given the same answer rather than asked the same
  * question twice.
+ *
+ * Exported so the weekly usage throttle asks this function rather than a copy
+ * of it (SB23-2541). The throttle reading a different answer is the defect
+ * that issue fixed: admission kept a credit-covered account and the throttle
+ * benched it on the `seven_day = 100` admission had just excluded.
+ *
+ * It reads `credits` off whatever it is handed and does no dating of its own,
+ * so hand it what `usageCache.get` returned: that read path is where a stale
+ * balance is withheld.
  */
-function codexCreditsExcludeWeekly(
+export function codexCreditsExcludeWeekly(
 	data: AnyUsageData | null | undefined,
 	provider: string,
 ): boolean {

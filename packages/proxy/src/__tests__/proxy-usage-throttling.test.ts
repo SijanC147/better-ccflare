@@ -1,8 +1,17 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
+import * as usageCollectorModule from "../usage-collector";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -114,5 +123,158 @@ describe("handleProxy usage throttling", () => {
 		} finally {
 			Date.now = realDateNow;
 		}
+	});
+});
+
+/**
+ * SB23-2541 at the call site. The unit tests pin `getUsageThrottleStatus`;
+ * these pin that `handleProxy` hands it the account's provider and the cached
+ * payload, which is what a mutation at `proxy.ts` would break.
+ */
+describe("handleProxy weekly throttle and Codex credits (SB23-2541)", () => {
+	const NOW = Date.UTC(2026, 9, 1, 12, 0, 0);
+	const realFetch = globalThis.fetch;
+	const realDateNow = Date.now;
+	let fetched: string[] = [];
+	let collectorSpy: ReturnType<typeof spyOn> | null = null;
+	// Comfortably past the token refresh safety window, so routing never tries
+	// to mint a token and the only upstream call is the proxied request.
+	const account = (overrides: Partial<Account> = {}) =>
+		makeAccount({ expires_at: NOW + 3 * 60 * 60 * 1000, ...overrides });
+
+	/**
+	 * Halfway through the week, so the throttle's expected pace is 50 percent.
+	 * 100 is the acceptance case; 90 is below admission's bench line, so a
+	 * negative at 90 reaches the throttle and answers its 529 rather than
+	 * being benched earlier by admission (which answers 503 on its own path).
+	 */
+	function weeklyAt(
+		weekly: number,
+		credits?: {
+			has_credits: boolean;
+			unlimited: boolean;
+			balance: string | null;
+		},
+	) {
+		return {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(NOW + 2.5 * 60 * 60 * 1000).toISOString(),
+			},
+			seven_day: {
+				utilization: weekly,
+				resets_at: new Date(NOW + 3.5 * 24 * 60 * 60 * 1000).toISOString(),
+			},
+			...(credits ? { credits } : {}),
+		};
+	}
+
+	function request() {
+		return new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5",
+				messages: [{ role: "user", content: "hello" }],
+				max_tokens: 16,
+			}),
+		});
+	}
+
+	beforeEach(() => {
+		fetched = [];
+		// Every upstream call is recorded and answered here, so nothing leaves
+		// the machine. A test that expects the request to go upstream asserts
+		// on what was recorded, which fails if the stub was never reached.
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			fetched.push(
+				typeof input === "string"
+					? input
+					: input instanceof URL
+						? input.href
+						: input.url,
+			);
+			return new Response(JSON.stringify({ error: "stubbed upstream" }), {
+				status: 418,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as typeof fetch;
+		// Frozen before usageCache.set so the entry and the balance share NOW.
+		Date.now = () => NOW;
+		collectorSpy = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue({
+			handleStart: mock(() => {}),
+			handleChunk: mock(() => {}),
+			handleEnd: mock(() => Promise.resolve()),
+		} as unknown as usageCollectorModule.UsageCollector);
+	});
+
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		Date.now = realDateNow;
+		collectorSpy?.mockRestore();
+		collectorSpy = null;
+		usageCache.delete("acc-1");
+	});
+
+	it("routes a credit-covered Codex account at seven_day = 100 instead of answering 529", async () => {
+		const acct = account();
+		usageCache.set(
+			acct.id,
+			weeklyAt(100, { has_credits: true, unlimited: false, balance: "9.99" }),
+			NOW,
+		);
+		const req = request();
+
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			makeContext(acct),
+		);
+
+		expect(response.status).not.toBe(529);
+		expect(fetched.length).toBeGreaterThan(0);
+		expect(fetched.every((url) => !url.startsWith("https://proxy.local"))).toBe(
+			true,
+		);
+	});
+
+	it("answers 529 for a Codex account ahead of weekly pace with no credits, without contacting upstream", async () => {
+		const acct = account();
+		usageCache.set(acct.id, weeklyAt(90), NOW);
+		const req = request();
+
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			makeContext(acct),
+		);
+
+		expect(response.status).toBe(529);
+		expect(fetched).toEqual([]);
+	});
+
+	it("answers 529 for an Anthropic account whose payload carries a covering credits key", async () => {
+		const acct = account({
+			provider: "anthropic",
+			name: "claude-a",
+		});
+		usageCache.set(
+			acct.id,
+			weeklyAt(90, { has_credits: true, unlimited: false, balance: "9.99" }),
+			NOW,
+		);
+		const req = request();
+
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			makeContext(acct),
+		);
+
+		expect(response.status).toBe(529);
+		expect(fetched).toEqual([]);
 	});
 });

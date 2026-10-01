@@ -7,6 +7,7 @@ import {
 	runMigrations,
 } from "@better-ccflare/database";
 import { parseCodexUsageHeaders, usageCache } from "@better-ccflare/providers";
+import { getUsageThrottleUntil } from "@better-ccflare/proxy";
 import type { AccountResponse } from "@better-ccflare/types";
 import { createAccountsListHandler } from "../accounts";
 
@@ -339,5 +340,170 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
 
 		expect(usage).not.toBeNull();
 		expect(usage && "credits" in usage).toBe(false);
+	});
+});
+
+/**
+ * SB23-2541: the dashboard's throttle state for an account is the one the
+ * router acts on. Both read the same cache entry and pass the account's
+ * provider to the same function, so a credit-covered Codex account at weekly
+ * 100 is neither throttled on the card nor in routing.
+ */
+describe("GET /api/accounts: weekly throttle agrees with routing (SB23-2541)", () => {
+	const ID = "codex-throttle-acct";
+	const SETTINGS = { fiveHourEnabled: true, weeklyEnabled: true };
+	const THROTTLE_CONFIG = {
+		getUsageThrottlingFiveHourEnabled: () => SETTINGS.fiveHourEnabled,
+		getUsageThrottlingWeeklyEnabled: () => SETTINGS.weeklyEnabled,
+	} as unknown as Config;
+	let sqlite: Database;
+	let adapter: BunSqlAdapter;
+
+	beforeEach(async () => {
+		sqlite = new Database(":memory:");
+		ensureSchema(sqlite);
+		runMigrations(sqlite);
+		adapter = new BunSqlAdapter(sqlite);
+		usageCache.delete(ID);
+		await adapter.run(
+			`INSERT INTO accounts (
+				id, name, provider, refresh_token, access_token, expires_at, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				ID,
+				"Codex throttle",
+				"codex",
+				"refresh-token",
+				"access-token",
+				Date.now() + 3_600_000,
+				Date.now(),
+			],
+		);
+	});
+
+	afterEach(() => {
+		usageCache.delete(ID);
+		sqlite.close();
+	});
+
+	/** Halfway through the week, so the expected pace is 50 percent. */
+	function weekly(utilization: number, credits?: Record<string, unknown>) {
+		return {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization,
+				resets_at: new Date(Date.now() + 3.5 * 86_400_000).toISOString(),
+			},
+			...(credits ? { credits } : {}),
+		};
+	}
+
+	async function card(): Promise<AccountResponse | undefined> {
+		const dbOps = {
+			getAdapter: () => adapter,
+			getStatsRepository: () => ({
+				getSessionStats: async () => new Map(),
+			}),
+			getLatestUsageSnapshot: async () => null,
+		};
+		const response = await createAccountsListHandler(
+			dbOps as never,
+			THROTTLE_CONFIG,
+		)();
+		const accounts = (await response.json()) as AccountResponse[];
+		return accounts.find((a) => a.id === ID);
+	}
+
+	function routed(): number | null {
+		return getUsageThrottleUntil(
+			usageCache.get(ID),
+			"codex",
+			SETTINGS,
+			Date.now(),
+			{ scopedMode: "match" },
+		);
+	}
+
+	it("shows a credit-covered Codex account at weekly 100 as not throttled, as routing does", async () => {
+		usageCache.set(
+			ID,
+			weekly(100, {
+				has_credits: true,
+				unlimited: false,
+				balance: "9.99",
+			}) as never,
+		);
+
+		const account = await card();
+
+		expect(account?.usageThrottledUntil).toBeNull();
+		expect(account?.usageThrottledWindows).toEqual([]);
+		expect(routed()).toBeNull();
+	});
+
+	it("does not clear the card's weekly throttle on a stale balance recovered from a stored payload", async () => {
+		// Nothing is cached, so the handler reparses a day-old stored response.
+		// It writes that into usageCache dated by the payload, where get()
+		// withholds the balance, and returns the reparsed payload with the
+		// balance still on it. Routing throttles on the cache entry, so the card
+		// must too, or it shows "not throttled" on an account routing benches.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const longAgo = Date.now() - 24 * 60 * 60 * 1000;
+		await adapter.run(
+			`INSERT INTO requests (id, timestamp, method, path, account_used, model, success)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			["req-stale-throttle", longAgo, "POST", "/v1/messages", ID, "gpt-5.5", 1],
+		);
+		await adapter.run(
+			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
+			[
+				"req-stale-throttle",
+				JSON.stringify({
+					meta: { timestamp: longAgo },
+					response: {
+						status: 200,
+						headers: {
+							"x-codex-primary-window-minutes": "300",
+							"x-codex-primary-used-percent": "0",
+							"x-codex-primary-reset-at": String(nowSeconds + 3600),
+							"x-codex-secondary-window-minutes": "10080",
+							"x-codex-secondary-used-percent": "100",
+							"x-codex-secondary-reset-at": String(nowSeconds + 129_600),
+							"x-codex-credits-has-credits": "true",
+							"x-codex-credits-unlimited": "false",
+							"x-codex-credits-balance": "42.50",
+						},
+					},
+				}),
+				longAgo,
+			],
+		);
+
+		const account = await card();
+		const until = routed();
+
+		expect(until).not.toBeNull();
+		expect(account?.usageThrottledWindows).toEqual(["seven_day"]);
+		expect(account?.usageThrottledUntil).toBe(until);
+		// The rest of the card reads the same entry: no day-old balance shown,
+		// and the status label agrees with the weekly window routing sees.
+		const usage = account?.usageData as UsageWithCredits | null;
+		expect(usage && "credits" in usage).toBe(false);
+		expect(usage?.seven_day.utilization).toBe(100);
+		expect(account?.rateLimitStatus).toStartWith("usage_exhausted");
+	});
+
+	it("shows the same throttle the router applies when the account holds no credits", async () => {
+		usageCache.set(ID, weekly(90) as never);
+
+		const account = await card();
+		const until = routed();
+
+		expect(until).not.toBeNull();
+		expect(account?.usageThrottledWindows).toEqual(["seven_day"]);
+		expect(account?.usageThrottledUntil).toBe(until);
 	});
 });
