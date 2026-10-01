@@ -326,7 +326,7 @@ A release is a pushed `v*` tag on protected main — nothing else starts one. It
     - No vertex-ai account exists on the host.
     - Codex's three request-id maps now live per attempt on the `ProviderRequestContext` carrier (`SB23-3964`). No age sweep or count cap can evict a live attempt's state.
     - The provider-wide maps remain only for direct test callers.
-  - `#302` `exactOptionalPropertyTypes` is on in 21 of 27 typecheck targets (`SB23-2456`). Members that already took `undefined` were widened to `?: T | undefined`, which is runtime-identical. proxy, http-api, server and cli follow in `SB23-3983` and `SB23-3984`.
+  - `#302` `exactOptionalPropertyTypes` is on in 21 of 27 typecheck targets (`SB23-2456`). Members that already took `undefined` were widened to `?: T | undefined`, which is runtime-identical. proxy, http-api, server and cli followed in `#306` (`SB23-3983`, `SB23-3984`, `fbd06a5d`), which merged after the tag. On `main` the flag is set once in the root `tsconfig.json`, and all 28 programs read 0.
 - **v3.41.0** (`72a371f2`) carried:
   - `#301` a `ProviderRequestContext` per upstream attempt, created in `proxyWithAccount` and passed to `prepareRequest`, `buildUrl` and both `processResponse` sites (`SB23-2508`). Vertex AI's `_vertexModel` and `_originalModel` moved off the shared `Account` into a `WeakMap` keyed on it. Open: codex's three request-id maps (`SB23-3964`) and Vertex model fallback re-sending to the first model's URL (`SB23-3971`, pre-existing), one lane live on both.
   - `#299` the accounts rebuilds (`SB23-3918`, `SB23-3919`, `SB23-3947`):
