@@ -538,6 +538,8 @@ export const useSetRetention = () => {
 		}) => api.setRetention(partial),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["retention"] });
+			// request-storage reports `persists`, which store_payloads decides too.
+			queryClient.invalidateQueries({ queryKey: ["request-storage"] });
 		},
 	});
 };

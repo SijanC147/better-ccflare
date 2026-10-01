@@ -6,7 +6,7 @@ description: |-
   Body: Carries a credential. The playground never logs a request body — see the PR body.
 method: POST
 url: '{{baseUrl}}/api/config/github-token'
-order: 33000
+order: 37000
 headers:
   - key: 'Content-Type'
     value: 'application/json'

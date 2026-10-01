@@ -4,4 +4,4 @@ description: |-
   Whether a GitHub token is stored. The token is never returned.
 method: GET
 url: '{{baseUrl}}/api/config/github-token'
-order: 32000
+order: 36000

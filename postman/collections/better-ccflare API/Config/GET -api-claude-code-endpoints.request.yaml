@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/claude-code-endpoints'
+description: |-
+  Claude Code project endpoints, each a name mapped to a host directory and served at /<name>/v1, plus stored entries skipped as invalid.
+method: GET
+url: '{{baseUrl}}/api/claude-code-endpoints'
+order: 24000

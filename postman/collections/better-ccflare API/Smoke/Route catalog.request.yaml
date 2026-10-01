@@ -11,6 +11,6 @@ scripts:
       pm.test("status is 200", () => pm.response.to.have.status(200));
       pm.test("collection is current with the server catalog (regenerate if this fails)", () => {
         const body = pm.response.json();
-        pm.expect(body.count).to.eql(163);
-        pm.expect(body.routes).to.have.lengthOf(163);
+        pm.expect(body.count).to.eql(167);
+        pm.expect(body.routes).to.have.lengthOf(167);
       });

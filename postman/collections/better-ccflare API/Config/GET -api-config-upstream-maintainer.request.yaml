@@ -4,4 +4,4 @@ description: |-
   The upstream maintainer App's configuration.
 method: GET
 url: '{{baseUrl}}/api/config/upstream-maintainer'
-order: 34000
+order: 38000

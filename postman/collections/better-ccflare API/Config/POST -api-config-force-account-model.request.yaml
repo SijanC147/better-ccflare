@@ -4,7 +4,7 @@ description: |-
   Toggle account model forcing.
 method: POST
 url: '{{baseUrl}}/api/config/force-account-model'
-order: 31000
+order: 35000
 headers:
   - key: 'Content-Type'
     value: 'application/json'

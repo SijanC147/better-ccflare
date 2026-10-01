@@ -4,7 +4,7 @@ description: |-
   Set combo session fallback behaviour.
 method: POST
 url: '{{baseUrl}}/api/config/combo-session-fallback'
-order: 29000
+order: 33000
 headers:
   - key: 'Content-Type'
     value: 'application/json'

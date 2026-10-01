@@ -4,6 +4,8 @@ import {
 	errorResponse,
 	jsonResponse,
 } from "@better-ccflare/http-common";
+import type { RequestStorageGetResponse } from "@better-ccflare/types";
+import { resolvePayloadPersistence } from "@better-ccflare/types/request";
 
 /**
  * Create request-storage config handlers
@@ -12,12 +14,20 @@ export function createRequestStorageHandlers(config: Config) {
 	return {
 		/**
 		 * GET /api/config/request-storage
-		 * Returns the current headers-only storage setting.
+		 * Returns both switches that decide what a request's payload row holds,
+		 * and `persists`, what is actually written as a result. Headers-only
+		 * mode used to be reported alone, and read as "headers are kept" on an
+		 * install where store_payloads was off and nothing was kept (SB23-2572).
 		 */
 		getRequestStorage: (): Response => {
-			return jsonResponse({
-				headersOnly: config.getRequestStorageHeadersOnly(),
-			});
+			const headersOnly = config.getRequestStorageHeadersOnly();
+			const storePayloads = config.getStorePayloads();
+			const body: RequestStorageGetResponse = {
+				headersOnly,
+				storePayloads,
+				persists: resolvePayloadPersistence(storePayloads, headersOnly),
+			};
+			return jsonResponse(body);
 		},
 
 		/**

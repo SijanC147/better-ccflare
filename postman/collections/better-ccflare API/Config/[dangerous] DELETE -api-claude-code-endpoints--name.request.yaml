@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/claude-code-endpoints/:name'
+description: |-
+  Delete one Claude Code project endpoint.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/claude-code-endpoints/:name'
+order: 27000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'name'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

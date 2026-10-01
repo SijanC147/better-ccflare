@@ -90,6 +90,7 @@ interface TestRequestState {
 	chunksBytes: number;
 	chunksTruncated: boolean;
 	payloadReleased: boolean;
+	bodiesReleased: boolean;
 	retainedPayloadBytes: number;
 	usage: {
 		model?: string;
@@ -654,7 +655,10 @@ describe("UsageCollector request lifecycle", () => {
 		expect(saveRequestIds).toEqual([]);
 	});
 
-	it("keeps parser state but permanently releases payload capture for an old active stream", async () => {
+	// SB23-2572: the retention bound drops the bodies and keeps the header set,
+	// because a row is still written; before, it dropped the headers too and the
+	// request persisted nothing at all.
+	it("keeps parser state, releases body capture for an old active stream, and still writes its headers", async () => {
 		const { collector, payloads, saveRequestIds } = harness(true);
 		const requestBody = Buffer.from("old active request").toString("base64");
 		collector.handleStart(
@@ -676,10 +680,15 @@ describe("UsageCollector request lifecycle", () => {
 		testable(collector).cleanupStaleRequests();
 
 		expect(testable(collector).requests.has("old-active-stream")).toBe(true);
-		expect(state?.payloadReleased).toBe(true);
+		expect(state?.payloadReleased).toBe(false);
+		expect(state?.bodiesReleased).toBe(true);
 		expect(state?.startMessage.requestBody).toBeNull();
-		expect(state?.startMessage.requestHeaders).toEqual({});
-		expect(state?.startMessage.responseHeaders).toEqual({});
+		expect(state?.startMessage.requestHeaders).toEqual({
+			"x-old-active": "true",
+		});
+		expect(state?.startMessage.responseHeaders).toEqual({
+			"x-response": "old-active",
+		});
 		expect(state?.chunks).toEqual([]);
 		expect(state?.chunksBytes).toBe(0);
 		expect(state?.chunksTruncated).toBe(true);
@@ -702,7 +711,16 @@ describe("UsageCollector request lifecycle", () => {
 		await collector.drain();
 
 		expect(saveRequestIds).toEqual(["old-active-stream"]);
-		expect(payloads.has("old-active-stream")).toBe(false);
+		const stored = JSON.parse(payloads.get("old-active-stream") ?? "null") as {
+			request: { headers: Record<string, string>; body: string | null };
+			response: { headers: Record<string, string>; body: string | null };
+			meta: { bodiesReleased?: boolean };
+		} | null;
+		expect(stored?.request.headers).toEqual({ "x-old-active": "true" });
+		expect(stored?.response.headers).toEqual({ "x-response": "old-active" });
+		expect(stored?.request.body).toBeNull();
+		expect(stored?.response.body).toBeNull();
+		expect(stored?.meta.bodiesReleased).toBe(true);
 	});
 
 	it("releases one active request payload when its next chunk would exceed the global byte budget", async () => {
@@ -722,9 +740,13 @@ describe("UsageCollector request lifecycle", () => {
 		testable(collector).activePayloadBytes = nearCap;
 		collector.handleChunk("active-budget", modelBearingChunk());
 
-		expect(state?.payloadReleased).toBe(true);
+		// The budget drops the bodies; the header set stays for the row.
+		expect(state?.payloadReleased).toBe(false);
+		expect(state?.bodiesReleased).toBe(true);
 		expect(state?.startMessage.requestBody).toBeNull();
-		expect(state?.startMessage.requestHeaders).toEqual({});
+		expect(state?.startMessage.requestHeaders).toEqual({
+			"x-active-budget": "true",
+		});
 		expect(state?.chunks).toEqual([]);
 		expect(state?.chunksBytes).toBe(0);
 		expect(state?.retainedPayloadBytes).toBe(0);

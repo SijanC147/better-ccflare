@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'PUT /api/claude-code-endpoints/:name'
+description: |-
+  Create or replace one Claude Code project endpoint. The directory must exist; a name held by an OpenAI gateway is refused with 409.
+  
+  Body: {"directory": "/abs/path/to/project", "models": ["default", "sonnet"], "permission_mode": "bypassPermissions", "max_concurrency": 2}
+method: PUT
+url: '{{baseUrl}}/api/claude-code-endpoints/:name'
+order: 26000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'name'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}
