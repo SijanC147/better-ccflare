@@ -136,6 +136,32 @@ describe("buildOverviewAccount", () => {
 		expect(built.rows.map((r) => r.label)).toEqual(["Weekly"]);
 	});
 
+	it("keeps a Codex account's Weekly row as N/A when it has no data", () => {
+		const built = buildOverviewAccount(
+			account({ provider: "codex", usageData: null }),
+		);
+		expect(built.rows.map((r) => [r.label, r.utilization])).toEqual([
+			["Weekly", null],
+		]);
+	});
+
+	it("notes the usage API rate limit only when there is no payload, like the card", () => {
+		const limited = buildOverviewAccount(
+			account({ usageData: null, usageRateLimitedUntil: NOW + 60_000 }),
+		);
+		expect(limited.note).toStartWith("usage API rate limited until ");
+		const withPayload = buildOverviewAccount(
+			account({
+				usageData: { credits: {} } as unknown as AccountResponse["usageData"],
+				usageRateLimitedUntil: NOW + 60_000,
+				usageUtilization: 12,
+				usageWindow: "five_hour",
+			}),
+		);
+		expect(withPayload.note).toBeNull();
+		expect(withPayload.rows.map((r) => r.utilization)).toEqual([12]);
+	});
+
 	it("shows the representative scalar for other providers", () => {
 		const built = buildOverviewAccount(
 			account({
@@ -342,10 +368,12 @@ describe("fetchOverview", () => {
 	});
 
 	it("refuses a body that is not an account list", async () => {
-		const result = await fetchOverview(url, null, {
-			fetch: json(200, { hello: "world" }),
-		});
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.kind).toBe("invalid");
+		for (const body of [{ hello: "world" }, [{}], [{ name: "a" }], [null]]) {
+			const result = await fetchOverview(url, null, {
+				fetch: json(200, body),
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.kind).toBe("invalid");
+		}
 	});
 });

@@ -595,6 +595,32 @@ describe("CLI Integration Tests", () => {
 		});
 	});
 
+	describe("tui", () => {
+		// `tui` must be dispatched before anything that starts a server: before
+		// this subcommand existed, an unrecognised `tui` fell through to the
+		// default server start. `killed: false` says the CLI exited on its own
+		// rather than going on to serve until the harness deadline.
+		it("exits 1 naming the only known dashboard", async () => {
+			const result = await runCLI(["tui", "nosuch"]);
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toBe(
+				"❌ Unknown dashboard: nosuch. Known dashboards: overview\n",
+			);
+		});
+
+		it("exits 1 naming the URL when nothing listens, without starting a server", async () => {
+			// Port 1 is privileged and unbound, so the connection is refused at once.
+			const result = await runCLI(["tui", "overview", "--port", "1", "--once"]);
+			expect(result.killed).toBe(false);
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toBe(
+				"❌ server not running on http://127.0.0.1:1\n",
+			);
+			expect(result.stdout).toBe("");
+		});
+	});
+
 	describe("Error Handling", () => {
 		it("should handle invalid port gracefully", async () => {
 			const result = await runCLI(["--serve", "--port", "not-a-number"]);

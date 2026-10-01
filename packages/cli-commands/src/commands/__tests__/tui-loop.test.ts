@@ -196,6 +196,69 @@ describe("runOverviewLoop", () => {
 		expect(f.errors).toEqual(["❌ API key required\n"]);
 	});
 
+	it("restores the terminal and exits 1 when a fetch throws", async () => {
+		const f = fakeIO();
+		const done = runOverviewLoop({
+			baseUrl: "http://127.0.0.1:65532",
+			intervalMs: 5000,
+			color: false,
+			initial: [acct("alpha", 10)],
+			fetchOnce: async () => {
+				throw new Error("boom");
+			},
+			quitHint: "q",
+			io: f.io,
+		});
+		await f.fireInterval();
+		expect(await done).toBe(1);
+		expect(f.rawModes).toEqual([true, false]);
+		expect(f.writes[f.writes.length - 1]).toBe(LEAVE_SCREEN);
+		expect(f.errors).toEqual(["❌ boom\n"]);
+		expect(f.listenerCount()).toBe(0);
+	});
+
+	it("restores the terminal when the first paint throws", async () => {
+		const f = fakeIO();
+		const done = runOverviewLoop({
+			baseUrl: "http://127.0.0.1:65532",
+			intervalMs: 5000,
+			color: false,
+			// Not a shape fetchOverview lets through; stands in for any render throw.
+			initial: [{} as AccountResponse],
+			fetchOnce: async () => ({ ok: true, accounts: [] }),
+			quitHint: "q",
+			io: f.io,
+		});
+		expect(await done).toBe(1);
+		expect(f.rawModes).toEqual([true, false]);
+		expect(f.writes[f.writes.length - 1]).toBe(LEAVE_SCREEN);
+		expect(f.timers()).toEqual([]);
+	});
+
+	it("arms no timer when stopped while a fetch is in flight", async () => {
+		const f = fakeIO();
+		let release: (r: OverviewFetchResult) => void = () => {};
+		const done = runOverviewLoop({
+			baseUrl: "http://127.0.0.1:65532",
+			intervalMs: 5000,
+			color: false,
+			initial: [acct("alpha", 10)],
+			fetchOnce: () =>
+				new Promise<OverviewFetchResult>((resolve) => {
+					release = resolve;
+				}),
+			quitHint: "q",
+			io: f.io,
+		});
+		await f.fireInterval();
+		f.signal("SIGTERM");
+		expect(await done).toBe(0);
+		release({ ok: true, accounts: [acct("late", 1)] });
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(f.timers()).toEqual([]);
+		expect(f.writes[f.writes.length - 1]).toBe(LEAVE_SCREEN);
+	});
+
 	it("re-measures the width on SIGWINCH", async () => {
 		const f = fakeIO(80);
 		const done = start(f);

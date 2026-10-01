@@ -144,7 +144,19 @@ export async function fetchOverview(
 	} catch {
 		body = undefined;
 	}
-	if (!Array.isArray(body)) {
+	// Every element needs the two strings the renderer reads unguarded; a
+	// --url pointing at another service that answers an array is refused here
+	// rather than throwing mid-render with the terminal in raw mode.
+	if (
+		!Array.isArray(body) ||
+		!body.every(
+			(a) =>
+				a !== null &&
+				typeof a === "object" &&
+				typeof (a as { name?: unknown }).name === "string" &&
+				typeof (a as { provider?: unknown }).provider === "string",
+		)
+	) {
 		return {
 			ok: false,
 			kind: "invalid",
@@ -249,8 +261,10 @@ export function buildOverviewAccount(
 		return { ...base, rows: shown.map(toOverviewRow), note: null };
 	}
 
+	// Same condition as the dashboard card: only when there is no payload at all.
 	if (
 		(account.provider === "anthropic" || isCodex) &&
+		usageData == null &&
 		account.usageRateLimitedUntil != null
 	) {
 		return {
@@ -273,6 +287,22 @@ export function buildOverviewAccount(
 					window: account.usageWindow,
 					resetTime: account.rateLimitReset,
 					label: formatWindowName(account.usageWindow),
+				}),
+			],
+			note: null,
+		};
+	}
+
+	// Codex has no usage-polling endpoint, so its weekly window is its only
+	// quota bar; the dashboard keeps it on screen as N/A rather than dropping it.
+	if (isCodex) {
+		return {
+			...base,
+			rows: [
+				toOverviewRow({
+					utilization: null,
+					window: "seven_day",
+					resetTime: null,
 				}),
 			],
 			note: null,
@@ -595,21 +625,32 @@ export function runOverviewLoop(options: LoopOptions): Promise<number> {
 			timer = io.setTimer(() => void tick(), options.intervalMs);
 		};
 
+		// Every paint after ENTER_SCREEN goes through this: a throw while the
+		// terminal is in raw mode on the alternate screen must restore it.
+		const safePaint = () => {
+			try {
+				paint();
+			} catch (error) {
+				stop(1, error instanceof Error ? error.message : String(error));
+			}
+		};
+
 		io.stdout.write(ENTER_SCREEN);
 		for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
 			unregister.push(io.onSignal(signal, () => stop(0)));
 		}
-		unregister.push(io.onSignal("SIGWINCH", paint));
+		unregister.push(io.onSignal("SIGWINCH", safePaint));
 		if (io.stdin?.isTTY) {
 			io.stdin.setRawMode?.(true);
 			io.stdin.on("data", onKey);
 			io.stdin.resume();
 		}
 
-		paint();
+		safePaint();
+		if (stopped) return;
 		settleTimer = io.setTimer(() => {
 			settleTimer = null;
-			paint();
+			safePaint();
 		}, SETTLE_REPAINT_MS);
 		timer = io.setTimer(() => void tick(), options.intervalMs);
 	});

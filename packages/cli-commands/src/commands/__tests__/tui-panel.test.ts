@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { parseTuiArgs, runTui, type TuiDeps } from "../tui";
+import { ENTER_SCREEN, type LoopSignal } from "../tui-overview";
 import {
 	buildPanelCommand,
 	detectKittyPanelHost,
@@ -279,8 +280,25 @@ describe("runTui panel mode", () => {
 			onLiveStart: () => {
 				liveStarted++;
 			},
+			// A live loop with no keyboard, ended by a signal, like a panel child.
+			loop: {
+				stdin: null,
+				onSignal: (signal, handler) => {
+					handlers.set(signal, handler);
+					return () => handlers.delete(signal);
+				},
+				setTimer: () => 0,
+				clearTimer: () => {},
+			},
 		};
-		return { d, out, err, liveStarted: () => liveStarted };
+		const handlers = new Map<LoopSignal, () => void>();
+		return {
+			d,
+			out,
+			err,
+			liveStarted: () => liveStarted,
+			signal: (s: LoopSignal) => handlers.get(s)?.(),
+		};
 	}
 	const opts = (args: string[]) => {
 		const r = parseTuiArgs(args);
@@ -309,6 +327,50 @@ describe("runTui panel mode", () => {
 			expect(await runTui(opts([...args]), d)).toBe(0);
 			expect(f.spawned).toHaveLength(0);
 		}
+	});
+
+	it("runs live in the window, never a panel, with --no-panel in kitty: the child's own launch", async () => {
+		const f = fakePanel();
+		const { d, out, signal } = deps({ KITTY_WINDOW_ID: "3" }, f.deps);
+		const done = runTui(opts(["overview", "--no-panel"]), d);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(f.spawned).toHaveLength(0);
+		expect(out[0]).toBe(ENTER_SCREEN);
+		signal("SIGTERM");
+		expect(await done).toBe(0);
+	});
+
+	it("runs live in the window with BETTER_CCFLARE_TUI_PANEL=0 in kitty", async () => {
+		const f = fakePanel();
+		const { d, out, signal } = deps(
+			{ KITTY_WINDOW_ID: "3", BETTER_CCFLARE_TUI_PANEL: "0" },
+			f.deps,
+		);
+		const done = runTui(opts([]), d);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(f.spawned).toHaveLength(0);
+		expect(out[0]).toBe(ENTER_SCREEN);
+		signal("SIGHUP");
+		expect(await done).toBe(0);
+	});
+
+	it("prints once, never a panel, with --once in kitty", async () => {
+		const f = fakePanel();
+		const { d, out } = deps({ KITTY_WINDOW_ID: "3" }, f.deps);
+		expect(await runTui(opts(["--once"]), d)).toBe(0);
+		expect(f.spawned).toHaveLength(0);
+		expect(out.join("")).toContain("better-ccflare overview");
+	});
+
+	it("never spawns a panel without KITTY_WINDOW_ID, live", async () => {
+		const f = fakePanel();
+		const { d, out, signal } = deps({ TERM: "xterm-kitty" }, f.deps);
+		const done = runTui(opts([]), d);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(f.spawned).toHaveLength(0);
+		expect(out[0]).toBe(ENTER_SCREEN);
+		signal("SIGTERM");
+		expect(await done).toBe(0);
 	});
 
 	it("never spawns a panel without KITTY_WINDOW_ID", async () => {

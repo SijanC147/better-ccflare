@@ -23,7 +23,13 @@
  *   instance, so an existing live socket means "already running".
  */
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, lstatSync, unlinkSync } from "node:fs";
+import {
+	accessSync,
+	constants,
+	lstatSync,
+	statSync,
+	unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -180,7 +186,11 @@ export interface PanelDeps {
 	spawnDetached(
 		argv: string[],
 		env: Record<string, string | undefined>,
-	): { exited(): number | null; error(): Error | null };
+	): {
+		/** null while running; else "code N" or "signal SIGxxx". */
+		exited(): string | null;
+		error(): Error | null;
+	};
 	/** True when a unix socket file exists at the path. */
 	socketExists(path: string): boolean;
 	/** True when a kitty instance answers on the socket. */
@@ -238,9 +248,9 @@ export async function launchInPanel(
 		if (deps.socketExists(socket)) {
 			return { ok: true, socket, alreadyRunning: false };
 		}
-		const code = child.exited();
-		if (code !== null && code !== 0) {
-			return { ok: false, message: `kitten panel exited with code ${code}` };
+		const exit = child.exited();
+		if (exit !== null && exit !== "code 0") {
+			return { ok: false, message: `kitten panel exited with ${exit}` };
 		}
 	}
 	return {
@@ -254,6 +264,8 @@ function whichOnPath(command: string, path: string | undefined): string | null {
 		if (!dir) continue;
 		const candidate = join(dir, command);
 		try {
+			// X_OK is true for a directory, so a directory named kitten is not one.
+			if (!statSync(candidate).isFile()) continue;
 			accessSync(candidate, constants.X_OK);
 			return candidate;
 		} catch {
@@ -269,7 +281,7 @@ export function defaultPanelDeps(
 	return {
 		which: (command) => whichOnPath(command, env.PATH),
 		spawnDetached(argv, childEnv) {
-			let exitCode: number | null = null;
+			let exit: string | null = null;
 			let spawnError: Error | null = null;
 			const child = spawn(argv[0], argv.slice(1), {
 				detached: true,
@@ -279,11 +291,11 @@ export function defaultPanelDeps(
 			child.on("error", (error) => {
 				spawnError = error;
 			});
-			child.on("exit", (code) => {
-				exitCode = code ?? 0;
+			child.on("exit", (code, signal) => {
+				exit = code !== null ? `code ${code}` : `signal ${signal}`;
 			});
 			child.unref();
-			return { exited: () => exitCode, error: () => spawnError };
+			return { exited: () => exit, error: () => spawnError };
 		},
 		socketExists(path) {
 			try {
