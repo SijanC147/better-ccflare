@@ -2,6 +2,11 @@
 
 // Export handlers
 export { createAccountRequestTransformerUpdateHandler } from "./handlers/accounts";
+export {
+	type ClaudeCodeHostFacts,
+	claudeCodeHostRefusal,
+	loadClaudeCodeEndpointState,
+} from "./handlers/claude-code-endpoints";
 export * from "./handlers/storage";
 export { APIRouter } from "./router";
 export { AlertService } from "./services/alerts";

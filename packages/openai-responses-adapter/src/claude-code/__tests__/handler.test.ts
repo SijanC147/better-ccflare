@@ -1,13 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
+import path from "node:path";
 import {
 	CLAUDE_CODE_BIN_ENV,
+	claudeCodeHostRefusalMessage,
 	type ResolvedClaudeCodeEndpoint,
 } from "@better-ccflare/types";
 import {
+	type ClaudeCodeRunnerDeps,
 	handleClaudeCodeEndpointRequest,
 	resetClaudeCodeRunnerStateForTests,
 } from "../handler";
+import { conversationKey } from "../prompt";
+import { putClaudeCodeSession } from "../sessions";
 import {
 	type FakeClaude,
 	type FakeMode,
@@ -21,7 +26,11 @@ let fake: FakeClaude | null = null;
 function setup(
 	mode: FakeMode,
 	overrides: Partial<ResolvedClaudeCodeEndpoint> = {},
-	fakeOptions: { textDeltas?: string[]; resultText?: string } = {},
+	fakeOptions: {
+		textDeltas?: string[];
+		resultText?: string;
+		delayMs?: number;
+	} = {},
 ) {
 	fake = makeFakeClaude({ mode, ...fakeOptions });
 	const endpoint: ResolvedClaudeCodeEndpoint = {
@@ -38,8 +47,12 @@ function setup(
 	return { endpoint, bin: fake.bin };
 }
 
-function chatRequest(body: unknown, signal?: AbortSignal): Request {
-	return new Request("http://localhost/proj/v1/chat/completions", {
+function chatRequest(
+	body: unknown,
+	signal?: AbortSignal,
+	host = "localhost",
+): Request {
+	return new Request(`http://${host}/proj/v1/chat/completions`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
@@ -51,12 +64,14 @@ function call(
 	ctx: ReturnType<typeof setup>,
 	body: unknown,
 	signal?: AbortSignal,
+	deps: ClaudeCodeRunnerDeps & { host?: string } = {},
 ): Promise<Response> {
+	const { host, ...rest } = deps;
 	return handleClaudeCodeEndpointRequest(
-		chatRequest(body, signal),
+		chatRequest(body, signal, host),
 		"/chat/completions",
 		ctx.endpoint,
-		{ bin: ctx.bin, killGraceMs: 300 },
+		{ bin: ctx.bin, killGraceMs: 300, ...rest },
 	);
 }
 
@@ -207,9 +222,9 @@ describe("argv", () => {
 		);
 	});
 
-	test("a named model passes --model, and system messages go to --append-system-prompt", async () => {
+	test("a named model passes --model, and system messages reach the CLI through a 0600 file, never argv", async () => {
 		const ctx = setup("ok");
-		await call(ctx, {
+		const res = await call(ctx, {
 			model: "opus",
 			messages: [
 				{ role: "system", content: "Be terse." },
@@ -217,12 +232,50 @@ describe("argv", () => {
 				{ role: "user", content: "hi" },
 			],
 		});
+		expect(res.status).toBe(200);
 		const [inv] = fake?.invocations() ?? [];
-		expect(flag(inv?.argv ?? [], "--model")).toBe("opus");
-		expect(flag(inv?.argv ?? [], "--append-system-prompt")).toBe(
-			"Be terse.\n\nNo emoji.",
-		);
+		const argv = inv?.argv ?? [];
+		expect(flag(argv, "--model")).toBe("opus");
+		expect(argv).not.toContain("--append-system-prompt");
+		expect(argv.join(" ")).not.toContain("Be terse");
+		const file = inv?.systemPromptFile;
+		expect(file?.path).toBe(flag(argv, "--append-system-prompt-file"));
+		expect(file?.content).toBe("Be terse.\n\nNo emoji.");
+		expect(file?.mode).toBe(0o600);
+		expect(file?.dirMode).toBe(0o700);
 		expect(inv?.stdin).toBe("hi");
+		// The request owns the directory and removes it when it ends.
+		expect(fs.existsSync(file?.path ?? "")).toBe(false);
+		expect(fs.existsSync(path.dirname(file?.path ?? "/nonexistent/x"))).toBe(
+			false,
+		);
+	});
+
+	test("stream: the system prompt file is gone once the body is consumed", async () => {
+		const ctx = setup("ok");
+		const res = await call(ctx, {
+			model: "opus",
+			stream: true,
+			messages: [
+				{ role: "system", content: "Be terse." },
+				{ role: "user", content: "hi" },
+			],
+		});
+		await res.text();
+		const [inv] = fake?.invocations() ?? [];
+		expect(inv?.systemPromptFile?.content).toBe("Be terse.");
+		expect(fs.existsSync(inv?.systemPromptFile?.path ?? "")).toBe(false);
+	});
+
+	test("no system message passes no prompt file", async () => {
+		const ctx = setup("ok");
+		await call(ctx, {
+			model: "opus",
+			messages: [{ role: "user", content: "hi" }],
+		});
+		const [inv] = fake?.invocations() ?? [];
+		expect(inv?.argv).not.toContain("--append-system-prompt-file");
+		expect(inv?.systemPromptFile).toBeNull();
 	});
 });
 
@@ -515,7 +568,7 @@ describe("binary selection", () => {
 });
 
 describe("failures", () => {
-	test("non-zero exit is a 502 carrying the stderr tail", async () => {
+	test("non-zero exit is a 502 that keeps stderr out of the body", async () => {
 		const ctx = setup("exit3");
 		const res = await call(ctx, {
 			model: "opus",
@@ -526,8 +579,28 @@ describe("failures", () => {
 			error: { message: string; code: string };
 		};
 		expect(body.error.code).toBe("claude_code_failed");
-		expect(body.error.message).toContain("exited with code 3");
-		expect(body.error.message).toContain("boom: something broke");
+		expect(body.error.message).toBe(
+			"Claude Code exited with code 3. The server log has the CLI's stderr.",
+		);
+		// A fresh session is never retried.
+		expect(fake?.invocations()).toHaveLength(1);
+	});
+
+	test("stream: stderr stays out of a mid-stream error frame too", async () => {
+		const ctx = setup("exit3");
+		const res = await call(
+			ctx,
+			{
+				model: "opus",
+				stream: true,
+				messages: [{ role: "user", content: "hi" }],
+			},
+			undefined,
+			{ firstEventWaitMs: 0 },
+		);
+		const raw = await res.text();
+		expect(raw).toContain("claude_code_failed");
+		expect(raw).not.toContain("boom");
 	});
 
 	test("a result with is_error is a 502 carrying its text", async () => {
@@ -686,5 +759,223 @@ describe("concurrency, timeout and abort", () => {
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
+	});
+});
+
+describe("SB23-3408 follow-ups", () => {
+	const turnOne = {
+		model: "opus",
+		messages: [{ role: "user", content: "q1" }],
+	};
+	const turnTwo = (stream = false) => ({
+		model: "opus",
+		stream,
+		messages: [
+			{ role: "user", content: "q1" },
+			{ role: "assistant", content: "Hello world" },
+			{ role: "user", content: "q2" },
+		],
+	});
+
+	test("item 1: a resume that fails before any output is retried once as a fresh, flattened session", async () => {
+		const ctx = setup("resume-missing");
+		expect((await call(ctx, turnOne)).status).toBe(200);
+		const res = await call(ctx, turnTwo());
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			choices: Array<{ message: { content: string } }>;
+		};
+		expect(body.choices[0]?.message.content).toBe("Hello world");
+		const [a, b, c] = fake?.invocations() ?? [];
+		expect(fake?.invocations()).toHaveLength(3);
+		const firstId = flag(a?.argv ?? [], "--session-id");
+		expect(flag(b?.argv ?? [], "--resume")).toBe(firstId);
+		expect(c?.argv).not.toContain("--resume");
+		const retryId = flag(c?.argv ?? [], "--session-id");
+		expect(retryId).toBeDefined();
+		expect(retryId).not.toBe(firstId);
+		expect(c?.stdin).toBe("User: q1\n\nAssistant: Hello world\n\nUser: q2");
+	});
+
+	test("item 1: the retry works for a stream too, and its session is the one resumed next", async () => {
+		const ctx = setup("resume-missing");
+		await call(ctx, turnOne);
+		const res = await call(ctx, turnTwo(true));
+		expect(res.status).toBe(200);
+		expect(await res.text()).toContain('"content":"Hello"');
+		await call(ctx, {
+			model: "opus",
+			messages: [
+				...turnTwo().messages,
+				{ role: "assistant", content: "Hello world" },
+				{ role: "user", content: "q3" },
+			],
+		});
+		// This fake fails every --resume, so turn three retries as well.
+		const invs = fake?.invocations() ?? [];
+		expect(invs).toHaveLength(5);
+		expect(flag(invs[3]?.argv ?? [], "--resume")).toBe(
+			flag(invs[2]?.argv ?? [], "--session-id"),
+		);
+	});
+
+	test("item 1: a resume that fails after the model ran a tool is not retried", async () => {
+		const ctx = setup("resume-fail-after-tool");
+		await call(ctx, turnOne);
+		const res = await call(ctx, turnTwo());
+		expect(res.status).toBe(502);
+		expect(fake?.invocations()).toHaveLength(2);
+	});
+
+	test("item 3: a slow first event starts the stream and sends keep-alives before the text", async () => {
+		const ctx = setup("slow-start", {}, { delayMs: 1500 });
+		const started = Date.now();
+		const res = await call(
+			ctx,
+			{
+				model: "opus",
+				stream: true,
+				messages: [{ role: "user", content: "hi" }],
+			},
+			undefined,
+			{ firstEventWaitMs: 100, keepAliveMs: 50 },
+		);
+		// Headers arrive long before the CLI's first text.
+		expect(Date.now() - started).toBeLessThan(1200);
+		expect(res.status).toBe(200);
+		const raw = await res.text();
+		const keepAlive = raw.indexOf(": keep-alive");
+		const text = raw.indexOf('"content":"Hello"');
+		expect(keepAlive).toBeGreaterThan(-1);
+		expect(text).toBeGreaterThan(keepAlive);
+		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
+	});
+
+	test("item 3: a failure after the wait is an error frame on a 200 stream", async () => {
+		const ctx = setup("exit3");
+		const res = await call(
+			ctx,
+			{
+				model: "opus",
+				stream: true,
+				messages: [{ role: "user", content: "hi" }],
+			},
+			undefined,
+			{ firstEventWaitMs: 0 },
+		);
+		expect(res.status).toBe(200);
+		const raw = await res.text();
+		expect(raw).toContain('"code":"claude_code_failed"');
+		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
+	});
+
+	test("item 1: cancelling a stream while a resume is pending never starts the retry", async () => {
+		const ctx = setup("hang", { timeout_ms: 5000 });
+		const { name, directory } = ctx.endpoint;
+		putClaudeCodeSession(
+			conversationKey(`${name}\u0000${directory}`, [
+				{ role: "user", text: "q1" },
+				{ role: "assistant", text: "Hello world" },
+			]),
+			"seeded-session",
+		);
+		const res = await call(ctx, turnTwo(true), undefined, {
+			firstEventWaitMs: 50,
+		});
+		expect(res.status).toBe(200);
+		await waitFor(() => (fake?.invocations().length ?? 0) === 1);
+		expect(flag(fake?.invocations()[0]?.argv ?? [], "--resume")).toBe(
+			"seeded-session",
+		);
+		// Killing the hung resume makes it fail with no output, which would be
+		// retryable; the cancel must win.
+		await res.body?.cancel();
+		const [inv] = fake?.invocations() ?? [];
+		await waitFor(() => !isAlive(inv?.pid ?? 0));
+		await new Promise((r) => setTimeout(r, 400));
+		expect(fake?.invocations()).toHaveLength(1);
+	});
+
+	test("item 3: the keep-alive timer is cleared when the stream finishes", async () => {
+		const ctx = setup("ok");
+		const live = new Set<unknown>();
+		const realSet = globalThis.setInterval;
+		const realClear = globalThis.clearInterval;
+		globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+			const id = realSet(...args);
+			live.add(id);
+			return id;
+		}) as typeof setInterval;
+		globalThis.clearInterval = ((id?: Parameters<typeof clearInterval>[0]) => {
+			live.delete(id);
+			realClear(id);
+		}) as typeof clearInterval;
+		try {
+			const res = await call(ctx, { ...turnOne, stream: true }, undefined, {
+				keepAliveMs: 20,
+			});
+			expect(await res.text()).toContain("data: [DONE]");
+			expect(live.size).toBe(0);
+		} finally {
+			for (const id of live)
+				realClear(id as Parameters<typeof clearInterval>[0]);
+			globalThis.setInterval = realSet;
+			globalThis.clearInterval = realClear;
+		}
+	});
+
+	test("item 5: subagent text never reaches the client", async () => {
+		const ctx = setup("subagent");
+		const res = await call(ctx, {
+			model: "opus",
+			stream: true,
+			messages: [{ role: "user", content: "hi" }],
+		});
+		const raw = await res.text();
+		expect(raw).not.toContain("SUBAGENT-SECRET");
+		const text = raw
+			.split("\n\n")
+			.map((f) => f.trim())
+			.filter((f) => f.startsWith("data: {"))
+			.map((f) => JSON.parse(f.slice(6)))
+			.map((c) => c.choices?.[0]?.delta?.content ?? "")
+			.join("");
+		expect(text).toBe("Hello world");
+	});
+
+	test("item 6: a Host that is not this machine is a 403 naming the config key, and the CLI never starts", async () => {
+		const ctx = setup("ok");
+		const res = await call(ctx, turnOne, undefined, { host: "evil.example" });
+		expect(res.status).toBe(403);
+		const body = (await res.json()) as {
+			error: { message: string; code: string };
+		};
+		expect(body.error.code).toBe("host_not_allowed");
+		expect(body.error.message).toBe(
+			claudeCodeHostRefusalMessage("evil.example"),
+		);
+		expect(body.error.message).toContain("claude_code_allowed_hosts");
+		expect(fake?.invocations()).toHaveLength(0);
+	});
+
+	test("item 6: allowed hosts are IP literals, this machine's names and the configured extras", async () => {
+		const ctx = setup("ok");
+		const allowed: Array<[string, ClaudeCodeRunnerDeps]> = [
+			["127.0.0.1", {}],
+			["[::1]", {}],
+			["box.local", { hostname: "Box.local" }],
+			["box", { hostname: "Box.local" }],
+			["ccflare.example.com", { allowedHosts: ["ccflare.example.com"] }],
+		];
+		for (const [host, deps] of allowed) {
+			const res = await call(ctx, turnOne, undefined, { host, ...deps });
+			expect(`${host} ${res.status}`).toBe(`${host} 200`);
+		}
+		const refused = await call(ctx, turnOne, undefined, {
+			host: "box.evil.example",
+			hostname: "Box.local",
+			allowedHosts: ["ccflare.example.com"],
+		});
+		expect(refused.status).toBe(403);
 	});
 });

@@ -44,9 +44,63 @@ describe("parseStreamJsonLine", () => {
 			text: "hi",
 		});
 		expect(delta({ type: "input_json_delta", partial_json: "{" })).toEqual({
-			kind: "ignored",
+			kind: "activity",
 		});
-		expect(delta({ type: "text_delta", text: 5 })).toEqual({ kind: "ignored" });
+		expect(delta({ type: "text_delta", text: 5 })).toEqual({
+			kind: "activity",
+		});
+	});
+
+	test("subagent lines (parent_tool_use_id set) are activity, never text", () => {
+		const sub = { parent_tool_use_id: "toolu_1" };
+		expect(
+			parseStreamJsonLine(
+				line({
+					type: "stream_event",
+					...sub,
+					event: {
+						type: "content_block_delta",
+						delta: { type: "text_delta", text: "x" },
+					},
+				}),
+			),
+		).toEqual({ kind: "activity" });
+		expect(
+			parseStreamJsonLine(
+				line({
+					type: "assistant",
+					...sub,
+					message: { content: [{ type: "text", text: "x" }] },
+				}),
+			),
+		).toEqual({ kind: "activity" });
+		// null is the main thread.
+		expect(
+			parseStreamJsonLine(
+				line({
+					type: "assistant",
+					parent_tool_use_id: null,
+					message: { content: [{ type: "text", text: "x" }] },
+				}),
+			),
+		).toEqual({ kind: "assistant-text", text: "x" });
+	});
+
+	test("tool calls and tool results are activity", () => {
+		expect(
+			parseStreamJsonLine(
+				line({
+					type: "stream_event",
+					event: {
+						type: "content_block_start",
+						content_block: { type: "tool_use" },
+					},
+				}),
+			),
+		).toEqual({ kind: "activity" });
+		expect(parseStreamJsonLine(line({ type: "user", message: {} }))).toEqual({
+			kind: "activity",
+		});
 	});
 
 	test("assistant messages keep text blocks and drop tool_use blocks", () => {

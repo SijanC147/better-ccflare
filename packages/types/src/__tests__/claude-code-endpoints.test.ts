@@ -174,7 +174,7 @@ describe("validateClaudeCodeEndpointConfig", () => {
 		expect(
 			validateClaudeCodeEndpointConfig({
 				directory: "/a",
-				extra_args: ["x".repeat(1024)],
+				extra_args: ["--agent", "x".repeat(1024)],
 			}).ok,
 		).toBe(true);
 		expect(

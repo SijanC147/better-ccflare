@@ -13,6 +13,13 @@
  *     cache_read_input_tokens,cache_creation_input_tokens}}
  * Anything else, and any field of the wrong type, is ignored rather than
  * treated as an error.
+ *
+ * A `stream_event` or `assistant` line whose `parent_tool_use_id` is a
+ * non-empty string belongs to a subagent (the Task tool), not to the answer:
+ * it is reported as activity and its text never reaches the client
+ * (SB23-3408, item 5). Every other model line that carries no client text
+ * (tool calls, tool results, message framing) is activity too, which is how
+ * the runner knows whether the model had started before a run failed.
  */
 export interface ClaudeCodeUsage {
 	input: number;
@@ -26,6 +33,8 @@ export type ClaudeStreamEvent =
 	| { kind: "text-block-start" }
 	| { kind: "partial-text"; text: string }
 	| { kind: "assistant-text"; text: string }
+	/** Model output with no client text: a tool call, a tool result, a subagent. */
+	| { kind: "activity" }
 	| {
 			kind: "result";
 			isError: boolean;
@@ -75,6 +84,13 @@ export function parseStreamJsonLine(line: string): ClaudeStreamEvent | null {
 	const event = asRecord(parsed);
 	if (!event) return null;
 
+	if (
+		(event.type === "stream_event" || event.type === "assistant") &&
+		str(event.parent_tool_use_id) !== null
+	) {
+		return { kind: "activity" };
+	}
+
 	switch (event.type) {
 		case "system":
 			return event.subtype === "init"
@@ -86,25 +102,28 @@ export function parseStreamJsonLine(line: string): ClaudeStreamEvent | null {
 			if (inner.type === "content_block_start") {
 				return asRecord(inner.content_block)?.type === "text"
 					? { kind: "text-block-start" }
-					: { kind: "ignored" };
+					: { kind: "activity" };
 			}
 			if (inner.type === "content_block_delta") {
 				const delta = asRecord(inner.delta);
 				const text = delta?.type === "text_delta" ? str(delta.text) : null;
-				return text ? { kind: "partial-text", text } : { kind: "ignored" };
+				return text ? { kind: "partial-text", text } : { kind: "activity" };
 			}
-			return { kind: "ignored" };
+			return { kind: "activity" };
 		}
+		case "user":
+			// Tool results fed back to the model.
+			return { kind: "activity" };
 		case "assistant": {
 			const content = asRecord(event.message)?.content;
-			if (!Array.isArray(content)) return { kind: "ignored" };
+			if (!Array.isArray(content)) return { kind: "activity" };
 			const text = content
 				.map((block) => {
 					const b = asRecord(block);
 					return b?.type === "text" ? (str(b.text) ?? "") : "";
 				})
 				.join("");
-			return text ? { kind: "assistant-text", text } : { kind: "ignored" };
+			return text ? { kind: "assistant-text", text } : { kind: "activity" };
 		}
 		case "result":
 			return {
