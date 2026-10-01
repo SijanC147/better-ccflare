@@ -444,6 +444,52 @@ describe("GET /api/accounts — weekly throttle agrees with routing (SB23-2541)"
 		expect(routed()).toBeNull();
 	});
 
+	it("does not clear the card's weekly throttle on a stale balance recovered from a stored payload", async () => {
+		// Nothing is cached, so the handler reparses a day-old stored response.
+		// It writes that into usageCache dated by the payload, where get()
+		// withholds the balance, and returns the reparsed payload with the
+		// balance still on it. Routing throttles on the cache entry, so the card
+		// must too, or it shows "not throttled" on an account routing benches.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const longAgo = Date.now() - 24 * 60 * 60 * 1000;
+		await adapter.run(
+			`INSERT INTO requests (id, timestamp, method, path, account_used, model, success)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			["req-stale-throttle", longAgo, "POST", "/v1/messages", ID, "gpt-5.5", 1],
+		);
+		await adapter.run(
+			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
+			[
+				"req-stale-throttle",
+				JSON.stringify({
+					meta: { timestamp: longAgo },
+					response: {
+						status: 200,
+						headers: {
+							"x-codex-primary-window-minutes": "300",
+							"x-codex-primary-used-percent": "0",
+							"x-codex-primary-reset-at": String(nowSeconds + 3600),
+							"x-codex-secondary-window-minutes": "10080",
+							"x-codex-secondary-used-percent": "100",
+							"x-codex-secondary-reset-at": String(nowSeconds + 129_600),
+							"x-codex-credits-has-credits": "true",
+							"x-codex-credits-unlimited": "false",
+							"x-codex-credits-balance": "42.50",
+						},
+					},
+				}),
+				longAgo,
+			],
+		);
+
+		const account = await card();
+		const until = routed();
+
+		expect(until).not.toBeNull();
+		expect(account?.usageThrottledWindows).toEqual(["seven_day"]);
+		expect(account?.usageThrottledUntil).toBe(until);
+	});
+
 	it("shows the same throttle the router applies when the account holds no credits", async () => {
 		usageCache.set(ID, weekly(90) as never);
 

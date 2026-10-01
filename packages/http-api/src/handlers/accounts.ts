@@ -647,7 +647,16 @@ export function createAccountsListHandler(
 					fullUsageData
 				) {
 					const usageThrottleStatus = getUsageThrottleStatus(
-						fullUsageData as AnyUsageData,
+						// The entry the router throttles on (proxy.ts reads
+						// usageCache.get), not the payload the card renders. They differ
+						// on the Codex persisted-payload path: getCachedOrPersistedCodexUsage
+						// returns the reparsed payload with its balance intact, while the
+						// cache it wrote withholds that balance once it is older than
+						// CODEX_CREDITS_MAX_AGE_MS. Throttling the card on the returned
+						// payload would show a day-old balance clearing the weekly window
+						// that routing still throttles. fullUsageData stays the fallback
+						// for paths that never write the cache (the weekly snapshot).
+						(usageCache.get(account.id) ?? fullUsageData) as AnyUsageData,
 						// The same provider the router passes (proxy.ts), so the card
 						// shows the throttle state routing acts on: a credit-covered
 						// Codex account is not throttled on its weekly window here
