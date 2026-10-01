@@ -4,6 +4,9 @@ import {
 	CODEX_TURN_STATE_HEADER,
 	CodexTurnStateStore,
 	codexTurnId,
+	type MessagesTurn,
+	messagesTurn,
+	turnAnchorIndex,
 } from "./turn-state";
 
 // SB23-2370. The store files a token under the account that issued it and the
@@ -179,5 +182,189 @@ describe("CodexTurnStateStore", () => {
 		const toB = new Headers({ [CODEX_TURN_STATE_HEADER]: "ts-a" });
 		store.scope(toB, client({ turnId: "t1", token: "ts-a" }), "acc-b");
 		expect(toB.has(CODEX_TURN_STATE_HEADER)).toBe(false);
+	});
+});
+
+// SB23-3629: turns derived from an Anthropic Messages body.
+describe("messagesTurn", () => {
+	const session = "5e550000-0000-4000-8000-000000000001";
+	const body = (over: Record<string, unknown> = {}) => ({
+		model: "m",
+		metadata: { user_id: JSON.stringify({ session_id: session }) },
+		messages: [{ role: "user", content: "hi" }],
+		...over,
+	});
+
+	it("is null without a UUID session id, without messages, or without an anchor", () => {
+		expect(messagesTurn(body({ metadata: undefined }))).toBeNull();
+		expect(
+			messagesTurn(
+				body({ metadata: { user_id: JSON.stringify({ session_id: "nope" }) } }),
+			),
+		).toBeNull();
+		expect(messagesTurn(body({ messages: [] }))).toBeNull();
+		expect(
+			messagesTurn(
+				body({
+					messages: [
+						{
+							role: "user",
+							content: [
+								{ type: "tool_result", tool_use_id: "t", content: "x" },
+							],
+						},
+					],
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("names the turn by session and model, and ignores system and cache_control", () => {
+		const base = messagesTurn(body());
+		expect(base).not.toBeNull();
+		expect(messagesTurn(body({ system: "changed every request" }))?.key).toBe(
+			base?.key,
+		);
+		expect(
+			messagesTurn(
+				body({
+					messages: [
+						{
+							role: "user",
+							content: [
+								{
+									type: "text",
+									text: "hi",
+									cache_control: { type: "ephemeral" },
+								},
+							],
+						},
+					],
+				}),
+			)?.key,
+		).toBe(base?.key);
+		expect(messagesTurn(body({ model: "other" }))?.key).not.toBe(base?.key);
+		expect(
+			messagesTurn(
+				body({
+					metadata: {
+						user_id: JSON.stringify({
+							session_id: "5e550000-0000-4000-8000-000000000002",
+						}),
+					},
+				}),
+			)?.key,
+		).not.toBe(base?.key);
+	});
+
+	it("anchors on the last user message holding anything but a tool_result", () => {
+		const tr = { type: "tool_result", tool_use_id: "t", content: "x" };
+		expect(
+			turnAnchorIndex([
+				{ role: "user", content: "a" },
+				{ role: "assistant", content: "b" },
+				{ role: "user", content: [tr] },
+			]),
+		).toBe(0);
+		expect(
+			turnAnchorIndex([
+				{ role: "user", content: "a" },
+				{ role: "assistant", content: "b" },
+				{ role: "user", content: [tr, { type: "text", text: "c" }] },
+			]),
+		).toBe(2);
+	});
+});
+
+describe("CodexTurnStateStore messages turns", () => {
+	const session = "5e550000-0000-4000-8000-000000000003";
+	const turn = (n: number) =>
+		messagesTurn({
+			model: "m",
+			metadata: { user_id: JSON.stringify({ session_id: session }) },
+			messages: [
+				{ role: "user", content: "go" },
+				...Array.from({ length: n }, (_, i) => [
+					{
+						role: "assistant",
+						content: [{ type: "tool_use", id: `t${i}`, name: "x", input: {} }],
+					},
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: `t${i}`, content: "" },
+						],
+					},
+				]).flat(),
+			],
+		}) as MessagesTurn;
+
+	it("replays only to a strict extension of the last answered request", () => {
+		const store = new CodexTurnStateStore();
+		const l0 = store.lookupMessagesTurn(turn(0), "A");
+		expect(l0.match).toBe("fresh");
+		store.recordMessagesTurn(l0, "A", "tok");
+		const l1 = store.lookupMessagesTurn(turn(1), "A");
+		expect([l1.match, l1.token]).toEqual(["extends", "tok"]);
+		store.recordMessagesTurn(l1, "A", null);
+		const l2 = store.lookupMessagesTurn(turn(2), "A");
+		expect(l2.token).toBe("tok");
+		// A shorter body under the same key is a rewind: poisoned from here on.
+		expect(store.lookupMessagesTurn(turn(1), "A").match).toBe("other");
+		expect(store.lookupMessagesTurn(turn(3), "A").match).toBe("poisoned");
+	});
+
+	it("keeps accounts apart", () => {
+		const store = new CodexTurnStateStore();
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A"),
+			"A",
+			"tok",
+		);
+		expect(store.lookupMessagesTurn(turn(1), "B")).toMatchObject({
+			match: "fresh",
+			token: null,
+		});
+	});
+
+	it("poisons a key two fresh starts raced on", () => {
+		const store = new CodexTurnStateStore();
+		const first = store.lookupMessagesTurn(turn(0), "A");
+		const second = store.lookupMessagesTurn(turn(0), "A");
+		store.recordMessagesTurn(first, "A", "tok-1");
+		store.recordMessagesTurn(second, "A", "tok-2");
+		expect(store.lookupMessagesTurn(turn(1), "A").match).toBe("poisoned");
+	});
+
+	it("poisons a key two follow-ups of one position raced on", () => {
+		const store = new CodexTurnStateStore();
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A"),
+			"A",
+			"tok",
+		);
+		const x = store.lookupMessagesTurn(turn(1), "A");
+		const y = store.lookupMessagesTurn(turn(2), "A");
+		store.recordMessagesTurn(x, "A", null);
+		store.recordMessagesTurn(y, "A", null);
+		expect(store.lookupMessagesTurn(turn(3), "A").match).toBe("poisoned");
+	});
+
+	it("forgets a turn after the TTL and files no oversized token", () => {
+		const c = clock();
+		const store = new CodexTurnStateStore(1000, 100, c.now);
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "A"),
+			"A",
+			"tok",
+		);
+		c.advance(1001);
+		expect(store.lookupMessagesTurn(turn(1), "A").match).toBe("fresh");
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(0), "B"),
+			"B",
+			"x".repeat(4097),
+		);
+		expect(store.lookupMessagesTurn(turn(1), "B").match).toBe("fresh");
 	});
 });

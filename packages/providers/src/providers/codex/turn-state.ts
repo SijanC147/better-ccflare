@@ -360,7 +360,8 @@ export class CodexTurnStateStore {
 		const base = { key: turn.key, length, prefix: turn.prefixes[length - 1] };
 		const entry = this.readDerived(this.slot(accountId, turn.key));
 		if (!entry) return { ...base, match: "fresh", token: null };
-		if (entry.token === null) return { ...base, match: "poisoned", token: null };
+		if (entry.token === null)
+			return { ...base, match: "poisoned", token: null };
 		if (
 			length > entry.length &&
 			turn.prefixes[entry.length - 1] === entry.prefix
