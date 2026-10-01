@@ -1174,6 +1174,37 @@ describe("openobserve metrics", () => {
 		expect(balances(requests)).toBe(true);
 	});
 
+	test("a snapshot taken while a post is awaited still balances", async () => {
+		resetMetricsForTests();
+		const metricsBodies: MetricsRecord[][] = [];
+		let release: (() => void) | undefined;
+		// The request post hangs until released; the metrics post answers at
+		// once, so a snapshot can be taken inside the request post's await.
+		globalThis.fetch = (async (url: string, init: RequestInit) => {
+			if (String(url).includes(METRICS_STREAM)) {
+				metricsBodies.push(JSON.parse(String(init.body)) as MetricsRecord[]);
+				return new Response("{}", { status: 200 });
+			}
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return new Response("{}", { status: 200 });
+		}) as unknown as typeof fetch;
+		configureOpenObserve(() => settings());
+
+		for (let i = 0; i < 3; i++) shipRequestRecord({ id: `req-${i}` });
+		const pending = flush();
+		await shipMetricsSnapshot();
+		release?.();
+		await pending;
+
+		const during = kind(metricsBodies[0], "requests");
+		expect(during.in_flight_records).toBe(3);
+		expect(during.buffered_records).toBe(0);
+		expect(during.shipped_records).toBe(0);
+		expect(balances(during)).toBe(true);
+	});
+
 	test("an empty metrics stream sends no snapshot", async () => {
 		resetMetricsForTests();
 		const captures: Capture[] = [];
