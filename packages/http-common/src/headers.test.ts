@@ -162,3 +162,37 @@ describe("redactRequestHeadersForStorage", () => {
 		expect(redactRequestHeadersForStorage(null)).toEqual({});
 	});
 });
+
+describe("x-codex-turn-state is never persisted (SB23-2370)", () => {
+	test("its request value is redacted at storage, under any casing", () => {
+		expect(
+			redactRequestHeadersForStorage({
+				"x-codex-turn-state": "opaque-routing-token",
+				"X-Codex-Turn-State": "opaque-routing-token",
+				"x-codex-turn-metadata": '{"turn_id":"t1"}',
+			}),
+		).toEqual({
+			"x-codex-turn-state": REDACTED_HEADER_VALUE,
+			"X-Codex-Turn-State": REDACTED_HEADER_VALUE,
+			"x-codex-turn-metadata": '{"turn_id":"t1"}',
+		});
+	});
+
+	test("its response value is redacted, its name kept", () => {
+		expect(
+			sanitizeResponseHeaders({
+				"x-codex-turn-state": "opaque-routing-token",
+				"X-CODEX-TURN-STATE": "opaque-routing-token",
+				"x-codex-primary-used-percent": "12",
+			}),
+		).toEqual({
+			"x-codex-turn-state": REDACTED_HEADER_VALUE,
+			"X-CODEX-TURN-STATE": REDACTED_HEADER_VALUE,
+			"x-codex-primary-used-percent": "12",
+		});
+	});
+
+	test("it is not a credential, so the collector's own copy keeps it", () => {
+		expect(isCredentialHeaderName("x-codex-turn-state")).toBe(false);
+	});
+});
