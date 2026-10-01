@@ -43,6 +43,12 @@ afterEach(async () => {
 	await dbOps.dispose();
 });
 
+/** What the rebuild read and diagnosed for the row `insertRaw("rel", ...)` makes. */
+const DIAGNOSED = {
+	kind: "directory" as const,
+	pattern: "relative/worktrees",
+};
+
 function insertRaw(id: string, kind: string, pattern: string): void {
 	dbOps
 		.getDatabase()
@@ -142,9 +148,42 @@ describe("rebuildResolver re-checks stored worktree rules", () => {
 			new BunSqlAdapter(dbOps.getDatabase()),
 		);
 
-		expect(await repo.recordCompileError("rel", "first")).toBe(true);
-		expect(await repo.recordCompileError("rel", "second")).toBe(false);
+		expect(await repo.recordCompileError("rel", DIAGNOSED, "first")).toBe(true);
+		expect(await repo.recordCompileError("rel", DIAGNOSED, "second")).toBe(
+			false,
+		);
 		expect(row("rel")).toEqual({ enabled: 0, compile_error: "first" });
+	});
+
+	it("recordCompileError does not land on a row whose pattern was fixed after the read", async () => {
+		// The PATCH-in-the-window case: the rebuild diagnosed "relative/worktrees",
+		// then a PATCH replaced it with an absolute pattern (clearing the
+		// diagnosis and re-enabling the rule) before the rebuild's write ran.
+		insertRaw("rel", "directory", "relative/worktrees");
+		const repo = new WorktreeRuleRepository(
+			new BunSqlAdapter(dbOps.getDatabase()),
+		);
+		await repo.update("rel", { pattern: "/abs/fixed" });
+
+		expect(await repo.recordCompileError("rel", DIAGNOSED, "stale")).toBe(
+			false,
+		);
+		expect(row("rel")).toEqual({ enabled: 1, compile_error: null });
+	});
+
+	it("recordCompileError does not land on a row whose kind changed after the read", async () => {
+		// A kind-only PATCH recompiles the stored pattern under the new kind
+		// and clears the diagnosis too, so the kind is part of the key.
+		insertRaw("rel", "directory", "relative/worktrees");
+		const repo = new WorktreeRuleRepository(
+			new BunSqlAdapter(dbOps.getDatabase()),
+		);
+		await repo.update("rel", { kind: "glob" });
+
+		expect(await repo.recordCompileError("rel", DIAGNOSED, "stale")).toBe(
+			false,
+		);
+		expect(row("rel")).toEqual({ enabled: 1, compile_error: null });
 	});
 
 	it("never overwrites a diagnosis already on the row", async () => {

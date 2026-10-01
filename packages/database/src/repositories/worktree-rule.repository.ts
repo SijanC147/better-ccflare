@@ -211,12 +211,23 @@ export class WorktreeRuleRepository extends BaseRepository<WorktreeRule> {
 	 * set, shown on the rule in the dashboard. Never overwrites an existing
 	 * diagnosis, so concurrent rebuilds write it once. Returns whether this
 	 * call wrote it.
+	 *
+	 * Keyed on the `kind` and `pattern` that were diagnosed as well as the id.
+	 * A rebuild reads the row, checks it, then writes; a PATCH that fixes the
+	 * pattern in that window clears `compile_error` and re-enables the rule,
+	 * and an id-only write would land on the fixed row and disable it with a
+	 * diagnosis of a pattern it no longer has. A kind-only PATCH recompiles
+	 * too, so both halves are in the key.
 	 */
-	async recordCompileError(id: string, error: string): Promise<boolean> {
+	async recordCompileError(
+		id: string,
+		diagnosed: { kind: WorktreeRuleKind; pattern: string },
+		error: string,
+	): Promise<boolean> {
 		const changes = await this.runWithChanges(
 			`UPDATE worktree_rules SET enabled = 0, compile_error = ?
-			 WHERE id = ? AND compile_error IS NULL`,
-			[error, id],
+			 WHERE id = ? AND compile_error IS NULL AND kind = ? AND pattern = ?`,
+			[error, id, diagnosed.kind, diagnosed.pattern],
 		);
 		return changes > 0;
 	}

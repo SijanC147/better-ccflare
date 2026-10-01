@@ -2697,7 +2697,12 @@ OAuth tokens will need to be re-authenticated.
 				if (!check.ok) {
 					compileError = check.error;
 					enabled = false;
-					if (await this.worktreeRules.recordCompileError(r.id, check.error)) {
+					const wrote = await this.worktreeRules.recordCompileError(
+						r.id,
+						{ kind: r.kind, pattern: r.pattern },
+						check.error,
+					);
+					if (wrote) {
 						log.warn(
 							`Worktree rule ${r.id} (${r.kind}) cannot compile and has been disabled: ${check.error}`,
 						);
