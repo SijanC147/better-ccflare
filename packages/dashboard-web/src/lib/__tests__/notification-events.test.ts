@@ -363,7 +363,7 @@ describe("account classification", () => {
 		).toBe("rate_limited");
 	});
 
-	test("an expired lock never prints a past reset time", () => {
+	test("the detail names a live lock's reset time, and nothing without one", () => {
 		const obs = observeRateLimits(
 			[
 				account({
