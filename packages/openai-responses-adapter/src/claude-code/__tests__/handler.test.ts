@@ -81,7 +81,10 @@ function flag(argv: string[], name: string): string | undefined {
 }
 
 beforeEach(() => resetClaudeCodeRunnerStateForTests());
+// The runner's slot counts are module state shared by every file in the
+// process, so they are reset after each case as well as before (SB23-2484).
 afterEach(() => {
+	resetClaudeCodeRunnerStateForTests();
 	fake?.cleanup();
 	fake = null;
 });
