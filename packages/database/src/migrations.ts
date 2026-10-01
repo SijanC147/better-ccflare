@@ -905,9 +905,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 	// re-run the migration on a fresh DB) and rolls back cleanly inside the
 	// migration transaction, so it doesn't need a multi-GB file copy of the
 	// live DB ahead of every restart.
+	//
+	// `id` without its primary key marks a table damaged by the old CTAS
+	// account_tier rebuild, which the canonical rebuild below repairs.
 	const willMutate =
 		(refreshTokenCol && refreshTokenCol.notnull === 1) ||
 		finalAccountsColumnNames.includes("account_tier") ||
+		accountsInfo.some((col) => col.name === "id" && col.pk === 0) ||
 		finalOAuthColumnNames.includes("tier");
 
 	// Create backup before *destructive* schema modifications only.
@@ -1276,9 +1280,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			// back: for the rest of that server lifetime the repository's
 			// updateRateLimitMeta failed with "no such column: rate_limit_reset_at".
 			//
-			// Any future accounts column has to be added HERE and in that second list,
-			// not only to ensureSchema and runMigrations. That makes seven places, not
-			// the five CLAUDE.md used to name.
+			// Any future accounts column has to be added HERE and in the canonical
+			// rebuild's list below, not only to ensureSchema and runMigrations.
+			// accounts-rebuild-gate.test.ts fails on a column missing from either.
 			db.prepare(`
 				INSERT INTO accounts_new SELECT
 					id, name, provider, api_key,
@@ -1301,22 +1305,12 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			db.prepare(`DROP TABLE accounts`).run();
 			db.prepare(`ALTER TABLE accounts_new RENAME TO accounts`).run();
 
-			// Recreate indexes
-			db.prepare(
-				`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_id ON accounts(id)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_priority ON accounts(priority)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_last_used ON accounts(last_used)`,
-			).run();
+			// No index recreation here. DROP TABLE took every accounts index with
+			// it, and the UNIQUE index block and addPerformanceIndexes below build
+			// the same set a fresh install gets. This used to recreate a simple
+			// idx_accounts_priority ON accounts(priority), whose name then made
+			// addPerformanceIndexes' IF NOT EXISTS skip the real composite one for
+			// good (SB23-3918).
 
 			log.info("Made refresh_token nullable in accounts table");
 		}
@@ -1420,6 +1414,153 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			).run();
 			log.info(
 				"Added usage_pause_weekly_min_reset_remaining_ms column to accounts table",
+			);
+		}
+
+		// Rebuild accounts into its canonical shape, for two kinds of database.
+		//
+		// 1. One that still carries `account_tier`, which existed from cb6602de
+		//    (2025-07-25) until 8a54e4ee (2025-10-30, first shipped in v2.0.20).
+		// 2. One that already took this branch while it was written as
+		//    `CREATE TABLE accounts_new AS SELECT ...` (SB23-3918). SQLite's CTAS
+		//    copies names and affinity only, so that table has no PRIMARY KEY on
+		//    `id`, no NOT NULL and no DEFAULT anywhere, and every row added since
+		//    that omitted a defaulted column holds NULL in it. `id` without the
+		//    primary key is the mark: every other shape this table has ever had
+		//    declares it, and nothing but CTAS removes it.
+		//
+		// The guard reads a fresh PRAGMA rather than the one taken before the
+		// transaction, because the refresh_token rebuild above also discards
+		// `account_tier` and builds a primary key, and a second rebuild of a table
+		// it has just repaired would be wasted work.
+		//
+		// It sits above the UNIQUE index block and addPerformanceIndexes, not
+		// below them as it used to: DROP TABLE drops every index on the table,
+		// and both of those run later in this transaction and build the same
+		// index set a fresh install gets. Below them, an install taking this
+		// branch ran its first lifetime with no UNIQUE index on
+		// (name, provider, custom_endpoint), and the simple idx_accounts_priority
+		// recreated here kept the real one from ever being built.
+		//
+		// The CREATE is a fresh install's accounts table, column for column and in
+		// the same order. The SELECT restores each DEFAULT that a NULL could only
+		// have come from losing:
+		//   - required for the four NOT NULL DEFAULT 0 columns, or a damaged
+		//     table's NULLs fail the INSERT and the migration with it;
+		//   - a choice for the eleven nullable columns with a non-NULL default,
+		//     made because no writer stores NULL in them and every reader already
+		//     treats NULL as the default (`?? "geographic"`, `COALESCE(paused, 0)`).
+		// `name` and `created_at` are NOT NULL with no default and are not
+		// coalesced: every insert site supplies both.
+		//
+		// Every accounts column has to be in this list, which the ALTERs above
+		// guarantee exists by now. accounts-rebuild-gate.test.ts fails on a
+		// column missing from it.
+		const accountsBeforeCanonicalRebuild = db
+			.prepare("PRAGMA table_info(accounts)")
+			.all() as Array<{ name: string; pk: number }>;
+		const accountsHasTier = accountsBeforeCanonicalRebuild.some(
+			(col) => col.name === "account_tier",
+		);
+		const accountsIdLostPrimaryKey = accountsBeforeCanonicalRebuild.some(
+			(col) => col.name === "id" && col.pk === 0,
+		);
+		if (accountsHasTier || accountsIdLostPrimaryKey) {
+			db.prepare(`
+				CREATE TABLE accounts_new (
+					id TEXT PRIMARY KEY,
+					name TEXT NOT NULL,
+					provider TEXT DEFAULT 'anthropic',
+					api_key TEXT,
+					refresh_token TEXT,
+					access_token TEXT,
+					expires_at INTEGER,
+					created_at INTEGER NOT NULL,
+					last_used INTEGER,
+					request_count INTEGER DEFAULT 0,
+					total_requests INTEGER DEFAULT 0,
+					priority INTEGER DEFAULT 0,
+					consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
+					requires_reauth INTEGER DEFAULT 0,
+					last_manual_reauth_at INTEGER,
+					renewal_day INTEGER,
+					request_transformer TEXT,
+					usage_pause_five_hour_threshold INTEGER,
+					usage_pause_weekly_threshold INTEGER,
+					usage_pause_five_hour_enabled INTEGER NOT NULL DEFAULT 0,
+					usage_pause_weekly_enabled INTEGER NOT NULL DEFAULT 0,
+					usage_pause_five_hour_min_reset_remaining_ms INTEGER,
+					usage_pause_weekly_min_reset_remaining_ms INTEGER,
+					rate_limited_until INTEGER,
+					session_start INTEGER,
+					session_request_count INTEGER DEFAULT 0,
+					paused INTEGER DEFAULT 0,
+					rate_limit_reset INTEGER,
+					rate_limit_reset_at INTEGER,
+					rate_limit_status TEXT,
+					rate_limit_remaining INTEGER,
+					auto_fallback_enabled INTEGER DEFAULT 0,
+					custom_endpoint TEXT,
+					auto_refresh_enabled INTEGER DEFAULT 0,
+					model_mappings TEXT,
+					cross_region_mode TEXT DEFAULT 'geographic',
+					model_fallbacks TEXT,
+					billing_type TEXT DEFAULT NULL,
+					refresh_token_issued_at INTEGER,
+					auto_pause_on_overage_enabled INTEGER DEFAULT 0,
+					peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
+					pause_reason TEXT,
+					rate_limited_reason TEXT,
+					rate_limited_at INTEGER
+				)
+			`).run();
+
+			db.prepare(`
+				INSERT INTO accounts_new (
+					id, name, provider, api_key, refresh_token, access_token,
+					expires_at, created_at, last_used,
+					request_count, total_requests, priority,
+					consecutive_rate_limits, requires_reauth, last_manual_reauth_at,
+					renewal_day, request_transformer,
+					usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
+					usage_pause_five_hour_enabled, usage_pause_weekly_enabled,
+					usage_pause_five_hour_min_reset_remaining_ms,
+					usage_pause_weekly_min_reset_remaining_ms,
+					rate_limited_until, session_start, session_request_count, paused,
+					rate_limit_reset, rate_limit_reset_at, rate_limit_status,
+					rate_limit_remaining, auto_fallback_enabled, custom_endpoint,
+					auto_refresh_enabled, model_mappings, cross_region_mode,
+					model_fallbacks, billing_type, refresh_token_issued_at,
+					auto_pause_on_overage_enabled, peak_hours_pause_enabled,
+					pause_reason, rate_limited_reason, rate_limited_at
+				)
+				SELECT
+					id, name, COALESCE(provider, 'anthropic'), api_key, refresh_token, access_token,
+					expires_at, created_at, last_used,
+					COALESCE(request_count, 0), COALESCE(total_requests, 0), COALESCE(priority, 0),
+					COALESCE(consecutive_rate_limits, 0), COALESCE(requires_reauth, 0), last_manual_reauth_at,
+					renewal_day, request_transformer,
+					usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
+					COALESCE(usage_pause_five_hour_enabled, 0), COALESCE(usage_pause_weekly_enabled, 0),
+					usage_pause_five_hour_min_reset_remaining_ms,
+					usage_pause_weekly_min_reset_remaining_ms,
+					rate_limited_until, session_start, COALESCE(session_request_count, 0), COALESCE(paused, 0),
+					rate_limit_reset, rate_limit_reset_at, rate_limit_status,
+					rate_limit_remaining, COALESCE(auto_fallback_enabled, 0), custom_endpoint,
+					COALESCE(auto_refresh_enabled, 0), model_mappings, COALESCE(cross_region_mode, 'geographic'),
+					model_fallbacks, billing_type, refresh_token_issued_at,
+					COALESCE(auto_pause_on_overage_enabled, 0), COALESCE(peak_hours_pause_enabled, 0),
+					pause_reason, rate_limited_reason, rate_limited_at
+				FROM accounts
+			`).run();
+
+			db.prepare(`DROP TABLE accounts`).run();
+			db.prepare(`ALTER TABLE accounts_new RENAME TO accounts`).run();
+
+			log.info(
+				accountsHasTier
+					? "Removed account_tier column from accounts table"
+					: "Rebuilt accounts table to restore its PRIMARY KEY, NOT NULL and DEFAULT constraints",
 			);
 		}
 
@@ -1790,58 +1931,6 @@ export function runMigrations(db: Database, dbPath?: string): void {
 
 		// Add performance indexes
 		addPerformanceIndexes(db);
-
-		// Remove tier columns if they exist (cleanup migration)
-		// Use the column names we already defined above
-		// Drop account_tier column from accounts table if it exists
-		if (finalAccountsColumnNames.includes("account_tier")) {
-			// SQLite doesn't support DROP COLUMN directly, so we need to recreate the table.
-			// Include EVERY non-tier column the migrations above may have added — otherwise
-			// the rebuild silently drops columns (refresh_token_issued_at,
-			// peak_hours_pause_enabled, rate_limited_reason, rate_limited_at) that
-			// AccountRepository.findAll/findById select unconditionally, causing
-			// "no such column" errors at runtime (Codex P1).
-			db.prepare(`
-			CREATE TABLE accounts_new AS
-			SELECT id, name, provider, api_key, refresh_token, refresh_token_issued_at,
-			       access_token, expires_at,
-			       created_at, last_used, request_count, total_requests, priority,
-			       rate_limited_until, session_start, session_request_count, paused,
-			       rate_limit_reset, rate_limit_reset_at, rate_limit_status, rate_limit_remaining,
-			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
-			       request_transformer, cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
-			       peak_hours_pause_enabled, pause_reason, rate_limited_reason,
-			       rate_limited_at, requires_reauth,
-			       consecutive_rate_limits, last_manual_reauth_at, renewal_day,
-			       usage_pause_five_hour_threshold, usage_pause_weekly_threshold,
-			       usage_pause_five_hour_enabled, usage_pause_weekly_enabled,
-			       usage_pause_five_hour_min_reset_remaining_ms,
-			       usage_pause_weekly_min_reset_remaining_ms
-			FROM accounts
-		`).run();
-
-			db.prepare(`DROP TABLE accounts`).run();
-			db.prepare(`ALTER TABLE accounts_new RENAME TO accounts`).run();
-
-			// Recreate indexes
-			db.prepare(
-				`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_id ON accounts(id)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_priority ON accounts(priority)`,
-			).run();
-			db.prepare(
-				`CREATE INDEX IF NOT EXISTS idx_accounts_last_used ON accounts(last_used)`,
-			).run();
-
-			log.info("Removed account_tier column from accounts table");
-		}
 
 		// Drop tier column from oauth_sessions table if it exists
 		if (finalOAuthColumnNames.includes("tier")) {
