@@ -18,7 +18,12 @@ export type FakeMode =
 	| "resume-missing"
 	/** `--resume` fails after a tool call; a fresh session is "ok". */
 	| "resume-fail-after-tool"
-	/** A tool call, then `delayMs` of silence, then the answer. */
+	/**
+	 * A tool call, then silence until the test calls `openGate()`, then the
+	 * answer. A gate rather than a timer, so "the stream started before the
+	 * text" holds by construction instead of by a wall-clock margin that load
+	 * erodes (SB23-3861).
+	 */
 	| "slow-start"
 	/** A subagent's text (parent_tool_use_id set) before the answer. */
 	| "subagent";
@@ -47,14 +52,35 @@ export interface FakeClaude {
 	invocations(): FakeInvocation[];
 	/** How many SIGTERMs an "ignore-term" fake has received and ignored. */
 	ignoredSigterms(): number;
+	/** Releases a "slow-start" fake to print its answer. */
+	openGate(): void;
 	cleanup(): void;
+}
+
+/**
+ * Removes fixture directories that `makeFakeClaude` created, in ONE `trash`
+ * call however many there are. Each `trash` spawn measured 523 ms at the
+ * median and 5101 ms at the worst (588 calls, 12 copies of handler.test.ts at
+ * load average 138), so one call per test was enough on its own to pass a
+ * 5000 ms `afterEach` limit (SB23-3861). Every path came from mkdtemp below,
+ * so removing it cannot touch anything else. `trash` is macOS-only; the CI
+ * runner is Linux.
+ */
+export function removeFakeDirs(dirs: string[]): void {
+	if (dirs.length === 0) return;
+	for (const dir of dirs) {
+		if (!dir || dir === os.tmpdir() || !dir.startsWith(os.tmpdir())) {
+			throw new Error(`not a fake-claude fixture directory: ${dir}`);
+		}
+	}
+	if (Bun.which("trash")) Bun.spawnSync(["trash", ...dirs]);
+	else for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 }
 
 export function makeFakeClaude(options: {
 	mode: FakeMode;
 	textDeltas?: string[];
 	resultText?: string;
-	delayMs?: number;
 }): FakeClaude {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fake-claude-"));
 	if (!dir || dir === os.tmpdir()) throw new Error("bad fixture directory");
@@ -62,6 +88,7 @@ export function makeFakeClaude(options: {
 	fs.mkdirSync(projectDir);
 	const log = path.join(dir, "invocations.jsonl");
 	const termLog = path.join(dir, "ignored-sigterms.log");
+	const gate = path.join(dir, "gate");
 	const bin = path.join(dir, "claude");
 	const config = {
 		mode: options.mode,
@@ -71,7 +98,7 @@ export function makeFakeClaude(options: {
 			(options.textDeltas ?? ["Hello", " world"]).join(""),
 		log,
 		termLog,
-		delayMs: options.delayMs ?? 0,
+		gate,
 	};
 	const script = `#!${process.execPath}
 const fs = require("node:fs");
@@ -108,7 +135,7 @@ if (cfg.mode === "resume-missing" && resuming) { process.stderr.write("No conver
 out({ type: "system", subtype: "init", session_id: sessionId });
 const toolCall = () => out({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t1", name: "Bash", input: {} } } });
 if (cfg.mode === "resume-fail-after-tool" && resuming) { toolCall(); process.exit(1); }
-if (cfg.mode === "slow-start") { toolCall(); await new Promise((r) => setTimeout(r, cfg.delayMs)); }
+if (cfg.mode === "slow-start") { toolCall(); while (!fs.existsSync(cfg.gate)) await new Promise((r) => setTimeout(r, 10)); }
 if (cfg.mode === "subagent") {
   out({ type: "stream_event", parent_tool_use_id: "toolu_sub", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
   out({ type: "stream_event", parent_tool_use_id: "toolu_sub", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "SUBAGENT-SECRET" } } });
@@ -150,11 +177,11 @@ process.exit(cfg.mode === "is-error" ? 1 : 0);
 			return fs.readFileSync(termLog, "utf8").split("\n").filter(Boolean)
 				.length;
 		},
+		openGate() {
+			fs.writeFileSync(gate, "");
+		},
 		cleanup() {
-			// `dir` came from mkdtemp above, so removing it cannot touch anything
-			// else. `trash` is macOS-only; the CI runner is Linux.
-			if (Bun.which("trash")) Bun.spawnSync(["trash", dir]);
-			else fs.rmSync(dir, { recursive: true, force: true });
+			removeFakeDirs([dir]);
 		},
 	};
 }
