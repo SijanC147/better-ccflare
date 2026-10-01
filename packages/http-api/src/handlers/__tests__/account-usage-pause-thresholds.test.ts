@@ -1,9 +1,9 @@
 /**
  * SB23-2575. `POST /api/accounts/:id/usage-pause-thresholds` gained a reset
  * condition beside each window's percent, and `GET /api/accounts` builds its
- * own response object rather than going through `toAccountResponse`, so both
- * are covered here: the write path's validation and keep-stored rules, and the
- * list handler's copy of the new fields (the copy the dashboard reads).
+ * response object inside the list handler, so both are covered here: the write
+ * path's validation and keep-stored rules, and the list handler's copy of the
+ * new fields (the only copy, and the one the dashboard reads).
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";

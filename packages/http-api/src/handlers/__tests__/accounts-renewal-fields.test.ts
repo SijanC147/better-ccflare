@@ -1,8 +1,8 @@
 /**
- * SB23-2055. `GET /api/accounts` does NOT go through `toAccountResponse`: the
- * list handler builds its own response object, so a field added only to the
- * shared serializer never reaches the dashboard. This file covers the list
- * handler's own object, which is the copy the dashboard actually reads.
+ * SB23-2055. `GET /api/accounts` builds its response object inside the list
+ * handler, and that object is the only account-response builder in the tree
+ * (an unused second one, `toAccountResponse`, was deleted in SB23-2280). This
+ * file covers that object, which is what the dashboard reads.
  *
  * The mutation this exists to kill is deleting `renewalDay`, `nextRenewalAt`
  * and `daysUntilRenewal` from that object: the types test still passes, because

@@ -1,6 +1,5 @@
 import type {
 	Account,
-	AccountDisplay,
 	AccountResponse,
 	Request,
 	RequestResponse,
@@ -19,7 +18,7 @@ import {
  * Account presenter - formats account data for display
  */
 export class AccountPresenter {
-	constructor(private account: Account | AccountResponse | AccountDisplay) {}
+	constructor(private account: Account | AccountResponse) {}
 
 	get tokenStatus(): "valid" | "expired" {
 		if ("tokenStatus" in this.account) {
