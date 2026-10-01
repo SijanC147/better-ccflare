@@ -96,6 +96,25 @@ jobs:
         if: steps.changes.outputs.relevant != 'false'
         run: bun run check:optional-chain-silent-skip
 
+      # SB23-3758. `bun run typecheck` cannot see a file no program includes: it
+      # produces no diagnostic, so a new directory or root-level script outside
+      # every target passes typecheck by being invisible to it. SB23-2304 and
+      # SB23-3689 each found more such files than their issue named, by hand.
+      #
+      # This fails when a tracked `*.ts`/`*.tsx`/`*.mts`/`*.cts` is in no program
+      # the root `typecheck` chain reaches, when an allowlist entry is no longer
+      # ungated, or when a `typecheck:*` script is defined but never chained. The
+      # allowlist is `scripts/typecheck-coverage-allowlist.json`, a reason per
+      # entry; it held exactly three shadowed `.d.ts` files when this landed.
+      # Measured 20s on a laptop, beside a typecheck step that takes longer.
+      #
+      # A step inside this job for the same reason as the three around it: both
+      # job names are required checks in ruleset `hextap/main` and a new job would
+      # need a ruleset change.
+      - name: Check every tracked TypeScript file is in a typecheck target
+        if: steps.changes.outputs.relevant != 'false'
+        run: bun run check:typecheck-coverage
+
       # SB23-1918. `bun run lint` cannot be this gate: it is
       # `biome check --write --unsafe`, which mutates the tree and can exit 0
       # having rewritten files, so it reports nothing. This is the read-only
