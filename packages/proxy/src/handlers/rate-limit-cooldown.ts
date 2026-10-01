@@ -20,7 +20,9 @@ const log = new Logger("RateLimitCooldown");
 
 const MATURE_COOLDOWN_STREAK = 5;
 const PROBE_LEASE_MS = 2 * 60 * 1000;
-const MAX_PROBE_GATES = 10_000;
+/** How many probe leases the in-memory map holds before it evicts the oldest. */
+export const MAX_PROBE_GATES = 10_000;
+let probeGateCap = MAX_PROBE_GATES;
 const probeLeases = new Map<string, number>();
 
 /**
@@ -44,7 +46,7 @@ function pruneProbeLeases(now: number): void {
 	for (const [accountId, leaseUntil] of probeLeases) {
 		if (leaseUntil <= now) probeLeases.delete(accountId);
 	}
-	while (probeLeases.size >= MAX_PROBE_GATES) {
+	while (probeLeases.size >= probeGateCap) {
 		const oldest = probeLeases.keys().next().value;
 		if (oldest === undefined) break;
 		probeLeases.delete(oldest);
@@ -154,9 +156,26 @@ export function completeRateLimitProbe(
 	}
 }
 
-/** Test-only: clears all in-memory probe leases between test cases. */
+/**
+ * Test-only: clears all in-memory probe leases between test cases, and puts
+ * the eviction cap back to `MAX_PROBE_GATES`.
+ */
 export function resetRateLimitProbeGatesForTests(): void {
 	probeLeases.clear();
+	probeGateCap = MAX_PROBE_GATES;
+}
+
+/**
+ * Test-only: lowers the eviction cap so a test can reach it with a handful of
+ * admissions. Filling the real 10,000-entry map took about 3 s per run at load
+ * average 138 and timed out at 7125 ms in a loaded full suite (SB23-3851).
+ * `resetRateLimitProbeGatesForTests` restores the real cap.
+ */
+export function setRateLimitProbeGateCapForTests(cap: number): void {
+	if (!Number.isInteger(cap) || cap < 1) {
+		throw new Error(`probe gate cap must be a positive integer, got ${cap}`);
+	}
+	probeGateCap = cap;
 }
 
 /**

@@ -9,7 +9,9 @@ import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
+	MAX_PROBE_GATES,
 	resetRateLimitProbeGatesForTests,
+	setRateLimitProbeGateCapForTests,
 } from "../rate-limit-cooldown";
 
 const NOW = Date.UTC(2026, 6, 9, 3, 0, 0);
@@ -186,7 +188,18 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
 	});
 
+	// SB23-3851. Filling the real 10,000-entry map ran 10,001 admissions inline:
+	// about 3 s per run at load average 138, and a 7125 ms timeout in a loaded
+	// full suite. The cap is lowered through the module's own seam instead, and
+	// both sides of the boundary are asserted. Every admission call prunes
+	// first, the call that checks `first` included, and evicts while
+	// `size >= cap`. So with cap N, `first` holds while the map has N - 1
+	// leases, and the first call to find N evicts it. Removing the eviction
+	// loop fails the last assertion; evicting one lease early fails the
+	// "suppressed" one.
 	it("evicts the oldest lease once the in-memory map hits the cap", () => {
+		const cap = 4;
+		setRateLimitProbeGateCapForTests(cap);
 		Date.now = () => NOW;
 		const first = makeAccount({
 			id: "acc-evict-me",
@@ -194,22 +207,56 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW - 1,
 		});
 		expect(getRateLimitProbeAdmission(first)).toBe("admitted");
+		const fill = (i: number) =>
+			getRateLimitProbeAdmission(
+				makeAccount({
+					id: `acc-fill-${i}`,
+					consecutive_rate_limits: 9,
+					rate_limited_until: NOW - 1,
+				}),
+			);
 
-		// Fill the map with distinct accounts up to the eviction cap so the
-		// oldest lease (acc-evict-me) gets pruned.
-		const MAX_PROBE_GATES = 10_000;
-		for (let i = 0; i < MAX_PROBE_GATES; i++) {
-			const acct = makeAccount({
-				id: `acc-fill-${i}`,
-				consecutive_rate_limits: 9,
-				rate_limited_until: NOW - 1,
-			});
-			getRateLimitProbeAdmission(acct);
-		}
+		for (let i = 0; i < cap - 2; i++) expect(fill(i)).toBe("admitted");
+		// N - 1 leases, `first` included: still held.
+		expect(getRateLimitProbeAdmission(first)).toBe("suppressed");
 
-		// The original account's lease was evicted, so a fresh probe is admitted
-		// again instead of being suppressed.
+		// The N-th lease fills the map, so the next call evicts the oldest.
+		expect(fill(cap - 2)).toBe("admitted");
 		expect(getRateLimitProbeAdmission(first)).toBe("admitted");
+	});
+
+	it("the eviction cap is the module's MAX_PROBE_GATES once the test seam is reset", () => {
+		setRateLimitProbeGateCapForTests(2);
+		resetRateLimitProbeGatesForTests();
+		Date.now = () => NOW;
+		const first = makeAccount({
+			id: "acc-real-cap",
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		expect(getRateLimitProbeAdmission(first)).toBe("admitted");
+		// Under the cap of 2 that the reset must have undone, the second of
+		// these would evict `first`.
+		for (let i = 0; i < 2; i++) {
+			getRateLimitProbeAdmission(
+				makeAccount({
+					id: `acc-real-cap-fill-${i}`,
+					consecutive_rate_limits: 9,
+					rate_limited_until: NOW - 1,
+				}),
+			);
+		}
+		expect(getRateLimitProbeAdmission(first)).toBe("suppressed");
+		expect(MAX_PROBE_GATES).toBe(10_000);
+	});
+
+	it("the cap seam refuses a cap that could never hold a lease", () => {
+		expect(() => setRateLimitProbeGateCapForTests(0)).toThrow(
+			"probe gate cap must be a positive integer, got 0",
+		);
+		expect(() => setRateLimitProbeGateCapForTests(1.5)).toThrow(
+			"probe gate cap must be a positive integer, got 1.5",
+		);
 	});
 });
 
