@@ -510,7 +510,7 @@ describe("claude code endpoints API: directory roots (SB23-3408 item 7)", () => 
 		);
 		expect(response.status).toBe(400);
 		expect(await response.json()).toEqual({
-			error: claudeCodeDirectoryRootsMessage(outside, [root]),
+			error: claudeCodeDirectoryRootsMessage(outside),
 		});
 		expect(stored(path, CLAUDE_CODE_ENDPOINTS_CONFIG_KEY)).toBeUndefined();
 	});
@@ -526,7 +526,7 @@ describe("claude code endpoints API: directory roots (SB23-3408 item 7)", () => 
 		expect(response.status).toBe(400);
 		// The roots answer, so the reply cannot probe whether a path exists.
 		expect(await response.json()).toEqual({
-			error: claudeCodeDirectoryRootsMessage(missing, [root]),
+			error: claudeCodeDirectoryRootsMessage(missing),
 		});
 	});
 
@@ -593,7 +593,7 @@ describe("claude code endpoints API: directory roots (SB23-3408 item 7)", () => 
 		);
 		expect(refused.status).toBe(400);
 		expect(await refused.json()).toEqual({
-			error: claudeCodeDirectoryRootsMessage(outside, [home]),
+			error: claudeCodeDirectoryRootsMessage(outside),
 		});
 		expect(stored(path, CLAUDE_CODE_ENDPOINTS_CONFIG_KEY)).toBeUndefined();
 		expect(
@@ -633,7 +633,7 @@ describe("claude code endpoints API: directory roots (SB23-3408 item 7)", () => 
 		expect(listed.endpoints.map((e) => e.name)).toEqual(["good"]);
 		expect(listed.errors).toEqual([
 			`endpoint hooks: ${checkClaudeCodeExtraArgs(["--settings", "{}"])}`,
-			`endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside, [root])}`,
+			`endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside)}`,
 		]);
 		expect(handlers.getEndpoint("hooks").status).toBe(404);
 		expect(handlers.getEndpoint("escaped").status).toBe(404);
@@ -662,9 +662,7 @@ describe("loadClaudeCodeEndpointState", () => {
 		});
 		expect(loadClaudeCodeEndpointState(config, FACTS)).toEqual({
 			endpoints: { inside: { directory: root } },
-			errors: [
-				`endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside, [root])}`,
-			],
+			errors: [`endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside)}`],
 			allowedHosts: ["proxy.example"],
 		});
 	});
@@ -679,7 +677,7 @@ describe("loadClaudeCodeEndpointState", () => {
 				escaped: { directory: outside },
 			},
 		};
-		const escapedError = `endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside, [home])}`;
+		const escapedError = `endpoint escaped: ${claudeCodeDirectoryRootsMessage(outside)}`;
 
 		const notArrays = configWithFile({
 			...endpoints,

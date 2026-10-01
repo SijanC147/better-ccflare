@@ -128,8 +128,12 @@ export function checkClaudeCodeExtraArgs(
 		if (eq > 0) {
 			if (arity === 0) return `${flag} takes no value`;
 			if (token.length === eq + 1) return `${flag}= needs a value`;
-			if (arity === 1) continue;
-		} else if (arity === 1) {
+			// An `=` form carries exactly one value whatever the arity: the CLI
+			// (commander) does not keep collecting after it, so a following
+			// bare word would be its prompt and is refused on the next pass.
+			continue;
+		}
+		if (arity === 1) {
 			const value = args[i];
 			if (value === undefined || value.startsWith("-")) {
 				return `${flag} needs a value`;
@@ -571,9 +575,8 @@ export function parseClaudeCodeDirectoryRoots(raw: unknown): {
 	return { roots, errors: [] };
 }
 
-export function claudeCodeDirectoryRootsMessage(
-	directory: string,
-	roots: readonly string[],
-): string {
-	return `directory ${JSON.stringify(directory)} is outside the allowed roots (${roots.join(", ")}); add a root to ${CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY} in the config file`;
+export function claudeCodeDirectoryRootsMessage(directory: string): string {
+	// The roots themselves stay out of the message: they name the home
+	// directory, and this text reaches unauthenticated clients.
+	return `directory ${JSON.stringify(directory)} is outside the allowed roots; add a root to ${CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY} in the config file`;
 }

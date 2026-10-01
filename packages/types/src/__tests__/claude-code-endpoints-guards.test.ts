@@ -202,6 +202,14 @@ describe("checkClaudeCodeExtraArgs", () => {
 		expect(checkClaudeCodeExtraArgs(["--bare", "hello"])).toBe(
 			'extra_args entry "hello" is not a flag or a flag\'s value',
 		);
+		// commander stops collecting after `--flag=value`, so "Read" would be
+		// the prompt (PR #264 review, MF2).
+		expect(checkClaudeCodeExtraArgs(["--allowedTools=Bash", "Read"])).toBe(
+			'extra_args entry "Read" is not a flag or a flag\'s value',
+		);
+		expect(checkClaudeCodeExtraArgs(["--allowedTools", "Bash", "Read"])).toBe(
+			null,
+		);
 	});
 
 	it("refuses a value on a flag that takes none", () => {

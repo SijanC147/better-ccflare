@@ -11,6 +11,8 @@ import {
 	handleClaudeCodeEndpointRequest,
 	resetClaudeCodeRunnerStateForTests,
 } from "../handler";
+import { conversationKey } from "../prompt";
+import { putClaudeCodeSession } from "../sessions";
 import {
 	type FakeClaude,
 	type FakeMode,
@@ -865,6 +867,61 @@ describe("SB23-3408 follow-ups", () => {
 		const raw = await res.text();
 		expect(raw).toContain('"code":"claude_code_failed"');
 		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
+	});
+
+	test("item 1: cancelling a stream while a resume is pending never starts the retry", async () => {
+		const ctx = setup("hang", { timeout_ms: 5000 });
+		const { name, directory } = ctx.endpoint;
+		putClaudeCodeSession(
+			conversationKey(`${name}\u0000${directory}`, [
+				{ role: "user", text: "q1" },
+				{ role: "assistant", text: "Hello world" },
+			]),
+			"seeded-session",
+		);
+		const res = await call(ctx, turnTwo(true), undefined, {
+			firstEventWaitMs: 50,
+		});
+		expect(res.status).toBe(200);
+		await waitFor(() => (fake?.invocations().length ?? 0) === 1);
+		expect(flag(fake?.invocations()[0]?.argv ?? [], "--resume")).toBe(
+			"seeded-session",
+		);
+		// Killing the hung resume makes it fail with no output, which would be
+		// retryable; the cancel must win.
+		await res.body?.cancel();
+		const [inv] = fake?.invocations() ?? [];
+		await waitFor(() => !isAlive(inv?.pid ?? 0));
+		await new Promise((r) => setTimeout(r, 400));
+		expect(fake?.invocations()).toHaveLength(1);
+	});
+
+	test("item 3: the keep-alive timer is cleared when the stream finishes", async () => {
+		const ctx = setup("ok");
+		const live = new Set<unknown>();
+		const realSet = globalThis.setInterval;
+		const realClear = globalThis.clearInterval;
+		globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+			const id = realSet(...args);
+			live.add(id);
+			return id;
+		}) as typeof setInterval;
+		globalThis.clearInterval = ((id?: Parameters<typeof clearInterval>[0]) => {
+			live.delete(id);
+			realClear(id);
+		}) as typeof clearInterval;
+		try {
+			const res = await call(ctx, { ...turnOne, stream: true }, undefined, {
+				keepAliveMs: 20,
+			});
+			expect(await res.text()).toContain("data: [DONE]");
+			expect(live.size).toBe(0);
+		} finally {
+			for (const id of live)
+				realClear(id as Parameters<typeof clearInterval>[0]);
+			globalThis.setInterval = realSet;
+			globalThis.clearInterval = realClear;
+		}
 	});
 
 	test("item 5: subagent text never reaches the client", async () => {

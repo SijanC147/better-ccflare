@@ -142,7 +142,7 @@ export function loadClaudeCodeEndpointState(
 	for (const [name, endpoint] of Object.entries(parsed.endpoints)) {
 		if (!isClaudeCodeDirectoryAllowed(endpoint.directory, roots)) {
 			errors.push(
-				`endpoint ${name}: ${claudeCodeDirectoryRootsMessage(endpoint.directory, roots)}`,
+				`endpoint ${name}: ${claudeCodeDirectoryRootsMessage(endpoint.directory)}`,
 			);
 			continue;
 		}
@@ -244,9 +244,7 @@ export function createClaudeCodeEndpointHandlers(
 			const { roots } = claudeCodeDirectoryRoots(config, facts);
 			if (!isClaudeCodeDirectoryAllowed(result.value.directory, roots)) {
 				return errorResponse(
-					BadRequest(
-						claudeCodeDirectoryRootsMessage(result.value.directory, roots),
-					),
+					BadRequest(claudeCodeDirectoryRootsMessage(result.value.directory)),
 				);
 			}
 

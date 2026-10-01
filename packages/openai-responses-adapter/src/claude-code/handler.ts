@@ -814,16 +814,29 @@ export async function handleClaudeCodeEndpointRequest(
 	// s) drop the request, so after the wait the stream starts and
 	// keep-alive comments flow until text arrives (SB23-3408, item 3).
 	const firstPromise = firstEvent();
+	// Awaited again in pull(); this only keeps a rejection that lands after a
+	// cancel from being reported as unhandled.
+	firstPromise.catch(() => {});
 	let waitTimer: ReturnType<typeof setTimeout> | undefined;
-	const raced = await Promise.race([
-		firstPromise,
-		new Promise<"waiting">((resolve) => {
-			waitTimer = setTimeout(
-				() => resolve("waiting"),
-				deps.firstEventWaitMs ?? DEFAULT_FIRST_EVENT_WAIT_MS,
-			);
-		}),
-	]);
+	let raced: Awaited<typeof firstPromise> | "waiting";
+	try {
+		raced = await Promise.race([
+			firstPromise,
+			new Promise<"waiting">((resolve) => {
+				waitTimer = setTimeout(
+					() => resolve("waiting"),
+					deps.firstEventWaitMs ?? DEFAULT_FIRST_EVENT_WAIT_MS,
+				);
+			}),
+		]);
+	} catch (err) {
+		clearTimeout(waitTimer);
+		release();
+		log.warn(
+			`Claude Code endpoint "${endpoint.name}" failed before its first event: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return jsonResponse(502, endedWithoutResult());
+	}
 	clearTimeout(waitTimer);
 	if (raced !== "waiting") {
 		if ("kind" in raced) {
@@ -873,66 +886,86 @@ export async function handleClaudeCodeEndpointRequest(
 			}, deps.keepAliveMs ?? DEFAULT_KEEPALIVE_MS);
 		},
 		async pull(controller) {
-			const finish = () => {
-				finished = true;
-				if (keepAlive) clearInterval(keepAlive);
-				release();
-				controller.close();
-			};
-			const fail = (body: unknown) => {
-				controller.enqueue(frame(body));
+			try {
+				const finish = () => {
+					finished = true;
+					if (keepAlive) clearInterval(keepAlive);
+					release();
+					controller.close();
+				};
+				const fail = (body: unknown) => {
+					controller.enqueue(frame(body));
+					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+					finish();
+				};
+				if (!roleSent) {
+					roleSent = true;
+					controller.enqueue(
+						frame(chunk({ role: "assistant", content: "" }, null)),
+					);
+				}
+				let ev: RunEvent | null = null;
+				if (firstPending) {
+					firstPending = false;
+					const first = await firstPromise;
+					if ("kind" in first) {
+						fail(errorBody(first.message, first.type, first.code));
+						return;
+					}
+					if (!first.done) ev = first.value;
+				}
+				while (ev === null || ev.kind === "session") {
+					const next = await (current as Launch).events.next();
+					if (next.done) {
+						fail(endedWithoutResult());
+						return;
+					}
+					ev = next.value;
+				}
+				if (ev.kind === "text") {
+					sent += ev.text;
+					controller.enqueue(frame(chunk({ content: ev.text }, null)));
+					return;
+				}
+				if (ev.kind === "error") {
+					fail(errorBody(ev.message, ev.type, ev.code));
+					return;
+				}
+				remember(ev.sessionId, sent);
+				controller.enqueue(frame(chunk({}, "stop")));
+				if (includeUsage) {
+					controller.enqueue(
+						frame({
+							id: completionId,
+							object: "chat.completion.chunk",
+							created,
+							model,
+							choices: [],
+							usage: toChatUsage(ev.usage),
+						}),
+					);
+				}
 				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 				finish();
-			};
-			if (!roleSent) {
-				roleSent = true;
-				controller.enqueue(
-					frame(chunk({ role: "assistant", content: "" }, null)),
+			} catch (err) {
+				// Nothing above is expected to throw; if it does, the run and the
+				// prompt directory are still released and the timer stops.
+				log.warn(
+					`Claude Code endpoint "${endpoint.name}" stream failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
-			}
-			let ev: RunEvent | null = null;
-			if (firstPending) {
-				firstPending = false;
-				const first = await firstPromise;
-				if ("kind" in first) {
-					fail(errorBody(first.message, first.type, first.code));
-					return;
+				if (keepAlive) clearInterval(keepAlive);
+				release();
+				if (!finished) {
+					finished = true;
+					try {
+						controller.enqueue(frame(endedWithoutResult()));
+						controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+						controller.close();
+					} catch {
+						// already closed
+					}
 				}
-				if (!first.done) ev = first.value;
 			}
-			while (ev === null || ev.kind === "session") {
-				const next = await (current as Launch).events.next();
-				if (next.done) {
-					fail(endedWithoutResult());
-					return;
-				}
-				ev = next.value;
-			}
-			if (ev.kind === "text") {
-				sent += ev.text;
-				controller.enqueue(frame(chunk({ content: ev.text }, null)));
-				return;
-			}
-			if (ev.kind === "error") {
-				fail(errorBody(ev.message, ev.type, ev.code));
-				return;
-			}
-			remember(ev.sessionId, sent);
-			controller.enqueue(frame(chunk({}, "stop")));
-			if (includeUsage) {
-				controller.enqueue(
-					frame({
-						id: completionId,
-						object: "chat.completion.chunk",
-						created,
-						model,
-						choices: [],
-						usage: toChatUsage(ev.usage),
-					}),
-				);
-			}
-			controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-			finish();
 		},
 		async cancel() {
 			if (keepAlive) clearInterval(keepAlive);
