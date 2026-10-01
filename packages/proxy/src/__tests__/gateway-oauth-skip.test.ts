@@ -246,6 +246,7 @@ type Call = "oauth" | "api-key" | "codex";
 function installFetch(
 	oauthAnswer: (index: number) => Response = () => windowless429(),
 	codexAnswer: () => Response = () => message("gpt-5.6-sol"),
+	apiKeyAnswer: () => Response = () => message(MODEL),
 ): Call[] {
 	const calls: Call[] = [];
 	const unknown: string[] = [];
@@ -264,7 +265,7 @@ function installFetch(
 				bearer === `Bearer ${CONSOLE_KEY}`
 			) {
 				calls.push("api-key");
-				return message(MODEL);
+				return apiKeyAnswer();
 			}
 			if (bearer === "Bearer access-token") {
 				calls.push("oauth");
@@ -471,6 +472,59 @@ describe("gateway request: one OAuth call after a windowless 429 (SB23-2781)", (
 		expect(response.status).toBe(502);
 		expect(await response.text()).toContain("codex upstream 502");
 		expect(calls).toEqual(["oauth", "codex"]);
+	});
+
+	it("a windowless 429 from an API-key account does not skip the OAuth accounts", async () => {
+		const [first] = oauthAccounts();
+		const ctx = makeContext(
+			[
+				{ ...consoleAccount(), priority: 0 },
+				{ ...first, priority: 1 },
+			],
+			null,
+		);
+		const calls = installFetch(
+			() => message(MODEL),
+			undefined,
+			() => windowless429(),
+		);
+
+		const response = await send(ctx, true);
+
+		expect(response.status).toBe(200);
+		expect(calls).toEqual(["api-key", "oauth"]);
+	});
+
+	it("a fallback candidate followed only by skipped OAuth accounts is the terminal attempt", async () => {
+		const oauth = oauthAccounts();
+		const codex = { ...codexAccount(), priority: 1 };
+		const pool = [oauth[0], oauth[1], codex, ...oauth.slice(2)].map(
+			(account, index) => ({ ...account, priority: index }),
+		);
+		// One combo slot that benches, so the fallback loop meets the refusal
+		// (oauth[1]) and then Codex, with only skipped OAuth accounts after it.
+		const ctx = makeContext(pool, makeCombo([oauth[0].id]));
+		ctx.runtime = {
+			...ctx.runtime,
+			retry: { attempts: 1, delayMs: 0, backoff: 1 },
+		};
+		const calls = installFetch(
+			(index) => (index === 0 ? windowed429() : windowless429()),
+			() =>
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "api_error", message: "codex upstream 502" },
+					}),
+					{ status: 502, headers: { "content-type": "application/json" } },
+				),
+		);
+
+		const response = await send(ctx, true);
+
+		expect(response.status).toBe(502);
+		expect(await response.text()).toContain("codex upstream 502");
+		expect(calls).toEqual(["oauth", "oauth", "codex"]);
 	});
 
 	it("an OAuth account behind a custom endpoint is not skipped", async () => {
