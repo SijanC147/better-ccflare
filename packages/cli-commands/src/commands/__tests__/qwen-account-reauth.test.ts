@@ -51,8 +51,13 @@ afterAll(() => {
 
 const { reauthenticateAccount } = await import("../account");
 
+// "stale" sends no notification at all. Before SB23-4035 this file's re-auth
+// posted to localhost:8080 and :8081 for real, and 8080 is the production
+// service on the host the suite runs on.
 const config = {
-	getLocalControlSecret: () => "test-local-control-secret",
+	getLocalControlTarget: () => ({ kind: "stale", pid: 0 }),
+	getLocalControlSidecarPath: () =>
+		"/nonexistent/better-ccflare.json.local-control",
 } as unknown as Config;
 
 describe("CLI Qwen account re-authentication", () => {
