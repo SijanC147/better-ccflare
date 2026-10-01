@@ -91,22 +91,11 @@ function makeProxyContextWithAsyncExec(): ProxyContext {
 			})),
 		} as never,
 		runtime: { port: 8080, clientId: "test" } as never,
-		provider: {
-			name: "anthropic",
-			canHandle: () => true,
-			buildUrl: (_path: string, _search: string) =>
-				"https://api.anthropic.com/v1/messages",
-			prepareHeaders: (_headers: Headers) => new Headers(),
-			transformRequestBody: null,
-			processResponse: async (r: Response) => r,
-			parseRateLimit: () => ({
-				isRateLimited: false,
-				resetTime: undefined,
-				statusHeader: "allowed",
-				remaining: undefined,
-			}),
-			isStreamingResponse: () => false,
-		} as never,
+		// Only `name` is supplied. proxyWithAccount resolves
+		// `getProvider(account.provider) || ctx.provider`, and every account here
+		// names a provider the registry knows, so a method stubbed on this object
+		// never runs (SB23-2536). Drive the real provider through what it reads.
+		provider: { name: "anthropic" } as never,
 		refreshInFlight: new Map(),
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {

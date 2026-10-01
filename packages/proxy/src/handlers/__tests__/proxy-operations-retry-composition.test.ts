@@ -140,28 +140,11 @@ function makeProxyContext(): ProxyContext {
 			clientId: "test",
 			retry: { ...RETRY_DEFAULTS },
 		} as never,
-		provider: {
-			name: "anthropic",
-			canHandle: () => true,
-			buildUrl: () => "https://api.anthropic.com/v1/messages",
-			prepareHeaders: () => new Headers(),
-			transformRequestBody: null,
-			processResponse: async (r: Response) => r,
-			// NOT the provider this fixture actually exercises. proxy-operations
-			// resolves `getProvider(account.provider) || ctx.provider` (:1013),
-			// so for a real provider name such as "anthropic" or "zai" the
-			// registry wins and everything here is a fallback that never runs.
-			// A test that needs provider behaviour has to drive the REAL
-			// provider through headers it reads, which is what the reset-hint
-			// case below does.
-			parseRateLimit: () => ({
-				isRateLimited: false,
-				resetTime: undefined,
-				statusHeader: "allowed",
-				remaining: undefined,
-			}),
-			isStreamingResponse: () => false,
-		} as never,
+		// Only `name` is supplied. proxyWithAccount resolves
+		// `getProvider(account.provider) || ctx.provider`, and every account here
+		// names a provider the registry knows, so a method stubbed on this object
+		// never runs (SB23-2536). Drive the real provider through what it reads.
+		provider: { name: "anthropic" } as never,
 		refreshInFlight: new Map(),
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {

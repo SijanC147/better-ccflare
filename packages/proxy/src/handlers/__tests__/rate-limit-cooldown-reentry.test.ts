@@ -49,7 +49,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 	} as Account;
 }
 
-function makeCtx(opts: { rateLimited: boolean; resetTime?: number }) {
+function makeCtx() {
 	const calls = {
 		markRateLimited: [] as Array<{
 			until: number;
@@ -58,16 +58,11 @@ function makeCtx(opts: { rateLimited: boolean; resetTime?: number }) {
 		}>,
 	};
 	const ctx = {
-		provider: {
-			name: "anthropic",
-			parseRateLimit: () => ({
-				isRateLimited: opts.rateLimited,
-				resetTime: opts.resetTime,
-				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
-				remaining: undefined,
-			}),
-			isStreamingResponse: () => false,
-		},
+		// No provider methods: applyRateLimitCooldown and the probe gate never
+		// read ctx.provider, so a stubbed parseRateLimit here never ran and the
+		// `rateLimited` option it read changed nothing (SB23-2536). Each case
+		// passes its rate-limit info to the function under test directly.
+		provider: { name: "anthropic" },
 		dbOps: {
 			markAccountRateLimited: async (
 				_accountId: string,
@@ -157,7 +152,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			consecutive_rate_limits: 9,
 			rate_limited_until: NOW - 1,
 		});
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 
 		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
 		applyRateLimitCooldown(account, { resetTime: NOW + 120_000 }, ctx);
@@ -255,7 +250,7 @@ describe("transient 5xx server-error cooldown", () => {
 	it("applies the fixed server-error cooldown and ignores the 429 streak depth", () => {
 		Date.now = () => NOW;
 		const account = makeAccount({ consecutive_rate_limits: 8 });
-		const { ctx, calls } = makeCtx({ rateLimited: false });
+		const { ctx, calls } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -273,7 +268,7 @@ describe("transient 5xx server-error cooldown", () => {
 	it("honors a Retry-After shorter than the fixed cooldown", () => {
 		Date.now = () => NOW;
 		const account = makeAccount();
-		const { ctx } = makeCtx({ rateLimited: false });
+		const { ctx } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -287,7 +282,7 @@ describe("transient 5xx server-error cooldown", () => {
 	it("caps a far-future Retry-After at the server-error cooldown", () => {
 		Date.now = () => NOW;
 		const account = makeAccount();
-		const { ctx } = makeCtx({ rateLimited: false });
+		const { ctx } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -308,7 +303,7 @@ describe("transient 5xx server-error cooldown", () => {
 			rate_limited_until: quotaBenchUntil,
 			rate_limited_reason: "upstream_429_with_reset",
 		});
-		const { ctx, calls } = makeCtx({ rateLimited: false });
+		const { ctx, calls } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -328,7 +323,7 @@ describe("529 overload cooldown separation", () => {
 		// A mature 429 streak would normally ramp the exponential backoff to
 		// minutes; a 529 overload must ignore that ramp entirely.
 		const account = makeAccount({ consecutive_rate_limits: 8 });
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -344,7 +339,7 @@ describe("529 overload cooldown separation", () => {
 	it("does not increment consecutive_rate_limits after a 529 overload, in-memory or via the DB call", () => {
 		Date.now = () => NOW;
 		const account = makeAccount({ consecutive_rate_limits: 8 });
-		const { ctx, calls } = makeCtx({ rateLimited: true });
+		const { ctx, calls } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -360,7 +355,7 @@ describe("529 overload cooldown separation", () => {
 	it("caps a 529-with-reset at the overload-scale ceiling, not the frozen streak's exponential ramp, while still suppressing the streak (delta2-5)", () => {
 		Date.now = () => NOW;
 		const account = makeAccount({ consecutive_rate_limits: 8 });
-		const { ctx, calls } = makeCtx({ rateLimited: true });
+		const { ctx, calls } = makeCtx();
 		// Chosen so the two candidate formulas diverge: the overload cap (60s,
 		// computeOverloadWithResetCapMs) sits well below this reset, while the
 		// streak's exponential ramp (computeRateLimitBackoffMs(9), capped at
@@ -393,7 +388,7 @@ describe("529 overload cooldown separation", () => {
 	it("keeps the exponential 429 ramp and reset-time cap unchanged (regression)", () => {
 		Date.now = () => NOW;
 		const account = makeAccount({ consecutive_rate_limits: 8 });
-		const { ctx, calls } = makeCtx({ rateLimited: true });
+		const { ctx, calls } = makeCtx();
 		// Shorter than the 8th-streak backoff ceiling, so it drives the cap.
 		const resetTime = NOW + 10_000;
 
@@ -418,7 +413,7 @@ describe("529 overload cooldown separation", () => {
 		// via that frozen counter would give a flat 30s regardless of what
 		// Anthropic's own retry-after says.
 		const account = makeAccount({ consecutive_rate_limits: 0 });
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 		const resetTime = NOW + 60_000;
 
 		applyRateLimitCooldown(
@@ -433,7 +428,7 @@ describe("529 overload cooldown separation", () => {
 	it("caps a 529-with-reset duration at OVERLOAD_WITH_RESET_MAX_MS when the upstream reset is far in the future", () => {
 		Date.now = () => NOW;
 		const account = makeAccount({ consecutive_rate_limits: 0 });
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 		// anthropic-ratelimit-unified-reset can carry a quota-window reset that's
 		// hours away (provider.ts:368-380) rather than a real short retry-after —
 		// far beyond the 60s overload-scale cap.
@@ -459,7 +454,7 @@ describe("529 overload cooldown separation", () => {
 			rate_limited_until: NOW + 300_000,
 			rate_limited_at: NOW - 1_000,
 		});
-		const { ctx, calls } = makeCtx({ rateLimited: true });
+		const { ctx, calls } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -479,7 +474,7 @@ describe("529 overload cooldown separation", () => {
 	it("updates rate_limited_reason in-memory (not only in the DB) on every cooldown apply", () => {
 		Date.now = () => NOW;
 		const account = makeAccount({ consecutive_rate_limits: 0 });
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,

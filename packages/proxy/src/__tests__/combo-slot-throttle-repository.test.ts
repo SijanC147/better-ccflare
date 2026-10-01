@@ -197,7 +197,7 @@ describe("family combo slot thresholds survive the repository read", () => {
 				getAgentFrontmatterModelFallback: () => false,
 				getModelScopedCapacityRouting: () => "off",
 			} as never,
-			provider: { name: "anthropic", canHandle: () => true } as never,
+			provider: { name: "anthropic" } as never,
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) } as never,
 		};

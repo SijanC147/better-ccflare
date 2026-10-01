@@ -124,7 +124,6 @@ function makeCtx(opts: {
 				}
 				return opts.usage;
 			},
-			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: () => {},

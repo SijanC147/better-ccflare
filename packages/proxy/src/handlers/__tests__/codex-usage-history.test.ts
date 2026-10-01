@@ -209,15 +209,12 @@ function makeCodexCtx() {
 	const ctx = {
 		provider: {
 			name: "codex",
-			isStreamingResponse: () => false,
 			parseRateLimit: () => ({
 				isRateLimited: false,
 				resetTime: undefined,
 				statusHeader: undefined,
 				remaining: undefined,
 			}),
-			parseUsage: undefined,
-			extractUsageInfo: undefined,
 		},
 		// Read by updateAccountMetadata's Codex block once #428 lands, which
 		// picks the usage window a session is riding from the config. Harmless
