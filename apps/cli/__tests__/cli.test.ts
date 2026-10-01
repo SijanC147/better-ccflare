@@ -531,6 +531,70 @@ describe("CLI Integration Tests", () => {
 		});
 	});
 
+	// SB23-2575: the optional trailing pair of reset hours. The parser takes both
+	// or neither, and a following `--` option is never read as an hours token.
+	describe("--set-usage-pause-thresholds reset hours", () => {
+		const bothOrNeither =
+			"--set-usage-pause-thresholds takes reset hours for both windows or for neither";
+
+		it("refuses a single trailing hours token", async () => {
+			const result = await runCLI([
+				"--set-usage-pause-thresholds",
+				"some-account",
+				"80",
+				"off",
+				"2",
+			]);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout + result.stderr).toContain(bothOrNeither);
+		});
+
+		it("refuses a single hours token followed by another option", async () => {
+			const result = await runCLI([
+				"--set-usage-pause-thresholds",
+				"some-account",
+				"80",
+				"off",
+				"2",
+				"--stats",
+			]);
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout + result.stderr).toContain(bothOrNeither);
+		});
+
+		it("reads the five-token form through to the account lookup", async () => {
+			const result = await runCLI([
+				"--set-usage-pause-thresholds",
+				"some-account",
+				"80",
+				"off",
+				"2",
+				"off",
+			]);
+			const output = result.stdout + result.stderr;
+			expect(result.exitCode).toBe(1);
+			expect(output).toContain("Account 'some-account' not found");
+			expect(output).not.toContain(bothOrNeither);
+		});
+
+		it("keeps the three-token form when an option follows it", async () => {
+			// `--stats` runs and exits 0 before the thresholds handler, so this
+			// pins only the parse: the option is never read as an hours token. A
+			// parser that dropped its "--" check would take `--stats` as the first
+			// hours token, find no second, and exit 1 with the both-or-neither
+			// message.
+			const result = await runCLI([
+				"--set-usage-pause-thresholds",
+				"some-account",
+				"80",
+				"off",
+				"--stats",
+			]);
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout + result.stderr).not.toContain(bothOrNeither);
+		});
+	});
+
 	describe("Error Handling", () => {
 		it("should handle invalid port gracefully", async () => {
 			const result = await runCLI(["--serve", "--port", "not-a-number"]);

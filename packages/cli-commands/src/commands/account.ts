@@ -2331,9 +2331,20 @@ export async function setUsagePauseThresholds(
 		return text ? `off (${text} remembered)` : "off";
 	};
 
+	// The dialog's zero warning, carried over: 0 hours holds for any reset
+	// still ahead, so a reset-only window at 0 pauses on every poll.
+	const zeroWarning = [validated.fiveHour, validated.weekly].some(
+		(setting) =>
+			setting.enabled &&
+			setting.percent === null &&
+			setting.minResetRemainingMs === 0,
+	)
+		? " (a reset minimum of 0h with no percent pauses the account on every poll)"
+		: "";
+
 	return {
 		success: true,
-		message: `Account '${name}' usage pause thresholds set to 5h=${describe(validated.fiveHour)}, weekly=${describe(validated.weekly)}`,
+		message: `Account '${name}' usage pause thresholds set to 5h=${describe(validated.fiveHour)}, weekly=${describe(validated.weekly)}${zeroWarning}`,
 	};
 }
 

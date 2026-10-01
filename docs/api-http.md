@@ -408,7 +408,7 @@ Set the account's usage-window pause thresholds. Each window has two optional co
 }
 ```
 
-Each field is a whole percentage from 1 to 100, or `null` to turn that window's threshold off and clear the stored percentage. The bare form never touches a stored reset condition. Both windows are written on every call, so a field left out is disabled.
+Each field is a whole percentage from 1 to 100, or `null` to turn that window's threshold off and clear the stored percentage. The bare form never touches a stored reset condition, so a bare percentage that switches a window back on also brings back any reset minimum still stored for it; send the object form with `minResetRemainingMs: null` to drop it. Both windows are written on every call, so a field left out is disabled.
 
 **Request (object form, used by the dashboard):**
 ```json

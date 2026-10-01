@@ -215,7 +215,7 @@ function ThresholdRow({ id, label, draft, onDraftChange }: ThresholdRowProps) {
 						}
 						className="w-24"
 						aria-invalid={percent === "invalid"}
-						aria-describedby={percentHintId}
+						aria-describedby={percent === "invalid" ? percentHintId : undefined}
 					/>
 					<span className="text-xs text-muted-foreground">percent (1-100)</span>
 				</div>
@@ -242,7 +242,11 @@ function ThresholdRow({ id, label, draft, onDraftChange }: ThresholdRowProps) {
 						}
 						className="w-24"
 						aria-invalid={resetMs === "invalid"}
-						aria-describedby={resetHintId}
+						aria-describedby={
+							resetMs === "invalid" || resetMs === 0
+								? resetHintId
+								: `${resetHintId}-note`
+						}
 					/>
 					<span className="text-xs text-muted-foreground">
 						hours from resetting
@@ -263,7 +267,10 @@ function ThresholdRow({ id, label, draft, onDraftChange }: ThresholdRowProps) {
 						the account on every poll while that is the only condition set.
 					</p>
 				)}
-				<p className="text-[11px] text-muted-foreground">
+				<p
+					id={`${resetHintId}-note`}
+					className="text-[11px] text-muted-foreground"
+				>
 					A reset that is closer than this leaves the account in play, because
 					the window frees up shortly.
 				</p>

@@ -110,3 +110,39 @@ describe("setUsagePauseThresholds: reset hours (SB23-2575)", () => {
 		expect(writes).toStrictEqual([]);
 	});
 });
+
+describe("setUsagePauseThresholds: zero-hours warning (SB23-2575)", () => {
+	it("says so when a reset-only window is set to 0 hours, and not otherwise", async () => {
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		runMigrations(db);
+		const adapter = new BunSqlAdapter(db);
+		const dbOps = {
+			getAdapter: () => adapter,
+			setUsagePauseThresholds: async () => {},
+		} as unknown as DatabaseOperations;
+		db.run(
+			`INSERT INTO accounts (id, name, provider, created_at) VALUES ('acc-1', 'acc', 'anthropic', 1)`,
+		);
+		const warning =
+			" (a reset minimum of 0h with no percent pauses the account on every poll)";
+
+		const zero = await setUsagePauseThresholds(dbOps, "acc", null, null, [
+			"0",
+			null,
+		]);
+		expect(zero.message).toBe(
+			`Account 'acc' usage pause thresholds set to 5h=reset >= 0h away, weekly=off${warning}`,
+		);
+
+		const withPercent = await setUsagePauseThresholds(
+			dbOps,
+			"acc",
+			"80",
+			null,
+			["0", null],
+		);
+		expect(withPercent.message).not.toContain(warning);
+		db.close();
+	});
+});

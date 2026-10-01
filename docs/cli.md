@@ -270,7 +270,7 @@ bun run cli --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off> [<5h-hou
 - `name`: Account name to update
 - `5h%`: Percentage (1-100) of the 5-hour window at which to pause, or `off`
 - `weekly%`: Percentage (1-100) of the weekly window at which to pause, or `off`
-- `5h-hours`, `weekly-hours` (optional, both or neither): only pause while that window's reset is still at least this many hours away, or `off`. Fractions are allowed. Only the conditions that are set are considered and with both set both must hold, the same rule as a combo slot, so `off 80 2 off` pauses on the weekly percentage alone and `off off 2 off` pauses while the 5-hour window has at least two hours left to run. Without the pair the command behaves as it always did and keeps any stored reset condition
+- `5h-hours`, `weekly-hours` (optional, both or neither): only pause while that window's reset is still at least this many hours away, or `off`. Fractions are allowed. Only the conditions that are set are considered and with both set both must hold, the same rule as a combo slot, so `80 off 2 off` pauses at 80% of the 5-hour window only while that window has two or more hours left, and `off off 2 off` pauses whenever the 5-hour window has at least two hours left to run, whatever its usage. A window is on when either of its conditions is set. Without the pair the command behaves as it always did and keeps any stored reset condition
 
 **Behaviour:**
 - Thresholds are evaluated on each usage poll, so a pause lands within one poll interval of the account crossing the line
