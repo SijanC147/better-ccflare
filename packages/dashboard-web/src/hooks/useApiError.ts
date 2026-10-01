@@ -14,7 +14,7 @@ export interface UseApiErrorOptions extends ErrorFormatterOptions {
 	 * Whether to log errors to console
 	 * @default false
 	 */
-	logErrors?: boolean;
+	logErrors?: boolean | undefined;
 }
 
 export interface UseApiErrorReturn {

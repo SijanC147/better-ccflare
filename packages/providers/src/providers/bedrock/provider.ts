@@ -704,13 +704,13 @@ export class BedrockProvider extends BaseProvider implements Provider {
 	 * @returns Usage information or null
 	 */
 	async extractUsageInfo(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		inputTokens?: number;
-		outputTokens?: number;
-		costUsd?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		inputTokens?: number | undefined;
+		outputTokens?: number | undefined;
+		costUsd?: number | undefined;
 	} | null> {
 		try {
 			const contentType = response.headers.get("content-type") || "";
@@ -783,13 +783,13 @@ export class BedrockProvider extends BaseProvider implements Provider {
 	 * @returns Usage information or null if extraction fails
 	 */
 	async parseUsage(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		inputTokens?: number;
-		outputTokens?: number;
-		costUsd?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		inputTokens?: number | undefined;
+		outputTokens?: number | undefined;
+		costUsd?: number | undefined;
 	} | null> {
 		try {
 			const contentType = response.headers.get("content-type") || "";

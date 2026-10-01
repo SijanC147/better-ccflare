@@ -53,12 +53,12 @@ interface RequestSpec {
 	method: string;
 	url: string;
 	order: number;
-	description?: string;
-	headers?: { key: string; value: string }[];
-	queryParams?: { key: string; value: string; disabled?: boolean }[];
-	pathVariables?: { key: string; value: string; description?: string }[];
-	body?: string;
-	tests?: string;
+	description?: string | undefined;
+	headers?: { key: string; value: string }[] | undefined;
+	queryParams?: { key: string; value: string; disabled?: boolean }[] | undefined;
+	pathVariables?: { key: string; value: string; description?: string }[] | undefined;
+	body?: string | undefined;
+	tests?: string | undefined;
 }
 
 function requestYaml(r: RequestSpec): string {

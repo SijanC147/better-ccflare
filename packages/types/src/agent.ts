@@ -52,18 +52,18 @@ export interface Agent {
 	 * model). Optional so registry-internal Agent objects (built before the
 	 * preference merge) still type-check; only set on API responses.
 	 */
-	modelSource?: AgentModelSource;
+	modelSource?: AgentModelSource | undefined;
 	/**
 	 * The registry agent's raw `model` value before the DB preference merge.
 	 * Optional for the same reason as `modelSource`.
 	 */
-	frontmatterModel?: AllowedModel | null;
+	frontmatterModel?: AllowedModel | null | undefined;
 	systemPrompt: string;
 	source: AgentSource;
-	workspace?: string; // workspace path if source is "workspace"
-	tools?: AgentTool[]; // parsed from tools: front-matter
+	workspace?: string | undefined; // workspace path if source is "workspace"
+	tools?: AgentTool[] | undefined; // parsed from tools: front-matter
 	filePath: string; // absolute path of the markdown file
-	pluginName?: string; // set only when source === "plugin"; derived from the plugin manifest key
+	pluginName?: string | undefined; // set only when source === "plugin"; derived from the plugin manifest key
 }
 
 /**

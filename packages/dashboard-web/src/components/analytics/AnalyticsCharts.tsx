@@ -70,14 +70,14 @@ interface ChartData {
 
 interface MainMetricsChartProps {
 	data: ChartData[];
-	rawTimeSeries?: TimePoint[];
+	rawTimeSeries?: TimePoint[] | undefined;
 	loading: boolean;
 	viewMode: "normal" | "cumulative";
 	timeRange: TimeRange;
 	selectedMetric: string;
 	setSelectedMetric: (metric: string) => void;
-	modelBreakdown?: boolean;
-	onModelBreakdownChange?: (enabled: boolean) => void;
+	modelBreakdown?: boolean | undefined;
+	onModelBreakdownChange?: ((enabled: boolean) => void) | undefined;
 }
 
 export function MainMetricsChart({
@@ -209,7 +209,9 @@ export function MainMetricsChart({
 								<Switch
 									id="model-breakdown"
 									checked={modelBreakdown}
-									onCheckedChange={onModelBreakdownChange}
+									{...(onModelBreakdownChange !== undefined
+										? { onCheckedChange: onModelBreakdownChange }
+										: {})}
 								/>
 								<Label htmlFor="model-breakdown" className="text-sm">
 									Per Model
@@ -413,10 +415,10 @@ export function MainMetricsChart({
 interface PerformanceIndicatorsChartProps {
 	data: ChartData[];
 	loading: boolean;
-	modelBreakdown?: boolean;
-	rawTimeSeries?: TimePoint[];
-	selectedMetric?: "errorRate" | "cacheHitRate";
-	timeRange?: TimeRange;
+	modelBreakdown?: boolean | undefined;
+	rawTimeSeries?: TimePoint[] | undefined;
+	selectedMetric?: "errorRate" | "cacheHitRate" | undefined;
+	timeRange?: TimeRange | undefined;
 }
 
 export function PerformanceIndicatorsChart({

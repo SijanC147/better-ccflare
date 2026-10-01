@@ -4,7 +4,7 @@ export interface OAuthSession {
 	accountName: string;
 	verifier: string;
 	mode: "console" | "claude-oauth";
-	customEndpoint?: string;
+	customEndpoint?: string | undefined;
 	priority: number;
 }
 

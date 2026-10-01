@@ -7,7 +7,7 @@
  */
 export abstract class AppError extends Error {
 	public readonly timestamp: Date;
-	public readonly context?: Record<string, unknown>;
+	public readonly context?: Record<string, unknown> | undefined;
 
 	constructor(
 		message: string,

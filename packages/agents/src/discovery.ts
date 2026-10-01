@@ -61,7 +61,7 @@ export class AgentRegistry {
 	private cache: AgentCache | null = null;
 	private workspaces: Map<string, AgentWorkspace> = new Map();
 	private initialized = false;
-	private readonly manifestPathOverride?: string;
+	private readonly manifestPathOverride?: string | undefined;
 	private workspacePersistence: WorkspacePersistence;
 
 	constructor(

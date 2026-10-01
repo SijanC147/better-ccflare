@@ -73,7 +73,10 @@ async function serverErrorMessage(response: Response): Promise<string | null> {
 export async function fetchOverview(
 	baseUrl: string,
 	apiKey: string | null,
-	options: { fetch?: FetchLike; timeoutMs?: number } = {},
+	options: {
+		fetch?: FetchLike | undefined;
+		timeoutMs?: number | undefined;
+	} = {},
 ): Promise<OverviewFetchResult> {
 	const doFetch: FetchLike = options.fetch ?? (fetch as unknown as FetchLike);
 	const timeoutMs = options.timeoutMs ?? OVERVIEW_FETCH_TIMEOUT_MS;

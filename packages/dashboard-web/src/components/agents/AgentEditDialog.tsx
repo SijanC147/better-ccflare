@@ -336,8 +336,8 @@ export function AgentEditDialog({
 					description: description.replace(/\n/g, "\\n"),
 					color,
 					systemPrompt,
-					mode: mode as AgentUpdatePayload["mode"],
-					tools: mode ? undefined : tools,
+					mode: mode as NonNullable<AgentUpdatePayload["mode"]>,
+					...(mode ? {} : { tools }),
 					...(modelChanged
 						? {
 								model:

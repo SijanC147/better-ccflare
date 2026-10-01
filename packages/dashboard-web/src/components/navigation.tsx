@@ -33,7 +33,7 @@ interface NavItem {
 	label: string;
 	icon: React.ComponentType<{ className?: string }>;
 	path: string;
-	badge?: string;
+	badge?: string | undefined;
 }
 
 const _navItems: NavItem[] = [
@@ -50,9 +50,9 @@ const _navItems: NavItem[] = [
 ];
 
 interface NavigationProps {
-	onLogout?: () => void;
-	isCollapsed?: boolean;
-	onToggleCollapse?: () => void;
+	onLogout?: (() => void) | undefined;
+	isCollapsed?: boolean | undefined;
+	onToggleCollapse?: (() => void) | undefined;
 }
 
 export function Navigation({

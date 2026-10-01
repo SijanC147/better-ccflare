@@ -29,7 +29,7 @@ export interface DrainReaderWithDeadlineOptions {
 	 * object, it does not touch the connection.
 	 */
 	deadlineMs: number;
-	drainAbort?: AbortController;
+	drainAbort?: AbortController | undefined;
 	/**
 	 * Optional pre-step raced against the same deadline before the reader is
 	 * touched (e.g. Codex reconciling an in-flight read owned by a liveness

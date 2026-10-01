@@ -19,6 +19,13 @@ import type { LogEvent } from "@better-ccflare/types";
 import { __setEntryLstatForTest, lstatEntryForTrust } from "./entry-lstat-seam";
 import { Config } from "./index";
 
+// Bun stores the string "undefined" when `undefined` is assigned to a
+// `process.env` key, so restoring an unset variable has to delete it.
+function restoreNodeEnv(saved: string | undefined): void {
+	if (saved === undefined) delete process.env.NODE_ENV;
+	else process.env.NODE_ENV = saved;
+}
+
 function captureLogs(fn: () => void): LogEvent[] {
 	const captured: LogEvent[] = [];
 	const handler = (event: LogEvent) => captured.push(event);
@@ -479,7 +486,7 @@ describe("the entry-lstat seam's NODE_ENV gate", () => {
 				expect(() => __setEntryLstatForTest(null)).not.toThrow();
 			}
 		} finally {
-			process.env.NODE_ENV = saved;
+			restoreNodeEnv(saved);
 			__setEntryLstatForTest(null);
 		}
 	});
@@ -538,14 +545,14 @@ describe("the entry-lstat seam's production default", () => {
 			expect(lstatEntryForTrust(file).nlink).toBe(real.nlink);
 			expect(lstatEntryForTrust(file).uid).toBe(real.uid);
 
-			process.env.NODE_ENV = saved;
+			restoreNodeEnv(saved);
 			__setEntryLstatForTest(bogus);
 			expect(lstatEntryForTrust(file).nlink).toBe(42);
 			__setEntryLstatForTest(null);
 			expect(lstatEntryForTrust(file).nlink).toBe(real.nlink);
 			expect(lstatEntryForTrust(file).uid).toBe(real.uid);
 		} finally {
-			process.env.NODE_ENV = saved;
+			restoreNodeEnv(saved);
 			__setEntryLstatForTest(null);
 			rmSync(dir, { recursive: true, force: true });
 		}

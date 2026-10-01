@@ -6,17 +6,17 @@ import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 export interface MetricCardSubRow {
 	label: string;
 	value: string | number;
-	tooltip?: string;
+	tooltip?: string | undefined;
 }
 
 export interface MetricCardProps {
 	title: string;
 	value: string | number;
-	change?: number;
+	change?: number | undefined;
 	icon: React.ComponentType<{ className?: string }>;
-	trend?: "up" | "down" | "flat";
-	trendPeriod?: string;
-	subRows?: MetricCardSubRow[];
+	trend?: "up" | "down" | "flat" | undefined;
+	trendPeriod?: string | undefined;
+	subRows?: MetricCardSubRow[] | undefined;
 }
 
 export function MetricCard({

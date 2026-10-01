@@ -305,8 +305,8 @@ interface CodexMessage {
 interface CodexTool {
 	type: "function";
 	name: string;
-	description?: string;
-	parameters?: Record<string, unknown>;
+	description?: string | undefined;
+	parameters?: Record<string, unknown> | undefined;
 }
 
 interface CodexRequest {
@@ -323,7 +323,7 @@ interface CodexRequest {
 	reasoning?: { effort: string; summary?: unknown; context?: unknown };
 	instructions?: string;
 	tools?: CodexTool[];
-	prompt_cache_key?: string;
+	prompt_cache_key?: string | undefined;
 	prompt_cache_options?: {
 		mode?: "explicit";
 		ttl?: "30m";
@@ -480,12 +480,14 @@ interface StreamState {
 	contextWindow: ContextWindow | null;
 	// Track function_call items: output_index → buffered arguments and block index
 	functionCallBlocks: Map<number, FunctionCallBuffer>;
-	upstreamError?: {
-		type: string;
-		message: string;
-		code?: string;
-		status?: string;
-	};
+	upstreamError?:
+		| {
+				type: string;
+				message: string;
+				code?: string;
+				status?: string;
+		  }
+		| undefined;
 }
 
 /**

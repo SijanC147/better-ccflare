@@ -19,20 +19,20 @@ import {
 
 interface BarConfig {
 	dataKey: string;
-	fill?: string;
-	name?: string;
-	yAxisId?: string;
-	radius?: [number, number, number, number];
+	fill?: string | undefined;
+	name?: string | undefined;
+	yAxisId?: string | undefined;
+	radius?: [number, number, number, number] | undefined;
 }
 
 interface BaseBarChartProps extends CommonChartProps {
 	bars: BarConfig | BarConfig[];
-	layout?: "horizontal" | "vertical";
-	xAxisType?: "number" | "category";
-	yAxisType?: "number" | "category";
-	yAxisWidth?: number;
-	yAxisOrientation?: "left" | "right";
-	secondaryYAxis?: boolean;
+	layout?: "horizontal" | "vertical" | undefined;
+	xAxisType?: "number" | "category" | undefined;
+	yAxisType?: "number" | "category" | undefined;
+	yAxisWidth?: number | undefined;
+	yAxisOrientation?: "left" | "right" | undefined;
+	secondaryYAxis?: boolean | undefined;
 }
 
 export function BaseBarChart({
@@ -83,8 +83,8 @@ export function BaseBarChart({
 				<BarChart
 					data={data}
 					layout={layout}
-					margin={margin}
-					onClick={onChartClick}
+					{...(margin !== undefined ? { margin: margin } : {})}
+					{...(onChartClick !== undefined ? { onClick: onChartClick } : {})}
 				>
 					<CartesianGrid
 						strokeDasharray={CHART_PROPS.strokeDasharray}
@@ -95,14 +95,18 @@ export function BaseBarChart({
 							<XAxis
 								type={xAxisType as "number"}
 								className="text-xs"
-								tickFormatter={xAxisTickFormatter}
+								{...(xAxisTickFormatter !== undefined
+									? { tickFormatter: xAxisTickFormatter }
+									: {})}
 							/>
 							<YAxis
 								dataKey={xAxisKey}
 								type={yAxisType as "category"}
 								className="text-xs"
-								width={yAxisWidth}
-								tickFormatter={yAxisTickFormatter}
+								{...(yAxisWidth !== undefined ? { width: yAxisWidth } : {})}
+								{...(yAxisTickFormatter !== undefined
+									? { tickFormatter: yAxisTickFormatter }
+									: {})}
 							/>
 						</>
 					) : (
@@ -114,22 +118,28 @@ export function BaseBarChart({
 								angle={xAxisAngle}
 								textAnchor={xAxisTextAnchor}
 								height={xAxisHeight}
-								tickFormatter={xAxisTickFormatter}
+								{...(xAxisTickFormatter !== undefined
+									? { tickFormatter: xAxisTickFormatter }
+									: {})}
 							/>
 							<YAxis
-								yAxisId={secondaryYAxis ? "left" : undefined}
+								{...(secondaryYAxis ? { yAxisId: "left" } : {})}
 								type={yAxisType as "number"}
 								className="text-xs"
-								domain={yAxisDomain}
+								{...(yAxisDomain !== undefined ? { domain: yAxisDomain } : {})}
 								orientation={yAxisOrientation}
-								tickFormatter={yAxisTickFormatter}
+								{...(yAxisTickFormatter !== undefined
+									? { tickFormatter: yAxisTickFormatter }
+									: {})}
 							/>
 							{secondaryYAxis && (
 								<YAxis
 									yAxisId="right"
 									orientation="right"
 									className="text-xs"
-									tickFormatter={yAxisTickFormatter}
+									{...(yAxisTickFormatter !== undefined
+										? { tickFormatter: yAxisTickFormatter }
+										: {})}
 								/>
 							)}
 						</>
@@ -148,8 +158,12 @@ export function BaseBarChart({
 							dataKey={barConfig.dataKey}
 							fill={barConfig.fill || COLORS.primary}
 							name={barConfig.name || barConfig.dataKey}
-							yAxisId={barConfig.yAxisId}
-							radius={barConfig.radius}
+							{...(barConfig.yAxisId !== undefined
+								? { yAxisId: barConfig.yAxisId }
+								: {})}
+							{...(barConfig.radius !== undefined
+								? { radius: barConfig.radius }
+								: {})}
 							animationDuration={animationDuration}
 						/>
 					))}

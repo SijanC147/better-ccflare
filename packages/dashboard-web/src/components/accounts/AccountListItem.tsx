@@ -76,27 +76,27 @@ function formatPauseReason(reason: string | null): string | null {
 
 interface AccountListItemProps {
 	account: Account;
-	isPrimary?: boolean;
-	compact?: boolean;
+	isPrimary?: boolean | undefined;
+	compact?: boolean | undefined;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
 	onRemove: (account: Account) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
-	onRenewalDayChange?: (account: Account) => void;
+	onRenewalDayChange?: ((account: Account) => void) | undefined;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
 	onBillingTypeToggle: (account: Account) => void;
-	onAutoPauseOnOverageToggle?: (account: Account) => void;
-	onPeakHoursPauseToggle?: (account: Account) => void;
-	onUsageThresholdsChange?: (account: Account) => void;
-	onCustomEndpointChange?: (account: Account) => void;
-	onModelMappingsChange?: (account: Account) => void;
-	onRequestTransformerChange?: (account: Account) => void;
-	onReauth?: (account: Account) => void;
-	onAnthropicReauth?: (account: Account) => void;
-	onCodexReauth?: (account: Account) => void;
+	onAutoPauseOnOverageToggle?: ((account: Account) => void) | undefined;
+	onPeakHoursPauseToggle?: ((account: Account) => void) | undefined;
+	onUsageThresholdsChange?: ((account: Account) => void) | undefined;
+	onCustomEndpointChange?: ((account: Account) => void) | undefined;
+	onModelMappingsChange?: ((account: Account) => void) | undefined;
+	onRequestTransformerChange?: ((account: Account) => void) | undefined;
+	onReauth?: ((account: Account) => void) | undefined;
+	onAnthropicReauth?: ((account: Account) => void) | undefined;
+	onCodexReauth?: ((account: Account) => void) | undefined;
 }
 
 export function AccountListItem({

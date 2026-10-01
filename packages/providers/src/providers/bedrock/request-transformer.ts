@@ -30,13 +30,13 @@ export interface ClaudeRequest {
  * modelId is added separately in the provider after translation
  */
 export interface BedrockConverseInput {
-	messages?: Message[];
-	system?: Array<{ text: string }>;
+	messages?: Message[] | undefined;
+	system?: Array<{ text: string }> | undefined;
 	inferenceConfig?: {
-		maxTokens?: number;
-		temperature?: number;
-		topP?: number;
-		stopSequences?: string[];
+		maxTokens?: number | undefined;
+		temperature?: number | undefined;
+		topP?: number | undefined;
+		stopSequences?: string[] | undefined;
 	};
 }
 

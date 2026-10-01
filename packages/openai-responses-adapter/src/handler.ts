@@ -243,7 +243,9 @@ function applyPromptCacheControls(
 		if (ttl === "30m") options.ttl = "30m";
 		controlled = {
 			...controlled,
-			prompt_cache_options: options as ResponsesRequest["prompt_cache_options"],
+			prompt_cache_options: options as NonNullable<
+				ResponsesRequest["prompt_cache_options"]
+			>,
 		};
 	}
 	if (headers.get(CACHE_BREAKPOINT_HEADER)?.toLowerCase() === "developer") {

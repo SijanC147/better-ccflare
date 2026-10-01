@@ -135,7 +135,7 @@ type RunError = {
 	code: string;
 	/** True once the model produced anything: text, a tool call, a subagent. */
 	afterActivity: boolean;
-	headers?: Record<string, string>;
+	headers?: Record<string, string> | undefined;
 };
 
 type RunEvent =

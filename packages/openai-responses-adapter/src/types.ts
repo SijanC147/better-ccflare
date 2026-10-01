@@ -302,7 +302,7 @@ export interface AnthropicToolResultContent {
 
 export interface AnthropicTool {
 	name: string;
-	description?: string;
+	description?: string | undefined;
 	input_schema: Record<string, unknown>;
 }
 

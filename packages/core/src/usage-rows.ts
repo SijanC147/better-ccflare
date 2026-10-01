@@ -23,13 +23,13 @@ export interface UsageDisplay {
 	window: string | null;
 	resetTime: string | null;
 	/** Explicit display label (used for limits[] rows); falls back to formatWindowName(window). */
-	label?: string;
+	label?: string | undefined;
 	/** Grouping bucket for the UI ("session" | "weekly"). */
-	group?: "session" | "weekly";
+	group?: "session" | "weekly" | undefined;
 	/** Anthropic-provided severity ("normal" | "warning" | "critical") — drives bar color. */
-	severity?: string;
+	severity?: string | undefined;
 	/** True when this is the currently-binding limit (from limits[].is_active). */
-	isActive?: boolean;
+	isActive?: boolean | undefined;
 }
 
 /**

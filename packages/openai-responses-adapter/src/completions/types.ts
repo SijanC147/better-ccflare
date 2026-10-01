@@ -23,7 +23,7 @@ export interface CompletionRequest {
 	/** A string here; the API also allows arrays, which are refused. */
 	prompt: unknown;
 	suffix?: string | null;
-	max_tokens?: number | null;
+	max_tokens?: number | null | undefined;
 	temperature?: number | null;
 	top_p?: number | null;
 	n?: number | null;

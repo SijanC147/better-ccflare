@@ -14,22 +14,22 @@ import {
 interface ModelSelectDefaultItem {
 	label: string;
 	/** Omit to render the default item without a badge. */
-	badgeLabel?: string;
+	badgeLabel?: string | undefined;
 }
 
 interface ModelSelectProps {
-	value?: string;
+	value?: string | undefined;
 	onValueChange: (value: string) => void;
-	disabled?: boolean;
-	placeholder?: string;
-	triggerClassName?: string;
+	disabled?: boolean | undefined;
+	placeholder?: string | undefined;
+	triggerClassName?: string | undefined;
 	/**
 	 * When provided, renders a first SelectItem for
 	 * `AGENT_DEFAULT_MODEL_SENTINEL` — the "leave unset / fall back to
 	 * default" option. Omit this when the caller requires a concrete model
 	 * value (e.g. saving agent frontmatter).
 	 */
-	defaultItem?: ModelSelectDefaultItem;
+	defaultItem?: ModelSelectDefaultItem | undefined;
 }
 
 /**
@@ -49,7 +49,11 @@ export function ModelSelect({
 	const modelOptions = useModelOptions();
 
 	return (
-		<Select value={value} onValueChange={onValueChange} disabled={disabled}>
+		<Select
+			{...(value !== undefined ? { value } : {})}
+			onValueChange={onValueChange}
+			{...(disabled !== undefined ? { disabled } : {})}
+		>
 			<SelectTrigger className={triggerClassName}>
 				<SelectValue placeholder={placeholder} />
 			</SelectTrigger>

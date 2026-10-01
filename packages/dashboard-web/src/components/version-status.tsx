@@ -27,8 +27,8 @@ function Ref({
 }: {
 	href: string | null;
 	children: React.ReactNode;
-	title?: string;
-	className?: string;
+	title?: string | undefined;
+	className?: string | undefined;
 }) {
 	if (!href) {
 		return (
@@ -57,9 +57,9 @@ function Card({
 	children,
 }: {
 	icon: React.ComponentType<{ className?: string }>;
-	iconClass?: string;
+	iconClass?: string | undefined;
 	title: React.ReactNode;
-	children?: React.ReactNode;
+	children?: React.ReactNode | undefined;
 }) {
 	return (
 		<div className="rounded-lg bg-muted/50 p-3">

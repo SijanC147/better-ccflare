@@ -97,7 +97,7 @@ export class IntervalManager {
 		lastRun: number;
 		isRunning: boolean;
 		runCount: number;
-		description?: string;
+		description?: string | undefined;
 	}> {
 		return Array.from(this.intervals.entries()).map(([id, interval]) => ({
 			id,

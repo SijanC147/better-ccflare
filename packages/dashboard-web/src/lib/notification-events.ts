@@ -33,7 +33,7 @@ export interface ObservedEntry {
 	state: string;
 	label: string;
 	/** Extra words for the message body, such as a reset time. */
-	detail?: string;
+	detail?: string | undefined;
 }
 
 /**
@@ -115,7 +115,7 @@ export interface Transition {
 	label: string;
 	from: string | null;
 	to: string | null;
-	detail?: string;
+	detail?: string | undefined;
 }
 
 export interface TransitionSet {
@@ -179,7 +179,7 @@ export interface EvaluateOptions {
 	notify: Notifier;
 	build: MessageBuilder;
 	/** Defaults to `Date.now()`; passed by tests that age a baseline. */
-	now?: number;
+	now?: number | undefined;
 }
 
 /**

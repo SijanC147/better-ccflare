@@ -21,31 +21,31 @@ import {
 
 interface LineConfig {
 	dataKey: string;
-	stroke?: string;
-	strokeWidth?: number;
-	dot?: boolean;
-	name?: string;
-	strokeDasharray?: string;
-	connectNulls?: boolean;
+	stroke?: string | undefined;
+	strokeWidth?: number | undefined;
+	dot?: boolean | undefined;
+	name?: string | undefined;
+	strokeDasharray?: string | undefined;
+	connectNulls?: boolean | undefined;
 }
 
 interface ReferenceLineConfig {
-	x?: number | string;
-	y?: number;
-	stroke?: string;
-	strokeDasharray?: string;
-	label?: string;
+	x?: number | string | undefined;
+	y?: number | undefined;
+	stroke?: string | undefined;
+	strokeDasharray?: string | undefined;
+	label?: string | undefined;
 }
 
 interface BaseLineChartProps extends CommonChartProps {
 	lines: LineConfig | LineConfig[];
-	referenceLines?: ReferenceLineConfig[];
-	xAxisType?: "number" | "category";
-	xAxisDomain?: [number | string, number | string];
+	referenceLines?: ReferenceLineConfig[] | undefined;
+	xAxisType?: "number" | "category" | undefined;
+	xAxisDomain?: [number | string, number | string] | undefined;
 	// Fully custom recharts tooltip. recharts clones this element with the
 	// injected `active`/`payload`/`label` props. When set, it replaces the
 	// default formatter-based tooltip (other charts are unaffected).
-	tooltipContent?: ReactElement;
+	tooltipContent?: ReactElement | undefined;
 }
 
 export function BaseLineChart({
@@ -91,26 +91,34 @@ export function BaseLineChart({
 			emptyState={emptyState}
 		>
 			<ResponsiveContainer width="100%" height={chartHeight}>
-				<LineChart data={data} margin={margin} onClick={onChartClick}>
+				<LineChart
+					data={data}
+					{...(margin !== undefined ? { margin } : {})}
+					{...(onChartClick !== undefined ? { onClick: onChartClick } : {})}
+				>
 					<CartesianGrid
 						strokeDasharray={CHART_PROPS.strokeDasharray}
 						className={CHART_PROPS.gridClassName}
 					/>
 					<XAxis
 						dataKey={xAxisKey}
-						type={xAxisType}
-						domain={xAxisDomain}
+						{...(xAxisType !== undefined ? { type: xAxisType } : {})}
+						{...(xAxisDomain !== undefined ? { domain: xAxisDomain } : {})}
 						allowDataOverflow
 						className="text-xs"
 						angle={xAxisAngle}
 						textAnchor={xAxisTextAnchor}
 						height={xAxisHeight}
-						tickFormatter={xAxisTickFormatter}
+						{...(xAxisTickFormatter !== undefined
+							? { tickFormatter: xAxisTickFormatter }
+							: {})}
 					/>
 					<YAxis
 						className="text-xs"
-						domain={yAxisDomain}
-						tickFormatter={yAxisTickFormatter}
+						{...(yAxisDomain !== undefined ? { domain: yAxisDomain } : {})}
+						{...(yAxisTickFormatter !== undefined
+							? { tickFormatter: yAxisTickFormatter }
+							: {})}
 					/>
 					{tooltipContent ? (
 						<Tooltip content={tooltipContent} />
@@ -134,7 +142,9 @@ export function BaseLineChart({
 							dot={lineConfig.dot ?? false}
 							name={lineConfig.name || lineConfig.dataKey}
 							animationDuration={animationDuration}
-							strokeDasharray={lineConfig.strokeDasharray}
+							{...(lineConfig.strokeDasharray !== undefined
+								? { strokeDasharray: lineConfig.strokeDasharray }
+								: {})}
 							connectNulls={lineConfig.connectNulls ?? false}
 						/>
 					))}
@@ -142,13 +152,13 @@ export function BaseLineChart({
 						<ReferenceLine
 							// biome-ignore lint/suspicious/noArrayIndexKey: referenceLines is a static config array (no reorder); y may be undefined for x-only markers so it cannot key
 							key={`ref-line-${refIndex}`}
-							x={refLine.x}
-							y={refLine.y}
+							{...(refLine.x !== undefined ? { x: refLine.x } : {})}
+							{...(refLine.y !== undefined ? { y: refLine.y } : {})}
 							stroke={refLine.stroke || COLORS.primary}
 							strokeDasharray={
 								refLine.strokeDasharray || CHART_PROPS.strokeDasharray
 							}
-							label={refLine.label}
+							{...(refLine.label !== undefined ? { label: refLine.label } : {})}
 						/>
 					))}
 				</LineChart>

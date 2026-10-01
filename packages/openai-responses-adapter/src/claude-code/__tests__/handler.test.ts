@@ -76,7 +76,7 @@ function chatRequest(
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
-		signal,
+		signal: signal ?? null,
 	});
 }
 

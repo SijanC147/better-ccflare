@@ -15,10 +15,10 @@ const WINDOW_COLORS: Record<string, string> = {
 const PRED_SUFFIX = "__pred";
 
 interface TooltipPayloadItem {
-	dataKey?: string | number;
-	name?: string;
-	value?: number | string | null;
-	color?: string;
+	dataKey?: string | number | undefined;
+	name?: string | undefined;
+	value?: number | string | null | undefined;
+	color?: string | undefined;
 }
 
 /**
@@ -35,9 +35,9 @@ function UsageHistoryTooltip({
 	label,
 }: {
 	latestActualT: number;
-	active?: boolean;
-	payload?: TooltipPayloadItem[];
-	label?: number | string;
+	active?: boolean | undefined;
+	payload?: TooltipPayloadItem[] | undefined;
+	label?: number | string | undefined;
 }) {
 	if (!active || !payload?.length) return null;
 	const t = Number(label);
@@ -74,9 +74,9 @@ function UsageHistoryTooltip({
 interface Props {
 	windows: UsageHistoryWindowSeries[];
 	rangeMs: number;
-	loading?: boolean;
-	height?: number;
-	emptyState?: string;
+	loading?: boolean | undefined;
+	height?: number | undefined;
+	emptyState?: string | undefined;
 }
 
 export function UsageHistoryChart({

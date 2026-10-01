@@ -6,12 +6,12 @@ import { useRequestDeduplication } from "./useRequestBatching";
 interface AnalyticsParams {
 	timeRange: string;
 	filters: {
-		accounts?: string[];
-		models?: string[];
-		status?: "all" | "success" | "error";
+		accounts?: string[] | undefined;
+		models?: string[] | undefined;
+		status?: "all" | "success" | "error" | undefined;
 	};
 	viewMode: "normal" | "cumulative";
-	modelBreakdown?: boolean;
+	modelBreakdown?: boolean | undefined;
 }
 
 export function useDeduplicatedAnalytics() {

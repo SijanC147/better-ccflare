@@ -6,8 +6,8 @@ export const CODEX_STREAM_HEARTBEAT_INTERVAL_MS = 25_000;
 export const CODEX_STREAM_RAW_SILENCE_TIMEOUT_MS = 8 * 60_000;
 
 export interface CodexStreamLivenessOptions {
-	heartbeatIntervalMs?: number;
-	rawSilenceTimeoutMs?: number;
+	heartbeatIntervalMs?: number | undefined;
+	rawSilenceTimeoutMs?: number | undefined;
 }
 
 export interface CodexStreamHeartbeatGate {
