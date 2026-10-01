@@ -2108,20 +2108,6 @@ export default async function startServer(options?: {
 		};
 
 		serverInstance = serve(serverConfig);
-		// Now that the port is held, tell the CLI where it is. After serve()
-		// rather than at the secret's resolution above, because only now is the
-		// port known (a configured 0 binds a kernel-chosen one), and because a
-		// server that never gets here, such as a second instance the
-		// multi-instance guard stops, must not overwrite the running server's
-		// file (SB23-4035).
-		const boundPort = serverInstance.port;
-		if (typeof boundPort === "number") {
-			config.publishLocalControlSecret({
-				host: localControlNotifyHost(hostname),
-				port: boundPort,
-				pid: process.pid,
-			});
-		}
 	} catch (error) {
 		if (
 			typeof error === "object" &&
@@ -2139,6 +2125,29 @@ export default async function startServer(options?: {
 			process.exit(1);
 		}
 		throw error;
+	}
+
+	// Now that the port is held, tell the CLI where it is. After serve() rather
+	// than where the secret was resolved above, because only now is the port
+	// known (a configured 0 binds a kernel-chosen one), and because a server that
+	// never gets here, such as a second instance the multi-instance guard stops,
+	// must not overwrite the running server's file (SB23-4035). Outside the
+	// serve() try, so a failure here cannot reach its EADDRINUSE handling, and
+	// caught, because publishing is best effort and must not stop a server that
+	// is already listening.
+	const boundPort = serverInstance.port;
+	if (typeof boundPort === "number") {
+		try {
+			config.publishLocalControlSecret({
+				host: localControlNotifyHost(hostname),
+				port: boundPort,
+				pid: process.pid,
+			});
+		} catch (error) {
+			new Logger("LocalControl").warn(
+				`Could not publish the local control secret file: ${error instanceof Error ? error.message : String(error)}. The CLI falls back to the configured port.`,
+			);
+		}
 	}
 
 	// Memory monitoring - log RSS every 60s with warnings at growth thresholds.

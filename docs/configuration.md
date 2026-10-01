@@ -134,7 +134,7 @@ The CLI reads this file before the config, so it sends the value the running ser
 
 The CLI sends a notification such as `--reauthenticate` or `--force-reset-rate-limit` to one address only:
 
-- **The listener the file names**, while that process id is still running as your user. The address is a literal one, never `localhost`: for a server bound to `0.0.0.0` it is `127.0.0.1`, and for `::` it is `::1`. On macOS another local user can bind `[::1]` on the same port as a server bound to `0.0.0.0`, and `localhost` reaches `[::1]` first.
+- **The listener the file names**, while that process id is still running as your user. The address is a literal one, never `localhost`: for a server bound to `0.0.0.0` it is `127.0.0.1`, and for `::` it is `::1`. A server bound to `0.0.0.0` holds only the IPv4 side of its port, so another socket can bind `[::1]` on the same port, and `localhost` reached `[::1]` first. That was measured on macOS within one user. The two families share no binding, so the check that stops another user binding the same family does not apply.
 - **Nothing**, when the process id has exited or belongs to another user. The server's port may then be anyone's, so the CLI sends nothing, and `--reauthenticate` prints `Not notified: the server that published <path> (pid <n>) is no longer running`.
 - **The configured `port` alone**, when no listener is published: a server older than the field, a file the CLI refused, or no file. The address comes from the CLI's own `BETTER_CCFLARE_HOST`, mapped the same way. Before this the CLI tried `localhost:8080` and `localhost:8081` whichever the server used, so a local user listening on the other one received the secret.
 
