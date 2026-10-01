@@ -83,9 +83,10 @@ function makeRequestMeta(): RequestMeta {
 }
 
 /**
- * clientSessionId sits six positional arguments from the end of saveRequest —
+ * clientSessionId sits ten positional arguments from the end of saveRequest:
  * the five gatewayHint* fields (requestClass, agentType, prevToolDurations,
- * compaction, contextCompacted) follow it. Asserting from the tail rather
+ * compaction, contextCompacted), projectId, worktreePath and the two inbound
+ * marker fields (SB23-2727) follow it. Asserting from the tail rather
  * than a fixed index is deliberate: this branch originally dropped trailing
  * arguments because it was copied from a sibling 429 path that later grew
  * them, and a hardcoded index would not have caught that.
@@ -93,7 +94,7 @@ function makeRequestMeta(): RequestMeta {
 const lastSaveArg = (ctx: ProxyContext) => {
 	const calls = (ctx.dbOps.saveRequest as ReturnType<typeof mock>).mock.calls;
 	const args = calls[calls.length - 1] as unknown[];
-	return args[args.length - 6];
+	return args[args.length - 10];
 };
 
 function makeRequestBody(model = "claude-sonnet-4-5") {

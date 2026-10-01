@@ -10,6 +10,7 @@ import {
 	EXCLUDE_PROVIDERS_HEADER,
 	type OpenAIGatewayOptions,
 	resolveGatewayModel,
+	setInboundMarker,
 } from "./gateway";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
@@ -622,6 +623,7 @@ export async function handleResponsesRequest(
 	} else {
 		syntheticHeaders.set(EXCLUDE_PROVIDERS_HEADER, "anthropic-oauth");
 	}
+	setInboundMarker(syntheticHeaders, "openai-responses", gateway);
 	// Preserve Codex-only fields.
 	const codexPassthrough: Record<string, unknown> = {};
 	if (typeof apiKeyId === "string" && apiKeyId.length > 0) {

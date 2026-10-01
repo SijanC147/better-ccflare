@@ -1,6 +1,10 @@
 import {
 	GATEWAY_COMBO_HEADER,
+	GATEWAY_INTERNAL_HEADERS,
 	GATEWAY_REQUIRE_MODEL_HEADER,
+	INBOUND_FORMAT_HEADER,
+	INBOUND_GATEWAY_HEADER,
+	type InboundFormat,
 	type OpenAIGatewayModelEntry,
 } from "@better-ccflare/types";
 
@@ -9,6 +13,8 @@ import {
  * and Responses handlers, which both serve under `/v1/gateways/<name>`.
  */
 export interface OpenAIGatewayOptions {
+	/** The gateway's name, recorded on the request's history row. */
+	name?: string;
 	/**
 	 * Providers this request never routes to, in the vocabulary of
 	 * `x-better-ccflare-exclude-providers` (account-selector.ts), which
@@ -108,4 +114,37 @@ export function applyGatewayExclusions(
 		// them it stays the documented test-routing header.
 		headers.delete(FORCED_ACCOUNT_HEADER);
 	}
+}
+
+/**
+ * Labels a synthetic request with the API it arrived on and the gateway it
+ * came through, for its history row (SB23-2727). Both values come from the
+ * handler alone: any copy already on the headers is removed first, and the
+ * server drops a client's copy before routing.
+ */
+export function setInboundMarker(
+	headers: Headers,
+	format: InboundFormat,
+	options: OpenAIGatewayOptions | undefined,
+): void {
+	headers.set(INBOUND_FORMAT_HEADER, format);
+	headers.delete(INBOUND_GATEWAY_HEADER);
+	if (options?.name) headers.set(INBOUND_GATEWAY_HEADER, options.name);
+}
+
+/**
+ * The client request with every internal gateway header removed, or the same
+ * request when it carries none. Only the gateway and translation handlers may
+ * set these, on their own synthetic request, so the server applies this to
+ * every inbound request before any path reads it: a direct `/v1/messages`
+ * request then cannot pick a ladder, lift the model filter (SB23-3389 review,
+ * finding 1) or label its own history row as OpenAI traffic (SB23-2727).
+ */
+export function dropClientGatewayHeaders(req: Request): Request {
+	if (!GATEWAY_INTERNAL_HEADERS.some((name) => req.headers.has(name))) {
+		return req;
+	}
+	const headers = new Headers(req.headers);
+	for (const name of GATEWAY_INTERNAL_HEADERS) headers.delete(name);
+	return new Request(req, { headers });
 }

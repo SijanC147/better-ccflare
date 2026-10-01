@@ -1,3 +1,4 @@
+import { flattenToolHistory, parseBase64DataUrl } from "../inbound-compat";
 import {
 	type AnthropicImageBlock,
 	type AnthropicMessagesRequest,
@@ -97,8 +98,8 @@ function imageBlock(part: Record<string, unknown>, param: string) {
 	}
 	const trimmed = url.trim();
 	if (trimmed.startsWith("data:")) {
-		const match = /^data:([^;,]+);base64,(.+)$/.exec(trimmed);
-		if (!match) {
+		const parsed = parseBase64DataUrl(trimmed);
+		if (!parsed) {
 			throw new Refusal(
 				param,
 				"invalid_image_url",
@@ -107,7 +108,11 @@ function imageBlock(part: Record<string, unknown>, param: string) {
 		}
 		const image: AnthropicImageBlock = {
 			type: "image",
-			source: { type: "base64", media_type: match[1], data: match[2] },
+			source: {
+				type: "base64",
+				media_type: parsed.mediaType,
+				data: parsed.data,
+			},
 		};
 		return image;
 	}
@@ -648,6 +653,10 @@ function translate(req: ChatCompletionRequest): AnthropicMessagesRequest {
 	if (req.stream === true) body.stream = true;
 
 	const tools = translateTools(req.tools);
+	if (tools.length === 0) {
+		// Anthropic refuses tool history without tool definitions (SB23-2727).
+		body.messages = flattenToolHistory(body.messages);
+	}
 	if (tools.length > 0) {
 		body.tools = tools;
 		const toolChoice = translateToolChoice(

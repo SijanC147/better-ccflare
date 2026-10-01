@@ -352,3 +352,42 @@ export const GATEWAY_COMBO_HEADER = "x-better-ccflare-gateway-combo";
  */
 export const GATEWAY_REQUIRE_MODEL_HEADER =
 	"x-better-ccflare-gateway-require-model";
+
+/**
+ * The OpenAI-shaped API a request arrived on. Both are translated into a
+ * synthetic `POST /v1/messages` before routing, so the history row's path
+ * cannot tell them apart from Claude Code traffic (SB23-2727).
+ */
+export const INBOUND_FORMATS = ["openai-chat", "openai-responses"] as const;
+export type InboundFormat = (typeof INBOUND_FORMATS)[number];
+
+export function isInboundFormat(value: unknown): value is InboundFormat {
+	return (
+		typeof value === "string" &&
+		(INBOUND_FORMATS as readonly string[]).includes(value)
+	);
+}
+
+/**
+ * Internal: the inbound format of a translated request, recorded on its
+ * history row. Set only by the Chat Completions and Responses handlers on
+ * their own synthetic request, dropped from any client request by the server,
+ * and removed before the request goes upstream. Same lifecycle as
+ * `GATEWAY_COMBO_HEADER`.
+ */
+export const INBOUND_FORMAT_HEADER = "x-better-ccflare-inbound-format";
+
+/**
+ * Internal: the named gateway a translated request arrived through, recorded
+ * on its history row. Absent for the plain `/v1/chat/completions` and
+ * `/v1/responses`. Same lifecycle as `INBOUND_FORMAT_HEADER`.
+ */
+export const INBOUND_GATEWAY_HEADER = "x-better-ccflare-inbound-gateway";
+
+/** The internal headers no client may send and no upstream may receive. */
+export const GATEWAY_INTERNAL_HEADERS = [
+	GATEWAY_COMBO_HEADER,
+	GATEWAY_REQUIRE_MODEL_HEADER,
+	INBOUND_FORMAT_HEADER,
+	INBOUND_GATEWAY_HEADER,
+] as const;

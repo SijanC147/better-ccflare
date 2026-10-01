@@ -148,6 +148,12 @@ export interface RequestData {
 	gatewayHintPrevToolDurations?: string | null;
 	gatewayHintCompaction?: string | null;
 	gatewayHintContextCompacted?: string | null;
+	/**
+	 * The OpenAI-shaped API and named gateway a translated request arrived
+	 * through (SB23-2727). See packages/proxy/src/inbound-marker.ts.
+	 */
+	inboundFormat?: string | null;
+	inboundGateway?: string | null;
 	usage?: {
 		model?: string;
 		promptTokens?: number;
@@ -196,9 +202,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_request_class, gateway_hint_agent_type,
 				gateway_hint_prev_tool_durations, gateway_hint_compaction,
 				gateway_hint_context_compacted,
-				project_id, worktree_path
+				project_id, worktree_path,
+				inbound_format, inbound_gateway
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -258,7 +265,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_compaction = COALESCE(EXCLUDED.gateway_hint_compaction, requests.gateway_hint_compaction),
 				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted),
 				project_id = COALESCE(EXCLUDED.project_id, requests.project_id),
-				worktree_path = COALESCE(EXCLUDED.worktree_path, requests.worktree_path)
+				worktree_path = COALESCE(EXCLUDED.worktree_path, requests.worktree_path),
+				inbound_format = COALESCE(EXCLUDED.inbound_format, requests.inbound_format),
+				inbound_gateway = COALESCE(EXCLUDED.inbound_gateway, requests.inbound_gateway)
 		`,
 			[
 				data.id,
@@ -300,6 +309,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.gatewayHintContextCompacted || null,
 				data.projectId ?? null,
 				data.worktreePath ?? null,
+				data.inboundFormat || null,
+				data.inboundGateway || null,
 			],
 		);
 	}

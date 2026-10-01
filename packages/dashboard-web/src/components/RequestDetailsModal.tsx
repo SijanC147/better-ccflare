@@ -10,6 +10,7 @@ import { api, type RequestPayload, type RequestSummary } from "../api";
 import { attributionSourceLabel } from "../lib/attribution";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
+import { InboundBadge } from "./InboundBadge";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { Badge } from "./ui/badge";
 import {
@@ -165,6 +166,11 @@ export function RequestDetailsModal({
 										</Badge>
 									);
 								})()}
+							<InboundBadge
+								className=""
+								format={summary?.inboundFormat}
+								gateway={summary?.inboundGateway}
+							/>
 							{summary?.gatewayHintAgentType && (
 								<Badge variant="secondary">
 									Agent-Type: {summary.gatewayHintAgentType}

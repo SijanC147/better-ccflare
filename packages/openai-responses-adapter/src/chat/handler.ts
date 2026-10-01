@@ -9,6 +9,7 @@ import {
 	applyGatewayExclusions,
 	type OpenAIGatewayOptions,
 	resolveGatewayModel,
+	setInboundMarker,
 } from "../gateway";
 import { handleResponsesRequest } from "../handler";
 import type { HandleProxyFn } from "../types";
@@ -283,6 +284,7 @@ export async function handleChatCompletionsRequest(
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
 	applyGatewayExclusions(syntheticHeaders, options);
+	setInboundMarker(syntheticHeaders, "openai-chat", options);
 	// Report the model that answered, not the requested name (SB23-2781).
 	syntheticHeaders.set(REPORT_UPSTREAM_MODEL_HEADER, "1");
 	const syntheticReq = new Request(messagesUrl.toString(), {
@@ -481,6 +483,7 @@ export async function dispatchOpenAIGatewayRequest(
 		);
 	}
 	const options: OpenAIGatewayOptions = {
+		name: match.name,
 		excludeProviders: gateway.exclude_providers ?? [],
 		models: gateway.models,
 	};

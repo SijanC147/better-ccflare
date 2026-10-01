@@ -173,7 +173,9 @@ export function ensureSchema(db: Database): void {
 			gateway_hint_agent_type TEXT,
 			gateway_hint_prev_tool_durations TEXT,
 			gateway_hint_compaction TEXT,
-			gateway_hint_context_compacted TEXT
+			gateway_hint_context_compacted TEXT,
+			inbound_format TEXT,
+			inbound_gateway TEXT
 		)
 	`);
 
@@ -1662,6 +1664,16 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE requests ADD COLUMN gateway_hint_context_compacted TEXT",
 			).run();
 			log.info("Added gateway_hint_context_compacted column to requests table");
+		}
+		// The OpenAI-shaped API and named gateway a translated request arrived
+		// through (SB23-2727). Its path column reads /v1/messages either way.
+		if (!requestsColumnNames.includes("inbound_format")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN inbound_format TEXT").run();
+			log.info("Added inbound_format column to requests table");
+		}
+		if (!requestsColumnNames.includes("inbound_gateway")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN inbound_gateway TEXT").run();
+			log.info("Added inbound_gateway column to requests table");
 		}
 
 		// Add timestamp column to request_payloads if it doesn't exist
