@@ -197,7 +197,8 @@ const strippedFieldsReported = new Set<string>();
  * mint a fresh value while AuthService holds the startup one. Nothing an
  * attacker wrote can enter this way, because this.data and the disk re-read
  * both sit behind the strip that drops local_control_secret from a file other
- * users can write.
+ * users can write, and the sidecar getLocalControlSecret() reads first sits
+ * behind its own directory, owner, link-count and mode checks (SB23-3809).
  *
  * Keyed on this.configPath, the validated configured path, rather than on
  * writeTarget()'s resolved target, because the untrusted-path refusal has no
@@ -483,7 +484,7 @@ function chmodAndVerify(path: string, mode: number, what: string): void {
  * Keyed on the config target, never on the temp path, which is random per save
  * and would make the once-per-path set warn on every save.
  */
-function verifySavedMode(fd: number, target: string, what: string): void {
+function verifySavedMode(fd: number, target: string): void {
 	if (process.platform === "win32") return;
 	const after = fstatSync(fd).mode & 0o777;
 	if (after === CONFIG_FILE_MODE) return;
@@ -494,7 +495,7 @@ function verifySavedMode(fd: number, target: string, what: string): void {
 			? "Other local users may be able to read the credentials in it."
 			: "It is not readable by other local users, but it is not the mode this process set.";
 	log.warn(
-		`fchmod to 0600 on the ${what} being saved to ${target} did not take: the new file reads ${modeText(after)}. ${exposure} Filesystems without Unix modes behave this way, including Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes. The save goes ahead, because the file it replaces sits on the same filesystem and refusing would lose the setting without changing its mode. Move the config onto a filesystem that enforces modes, or mount it so only this user can read it. This line does not repeat for this path in this process.`,
+		`fchmod to 0600 on the config being saved to ${target} did not take: the new file reads ${modeText(after)}. ${exposure} Filesystems without Unix modes behave this way, including Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes. The save goes ahead, because the file it replaces sits on the same filesystem and refusing would lose the setting without changing its mode. Move the config onto a filesystem that enforces modes, or mount it so only this user can read it. This line does not repeat for this path in this process.`,
 	);
 }
 
@@ -2234,8 +2235,9 @@ export class Config extends EventEmitter {
 		target: string,
 		content: string,
 		keepExistingOwner = true,
-		what = "config file",
+		forSidecar = false,
 	): boolean {
+		const what = forSidecar ? "local control secret file" : "config file";
 		const tmpPath = `${target}.tmp-${randomUUID()}`;
 		try {
 			// "wx" is O_WRONLY|O_CREAT|O_EXCL: fails if the path exists at all,
@@ -2253,7 +2255,21 @@ export class Config extends EventEmitter {
 				// because a filesystem without Unix modes reports success and keeps
 				// whatever mode it presents (SB23-2274).
 				fchmodForConfig(fd, CONFIG_FILE_MODE);
-				verifySavedMode(fd, target, what === "config file" ? "config" : what);
+				// The sidecar holds nothing but the secret, and its reader refuses any
+				// mode but 0600, so a sidecar whose fchmod did not take is pure
+				// exposure: published where others may read it, and never believed.
+				// Refuse it here instead, which the config cannot do, because for the
+				// config refusing loses the setting without changing its mode.
+				if (forSidecar) {
+					const landed = fstatSync(fd).mode & 0o777;
+					if (landed !== CONFIG_FILE_MODE) {
+						throw new Error(
+							`the new file reads ${modeText(landed)} after fchmod to 0600, so it was not published`,
+						);
+					}
+				} else {
+					verifySavedMode(fd, target);
+				}
 				// The temp inode belongs to whoever is writing, and the rename
 				// discards the old file's ownership. An administrator running the CLI
 				// as root against a config owned by the service account would leave
@@ -2909,9 +2925,10 @@ export class Config extends EventEmitter {
 	 * holds is the secret this process minted.
 	 *
 	 * In a sticky directory such as /tmp, entryIsTrusted() requires an entry of
-	 * ours to exist already, so the first publish there is refused. That is the
-	 * config's own rule for the same reason: a name nobody owns yet is another
-	 * user's to claim first.
+	 * ours to exist already, and nothing here creates one, so no publish there
+	 * succeeds until the operator creates the file. That is the config's own rule
+	 * for the same reason: a name nobody owns yet is another user's to claim
+	 * first.
 	 *
 	 * Written by saveByRename(): a random O_EXCL temp file, fchmod 0600 read back,
 	 * fsync, rename. The rename replaces whatever is at the name, a symlink or a
@@ -2922,24 +2939,47 @@ export class Config extends EventEmitter {
 	 * Skipped when the sidecar already holds this value, so a server restart
 	 * against a config that is fine writes nothing.
 	 *
-	 * If the write fails, a sidecar holding a different value is removed rather
-	 * than left in place: the CLI reads the sidecar first, so a stale one would
-	 * outrank a config that is correct.
+	 * If the directory is refused or the write fails, a sidecar holding a
+	 * different value is removed rather than left in place: the CLI reads the
+	 * sidecar first, so a stale one would outrank a config that is correct.
+	 *
+	 * The write itself refuses a file whose 0600 did not take (saveByRename()
+	 * with forSidecar), so on a filesystem without Unix modes no sidecar is
+	 * published at all, rather than one the reader would refuse anyway.
 	 */
 	private writeLocalControlSidecar(secret: string): void {
 		if (process.platform === "win32") return;
 		const path = this.getLocalControlSidecarPath();
 		const reading = this.inspectLocalControlSidecar();
 		if (reading.kind === "ok" && reading.secret === secret) return;
-		if (this.entryIsTrusted(path) !== "trusted") {
+		const trust = this.entryIsTrusted(path);
+		if (trust !== "trusted") {
+			// Remove what is not being replaced. A sidecar left from a start when
+			// this directory was trusted would outrank a correct config the moment
+			// the directory is trusted again, silently, because every reader check
+			// passes on it. Nothing usable is lost: while the directory is
+			// untrusted the reader refuses the file anyway. unlinkSync never
+			// follows a link, and in a sticky directory it removes only a name
+			// whose inode is ours.
+			if (reading.kind !== "absent") {
+				try {
+					unlinkSync(path);
+				} catch {
+					// Not ours to remove. The reader's directory check still refuses it.
+				}
+			}
+			const consequence =
+				"Where the config file can be saved, the CLI reads the secret from there instead; where it cannot, CLI notifications such as --reauthenticate and --force-reset-rate-limit fail to authenticate against this server while API keys are active.";
 			this.reportSidecar(
-				`Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. Where the config file can be saved, the CLI reads the secret from there instead; where it cannot, CLI notifications such as --reauthenticate and --force-reset-rate-limit fail to authenticate against this server while API keys are active. Move the config to a directory only this user can write.`,
+				trust === "sticky-entry"
+					? `Did not write the local control secret file ${path}: it would sit in a sticky directory, where it is trusted only once a single-named file of yours already exists at that name, and this server never creates one there. ${consequence} Create it yourself at mode 0600, or move the config to a directory only this user can write.`
+					: `Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. ${consequence} Move the config to a directory only this user can write.`,
 			);
 			return;
 		}
 		sweepTempSiblings(path, "local control secret");
 		const content = `${JSON.stringify({ local_control_secret: secret }, null, 2)}\n`;
-		if (this.saveByRename(path, content, false, "local control secret file")) {
+		if (this.saveByRename(path, content, false, true)) {
 			log.info(`Published the local control secret to ${path} at 0600`);
 			return;
 		}

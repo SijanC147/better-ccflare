@@ -2,9 +2,11 @@ import { describe, expect, it } from "bun:test";
 import {
 	chmodSync,
 	existsSync,
+	fchmodSync,
 	linkSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
@@ -16,6 +18,7 @@ import { join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
 import { stickyFixture } from "@better-ccflare/security/testing";
 import type { LogEvent } from "@better-ccflare/types";
+import { __setFchmodForTest } from "./chmod-seam";
 import { __setEntryLstatForTest, lstatEntryForTrust } from "./entry-lstat-seam";
 import { Config } from "./index";
 
@@ -86,8 +89,26 @@ function ignoredMessage(path: string, reason: string): string {
 	return `Ignoring the local control secret file ${path}: ${reason}. Falling back to the secret in the config file, so a notification to the server fails to authenticate while API keys are active and that file's saves are refused. The server replaces this file with one it can trust the next time it starts, wherever its directory is not writable by other local users.`;
 }
 
+const NOT_WRITTEN_CONSEQUENCE =
+	"Where the config file can be saved, the CLI reads the secret from there instead; where it cannot, CLI notifications such as --reauthenticate and --force-reset-rate-limit fail to authenticate against this server while API keys are active.";
+
 function notWrittenMessage(path: string): string {
-	return `Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. Where the config file can be saved, the CLI reads the secret from there instead; where it cannot, CLI notifications such as --reauthenticate and --force-reset-rate-limit fail to authenticate against this server while API keys are active. Move the config to a directory only this user can write.`;
+	return `Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. ${NOT_WRITTEN_CONSEQUENCE} Move the config to a directory only this user can write.`;
+}
+
+function notWrittenStickyMessage(path: string): string {
+	return `Did not write the local control secret file ${path}: it would sit in a sticky directory, where it is trusted only once a single-named file of yours already exists at that name, and this server never creates one there. ${NOT_WRITTEN_CONSEQUENCE} Create it yourself at mode 0600, or move the config to a directory only this user can write.`;
+}
+
+function couldNotWriteMessage(path: string): string {
+	return `Could not write the local control secret file ${path}, reported just above. The CLI falls back to the config file for the secret.`;
+}
+
+/** Leftover temp files from a sidecar save, which hold the secret. */
+function sidecarTemps(dir: string): string[] {
+	return readdirSync(dir).filter((name) =>
+		name.includes(".local-control.tmp-"),
+	);
 }
 
 function sidecarWarnings(logs: LogEvent[]): string[] {
@@ -251,11 +272,114 @@ describe("SB23-3809: an untrusted config directory writes no sidecar", () => {
 
 			expect(existsSync(`${path}.local-control`)).toBe(false);
 			expect(sidecarWarnings(logs)).toEqual([
-				notWrittenMessage(`${path}.local-control`),
+				notWrittenStickyMessage(`${path}.local-control`),
 			]);
 		} finally {
 			fx.cleanup();
 		}
+	});
+
+	/**
+	 * A sidecar written while the directory was trusted must not survive a start
+	 * that refuses the directory, or it outranks a correct config, silently, as
+	 * soon as the directory is trusted again. Found by PR #309's review (L1).
+	 */
+	it("removes a stale sidecar when the directory is refused, so it cannot outrank the config later", () => {
+		withFixture((root) => {
+			const dir = join(root, "conf");
+			mkdirSync(dir, { mode: 0o700 });
+			const path = seed(
+				join(dir, "better-ccflare.json"),
+				JSON.stringify({ local_control_secret: CONFIG_VALUE }),
+			);
+			const sidecar = seed(
+				`${path}.local-control`,
+				sidecarBytes(SIDECAR_VALUE),
+			);
+			chmodSync(dir, 0o770);
+
+			const { logs } = captureLogs(() =>
+				new Config(path).publishLocalControlSecret(),
+			);
+
+			expect(existsSync(sidecar)).toBe(false);
+			expect(sidecarWarnings(logs)).toEqual([notWrittenMessage(sidecar)]);
+			chmodSync(dir, 0o700);
+			expect(new Config(path).getLocalControlSecret() === CONFIG_VALUE).toBe(
+				true,
+			);
+		});
+	});
+});
+
+describe("SB23-3809: a sidecar write that cannot be made safe publishes nothing", () => {
+	/**
+	 * A filesystem without Unix modes, simulated through the fchmod seam: the
+	 * new file keeps a mode other users can read. Publishing it would expose a
+	 * secret no reader would believe, so it is refused, no temp file survives,
+	 * and the stale sidecar is removed. Found by PR #309's review (L2).
+	 */
+	it("refuses to publish when 0600 did not take, and removes the stale one", () => {
+		withFixture((dir) => {
+			const path = seed(join(dir, "better-ccflare.json"), TRAILING_COMMA);
+			const sidecar = seed(
+				`${path}.local-control`,
+				sidecarBytes(SIDECAR_VALUE),
+			);
+			__setFchmodForTest((fd) => fchmodSync(fd, 0o644));
+			try {
+				const { logs } = captureLogs(() =>
+					new Config(path).publishLocalControlSecret(),
+				);
+
+				expect(existsSync(sidecar)).toBe(false);
+				expect(sidecarTemps(dir)).toEqual([]);
+				expect(
+					logs.some((event) =>
+						event.msg.startsWith("Published the local control"),
+					),
+				).toBe(false);
+				expect(
+					logs.some(
+						(event) =>
+							event.msg ===
+							`Could not replace the local control secret file atomically: Error: the new file reads 0644 after fchmod to 0600, so it was not published`,
+					),
+				).toBe(true);
+				expect(sidecarWarnings(logs)).toEqual([]);
+				expect(logs.map((event) => event.msg)).toContain(
+					couldNotWriteMessage(sidecar),
+				);
+			} finally {
+				__setFchmodForTest(null);
+			}
+		});
+	});
+
+	it("removes a stale sidecar when the write itself fails", () => {
+		withFixture((dir) => {
+			const path = seed(join(dir, "better-ccflare.json"), TRAILING_COMMA);
+			const sidecar = seed(
+				`${path}.local-control`,
+				sidecarBytes(SIDECAR_VALUE),
+			);
+			__setFchmodForTest(() => {
+				throw new Error("simulated fchmod failure");
+			});
+			try {
+				const { logs } = captureLogs(() =>
+					new Config(path).publishLocalControlSecret(),
+				);
+
+				expect(existsSync(sidecar)).toBe(false);
+				expect(sidecarTemps(dir)).toEqual([]);
+				expect(logs.map((event) => event.msg)).toContain(
+					couldNotWriteMessage(sidecar),
+				);
+			} finally {
+				__setFchmodForTest(null);
+			}
+		});
 	});
 });
 
@@ -406,6 +530,14 @@ describe("SB23-3809: a sidecar that fails a check is refused", () => {
 		expectRefused(
 			(sidecar) => seed(sidecar, `{"something_else":"x"}`),
 			"it holds no local_control_secret string",
+		);
+	});
+
+	it("refuses one larger than any this code writes", () => {
+		const bytes = sidecarBytes("x".repeat(5000));
+		expectRefused(
+			(sidecar) => seed(sidecar, bytes),
+			`it is ${Buffer.byteLength(bytes)} bytes, larger than any this code writes`,
 		);
 	});
 
