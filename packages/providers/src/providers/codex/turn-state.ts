@@ -18,6 +18,15 @@ export const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 /** JSON carrying the client's `turn_id` (upstream `turn_metadata.rs`). */
 export const CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
 
+/**
+ * Set by the proxy, after it has verified the internal probe secret, on a
+ * request it generated itself (a cache keepalive, an auto-refresh probe).
+ * Those replay a client's body and are not a step in anyone's turn, so they
+ * take no part in turns derived from the body (SB23-3629). Stripped before
+ * the request leaves ccflare.
+ */
+export const CODEX_INTERNAL_REPLAY_HEADER = "x-better-ccflare-internal-replay";
+
 /** Long enough for a turn paused on a tool approval; refreshed on each use. */
 export const CODEX_TURN_STATE_TTL_MS = 2 * 60 * 60 * 1000;
 export const CODEX_TURN_STATE_MAX_ENTRIES = 5000;
@@ -28,6 +37,158 @@ const MAX_TURN_ID_LENGTH = 256;
 interface Entry {
 	token: string;
 	expiresAt: number;
+}
+
+/**
+ * A turn derived from an Anthropic Messages body (SB23-3629). `token` is null
+ * once the key has been poisoned. `length` and `prefix` name the last request
+ * this account answered in the turn: the next one must extend it.
+ */
+interface DerivedEntry {
+	token: string | null;
+	length: number;
+	prefix: string;
+	expiresAt: number;
+}
+
+/**
+ * How a request's body related to the turn the account had on file:
+ * `fresh` when there was none, `extends` when it strictly extends the last
+ * request answered, `other` for anything else under the same key (a rewind, a
+ * fork, a byte-identical re-send), and `poisoned` when an earlier `other`
+ * already ruled the key out.
+ */
+export type MessagesTurnMatch = "fresh" | "extends" | "other" | "poisoned";
+
+/** What a request's lookup saw, carried to the response that records it. */
+export interface MessagesTurnLookup {
+	key: string;
+	length: number;
+	prefix: string;
+	match: MessagesTurnMatch;
+	token: string | null;
+	/** The position an `extends` lookup extended, so a record can tell whether another request moved it since. */
+	from?: { length: number; prefix: string };
+}
+
+/**
+ * A turn named by an Anthropic Messages body. `prefixes[i]` digests
+ * `messages[0..i]`, so request B extends request A exactly when B is longer
+ * and `B.prefixes[A.length - 1]` equals A's last prefix.
+ */
+export interface MessagesTurn {
+	key: string;
+	prefixes: string[];
+}
+
+const UUID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * The session id Claude Code puts in `metadata.user_id`, a JSON string
+ * carrying `session_id`, or null when there is none or it is not a UUID.
+ */
+export function messagesSessionId(body: unknown): string | null {
+	const rawUserId = (body as { metadata?: { user_id?: unknown } } | null)
+		?.metadata?.user_id;
+	if (typeof rawUserId !== "string") return null;
+	try {
+		const metadata = JSON.parse(rawUserId) as unknown;
+		if (!metadata || typeof metadata !== "object") return null;
+		const sessionId = (metadata as Record<string, unknown>).session_id;
+		return typeof sessionId === "string" && UUID.test(sessionId)
+			? sessionId.toLowerCase()
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function contentBlocks(message: unknown): unknown[] {
+	const content = (message as { content?: unknown } | null)?.content;
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	return Array.isArray(content) ? content : [];
+}
+
+function stripCacheControl(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(stripCacheControl);
+	if (value !== null && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value)) {
+			if (k !== "cache_control") out[k] = stripCacheControl(v);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
+ * One message as compared across requests. A client writes its newest
+ * message as a block array to hang `cache_control` on it, and the same
+ * message as a plain string once it is older, so string content is read as
+ * its one text block and `cache_control` is dropped. Without this, measured
+ * on real traffic, no follow-up ever matches the request before it.
+ */
+export function normalizeMessage(message: unknown): string {
+	const base =
+		message !== null && typeof message === "object"
+			? (message as Record<string, unknown>)
+			: {};
+	return JSON.stringify(
+		stripCacheControl({ ...base, content: contentBlocks(message) }),
+	);
+}
+
+/**
+ * The index of the last `user` message holding any block that is not a
+ * `tool_result`: the prompt that opened the current turn. A tool-loop
+ * follow-up adds only `tool_result` blocks, so the anchor stays put; typed
+ * text, an interrupt marker or a `<system-reminder>` beside the results moves
+ * it, which reads as a new turn. A rejection whose feedback sits inside a
+ * `tool_result` does not move it. -1 when no message qualifies.
+ */
+export function turnAnchorIndex(messages: readonly unknown[]): number {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if ((messages[i] as { role?: unknown } | null)?.role !== "user") continue;
+		const blocks = contentBlocks(messages[i]);
+		if (
+			blocks.some(
+				(b) => (b as { type?: unknown } | null)?.type !== "tool_result",
+			)
+		)
+			return i;
+	}
+	return -1;
+}
+
+/**
+ * The turn an Anthropic Messages body belongs to: a digest of its session id,
+ * its model and `messages[0..k]` at the anchor. Null without a session id,
+ * because a key from the messages alone collides across clients sending the
+ * same prompt. `system` is left out because Claude Code changes it on almost
+ * every request of a turn (131 of 132 measured follow-ups).
+ */
+export function messagesTurn(body: unknown): MessagesTurn | null {
+	const session = messagesSessionId(body);
+	const messages = (body as { messages?: unknown } | null)?.messages;
+	if (!session || !Array.isArray(messages) || messages.length === 0)
+		return null;
+	const anchor = turnAnchorIndex(messages);
+	if (anchor < 0) return null;
+	const prefixes: string[] = [];
+	let prefix = "";
+	for (const message of messages) {
+		prefix = digest("prefix", `${prefix}\0${normalizeMessage(message)}`);
+		prefixes.push(prefix);
+	}
+	const model = (body as { model?: unknown }).model;
+	return {
+		key: digest(
+			"messages-turn",
+			`${session}\0${typeof model === "string" ? model : ""}\0${prefixes[anchor]}`,
+		),
+		prefixes,
+	};
 }
 
 function digest(kind: string, value: string): string {
@@ -66,6 +227,7 @@ export function codexTurnId(headers: Headers | undefined): string | null {
  */
 export class CodexTurnStateStore {
 	private readonly entries = new Map<string, Entry>();
+	private readonly derived = new Map<string, DerivedEntry>();
 
 	constructor(
 		private readonly ttlMs = CODEX_TURN_STATE_TTL_MS,
@@ -158,13 +320,102 @@ export class CodexTurnStateStore {
 	}
 
 	private evict(): void {
+		this.evictFrom(this.entries);
+	}
+
+	private evictFrom(map: Map<string, { expiresAt: number }>): void {
 		const now = this.now();
 		// Map order is least-recently-used first, and every write or read sets
 		// expiresAt to now + ttl, so it is also soonest-expiring first.
-		for (const [slot, entry] of this.entries) {
-			if (this.entries.size <= this.maxEntries && entry.expiresAt > now) break;
-			this.entries.delete(slot);
+		for (const [slot, entry] of map) {
+			if (map.size <= this.maxEntries && entry.expiresAt > now) break;
+			map.delete(slot);
 		}
+	}
+
+	/** A live derived entry, moved to the most-recently-used end with its TTL slid. */
+	private readDerived(slot: string): DerivedEntry | undefined {
+		const entry = this.derived.get(slot);
+		if (!entry) return undefined;
+		this.derived.delete(slot);
+		if (entry.expiresAt <= this.now()) return undefined;
+		entry.expiresAt = this.now() + this.ttlMs;
+		this.derived.set(slot, entry);
+		return entry;
+	}
+
+	/**
+	 * The token to replay to `accountId` for a request whose body names
+	 * `turn` (SB23-3629). Only a request that strictly extends the last one
+	 * this account answered in the turn gets one. Anything else under a key
+	 * the account has on file poisons that key for the TTL: a rewind that
+	 * resends the same prompt, a fork, or a byte-identical re-send cannot be
+	 * told from a different turn, and not replaying is the old behaviour.
+	 */
+	lookupMessagesTurn(
+		turn: MessagesTurn,
+		accountId: string,
+	): MessagesTurnLookup {
+		const length = turn.prefixes.length;
+		const base = { key: turn.key, length, prefix: turn.prefixes[length - 1] };
+		const entry = this.readDerived(this.slot(accountId, turn.key));
+		if (!entry) return { ...base, match: "fresh", token: null };
+		if (entry.token === null) return { ...base, match: "poisoned", token: null };
+		if (
+			length > entry.length &&
+			turn.prefixes[entry.length - 1] === entry.prefix
+		)
+			return {
+				...base,
+				match: "extends",
+				token: entry.token,
+				from: { length: entry.length, prefix: entry.prefix },
+			};
+		entry.token = null;
+		return { ...base, match: "other", token: null };
+	}
+
+	/**
+	 * Records a 2xx answer to a request looked up with `lookupMessagesTurn`.
+	 * A fresh turn files the token `accountId` issued; a follow-up moves the
+	 * turn's position forward and keeps the first token, as the Codex client
+	 * keeps its first. Two requests racing on one key, two fresh starts or
+	 * two follow-ups of one position, poison it: siblings look like that.
+	 */
+	recordMessagesTurn(
+		lookup: MessagesTurnLookup,
+		accountId: string,
+		issued: string | null,
+	): void {
+		const slot = this.slot(accountId, lookup.key);
+		const entry = this.readDerived(slot);
+		if (lookup.match === "fresh") {
+			if (entry) {
+				entry.token = null;
+				return;
+			}
+			if (!issued || issued.length > MAX_TOKEN_LENGTH) return;
+			this.derived.set(slot, {
+				token: issued,
+				length: lookup.length,
+				prefix: lookup.prefix,
+				expiresAt: this.now() + this.ttlMs,
+			});
+			this.evictFrom(this.derived);
+			return;
+		}
+		if (lookup.match !== "extends" || !entry || entry.token === null) return;
+		if (
+			!lookup.from ||
+			entry.token !== lookup.token ||
+			entry.length !== lookup.from.length ||
+			entry.prefix !== lookup.from.prefix
+		) {
+			entry.token = null;
+			return;
+		}
+		entry.length = lookup.length;
+		entry.prefix = lookup.prefix;
 	}
 
 	/**

@@ -36,13 +36,25 @@ import {
 	type CodexStreamLivenessOptions,
 } from "./stream-liveness";
 import {
+	CODEX_INTERNAL_REPLAY_HEADER,
 	CODEX_TURN_METADATA_HEADER,
 	CODEX_TURN_STATE_HEADER,
 	CodexTurnStateStore,
+	type MessagesTurn,
+	type MessagesTurnLookup,
+	messagesSessionId,
+	messagesTurn,
 } from "./turn-state";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const log = new Logger("CodexProvider");
+
+/** How long a body-derived turn waits for its response before it is swept. */
+const MESSAGES_TURN_PENDING_TTL_MS = 10 * 60 * 1000;
+
+function messagesTurnRequestKey(requestId: string, accountId: string): string {
+	return `${requestId}\0${accountId}`;
+}
 
 function recordCacheLifecycle(facts: CacheFacts): void {
 	log.info("Codex cache observation lifecycle", sanitizeCacheFacts(facts));
@@ -565,6 +577,15 @@ export class CodexProvider extends BaseProvider {
 	private readonly continuationMaxLanes: number;
 	private readonly now: () => number;
 	private readonly turnState: CodexTurnStateStore;
+	/**
+	 * A body-derived turn per (request id, account), from the transform that
+	 * computed it to the response that records it (SB23-3629). processResponse
+	 * cannot recompute it: it sees the response, not the body.
+	 */
+	private readonly messagesTurnByRequest = new Map<
+		string,
+		{ turn?: MessagesTurn; lookup?: MessagesTurnLookup; ts: number }
+	>();
 	private readonly continuationByLane = new Map<string, ContinuationState>();
 	private continuationGeneration = 0;
 	private readonly messagesContinuationRejected = new Map<string, number>();
@@ -820,6 +841,7 @@ export class CodexProvider extends BaseProvider {
 	): Promise<Request> {
 		// Read before the transform: these are the client's own values, which
 		// the outbound copy is about to be rewritten from (SB23-2370).
+		const requestId = request.headers.get("x-better-ccflare-request-id");
 		const clientTurnHeaders = new Headers();
 		for (const name of [CODEX_TURN_STATE_HEADER, CODEX_TURN_METADATA_HEADER]) {
 			const value = request.headers.get(name);
@@ -832,7 +854,53 @@ export class CodexProvider extends BaseProvider {
 		// Every branch, the untouched passthroughs included: a turn-state token
 		// goes upstream only to the account that issued it.
 		this.turnState.scope(transformed.headers, clientTurnHeaders, account?.id);
+		transformed.headers.delete(CODEX_INTERNAL_REPLAY_HEADER);
+		this.replayMessagesTurn(transformed.headers, requestId, account?.id);
 		return transformed;
+	}
+
+	/**
+	 * Replays a token for a turn named by the request body (SB23-3629), for
+	 * clients that send no Codex turn headers. Claude Code reaches Codex
+	 * accounts through /v1/messages and never replays the token itself.
+	 */
+	private replayMessagesTurn(
+		outbound: Headers,
+		requestId: string | null,
+		accountId: string | undefined,
+	): void {
+		if (!requestId || !accountId) return;
+		const key = messagesTurnRequestKey(requestId, accountId);
+		const turn = this.messagesTurnByRequest.get(key)?.turn;
+		if (!turn) return;
+		const lookup = this.turnState.lookupMessagesTurn(turn, accountId);
+		// Keep the lookup only: the prefix digests are not needed past here.
+		this.messagesTurnByRequest.set(key, { lookup, ts: this.now() });
+		if (lookup.token) outbound.set(CODEX_TURN_STATE_HEADER, lookup.token);
+	}
+
+	private recordMessagesTurn(
+		response: Response,
+		accountId: string | undefined,
+	): void {
+		const requestId = response.headers.get("x-better-ccflare-request-id");
+		if (!response.ok || !requestId || !accountId) return;
+		const key = messagesTurnRequestKey(requestId, accountId);
+		const lookup = this.messagesTurnByRequest.get(key)?.lookup;
+		if (!lookup) return;
+		this.messagesTurnByRequest.delete(key);
+		this.turnState.recordMessagesTurn(
+			lookup,
+			accountId,
+			response.headers.get(CODEX_TURN_STATE_HEADER),
+		);
+	}
+
+	private sweepMessagesTurnByRequest(): void {
+		const cutoff = this.now() - MESSAGES_TURN_PENDING_TTL_MS;
+		for (const [key, entry] of this.messagesTurnByRequest) {
+			if (entry.ts < cutoff) this.messagesTurnByRequest.delete(key);
+		}
 	}
 
 	private async transformRequestBodyForAccount(
@@ -862,6 +930,7 @@ export class CodexProvider extends BaseProvider {
 
 		try {
 			this.sweepRequestStreamById();
+			this.sweepMessagesTurnByRequest();
 			const body = (await request.json()) as AnthropicRequest;
 			if (isSyntheticCountTokens) {
 				if (process.env[CODEX_SYNTHETIC_COUNT_TOKENS_ENV] === "0") {
@@ -917,6 +986,24 @@ export class CodexProvider extends BaseProvider {
 				);
 			}
 			delete body.__better_ccflare_codex_passthrough;
+			// A turn named by the body (SB23-3629), only for a client that sends
+			// no Codex turn headers of its own, and never for the proxy's own
+			// replays of a client body.
+			if (
+				!nativeResponses &&
+				requestId &&
+				account?.id &&
+				request.headers.get(CODEX_INTERNAL_REPLAY_HEADER) !== "true" &&
+				!request.headers.has(CODEX_TURN_STATE_HEADER) &&
+				!request.headers.has(CODEX_TURN_METADATA_HEADER)
+			) {
+				const turn = messagesTurn(body);
+				if (turn)
+					this.messagesTurnByRequest.set(
+						messagesTurnRequestKey(requestId, account.id),
+						{ turn, ts: this.now() },
+					);
+			}
 			// The passthrough object is part of the public JSON body and is therefore
 			// attacker-controlled. Native execution fields require the proxy's
 			// in-process trust bit; the legacy path admits only the cache hint above.
@@ -1105,6 +1192,7 @@ export class CodexProvider extends BaseProvider {
 				response.headers.get(CODEX_TURN_STATE_HEADER),
 			);
 		}
+		this.recordMessagesTurn(response, _account?.id);
 
 		// /v1/models responses: translate Codex format → OpenAI /v1/models format
 		// with full capability fields preserved for the CLI.
@@ -2561,24 +2649,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private extractSessionId(body: AnthropicRequest): string | undefined {
-		const rawUserId = body.metadata?.user_id;
-		if (typeof rawUserId !== "string") return undefined;
-		try {
-			const metadata = JSON.parse(rawUserId) as unknown;
-			if (!metadata || typeof metadata !== "object") return undefined;
-			const sessionId = (metadata as Record<string, unknown>).session_id;
-			if (
-				typeof sessionId !== "string" ||
-				!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-					sessionId,
-				)
-			) {
-				return undefined;
-			}
-			return sessionId.toLowerCase();
-		} catch {
-			return undefined;
-		}
+		return messagesSessionId(body) ?? undefined;
 	}
 
 	/**
