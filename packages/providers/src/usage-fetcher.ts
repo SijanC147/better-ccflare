@@ -65,6 +65,11 @@ export interface ExtraUsage {
 	monthly_limit: number | null;
 	used_credits: number | null;
 	utilization: number | null;
+	// Minor units of `currency`, with `decimal_places` digits (SB23-3266).
+	currency?: string | null;
+	decimal_places?: number | null;
+	disabled_reason?: string | null;
+	spend_limit_reached?: boolean;
 }
 
 // Anthropic's generic per-limit representation (2026 usage API). Session and

@@ -20,11 +20,14 @@ import {
 	providerShowsWeeklyUsage,
 	ZAI_PEAK_WINDOW,
 } from "../../utils/provider-utils";
+import { formatRenewalDate, viewerRenewal } from "../../utils/renewal";
 import { Progress } from "../ui/progress";
 import {
 	collectAnthropicUsageRows,
+	formatExtraUsageAmount,
 	formatWindowName,
 	isWeeklyWindow,
+	resolveExtraUsageDisplay,
 	severityColor,
 	type UsageDisplay,
 } from "./rate-limit-helpers";
@@ -55,6 +58,100 @@ function PeakHoursBadge({ label }: { label: PeakLabel }) {
 	);
 }
 
+/**
+ * Anthropic's extra-usage pool: what is left this month, what was used of what
+ * limit, and whether the pool is off (SB23-3266).
+ *
+ * Rendered only for `provider === "anthropic"`, never on the presence of an
+ * `extra_usage` key, which another provider's payload may one day carry too
+ * (SB23-2462 is that mistake made with `credits`). Below the window rows, like
+ * the Codex credits line: the pool only matters read against the windows it
+ * outlasts.
+ *
+ * Absent renders nothing, Off renders "Off" and no number, and a zero balance
+ * renders as "0". Those three must never look alike.
+ */
+function ExtraUsageBlock({
+	usageData,
+	renewalDay,
+}: {
+	usageData: AnthropicUsageData | null | undefined;
+	renewalDay?: number | null;
+}) {
+	const display = resolveExtraUsageDisplay(usageData);
+	if (display.kind === "absent") return null;
+
+	if (display.kind === "off") {
+		return (
+			<div className="flex items-center justify-between" data-extra-usage="off">
+				<span className="text-xs text-muted-foreground">Extra usage</span>
+				<span
+					className="text-xs font-medium text-muted-foreground"
+					title={display.reason ?? undefined}
+				>
+					{display.reason
+						? `Off · ${display.reason.replace(/_/g, " ")}`
+						: "Off"}
+				</span>
+			</div>
+		);
+	}
+
+	const { used, limit, remaining, percent, unit, limitReached } = display;
+	const renewal = viewerRenewal(renewalDay);
+	return (
+		<div className="space-y-2" data-extra-usage="on">
+			<div className="flex items-center justify-between">
+				<span className="text-xs text-muted-foreground">Extra usage</span>
+				<span
+					className={cn(
+						"text-xs font-medium",
+						limitReached
+							? "text-red-600 dark:text-red-400"
+							: "text-muted-foreground",
+					)}
+				>
+					{remaining !== null ? (
+						<>
+							<span data-extra-usage-remaining="">
+								{formatExtraUsageAmount(remaining, unit)}
+							</span>
+							{unit === null ? " credits left" : " left"}
+						</>
+					) : (
+						"On"
+					)}
+				</span>
+			</div>
+			{(used !== null || limit !== null) && (
+				<div className="flex items-center justify-between">
+					<span className="text-xs text-muted-foreground">
+						{used !== null ? formatExtraUsageAmount(used, unit) : "?"}
+						{" of "}
+						{limit !== null ? formatExtraUsageAmount(limit, unit) : "no limit"}
+						{unit === null ? " credits used" : " used"}
+					</span>
+					{renewal && (
+						<span
+							className="text-xs text-muted-foreground"
+							title="Set by the operator on this account. Anthropic's usage payload carries no reset date for this pool."
+						>
+							renews {formatRenewalDate(renewal)} (operator-set)
+						</span>
+					)}
+				</div>
+			)}
+			{percent !== null && (
+				<Progress
+					value={Math.min(100, Math.max(0, percent))}
+					className="h-2"
+					indicatorClassName={limitReached ? "bg-red-500" : undefined}
+				/>
+			)}
+		</div>
+	);
+}
+
 interface RateLimitProgressProps {
 	resetIso: string | null;
 	usageUtilization?: number | null; // Actual utilization from API (0-100)
@@ -68,6 +165,7 @@ interface RateLimitProgressProps {
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	pauseThresholdFiveHour?: number | null; // Pause at this percent of the 5-hour window; null = off
 	pauseThresholdWeekly?: number | null; // Pause at this percent of the all-models weekly window; null = off
+	renewalDay?: number | null; // Operator-set subscription renewal day (1-31); null = not set
 }
 
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
@@ -171,6 +269,7 @@ function formatThrottledUntil(throttledUntilMs: number, now: number): string {
 	const roundedUpToMinuteMs = Math.ceil(throttledUntilMs / 60000) * 60000;
 	return new Date(roundedUpToMinuteMs).toLocaleTimeString(undefined, {
 		hour: "2-digit",
+		hourCycle: "h23",
 		minute: "2-digit",
 	});
 }
@@ -221,6 +320,7 @@ export function RateLimitProgress({
 	showWeekly = false,
 	pauseThresholdFiveHour = null,
 	pauseThresholdWeekly = null,
+	renewalDay = null,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -255,6 +355,7 @@ export function RateLimitProgress({
 		const retryAfterDate = new Date(usageRateLimitedUntil);
 		const retryTimeText = retryAfterDate.toLocaleTimeString(undefined, {
 			hour: "2-digit",
+			hourCycle: "h23",
 			minute: "2-digit",
 		});
 		return (
@@ -941,6 +1042,7 @@ export function RateLimitProgress({
 													month: "short",
 													day: "numeric",
 													hour: "2-digit",
+													hourCycle: "h23",
 													minute: "2-digit",
 												},
 											)} (local)`
@@ -948,6 +1050,7 @@ export function RateLimitProgress({
 												undefined,
 												{
 													hour: "2-digit",
+													hourCycle: "h23",
 													minute: "2-digit",
 												},
 											)} (local)`}
@@ -1014,54 +1117,12 @@ export function RateLimitProgress({
 						</div>
 					);
 				})()}
-			{hasAnthropicStyleData &&
-				(() => {
-					const spend = (
-						usageData as {
-							spend?: {
-								enabled?: boolean;
-								percent?: number | null;
-								used?: {
-									amount_minor: number;
-									currency: string;
-									exponent?: number;
-								} | null;
-								currency?: string | null;
-							};
-						}
-					).spend;
-					if (!spend?.enabled) return null;
-					const used = spend.used;
-					const exponent = used?.exponent ?? 2;
-					const rawAmount =
-						used != null ? used.amount_minor / 10 ** exponent : null;
-					const amount =
-						rawAmount != null && Number.isFinite(rawAmount) ? rawAmount : null;
-					const cur = used?.currency ?? spend.currency ?? "USD";
-					const pct = spend.percent ?? null;
-					return (
-						<div className="space-y-2">
-							<div className="flex items-center justify-between">
-								<span className="text-xs text-muted-foreground">
-									Overage credits
-								</span>
-								<span className="text-xs font-medium text-muted-foreground">
-									{amount != null
-										? `${cur} ${amount.toFixed(2)}`
-										: pct != null
-											? `${pct.toFixed(0)}%`
-											: "—"}
-								</span>
-							</div>
-							{pct != null && (
-								<Progress
-									value={Math.min(100, Math.max(0, pct))}
-									className="h-2"
-								/>
-							)}
-						</div>
-					);
-				})()}
+			{provider === PROVIDER_NAMES.ANTHROPIC && (
+				<ExtraUsageBlock
+					usageData={usageData as AnthropicUsageData | null | undefined}
+					renewalDay={renewalDay}
+				/>
+			)}
 		</div>
 	);
 }

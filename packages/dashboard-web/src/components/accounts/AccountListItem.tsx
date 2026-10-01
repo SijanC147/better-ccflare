@@ -524,6 +524,7 @@ export function AccountListItem({
 							? account.usagePauseWeeklyThreshold
 							: null
 					}
+					renewalDay={account.renewalDay}
 				/>
 			)}
 		</div>
