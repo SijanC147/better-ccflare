@@ -99,9 +99,9 @@ Three worth stating plainly, because each has cost time before.
 
 The exporter ships one record per request to the configured request stream, and
 that record is the `summary` object `UsageCollector._handleEndInternal` builds
-(`packages/proxy/src/usage-collector.ts:1020-1074`), spread wholesale into
+(`packages/proxy/src/usage-collector.ts`, the `summary` literal and the `shipRequestRecord` call after it), spread wholesale into
 `shipRequestRecord`. `shipRequestRecord` takes a loose `Record<string, unknown>`
-(`packages/logger/src/openobserve.ts:313-316`), adds `_timestamp`, and enqueues,
+(`packages/logger/src/openobserve.ts`), adds `_timestamp`, and enqueues,
 so it is field-agnostic: a field added to the summary reaches the stream with no
 exporter change, and one deleted from it disappears just as silently.
 
@@ -122,7 +122,7 @@ stores rather than trusting what the code sends.
 
 **An absent token field is omitted, not zeroed.** Every token field is optional
 on `RequestResponse` (`packages/types/src/request.ts:200-210`) and
-`JSON.stringify` drops `undefined` (`openobserve.ts:120`), so a request with no
+`JSON.stringify` drops `undefined` (in `enqueue`), so a request with no
 parsed usage, an error or a non-message endpoint, ships with no token keys at
 all. This is deliberate. A zero reads as "no tokens were used"; a missing key
 reads as "this was not measured". Aggregates must treat missing as missing, and
@@ -130,18 +130,67 @@ an `avg()` over a stream half of whose records lack the field is not the average
 anyone intends.
 
 **There are two timestamps and they mean different things.** `_timestamp`
-(`openobserve.ts:315`) is `Date.now()` at ship time, so approximately request
-*end*. The `timestamp` field (`usage-collector.ts:1022`) is request *start*, as
+(set in `shipRequestRecord`) is `Date.now()` at ship time, so approximately request
+*end*. The `timestamp` field (on the `summary` literal) is request *start*, as
 an ISO string. OpenObserve indexes `_timestamp`, so a dashboard should use
 `_timestamp` unless it specifically wants arrival time; the two differ by the
 request duration, which for a long stream is not small.
 
-**There is no retry, so the stream is lossy and is never a billing record.** A
-batch that fails to post is dropped rather than requeued
-(`openobserve.ts:206-210`, `:239-246`), and the buffers are bounded at 1000
-records and 16 MB with evictions counted and warned about. Under pressure or an
+**The stream is lossy and is never a billing record.** A batch that fails for a
+transient reason (a connection failure, 429 or 5xx) goes back to the front of
+the same bounded buffer and is tried again with backoff, up to six attempts; any
+other 4xx drops it at once. The buffers are bounded at 1000 records and 16 MB
+and evict the oldest first, a deferred batch included. Under pressure or a long
 outage, records are gone. Use the `requests` table for anything that must
-reconcile. Retry is tracked as SB23-1760.
+reconcile. The exporter's metrics stream, below, says how many were lost and
+why.
+
+### Which account served a request
+
+`accountUsed` is the serving account's id (queried as `accountused`). Beside it,
+`accountName` and `accountProvider` (`accountname`, `accountprovider`) carry the
+account's own label and its provider, so one stream can be split by account
+without a join. Both are added at the ship site in `usage-collector.ts`
+(`shippedAccountAttributes`), not to the dashboard's `summary`, and both are
+**absent** when no account served the request. That is deliberate: a request
+refused before any account was chosen carries the server's default provider on
+its start message, and shipping it would describe an account that does not
+exist. Neither field is a credential.
+
+## What the OpenObserve metrics stream holds
+
+Once a minute the exporter posts two records to the metrics stream (default
+`better_ccflare_exporter_metrics`), one with `stream_kind` `logs` and one with
+`requests`, over the same bulk endpoint. Field names are snake_case so they
+survive OpenObserve's lowercasing readable.
+
+Every counter is **cumulative since the process started**, which is what lets a
+snapshot be posted exactly once and never retried: a lost snapshot costs only
+resolution, because the next one carries the totals. Do not sum them across
+snapshots; take the latest per `run_id`, or the difference between two in the
+same run. `run_id` changes on every restart, which is how a fall to zero is told
+apart from a loss, and `snapshot_failures` counts the snapshots in a row that
+did not land before this one.
+
+| Field | Meaning |
+|---|---|
+| `enqueued_records` | Accepted into the buffer |
+| `shipped_records`, `shipped_batches` | Accepted by the endpoint |
+| `deferred_records` | Put back for another attempt, counted once per deferral |
+| `evicted_records` | Discarded oldest-first under the count or byte bound |
+| `rejected_records` | Refused at enqueue: unserializable, or over 16 MB on its own |
+| `failed_records` | Dropped on a non-retryable answer (a 4xx other than 429, or an unusable URL) |
+| `exhausted_records` | Dropped after six attempts |
+| `discarded_records` | Thrown away because the exporter was turned off with records held |
+| `filtered_records` | Log events below the minimum level (log stream only) |
+| `buffered_records`, `buffered_bytes`, `in_flight_records`, `consecutive_failures` | Gauges at the moment of the snapshot |
+
+At any snapshot, `enqueued = shipped + evicted + failed + exhausted + discarded +
+buffered + in_flight`. `rejected` and `filtered` never entered the buffer and sit
+outside that identity. The snapshot carries counts and stream names only: never
+the endpoint, the user or the token, and nothing from any record. It is not
+sent at shutdown, so up to a minute of counts at the end of a run is not
+reported.
 
 ## Gaps worth filling
 
