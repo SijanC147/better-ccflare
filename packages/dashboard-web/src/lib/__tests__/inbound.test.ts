@@ -27,12 +27,14 @@ describe("inboundLabel", () => {
 describe("inboundPath", () => {
 	it("gives the path the client called", () => {
 		expect(inboundPath("openai-chat")).toBe("/v1/chat/completions");
-		expect(inboundPath("openai-responses")).toBe("/v1/responses");
+		expect(inboundPath("openai-responses")).toBe(
+			"/v1/responses or /v1/responses/compact",
+		);
 		expect(inboundPath("openai-chat", "work")).toBe(
 			"/v1/gateways/work/chat/completions",
 		);
 		expect(inboundPath("openai-responses", "gpt")).toBe(
-			"/v1/gateways/gpt/responses",
+			"/v1/gateways/gpt/responses or /v1/gateways/gpt/responses/compact",
 		);
 	});
 

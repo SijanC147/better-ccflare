@@ -18,7 +18,11 @@ export function inboundLabel(
 	return gateway ? `${api} · ${gateway}` : api;
 }
 
-/** The path the client called, for the badge's tooltip. */
+/**
+ * The path the client called, for the badge's tooltip. A Responses request may
+ * have been `/responses/compact`; the marker does not say which, so the
+ * tooltip names both.
+ */
 export function inboundPath(
 	format?: string | null,
 	gateway?: string | null,
@@ -30,6 +34,10 @@ export function inboundPath(
 				? "/responses"
 				: null;
 	if (rest === null) return null;
+	if (format === "openai-responses") {
+		const base = gateway ? `/v1/gateways/${gateway}` : "/v1";
+		return `${base}/responses or ${base}/responses/compact`;
+	}
 	return gateway ? `/v1/gateways/${gateway}${rest}` : `/v1${rest}`;
 }
 

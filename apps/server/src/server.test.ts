@@ -1149,6 +1149,27 @@ describe("startServer() wiring guards", () => {
 		}
 	});
 
+	// SB23-2727 review, finding 2. dropClientGatewayHeaders is tested on its
+	// own, but what protects a plain /v1/messages request from a client that
+	// picks a gateway ladder, lifts the model filter or labels its own history
+	// row is the CALL to it in the fetch handler, before anything reads the
+	// request. A reviewer no-opped that call and 763 tests stayed green.
+	it("drops client gateway headers first thing in the fetch handler", () => {
+		const body = readStartServerBody();
+		const fetchIdx = body.search(/async\s+fetch\s*\(\s*req\s*:\s*Request\s*\)/);
+		expect(fetchIdx).toBeGreaterThanOrEqual(0);
+		const handler = body.slice(fetchIdx);
+		const dropIdx = handler.search(
+			/\breq\s*=\s*dropClientGatewayHeaders\s*\(\s*req\s*\)/,
+		);
+		expect(dropIdx).toBeGreaterThanOrEqual(0);
+		// Before the first header read and before the short-form rewrite.
+		const firstHeaderRead = handler.search(/\breq\.headers\b/);
+		const aliasIdx = handler.search(/matchOpenAIGatewayAliasPath\s*\(/);
+		expect(aliasIdx).toBeGreaterThan(dropIdx);
+		if (firstHeaderRead >= 0) expect(firstHeaderRead).toBeGreaterThan(dropIdx);
+	});
+
 	it("invokes bootstrapMinimaxUsagePolling inside startServer()", () => {
 		const body = readStartServerBody();
 		// Match an actual call: `<identifier> (`. Just matching the bare

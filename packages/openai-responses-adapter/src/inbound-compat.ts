@@ -101,11 +101,14 @@ export function flattenToolHistory<
 						) as unknown as Block,
 					];
 				}
-				const parts = result.content.filter(
-					(part) =>
-						part.type !== "text" ||
-						(part as unknown as TextLike).text.trim() !== "",
-				);
+				// A text part whose `text` is not a string is dropped rather than
+				// read: the Responses translator passes a client's value through,
+				// and a throw here would turn the client's 400 into a 500.
+				const parts = result.content.filter((part) => {
+					if (part.type !== "text") return true;
+					const text = (part as unknown as { text?: unknown }).text;
+					return typeof text === "string" && text.trim() !== "";
+				});
 				return [
 					textBlock(parts.length === 0 ? `${label} (empty)` : label),
 					...parts,

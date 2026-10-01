@@ -116,6 +116,24 @@ describe("flattenToolHistory (SB23-2727 item 3)", () => {
 		]);
 	});
 
+	test("a text part whose text is not a string is dropped, not read", () => {
+		const out = flattenToolHistory([
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "call_9",
+						content: [{ type: "text", text: 5 as unknown as string }],
+					},
+				],
+			},
+		]);
+		expect(out[0].content as unknown[]).toEqual([
+			{ type: "text", text: "[Tool result for call call_9] (empty)" },
+		]);
+	});
+
 	test("a message with no tool block is returned as the same object", () => {
 		const message = {
 			role: "user",
