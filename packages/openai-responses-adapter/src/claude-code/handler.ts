@@ -5,11 +5,16 @@
  * client; tool activity stays inside the CLI.
  */
 import crypto from "node:crypto";
-import { existsSync } from "node:fs";
+import fs, { existsSync } from "node:fs";
 import os from "node:os";
+import nodePath from "node:path";
+import { Logger } from "@better-ccflare/logger";
 import {
 	CLAUDE_CODE_BIN_ENV,
 	CLAUDE_CODE_DEFAULT_MODEL_ID,
+	claudeCodeHostRefusalMessage,
+	claudeCodeMachineHostnames,
+	isClaudeCodeHostAllowed,
 	type ResolvedClaudeCodeEndpoint,
 } from "@better-ccflare/types";
 import type {
@@ -43,10 +48,28 @@ export interface ClaudeCodeRunnerDeps {
 	killGraceMs?: number;
 	/** Session id for a new conversation. Default `crypto.randomUUID`. */
 	newSessionId?: () => string;
+	/**
+	 * Host names allowed besides IP literals, `localhost` and this machine's
+	 * own name: the `claude_code_allowed_hosts` config key.
+	 */
+	allowedHosts?: readonly string[];
+	/** This machine's name. Default `os.hostname()`. */
+	hostname?: string;
+	/**
+	 * Streaming only: how long to hold the response headers waiting for the
+	 * first text or failure, so an early failure still gets its real status.
+	 * After it the stream starts as 200 and keep-alives flow. Default 10000.
+	 */
+	firstEventWaitMs?: number;
+	/** Streaming only: interval of SSE keep-alive comments. Default 15000. */
+	keepAliveMs?: number;
 }
 
+const log = new Logger("claude-code-endpoints");
+
 const DEFAULT_KILL_GRACE_MS = 5000;
-const KEEPALIVE_MS = 15_000;
+const DEFAULT_KEEPALIVE_MS = 15_000;
+const DEFAULT_FIRST_EVENT_WAIT_MS = 10_000;
 const STDERR_KEEP_CHARS = 500;
 const OWNED_BY = "claude-code";
 
@@ -98,6 +121,9 @@ type RunError = {
 	message: string;
 	type: string;
 	code: string;
+	/** True once the model produced anything: text, a tool call, a subagent. */
+	afterActivity: boolean;
+	headers?: Record<string, string>;
 };
 
 type RunEvent =
@@ -163,8 +189,10 @@ function runError(
 	type: string,
 	code: string,
 	message: string,
+	afterActivity = false,
+	headers?: Record<string, string>,
 ): RunError {
-	return { kind: "error", status, message, type, code };
+	return { kind: "error", status, message, type, code, afterActivity, headers };
 }
 
 interface LaunchInput {
@@ -176,18 +204,17 @@ interface LaunchInput {
 	killGraceMs: number;
 }
 
-function launch(input: LaunchInput): Launch | Response {
+function launch(input: LaunchInput): Launch | RunError {
 	const { endpoint, argv, prompt, signal, killGraceMs } = input;
 
 	const running = activeByEndpoint.get(endpoint.name) ?? 0;
 	if (running >= endpoint.max_concurrency) {
-		return jsonResponse(
+		return runError(
 			429,
-			errorBody(
-				`Endpoint "${endpoint.name}" is already running ${running} Claude Code request(s), its limit.`,
-				"rate_limit_error",
-				"rate_limit_exceeded",
-			),
+			"rate_limit_error",
+			"rate_limit_exceeded",
+			`Endpoint "${endpoint.name}" is already running ${running} Claude Code request(s), its limit.`,
+			false,
 			{ "retry-after": "5" },
 		);
 	}
@@ -205,13 +232,15 @@ function launch(input: LaunchInput): Launch | Response {
 			detached: true,
 		});
 	} catch (err) {
-		return jsonResponse(
+		// The reason names host paths, so it goes to the log, not the client.
+		log.warn(
+			`Claude Code endpoint "${endpoint.name}" could not start the CLI: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return runError(
 			502,
-			errorBody(
-				`Could not start Claude Code: ${err instanceof Error ? err.message : String(err)}`,
-				"api_error",
-				"claude_code_spawn_failed",
-			),
+			"api_error",
+			"claude_code_spawn_failed",
+			"Could not start Claude Code; the server log has the reason.",
 		);
 	}
 	const pid = proc.pid;
@@ -284,6 +313,7 @@ function launch(input: LaunchInput): Launch | Response {
 	async function* events(): AsyncGenerator<RunEvent, void, undefined> {
 		let sessionId = input.sessionId;
 		let emitted = "";
+		let active = false;
 		let sawPartial = false;
 		let separatePending = false;
 		let result: Extract<ClaudeStreamEvent, { kind: "result" }> | null = null;
@@ -306,12 +336,18 @@ function launch(input: LaunchInput): Launch | Response {
 						if (ev.sessionId) sessionId = ev.sessionId;
 						return [{ kind: "session" }];
 					case "text-block-start":
+						active = true;
 						separatePending = true;
 						return [];
+					case "activity":
+						active = true;
+						return [];
 					case "partial-text":
+						active = true;
 						sawPartial = true;
 						return [textOut(ev.text)];
 					case "assistant-text":
+						active = true;
 						// With partials on, the full message repeats what the deltas
 						// already sent; it is only the source when they are absent.
 						if (sawPartial) return [];
@@ -340,6 +376,7 @@ function launch(input: LaunchInput): Launch | Response {
 			const code = await proc.exited;
 			await stderrDone;
 			const tail = stderrTail.slice(-STDERR_KEEP_CHARS);
+			const afterActivity = active || emitted !== "";
 			const final = result as Extract<
 				ClaudeStreamEvent,
 				{ kind: "result" }
@@ -351,6 +388,7 @@ function launch(input: LaunchInput): Launch | Response {
 					"timeout_error",
 					"timeout",
 					`Claude Code did not finish within ${endpoint.timeout_ms} ms and was killed.`,
+					afterActivity,
 				);
 				return;
 			}
@@ -360,6 +398,7 @@ function launch(input: LaunchInput): Launch | Response {
 					"api_error",
 					"client_closed_request",
 					"The client closed the request; Claude Code was killed.",
+					afterActivity,
 				);
 				return;
 			}
@@ -369,13 +408,18 @@ function launch(input: LaunchInput): Launch | Response {
 					: code !== 0
 						? `Claude Code exited with code ${code}.`
 						: "Claude Code exited without producing a result.";
+				// stderr can carry host paths, environment details and file
+				// contents, and these endpoints can be public, so it is logged
+				// and never sent (SB23-3408, item 4).
+				log.warn(
+					`Claude Code endpoint "${endpoint.name}" failed: ${reason}${tail ? ` stderr (last ${STDERR_KEEP_CHARS} chars): ${tail}` : ""}`,
+				);
 				yield runError(
 					502,
 					"api_error",
 					"claude_code_failed",
-					tail
-						? `${reason}\nstderr (last ${STDERR_KEEP_CHARS} chars): ${tail}`
-						: reason,
+					`${reason} The server log has the CLI's stderr.`,
+					afterActivity,
 				);
 				return;
 			}
@@ -411,6 +455,24 @@ function errorResponseFor(error: RunError): Response {
 	return jsonResponse(
 		error.status,
 		errorBody(error.message, error.type, error.code),
+		error.headers,
+	);
+}
+
+/**
+ * A `--resume` that failed before the model produced anything is retried
+ * once as a fresh session (SB23-3408, item 1): the session file is gone or
+ * the CLI refused it, and nothing ran. Once the model has produced output it
+ * may have run tools, so replaying the turn could repeat their effects.
+ */
+function isResumeRetryable(
+	next: IteratorResult<RunEvent, void> | RunError,
+): boolean {
+	const error = "kind" in next ? next : next.done ? null : next.value;
+	return (
+		error?.kind === "error" &&
+		error.code === "claude_code_failed" &&
+		!error.afterActivity
 	);
 }
 
@@ -464,6 +526,30 @@ export async function handleClaudeCodeEndpointRequest(
 			"Use POST /chat/completions.",
 			null,
 			"method_not_allowed",
+		);
+	}
+
+	// A page that rebinds its own domain to this machine passes the
+	// content-type and Sec-Fetch-Site checks below, because to the browser it
+	// is same-origin; its Host is still its own name (SB23-3408, item 6).
+	let hostname: string | null = null;
+	try {
+		hostname = new URL(req.url).hostname || null;
+	} catch {
+		hostname = null;
+	}
+	if (
+		!isClaudeCodeHostAllowed(
+			hostname,
+			claudeCodeMachineHostnames(deps.hostname ?? os.hostname()),
+			deps.allowedHosts ?? [],
+		)
+	) {
+		return invalidRequest(
+			403,
+			claudeCodeHostRefusalMessage(hostname),
+			null,
+			"host_not_allowed",
 		);
 	}
 
@@ -546,37 +632,120 @@ export async function handleClaudeCodeEndpointRequest(
 		history.length > 0
 			? takeClaudeCodeSession(conversationKey(sessionScope, history))
 			: null;
-	const sessionId = resumeId ?? (deps.newSessionId ?? crypto.randomUUID)();
-	const prompt = resumeId ? lastMessage.text : flattenConversation(messages);
 	const system = systemText(messages);
-
 	const bin = deps.bin ?? resolveClaudeCodeBin();
-	const argv = [
-		bin,
-		"-p",
-		"--output-format",
-		"stream-json",
-		"--verbose",
-		"--include-partial-messages",
-		"--permission-mode",
-		endpoint.permission_mode,
-		...(body.model === CLAUDE_CODE_DEFAULT_MODEL_ID
-			? []
-			: ["--model", body.model]),
-		...(resumeId ? ["--resume", resumeId] : ["--session-id", sessionId]),
-		...(system ? ["--append-system-prompt", system] : []),
-		...endpoint.extra_args,
-	];
+	const killGraceMs = deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
 
-	const started = launch({
-		endpoint,
-		argv,
-		prompt,
-		sessionId,
-		signal: req.signal,
-		killGraceMs: deps.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
-	});
-	if (started instanceof Response) return started;
+	// The system prompt goes through a 0600 file in a private directory, never
+	// argv, where `ps` shows it and Linux caps one argument at 128 KiB
+	// (SB23-3408, item 2). `--append-system-prompt-file` is a hidden option in
+	// claude 2.1.286 (absent from --help, present in the binary). The
+	// directory belongs to the request, not to one run, because a resume
+	// retry needs the file too; release() removes it.
+	let promptDir: string | null = null;
+	let systemFile: string | null = null;
+	if (system) {
+		try {
+			promptDir = fs.mkdtempSync(
+				nodePath.join(os.tmpdir(), "ccflare-claude-code-"),
+			);
+			systemFile = nodePath.join(promptDir, "system-prompt.txt");
+			fs.writeFileSync(systemFile, system, { mode: 0o600, flag: "wx" });
+		} catch (err) {
+			if (promptDir) fs.rmSync(promptDir, { recursive: true, force: true });
+			log.warn(
+				`Claude Code endpoint "${endpoint.name}" could not write the system prompt file: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return jsonResponse(
+				500,
+				errorBody(
+					"Could not prepare the system prompt; the server log has the reason.",
+					"api_error",
+					"claude_code_prompt_failed",
+				),
+			);
+		}
+	}
+
+	const startRun = (resume: string | null): Launch | RunError => {
+		const sessionId = resume ?? (deps.newSessionId ?? crypto.randomUUID)();
+		const argv = [
+			bin,
+			"-p",
+			"--output-format",
+			"stream-json",
+			"--verbose",
+			"--include-partial-messages",
+			"--permission-mode",
+			endpoint.permission_mode,
+			...(body.model === CLAUDE_CODE_DEFAULT_MODEL_ID
+				? []
+				: ["--model", body.model]),
+			...(resume ? ["--resume", resume] : ["--session-id", sessionId]),
+			...(systemFile ? ["--append-system-prompt-file", systemFile] : []),
+			...endpoint.extra_args,
+		];
+		return launch({
+			endpoint,
+			argv,
+			prompt: resume ? lastMessage.text : flattenConversation(messages),
+			sessionId,
+			signal: req.signal,
+			killGraceMs,
+		});
+	};
+
+	let current: Launch | null = null;
+	let released = false;
+	/** Idempotent: kills the current run and removes the prompt directory. */
+	const release = () => {
+		current?.dispose();
+		if (released) return;
+		released = true;
+		if (promptDir) fs.rmSync(promptDir, { recursive: true, force: true });
+	};
+
+	/** The first event that is not `session`, from the current run. */
+	const nextMeaningful = async (): Promise<IteratorResult<RunEvent, void>> => {
+		let next: IteratorResult<RunEvent, void>;
+		do {
+			next = await (current as Launch).events.next();
+		} while (!next.done && next.value.kind === "session");
+		return next;
+	};
+
+	const firstRun = startRun(resumeId);
+	if (!("events" in firstRun)) {
+		release();
+		return errorResponseFor(firstRun);
+	}
+	current = firstRun;
+
+	/**
+	 * The first meaningful event, retrying a failed resume once (item 1).
+	 * Resolves to a RunError when the retry itself could not start.
+	 */
+	const firstEvent = async (): Promise<
+		IteratorResult<RunEvent, void> | RunError
+	> => {
+		const next = await nextMeaningful();
+		if (
+			!resumeId ||
+			released ||
+			req.signal.aborted ||
+			!isResumeRetryable(next)
+		) {
+			return next;
+		}
+		current?.dispose();
+		log.info(
+			`Claude Code endpoint "${endpoint.name}": resuming session ${resumeId} failed before any model output; retrying once as a new session`,
+		);
+		const retry = startRun(null);
+		if (!("events" in retry)) return retry;
+		current = retry;
+		return nextMeaningful();
+	};
 
 	const remember = (id: string, reply: string) => {
 		putClaudeCodeSession(
@@ -591,11 +760,21 @@ export async function handleClaudeCodeEndpointRequest(
 	const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, "")}`;
 	const created = Math.floor(Date.now() / 1000);
 	const model = body.model;
+	const endedWithoutResult = () =>
+		errorBody(
+			"Claude Code ended without a result.",
+			"api_error",
+			"claude_code_failed",
+		);
 
 	if (body.stream !== true) {
-		let text = "";
 		try {
-			for await (const ev of started.events) {
+			const first = await firstEvent();
+			if ("kind" in first) return errorResponseFor(first);
+			if (first.done) return jsonResponse(502, endedWithoutResult());
+			let text = "";
+			let ev: RunEvent | null = first.value;
+			while (ev) {
 				if (ev.kind === "text") text += ev.text;
 				else if (ev.kind === "error") return errorResponseFor(ev);
 				else if (ev.kind === "done") {
@@ -619,41 +798,46 @@ export async function handleClaudeCodeEndpointRequest(
 					};
 					return jsonResponse(200, completion);
 				}
+				const next = await (current as Launch).events.next();
+				ev = next.done ? null : next.value;
 			}
+			return jsonResponse(502, endedWithoutResult());
 		} finally {
-			started.dispose();
+			release();
 		}
-		return jsonResponse(
-			502,
-			errorBody(
-				"Claude Code ended without a result.",
-				"api_error",
-				"claude_code_failed",
-			),
-		);
 	}
 
-	// Streaming: hold the headers until there is text, a result or a failure,
-	// so a CLI that dies at startup still gets a real status code.
-	const iterator = started.events;
-	let first: IteratorResult<RunEvent, void>;
-	do {
-		first = await iterator.next();
-	} while (!first.done && first.value.kind === "session");
-	if (first.done) {
-		started.dispose();
-		return jsonResponse(
-			502,
-			errorBody(
-				"Claude Code ended without a result.",
-				"api_error",
-				"claude_code_failed",
-			),
-		);
-	}
-	if (first.value.kind === "error") {
-		started.dispose();
-		return errorResponseFor(first.value);
+	// Streaming: hold the headers for a bounded time, so a CLI that dies at
+	// startup still gets a real status code. A long tool-use stretch before
+	// the first text would otherwise send no bytes at all, and clients and
+	// proxies with an idle or first-byte timeout (Cloudflare gives up at 100
+	// s) drop the request, so after the wait the stream starts and
+	// keep-alive comments flow until text arrives (SB23-3408, item 3).
+	const firstPromise = firstEvent();
+	let waitTimer: ReturnType<typeof setTimeout> | undefined;
+	const raced = await Promise.race([
+		firstPromise,
+		new Promise<"waiting">((resolve) => {
+			waitTimer = setTimeout(
+				() => resolve("waiting"),
+				deps.firstEventWaitMs ?? DEFAULT_FIRST_EVENT_WAIT_MS,
+			);
+		}),
+	]);
+	clearTimeout(waitTimer);
+	if (raced !== "waiting") {
+		if ("kind" in raced) {
+			release();
+			return errorResponseFor(raced);
+		}
+		if (raced.done) {
+			release();
+			return jsonResponse(502, endedWithoutResult());
+		}
+		if (raced.value.kind === "error") {
+			release();
+			return errorResponseFor(raced.value);
+		}
 	}
 
 	const includeUsage = body.stream_options?.include_usage === true;
@@ -672,7 +856,7 @@ export async function handleClaudeCodeEndpointRequest(
 	const frame = (data: unknown) =>
 		encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
 
-	let pending: RunEvent | null = first.value;
+	let firstPending = true;
 	let sent = "";
 	let roleSent = false;
 	let keepAlive: ReturnType<typeof setInterval> | undefined;
@@ -686,14 +870,19 @@ export async function handleClaudeCodeEndpointRequest(
 				} catch {
 					// closed
 				}
-			}, KEEPALIVE_MS);
+			}, deps.keepAliveMs ?? DEFAULT_KEEPALIVE_MS);
 		},
 		async pull(controller) {
 			const finish = () => {
 				finished = true;
 				if (keepAlive) clearInterval(keepAlive);
-				started.dispose();
+				release();
 				controller.close();
+			};
+			const fail = (body: unknown) => {
+				controller.enqueue(frame(body));
+				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+				finish();
 			};
 			if (!roleSent) {
 				roleSent = true;
@@ -701,22 +890,20 @@ export async function handleClaudeCodeEndpointRequest(
 					frame(chunk({ role: "assistant", content: "" }, null)),
 				);
 			}
-			let ev: RunEvent | null = pending;
-			pending = null;
-			while (ev?.kind === "session" || ev === null) {
-				const next = await iterator.next();
+			let ev: RunEvent | null = null;
+			if (firstPending) {
+				firstPending = false;
+				const first = await firstPromise;
+				if ("kind" in first) {
+					fail(errorBody(first.message, first.type, first.code));
+					return;
+				}
+				if (!first.done) ev = first.value;
+			}
+			while (ev === null || ev.kind === "session") {
+				const next = await (current as Launch).events.next();
 				if (next.done) {
-					controller.enqueue(
-						frame(
-							errorBody(
-								"Claude Code ended without a result.",
-								"api_error",
-								"claude_code_failed",
-							),
-						),
-					);
-					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-					finish();
+					fail(endedWithoutResult());
 					return;
 				}
 				ev = next.value;
@@ -727,9 +914,7 @@ export async function handleClaudeCodeEndpointRequest(
 				return;
 			}
 			if (ev.kind === "error") {
-				controller.enqueue(frame(errorBody(ev.message, ev.type, ev.code)));
-				controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-				finish();
+				fail(errorBody(ev.message, ev.type, ev.code));
 				return;
 			}
 			remember(ev.sessionId, sent);
@@ -751,8 +936,9 @@ export async function handleClaudeCodeEndpointRequest(
 		},
 		async cancel() {
 			if (keepAlive) clearInterval(keepAlive);
-			started.dispose();
-			if (!finished) await iterator.return(undefined).catch(() => {});
+			const run = current;
+			release();
+			if (!finished) await run?.events.return(undefined).catch(() => {});
 		},
 	});
 

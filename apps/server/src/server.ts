@@ -40,6 +40,7 @@ import {
 	AuthService,
 	getServiceStatusService,
 	initServiceStatusRefresh,
+	loadClaudeCodeEndpointState,
 } from "@better-ccflare/http-api";
 import {
 	LeastUsedStrategy,
@@ -115,14 +116,12 @@ import {
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
-	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
 	GATEWAY_COMBO_HEADER,
 	GATEWAY_REQUIRE_MODEL_HEADER,
 	type LoadBalancingStrategy,
 	matchOpenAIGatewayAliasPath,
 	matchOpenAIGatewayPath,
 	OPENAI_GATEWAYS_CONFIG_KEY,
-	parseClaudeCodeEndpoints,
 	parseOpenAIGateways,
 	type RetentionStatus,
 	resolveClaudeCodeEndpoint,
@@ -1928,12 +1927,15 @@ export default async function startServer(options?: {
 							// host's `claude` CLI in the endpoint's directory rather
 							// than by an account in the pool. The API refuses a name
 							// that exists in both, so the order here only matters for
-							// a hand-edited config.
+							// a hand-edited config. An entry whose directory is
+							// outside claude_code_directory_roots is reported and
+							// not served (SB23-3408, item 7).
 							if (gatewayMatch) {
-								const { endpoints, errors: endpointErrors } =
-									parseClaudeCodeEndpoints(
-										config.getObjectSetting(CLAUDE_CODE_ENDPOINTS_CONFIG_KEY),
-									);
+								const {
+									endpoints,
+									errors: endpointErrors,
+									allowedHosts,
+								} = loadClaudeCodeEndpointState(config);
 								for (const error of endpointErrors) {
 									if (!reportedGatewayConfigErrors.has(error)) {
 										reportedGatewayConfigErrors.add(error);
@@ -1949,6 +1951,7 @@ export default async function startServer(options?: {
 												gatewayMatch.name,
 												endpoints[gatewayMatch.name],
 											),
+											{ allowedHosts },
 										),
 									);
 								}
