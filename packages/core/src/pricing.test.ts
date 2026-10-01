@@ -126,9 +126,20 @@ describe("NanoGPT Pricing", () => {
 	// in the proxy abort-semantics suites. The sibling "models.dev pricing"
 	// describe above already does this correctly; this block did not.
 	let originalFetch: typeof global.fetch;
+	let originalOffline: string | undefined;
 
 	beforeEach(() => {
 		originalFetch = global.fetch;
+		// The test preload sets CF_PRICING_OFFLINE, which now stops the NanoGPT
+		// fetch too (SB23-3493). These tests exercise that fetch, so they clear
+		// it, and every test starts from a fetch that refuses rather than the
+		// network: a test that stubs nothing (the initialise-when-accounts-exist
+		// case below) otherwise sends a real request to nano-gpt.com.
+		originalOffline = process.env.CF_PRICING_OFFLINE;
+		delete process.env.CF_PRICING_OFFLINE;
+		global.fetch = asFetch(
+			vi.fn().mockRejectedValue(new Error("nano-gpt.com is not reachable")),
+		);
 		// Clear any existing intervals
 		stopNanoGPTPricingRefresh();
 		// Reset the global cache state to ensure test isolation
@@ -140,6 +151,11 @@ describe("NanoGPT Pricing", () => {
 
 	afterEach(() => {
 		global.fetch = originalFetch;
+		if (originalOffline === undefined) {
+			delete process.env.CF_PRICING_OFFLINE;
+		} else {
+			process.env.CF_PRICING_OFFLINE = originalOffline;
+		}
 	});
 
 	afterEach(() => {

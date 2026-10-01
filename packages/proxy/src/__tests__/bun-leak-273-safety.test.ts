@@ -12,7 +12,7 @@
  * the model-not-found forward to the client (`withSanitizedProxyHeaders`) —
  * must keep the body intact so the upstream bytes reach the user.
  *
- * This test exercises the FORWARD path against a real upstream. We
+ * This test exercises the FORWARD path against a streaming upstream. We
  * verify that (a) the body is fully consumed end-to-end (i.e. the drain
  * was not called somewhere it shouldn't be), and (b) draining a
  * downstream tee'd stream does not affect the upstream Response's body
@@ -20,9 +20,54 @@
  *
  * Run: bun test packages/proxy/src/__tests__/bun-leak-273-safety.test.ts
  */
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-const TEST_ENDPOINT = "https://api.minimax.io/v1/text/chatcompletion_v2";
+/*
+ * The upstream is a loopback server, not a provider. This file used to POST
+ * to https://api.minimax.io with a fake bearer token, three times per run on
+ * every machine and in CI, and assert on whatever MiniMax's edge answered
+ * (measured 2026-10-01, SB23-3493). The subject here is how a fetched body
+ * behaves when it is teed, drained or cancelled, which needs a body that
+ * arrives in several chunks and nothing else, so a local server that streams
+ * a known payload tests it better: the byte count is now exact, where a live
+ * upstream allowed only `> 0`.
+ */
+const CHUNKS = Array.from(
+	{ length: 8 },
+	(_, i) => `data: {"chunk":${i},"text":"forwarded"}\n\n`,
+);
+const EXPECTED_BYTES = new TextEncoder().encode(CHUNKS.join("")).byteLength;
+
+let upstream: ReturnType<typeof Bun.serve>;
+let TEST_ENDPOINT: string;
+
+beforeAll(() => {
+	upstream = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch() {
+			const encoder = new TextEncoder();
+			const body = new ReadableStream<Uint8Array>({
+				async start(controller) {
+					for (const chunk of CHUNKS) {
+						controller.enqueue(encoder.encode(chunk));
+						await Bun.sleep(1);
+					}
+					controller.close();
+				},
+			});
+			return new Response(body, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		},
+	});
+	TEST_ENDPOINT = `http://127.0.0.1:${upstream.port}/v1/text/chatcompletion_v2`;
+});
+
+afterAll(() => {
+	upstream.stop(true);
+});
 
 describe("issue #273 — safety: forwarded bodies are never cancelled by the leak fix", () => {
 	it("the streaming forward path does NOT cancel the upstream body", async () => {
@@ -83,11 +128,8 @@ describe("issue #273 — safety: forwarded bodies are never cancelled by the lea
 			(acc, c) => acc + c.byteLength,
 			0,
 		);
-		// We don't have a strict equality with any expected length
-		// (upstream response shape varies), but a fully-read client
-		// stream must report `totalForwarded > 0` and must not have
-		// errored mid-stream.
-		expect(totalForwarded).toBeGreaterThan(0);
+		// Every byte the upstream sent must reach the client.
+		expect(totalForwarded).toBe(EXPECTED_BYTES);
 	});
 
 	it("the non-streaming forward path drains the body without cancelling", async () => {
@@ -143,7 +185,7 @@ describe("issue #273 — safety: forwarded bodies are never cancelled by the lea
 
 		const total = clientChunks.reduce((acc, c) => acc + c.byteLength, 0);
 		const stored = storageChunks.reduce((acc, c) => acc + c.byteLength, 0);
-		expect(total).toBeGreaterThan(0);
+		expect(total).toBe(EXPECTED_BYTES);
 		// Tee semantics guarantee both branches read the same total
 		// bytes — the proxy's stored copy must match the client's.
 		expect(stored).toBe(total);
