@@ -19,6 +19,12 @@
 # tsconfig*, .gitignore, bun.lock, and .hextap/** on the relevant side without
 # having to enumerate them.
 #
+# One exception runs before every inert class: a TypeScript file is relevant
+# wherever it sits. `check:typecheck-coverage` (SB23-3758) reads every tracked
+# *.ts, *.tsx, *.mts and *.cts, including any under docs/, .claude/ or .github/,
+# so a .ts added there would otherwise skip that gate on its own PR and fail the
+# next PR that touches anything relevant instead.
+#
 # The two jobs differ on .github/**. `Bun and release tooling` runs the whole
 # `bun test` suite, which includes scripts/hextap-contract.test.ts: that test
 # reads ci.yml and hextap-release.yml and asserts the exact list of files in
@@ -37,10 +43,19 @@ quality | contract) ;;
 	;;
 esac
 
-output_file="${GITHUB_OUTPUT:-/dev/stdout}"
+# The verdict goes to fd 3: $GITHUB_OUTPUT when set, otherwise a duplicate of
+# stdout. Not `>> /dev/stdout`: on Linux that path reopens the underlying file
+# at its own offset, so when stdout is a regular file the explanation echoed
+# after it overwrites the verdict. Measured on Linux CI at c05e8117 (SB23-3758),
+# where all nine rows of a test reading stdout got an empty verdict and exit 0.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+	exec 3>>"$GITHUB_OUTPUT"
+else
+	exec 3>&1
+fi
 
 run_everything() {
-	printf 'relevant=true\n' >>"$output_file"
+	printf 'relevant=true\n' >&3
 	printf '%s\n' "$1"
 	exit 0
 }
@@ -73,6 +88,7 @@ fi
 
 relevant_paths="$(printf '%s\n' "$changed" | awk -v job="$job" '
 	$0 == "" { next }
+	$0 ~ /\.(ts|tsx|mts|cts)$/ { print; next }
 	$0 ~ /(^|\/)[^\/]*\.md$/ { next }
 	$0 ~ /^docs\// { next }
 	$0 ~ /^\.claude\// { next }
@@ -82,13 +98,13 @@ relevant_paths="$(printf '%s\n' "$changed" | awk -v job="$job" '
 ')"
 
 if [ -n "$relevant_paths" ]; then
-	printf 'relevant=true\n' >>"$output_file"
+	printf 'relevant=true\n' >&3
 	echo "Changed paths that can alter this job's result:"
 	printf '%s\n' "$relevant_paths" | sed 's/^/  /'
 	exit 0
 fi
 
-printf 'relevant=false\n' >>"$output_file"
+printf 'relevant=false\n' >&3
 echo "No changed path can alter this job's result; skipping the expensive steps."
 echo "Changed paths, all inert for this job:"
 printf '%s\n' "$changed" | sed 's/^/  /'

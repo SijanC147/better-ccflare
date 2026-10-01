@@ -3,8 +3,8 @@ import { EventEmitter } from "node:events";
 import {
 	closeSync,
 	existsSync,
-	fchmodSync,
 	fchownSync,
+	fstatSync,
 	fsyncSync,
 	lstatSync,
 	mkdirSync,
@@ -34,7 +34,7 @@ import {
 } from "@better-ccflare/core";
 import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
-import { chmodForConfig } from "./chmod-seam";
+import { chmodForConfig, fchmodForConfig } from "./chmod-seam";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
 import {
@@ -145,6 +145,69 @@ const writableAtFirstRead = new Map<string, boolean>();
 
 /** Config paths whose stripped fields have already been named, once per process. */
 const strippedFieldsReported = new Set<string>();
+
+/**
+ * The local_control_secret this process has handed out for each config path,
+ * so every Config in the process returns one value for one file, even while
+ * nothing can be written (SB23-2489).
+ *
+ * Before this the secret was per INSTANCE whenever a save was refused: stable on
+ * one Config, different on the next one built in the same process, because the
+ * generated value could not reach the file and nothing else held it.
+ * packages/http-api/src/handlers/oauth.ts builds a Config per request, so a
+ * long-lived server under a refusal held as many secrets as it had instances.
+ * Traced at 880e0797 and found latent rather than live: the one comparison,
+ * AuthService#isLocalControlRequest, holds the value apps/server read once at
+ * startup, and the per-request instances never ask for the secret. This makes
+ * the property hold rather than leaving it to that accident.
+ *
+ * Consulted only where getLocalControlSecret() would otherwise mint a fresh
+ * value, after this.data and after the disk re-read. A secret in either still
+ * wins, which keeps the #379 race intact: a CLI racing the server's first boot
+ * persists its own secret after an instance was constructed.
+ *
+ * Recorded on every value getLocalControlSecret() returns, first one wins, not
+ * only on the ones it generates. Recording only at generation leaves one gap: a
+ * file that held the secret at startup and breaks later makes the next instance
+ * mint a fresh value while AuthService holds the startup one. Nothing an
+ * attacker wrote can enter this way, because this.data and the disk re-read
+ * both sit behind the strip that drops local_control_secret from a file other
+ * users can write.
+ *
+ * Keyed on this.configPath, the validated configured path, rather than on
+ * writeTarget()'s resolved target, because the untrusted-path refusal has no
+ * target at all and it is one of the three refusals this exists for. Two
+ * configured paths that are links to one file get two entries; each writes to
+ * that file whenever it can save, so they converge through the disk re-read.
+ *
+ * Module-scoped and never cleared, beside writableAtFirstRead and for a related
+ * reason: AuthService keeps the value it read for the life of the process, so
+ * the process has to keep agreeing with it. What this cannot do is reach
+ * another process. The CLI reads the secret from the file, which a refused save
+ * never writes, so it still cannot learn the server's value while the refusal
+ * holds, and the refusal messages say so.
+ *
+ * It also outlives the file it came from. If the operator deletes the config,
+ * the next instance creates a fresh file and a getLocalControlSecret() on it
+ * writes the remembered value back. Deliberate rather than overlooked: that is
+ * the value AuthService holds until the process exits, and a restart, which
+ * clears this map, is what the refusal messages already ask for.
+ */
+const localControlSecretsByPath = new Map<string, string>();
+
+/**
+ * Config paths whose save-path fchmod has already been reported as not taking,
+ * so that warning lands once per path per process (SB23-2274).
+ *
+ * A Set of its own, not unenforceableModes, although SB23-2274 suggested that
+ * one. readConfigData() branches on unenforceableModes to choose its report for
+ * a writable config, so an entry added from the save path would select the load
+ * path's branch without the load path's own chmod, re-stat and compare having
+ * run. That is the defect SB23-2365 removed, where a pre-seeded Set let a
+ * mutation deleting the measurement survive the whole suite. The load path
+ * measures for itself, and this records only what a save measured.
+ */
+const unenforceableSaveModes = new Set<string>();
 
 /**
  * Whole families that are an endpoint or a credential, stripped from a config
@@ -338,6 +401,48 @@ function chmodAndVerify(path: string, mode: number, what: string): void {
 			`including Docker bind mounts from a macOS or Windows host and FAT or ` +
 			`exFAT volumes. Move the config onto a filesystem that enforces modes, ` +
 			`or mount it so only this user can read it.`,
+	);
+}
+
+/**
+ * Read back the mode a save's fchmod set on the new config file, before the
+ * rename publishes it (SB23-2274).
+ *
+ * The one chmod on this file that was not verified. restrictConfigFile() and
+ * restrictConfigDir() read their result back through chmodAndVerify(), but the
+ * save path set 0600 through the descriptor and reported nothing, so on a
+ * filesystem that ignores modes every save published the secrets at whatever
+ * mode the mount presents. restrictConfigFile() warns about that on the next
+ * load, which can be a restart away; this says it at the save that did it.
+ *
+ * fstat on the descriptor rather than stat on a path, for the reason the fchmod
+ * uses one: in a directory another user can write, the path can become a link
+ * between the write and the read.
+ *
+ * Warns and lets the save go ahead. The file being replaced sits on the same
+ * filesystem and already presents the same mode, so refusing would lose the
+ * setting without changing who can read it.
+ *
+ * Skipped on Windows for the reason chmodAndVerify() gives: the mode there is
+ * derived from the read-only attribute, so a writable file reads 0666 and a
+ * read-back would warn on every save. Argued from libuv, not measured, and no
+ * test can reach the branch from macOS or Linux.
+ *
+ * Keyed on the config target, never on the temp path, which is random per save
+ * and would make the once-per-path set warn on every save.
+ */
+function verifySavedMode(fd: number, target: string): void {
+	if (process.platform === "win32") return;
+	const after = fstatSync(fd).mode & 0o777;
+	if (after === CONFIG_FILE_MODE) return;
+	if (unenforceableSaveModes.has(target)) return;
+	unenforceableSaveModes.add(target);
+	const exposure =
+		(after & 0o077) !== 0
+			? "Other local users may be able to read the credentials in it."
+			: "It is not readable by other local users, but it is not the mode this process set.";
+	log.warn(
+		`fchmod to 0600 on the config being saved to ${target} did not take: the new file reads ${modeText(after)}. ${exposure} Filesystems without Unix modes behave this way, including Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes. The save goes ahead, because the file it replaces sits on the same filesystem and refusing would lose the setting without changing its mode. Move the config onto a filesystem that enforces modes, or mount it so only this user can read it. This line does not repeat for this path in this process.`,
 	);
 }
 
@@ -1835,7 +1940,7 @@ export class Config extends EventEmitter {
 		// deduplicated either.
 		if (this.strippedFields.size > 0) {
 			log.error(
-				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
+				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process generates one and keeps it until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process, and neither can a client holding an earlier secret. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
 			);
 			return;
 		}
@@ -1864,7 +1969,7 @@ export class Config extends EventEmitter {
 		// as readily as at boot.
 		if (this.unparseableFrom !== undefined) {
 			log.error(
-				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Fix the file, or move it aside so a fresh one is created, then restart.`,
+				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process keeps the one it already holds, or generates one, until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process. Fix the file, or move it aside so a fresh one is created, then restart.`,
 			);
 			return;
 		}
@@ -2069,8 +2174,11 @@ export class Config extends EventEmitter {
 				// break every later write. Set through the descriptor rather than the
 				// path, because a path-based chmod follows a symlink and the window
 				// between write and chmod is enough for one to appear in a directory
-				// another user can write.
-				fchmodSync(fd, 0o600);
+				// another user can write. Read back like every other chmod here,
+				// because a filesystem without Unix modes reports success and keeps
+				// whatever mode it presents (SB23-2274).
+				fchmodForConfig(fd, CONFIG_FILE_MODE);
+				verifySavedMode(fd, target);
 				// The temp inode belongs to whoever is writing, and the rename
 				// discards the old file's ownership. An administrator running the CLI
 				// as root against a config owned by the service account would leave
@@ -2453,11 +2561,15 @@ export class Config extends EventEmitter {
 	 * to the identical value, so the CLI can authorize its own notify calls
 	 * to its own locally-running server without ever handling a real API
 	 * key (issue #216).
+	 *
+	 * While a save is refused the value cannot reach the file, so it is shared
+	 * within this process only: every Config here returns the same one, and a
+	 * CLI process cannot learn it (SB23-2489, localControlSecretsByPath).
 	 */
 	getLocalControlSecret(): string {
 		const existing = this.data.local_control_secret;
 		if (typeof existing === "string" && existing.length > 0) {
-			return existing;
+			return this.rememberLocalControlSecret(existing);
 		}
 
 		// Re-check the on-disk file before generating a new secret: another
@@ -2470,11 +2582,34 @@ export class Config extends EventEmitter {
 		const fromDisk = this.readLocalControlSecretFromDisk();
 		if (typeof fromDisk === "string" && fromDisk.length > 0) {
 			this.data.local_control_secret = fromDisk;
-			return fromDisk;
+			return this.rememberLocalControlSecret(fromDisk);
 		}
 
-		const secret = randomUUID();
+		// The value another Config in this process already handed out, which is
+		// the one AuthService holds when this file cannot be written (SB23-2489).
+		// Through set() like a generated one, so an instance that CAN save persists
+		// what it returns instead of leaving the file without a secret for as long
+		// as the memo keeps answering.
+		const remembered = localControlSecretsByPath.get(this.configPath);
+		if (remembered !== undefined) {
+			this.set("local_control_secret", remembered);
+			return remembered;
+		}
+
+		const secret = this.rememberLocalControlSecret(randomUUID());
 		this.set("local_control_secret", secret);
+		return secret;
+	}
+
+	/**
+	 * Record the first local_control_secret this process returns for this path,
+	 * and return the value given. See localControlSecretsByPath for why every
+	 * return records and why a later value never replaces an earlier one.
+	 */
+	private rememberLocalControlSecret(secret: string): string {
+		if (!localControlSecretsByPath.has(this.configPath)) {
+			localControlSecretsByPath.set(this.configPath, secret);
+		}
 		return secret;
 	}
 

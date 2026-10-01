@@ -7,6 +7,7 @@ This guide covers all configuration options for better-ccflare, including file-b
 - [Configuration Overview](#configuration-overview)
 - [Configuration Precedence](#configuration-precedence)
 - [Configuration File Format](#configuration-file-format)
+- [Config File Permissions and Trust](#config-file-permissions-and-trust)
 - [Configuration Options](#configuration-options)
 - [Environment Variables](#environment-variables)
 - [Model Catalog](#model-catalog)
@@ -47,7 +48,7 @@ The configuration file is stored at:
 
 - **Linux/macOS**: `~/.config/better-ccflare/better-ccflare.json` (or `$XDG_CONFIG_HOME/better-ccflare/better-ccflare.json`)
 - **Windows**: `%LOCALAPPDATA%\better-ccflare\better-ccflare.json` (or `%APPDATA%\better-ccflare\better-ccflare.json`)
-- **Custom path**: Set via `better-ccflare_CONFIG_PATH` environment variable
+- **Custom path**: Set via the `BETTER_CCFLARE_CONFIG_PATH` environment variable (`ccflare_CONFIG_PATH` is still read)
 
 ### File Structure
 
@@ -62,6 +63,67 @@ The configuration file is stored at:
   "port": 8080
 }
 ```
+
+## Config File Permissions and Trust
+
+The configuration file holds `pg_password`, `local_control_secret` and `upstream_maintainer_token`, which is a GitHub token. better-ccflare enforces who can read and write it every time it loads or saves the file, and it refuses to read or write a file another local user could have chosen. This section explains each rule and every log line it can produce.
+
+### File and directory modes
+
+- **The file is kept at 0600.** A file at any other mode is brought to 0600 when it is loaded, logged at info as `Restricted config file permissions to 0600`.
+- **Every save writes a new file at 0600 and renames it over the old one.** The new file's mode is set through its descriptor, because the create mode alone is reduced by the umask: under umask 0277 it would be 0400. On a filesystem that enforces modes, a save therefore never republishes the file at a looser mode.
+- **If the rename is not possible, the save writes in place.** That happens when the directory is not writable by the server, such as a root-owned directory holding a config owned by the service user. The log says `Could not replace the config file atomically`, and the file keeps the 0600 the load gave it.
+- **The default directory is kept at 0700.** That is `~/.config/better-ccflare`, or `$XDG_CONFIG_HOME/better-ccflare`. It also holds the SQLite database, which stores account tokens in plaintext, so 0700 on the directory stops other local users reaching the database, its WAL and its backups. A directory chosen through `BETTER_CCFLARE_CONFIG_PATH` is left alone with an info line, because it may be a directory other users need, such as `/etc`. If only the server's user needs it, set it to 0700 yourself.
+- **Windows has no Unix modes.** The chmod still runs, and its result is not read back, because Windows reports 0666 for any writable file.
+
+Replacing the file with `mv` resets its mode to whatever your umask produces. See [Migration Guide](#from-environment-only-configuration) for the safe way to edit it.
+
+### When a mode does not take
+
+The two `chmod ... reported success` lines and the `fchmod` line appear at most once per path per process. The two `Could not restrict` lines repeat on every load until the cause is fixed.
+
+| Log line | Meaning | What to do |
+| --- | --- | --- |
+| `chmod on the config file <path> reported success but the mode is still <mode> rather than 0600` | The filesystem ignores Unix modes. Docker Desktop bind mounts from a macOS or Windows host and FAT or exFAT volumes do this. | Move the config onto a filesystem that enforces modes, or restrict access where the volume is mounted. |
+| `chmod on the config directory <path> reported success but the mode is still <mode> rather than 0700` | The same, for the directory. | The same. |
+| `Could not restrict config file permissions: <error>` | The chmod failed outright, usually `EPERM`: the file belongs to root, the mount is read-only, or a macOS `uchg` flag is set. A file owned by another non-root user never gets this far, because it is refused (see [Symlinks, ownership and hard links](#symlinks-ownership-and-hard-links)). | Fix the ownership or the flag, then restart. |
+| `Could not restrict config directory permissions: <error>` | The same, for the directory. | The same. |
+| `fchmod to 0600 on the config being saved to <path> did not take: the new file reads <mode>` | A save wrote the new file but the filesystem ignored the mode. The save still goes ahead, because the file it replaces sits on the same filesystem. | Move the config onto a filesystem that enforces modes. |
+
+For Docker deployments, [Bind-mounted config must be owned by the container user](deployment.md#bind-mounted-config-must-be-owned-by-the-container-user) covers bind-mount ownership and why `chmod` there often does nothing.
+
+### A config other local users can write
+
+If the file is group- or world-writable when this process first reads it, someone else could have written it. better-ccflare then:
+
+1. brings it to 0600;
+2. loads its ordinary settings, such as `lb_strategy`;
+3. does **not** adopt credential and endpoint fields from it, and names any it skipped in a separate log line. Skipped fields are anything ending in `token`, `secret` or `password`, every `pg_*` and `openobserve_*` field, `alert_webhook_url`, `outbound_proxy`, `claude_projects_dir`, `github_read_token`, `upstream_maintainer_token`, `client_id` and `local_control_secret`;
+4. if it skipped any, refuses every later save in that process, because writing the file back would delete the fields it skipped. See [When saves are refused](#when-saves-are-refused).
+
+The file is 0600 afterwards, so the next process reads it as trusted and adopts every field in it, including any an attacker wrote. Inspect the contents before restarting.
+
+### Symlinks, ownership and hard links
+
+- **A symlinked config is followed one link at a time**, up to 40 links. For every link in the chain, the directory holding it must belong to you or to root, and must not be writable by group or other unless it has the sticky bit. In a sticky directory such as `/tmp`, the entry must already exist, belong to you and have exactly one hard link. A chain that fails is refused, usually with `Refusing the config path <path>: <hop> sits in ...` (a link that cannot be read and a cycle have their own messages), and the process runs on defaults.
+- **An untrusted link at the configured path is replaced, not written through.** When the configured path is a symlink that does not belong to you, in a directory other users can write, a save renames a new regular file over the link and logs `Replaced the untrusted symlink at <path> with a regular config file rather than writing through it`. A link that belongs to you is never replaced: it is refused instead, so a dotfiles link stays intact.
+- **A regular file owned by another user is refused**, with `Refusing the config path <path>: it is a regular file owned by uid <n>, not by us`. Root-owned files are accepted. In a container with a bind-mounted config, the file carries its owner from the host; see [Bind-mounted config must be owned by the container user](deployment.md#bind-mounted-config-must-be-owned-by-the-container-user).
+- **A file with more than one hard link is refused**, because a hard link carries the owner of the file it points at, so owning the name does not prove you wrote it.
+- **A path that is not a regular file**, such as a directory or a FIFO, is not read and its mode is not changed: `The config path <path> is not a regular file, so it was not read`.
+
+Every refusal is logged once per process with its reason. Each refused read also logs `Config not loaded: <path> cannot be trusted, so this process is running on defaults`.
+
+### When saves are refused
+
+Three conditions stop this process writing the config at all:
+
+- the file was writable by other users when first read, so fields were skipped;
+- the file could not be read, or held invalid JSON, or held JSON that is not an object;
+- the configured path failed the trust checks above, and is not an untrusted link a save can replace.
+
+Each refused save logs `Config not saved: ...` every time, because each one is a setting that did not persist. The setting stays in memory until the process exits.
+
+While saves are refused, `local_control_secret` is never written. The process keeps the secret it already holds, or generates one the first time it is needed, and every part of that process uses the same value until it exits. Separate processes cannot see it: the CLI is one, and it reads the secret from the file. So while the refusal lasts, CLI notifications such as `--reauthenticate` and `--force-reset-rate-limit` fail to authenticate against a server that has API keys active. Repairing the file does not end that by itself: the server read its secret once at startup and keeps it. Fix the file, then restart the server: it adopts the secret the repaired file holds, or writes a fresh one, and the CLI reads the same value.
 
 ## Configuration Options
 
