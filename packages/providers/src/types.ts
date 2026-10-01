@@ -123,9 +123,16 @@ export interface Provider {
 	): Promise<Response>;
 
 	/**
-	 * Transform the request body before sending to the provider
+	 * Transform the request body before sending to the provider. `context` is
+	 * the attempt's carrier, the same object `prepareRequest`, `buildUrl` and
+	 * `processResponse` receive, and it is passed to every transform of the
+	 * attempt (the model-fallback and recovery re-transforms included).
 	 */
-	transformRequestBody?(request: Request, account?: Account): Promise<Request>;
+	transformRequestBody?(
+		request: Request,
+		account?: Account,
+		context?: ProviderRequestContext,
+	): Promise<Request>;
 
 	/**
 	 * Extract tier information from response if available

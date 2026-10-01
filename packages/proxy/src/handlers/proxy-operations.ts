@@ -1048,11 +1048,18 @@ export async function proxyWithAccount(
 
 		// Get the provider for this account
 		const provider = getProvider(account.provider) || ctx.provider;
+		// The per-request carrier (SB23-2508): one object for this attempt, handed
+		// by reference to prepareRequest, buildUrl, every transformRequestBody and
+		// every processResponse call below, the in-place retries and the
+		// model-fallback re-transforms included. A provider keys anything it
+		// derives here on this object, never on `account`, which outlives the
+		// request. A failover re-enters this function and gets a fresh one.
+		const providerContext: ProviderRequestContext = {};
 		const transformRequestForAccount = async (
 			request: Request,
 		): Promise<Request> => {
 			const providerRequest = provider.transformRequestBody
-				? await provider.transformRequestBody(request, account)
+				? await provider.transformRequestBody(request, account, providerContext)
 				: request;
 			return applyAccountRequestTransformer(providerRequest, account);
 		};
@@ -1068,13 +1075,6 @@ export async function proxyWithAccount(
 		const accessToken = isSyntheticCodexCountTokens
 			? ""
 			: await getValidAccessToken(account, ctx);
-
-		// The per-request carrier (SB23-2508): one object for this attempt, handed
-		// by reference to prepareRequest, buildUrl and every processResponse call
-		// below, the in-place retries included. A provider keys anything it
-		// derives here on this object, never on `account`, which outlives the
-		// request. A failover re-enters this function and gets a fresh one.
-		const providerContext: ProviderRequestContext = {};
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
 		if (provider.prepareRequest) {
@@ -1269,6 +1269,7 @@ export async function proxyWithAccount(
 				rawResponse,
 				new Request(targetUrl, requestInit),
 				account,
+				providerContext,
 			);
 			if (recovered) {
 				// Exactly one retry on the same provider/account/model. Refresh the
