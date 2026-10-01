@@ -140,23 +140,33 @@ export function normalizeMessage(message: unknown): string {
 }
 
 /**
- * The index of the last `user` message holding any block that is not a
- * `tool_result`: the prompt that opened the current turn. A tool-loop
- * follow-up adds only `tool_result` blocks, so the anchor stays put; typed
- * text, an interrupt marker or a `<system-reminder>` beside the results moves
- * it, which reads as a new turn. A rejection whose feedback sits inside a
- * `tool_result` does not move it. -1 when no message qualifies.
+ * Claude Code's text for a tool call the user refused. With feedback, the
+ * user's words follow it inside the `tool_result`, so typed text arrives
+ * without a text block of its own.
+ */
+const CLAUDE_CODE_REJECTION =
+	"The user doesn't want to proceed with this tool use";
+
+function opensTurn(block: unknown): boolean {
+	const b = block as { type?: unknown; content?: unknown } | null;
+	if (b?.type !== "tool_result") return true;
+	// Bias toward a new turn: a refusal may carry a new instruction. Measured
+	// at 0 of 154 real follow-ups, so this costs no observed replay.
+	return JSON.stringify(b.content ?? "").includes(CLAUDE_CODE_REJECTION);
+}
+
+/**
+ * The index of the last `user` message that opens a turn: one holding any
+ * block that is not a `tool_result`, or a `tool_result` recording a refusal.
+ * A tool-loop follow-up adds only ordinary `tool_result` blocks, so the anchor
+ * stays put; typed text, an interrupt marker, a `<system-reminder>` beside the
+ * results or a refusal moves it, which reads as a new turn. -1 when no
+ * message qualifies.
  */
 export function turnAnchorIndex(messages: readonly unknown[]): number {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if ((messages[i] as { role?: unknown } | null)?.role !== "user") continue;
-		const blocks = contentBlocks(messages[i]);
-		if (
-			blocks.some(
-				(b) => (b as { type?: unknown } | null)?.type !== "tool_result",
-			)
-		)
-			return i;
+		if (contentBlocks(messages[i]).some(opensTurn)) return i;
 	}
 	return -1;
 }

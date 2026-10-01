@@ -583,11 +583,10 @@ describe("x-codex-turn-state replayed on turns derived from /v1/messages bodies 
 		]);
 	});
 
-	it("replays when the user's words sit inside a tool_result: a rejection with feedback stays in the turn", async () => {
+	it("sends none after a refusal whose feedback sits inside the tool_result: the user's words may open a new turn", async () => {
 		route = ["a"];
 		const s = newSession();
-		const first = await claudeCode(s, [fresh("edit the file")]);
-		const token = first.headers.get(TURN_STATE);
+		await claudeCode(s, [fresh("edit the file")]);
 		await claudeCode(s, [
 			older("edit the file"),
 			toolUse("t1"),
@@ -606,7 +605,7 @@ describe("x-codex-turn-state replayed on turns derived from /v1/messages bodies 
 		]);
 		expect(sent()).toEqual([
 			["a", null],
-			["a", token],
+			["a", null],
 		]);
 	});
 

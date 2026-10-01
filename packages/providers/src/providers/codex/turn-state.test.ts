@@ -273,6 +273,25 @@ describe("messagesTurn", () => {
 				{ role: "user", content: [tr, { type: "text", text: "c" }] },
 			]),
 		).toBe(2);
+		// A refusal opens a turn even with no text block of its own; an
+		// ordinary error result does not.
+		const result = (content: string) => ({
+			role: "user",
+			content: [
+				{ type: "tool_result", tool_use_id: "t", is_error: true, content },
+			],
+		});
+		const history = [
+			{ role: "user", content: "a" },
+			{ role: "assistant", content: "b" },
+		];
+		expect(
+			turnAnchorIndex([
+				...history,
+				result("The user doesn't want to proceed with this tool use. Stop."),
+			]),
+		).toBe(2);
+		expect(turnAnchorIndex([...history, result("exit code 1")])).toBe(0);
 	});
 });
 

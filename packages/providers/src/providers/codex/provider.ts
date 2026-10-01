@@ -51,6 +51,8 @@ const log = new Logger("CodexProvider");
 
 /** How long a body-derived turn waits for its response before it is swept. */
 const MESSAGES_TURN_PENDING_TTL_MS = 10 * 60 * 1000;
+/** A bound independent of the sweep, so a burst cannot grow the map unchecked. */
+const MESSAGES_TURN_PENDING_MAX = 5000;
 
 function messagesTurnRequestKey(requestId: string, accountId: string): string {
 	return `${requestId}\0${accountId}`;
@@ -875,7 +877,7 @@ export class CodexProvider extends BaseProvider {
 		if (!turn) return;
 		const lookup = this.turnState.lookupMessagesTurn(turn, accountId);
 		// Keep the lookup only: the prefix digests are not needed past here.
-		this.messagesTurnByRequest.set(key, { lookup, ts: this.now() });
+		this.pendMessagesTurn(key, { lookup, ts: this.now() });
 		if (lookup.token) outbound.set(CODEX_TURN_STATE_HEADER, lookup.token);
 	}
 
@@ -894,6 +896,19 @@ export class CodexProvider extends BaseProvider {
 			accountId,
 			response.headers.get(CODEX_TURN_STATE_HEADER),
 		);
+	}
+
+	private pendMessagesTurn(
+		key: string,
+		entry: { turn?: MessagesTurn; lookup?: MessagesTurnLookup; ts: number },
+	): void {
+		this.messagesTurnByRequest.delete(key);
+		this.messagesTurnByRequest.set(key, entry);
+		// Insertion order is oldest first.
+		for (const oldest of this.messagesTurnByRequest.keys()) {
+			if (this.messagesTurnByRequest.size <= MESSAGES_TURN_PENDING_MAX) break;
+			this.messagesTurnByRequest.delete(oldest);
+		}
 	}
 
 	private sweepMessagesTurnByRequest(): void {
@@ -999,10 +1014,10 @@ export class CodexProvider extends BaseProvider {
 			) {
 				const turn = messagesTurn(body);
 				if (turn)
-					this.messagesTurnByRequest.set(
-						messagesTurnRequestKey(requestId, account.id),
-						{ turn, ts: this.now() },
-					);
+					this.pendMessagesTurn(messagesTurnRequestKey(requestId, account.id), {
+						turn,
+						ts: this.now(),
+					});
 			}
 			// The passthrough object is part of the public JSON body and is therefore
 			// attacker-controlled. Native execution fields require the proxy's
