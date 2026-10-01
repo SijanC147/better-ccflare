@@ -1,5 +1,10 @@
 import type { Account } from "@better-ccflare/types";
-import type { Provider, RateLimitInfo, TokenRefreshResult } from "./types";
+import type {
+	Provider,
+	ProviderRequestContext,
+	RateLimitInfo,
+	TokenRefreshResult,
+} from "./types";
 
 export abstract class BaseProvider implements Provider {
 	abstract name: string;
@@ -131,6 +136,7 @@ export abstract class BaseProvider implements Provider {
 	async transformRequestBody(
 		request: Request,
 		_account?: Account,
+		_context?: ProviderRequestContext,
 	): Promise<Request> {
 		return request;
 	}

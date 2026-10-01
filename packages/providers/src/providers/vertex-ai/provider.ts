@@ -170,9 +170,11 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 				`[Vertex AI] prepareRequest - extracted model: ${originalModel}`,
 			);
 
-			// Apply custom model mappings if configured
+			// Apply custom model mappings if configured. A model-fallback body
+			// already names a mapped model (SB23-3971): mapping it again can turn
+			// a fallback in the primary's family back into the primary.
 			let transformedModel = originalModel;
-			if (account?.model_mappings) {
+			if (account?.model_mappings && !context.fallbackModel) {
 				transformedModel = getModelName(originalModel, account);
 				console.log(
 					`[Vertex AI] prepareRequest - after mapping: ${transformedModel}`,

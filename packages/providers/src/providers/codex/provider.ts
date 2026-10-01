@@ -15,6 +15,7 @@ import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import { resolveProviderModelDefault } from "../../provider-model-defaults";
 import type {
+	ProviderRequestContext,
 	RateLimitInfo,
 	TokenRefreshResult,
 	UpstreamObservationContext,
@@ -360,6 +361,31 @@ interface ContinuationState {
 	generation: number;
 }
 
+interface RequestStreamEntry {
+	stream: boolean;
+	hasCustomTools: boolean;
+	nativeResponses: boolean;
+	ts: number;
+}
+
+/** A body-derived turn waiting for the response that records it (SB23-3629). */
+interface MessagesTurnEntry {
+	lookup: MessagesTurnLookup;
+	ts: number;
+}
+
+/**
+ * What one request carries from transformRequestBody to processResponse and
+ * to the stream processResponse returns, keyed inside each map as before (by
+ * request id, or by request id and account). The provider holds one of these
+ * for carrier-less callers and one per carrier (SB23-3964).
+ */
+interface CodexRequestState {
+	requestStream: Map<string, RequestStreamEntry>;
+	messagesTurn: Map<string, MessagesTurnEntry>;
+	pendingContinuation: Map<string, PendingContinuation>;
+}
+
 interface PendingContinuation {
 	legacyProjection?: boolean;
 	continuationSuppressed?: boolean;
@@ -586,10 +612,7 @@ export class CodexProvider extends BaseProvider {
 	 * computed it to the response that records it (SB23-3629). processResponse
 	 * cannot recompute it: it sees the response, not the body.
 	 */
-	private readonly messagesTurnByRequest = new Map<
-		string,
-		{ lookup: MessagesTurnLookup; ts: number }
-	>();
+	private readonly messagesTurnByRequest = new Map<string, MessagesTurnEntry>();
 	private readonly continuationByLane = new Map<string, ContinuationState>();
 	private continuationGeneration = 0;
 	private readonly messagesContinuationRejected = new Map<string, number>();
@@ -617,18 +640,49 @@ export class CodexProvider extends BaseProvider {
 	}
 	// Fallback map: proxy-operations.ts injects x-better-ccflare-request-id and
 	// x-better-ccflare-request-stream into the upstream response before calling
-	// processResponse, so headerRequestedStream is normally set. This map covers
-	// the race where a response arrives after the 30s TTL sweep evicts the entry,
-	// and the 529 in-place retry path (which doesn't re-tag those headers).
-	private requestStreamById = new Map<
-		string,
-		{
-			stream: boolean;
-			hasCustomTools: boolean;
-			nativeResponses: boolean;
-			ts: number;
-		}
+	// processResponse, and reissueRequestInPlace re-tags them on every in-place
+	// retry, so headerRequestedStream is normally set and this is read only for
+	// a response that arrives untagged.
+	private requestStreamById = new Map<string, RequestStreamEntry>();
+
+	/**
+	 * The three request-id maps above, for a caller that passes no carrier.
+	 * They are swept and capped because nothing else ends their entries' lives.
+	 */
+	private readonly unscopedState: CodexRequestState = {
+		requestStream: this.requestStreamById,
+		messagesTurn: this.messagesTurnByRequest,
+		pendingContinuation: this.pendingContinuationByRequest,
+	};
+
+	/**
+	 * Per-attempt state keyed on the proxy's carrier (SB23-3964). It lives as
+	 * long as the attempt and anything still reading it (an open stream holds
+	 * its carrier), so no TTL or cap can drop it under a live response.
+	 */
+	private readonly stateByContext = new WeakMap<
+		ProviderRequestContext,
+		CodexRequestState
 	>();
+
+	/**
+	 * Where one request keeps what transformRequestBody derived for
+	 * processResponse and the stream it returns: with a carrier, on the
+	 * carrier; without one, in the provider-wide request-id maps.
+	 */
+	private stateFor(context?: ProviderRequestContext): CodexRequestState {
+		if (!context) return this.unscopedState;
+		let state = this.stateByContext.get(context);
+		if (!state) {
+			state = {
+				requestStream: new Map(),
+				messagesTurn: new Map(),
+				pendingContinuation: new Map(),
+			};
+			this.stateByContext.set(context, state);
+		}
+		return state;
+	}
 
 	private sweepRequestStreamById(): void {
 		const cutoff = Date.now() - 30_000;
@@ -842,16 +896,16 @@ export class CodexProvider extends BaseProvider {
 	async transformRequestBody(
 		request: Request,
 		account?: Account,
+		context?: ProviderRequestContext,
 	): Promise<Request> {
+		const state = this.stateFor(context);
 		// Read before the transform: these are the client's own values, which
 		// the outbound copy is about to be rewritten from (SB23-2370).
 		const requestId = request.headers.get("x-better-ccflare-request-id");
 		// A lookup belongs to the transform that made it: a second transform of
 		// the same request that derives nothing must not send the first's token.
 		if (requestId && account?.id)
-			this.messagesTurnByRequest.delete(
-				messagesTurnRequestKey(requestId, account.id),
-			);
+			state.messagesTurn.delete(messagesTurnRequestKey(requestId, account.id));
 		const clientTurnHeaders = new Headers();
 		for (const name of [CODEX_TURN_STATE_HEADER, CODEX_TURN_METADATA_HEADER]) {
 			const value = request.headers.get(name);
@@ -860,12 +914,18 @@ export class CodexProvider extends BaseProvider {
 		const transformed = await this.transformRequestBodyForAccount(
 			request,
 			account,
+			state,
 		);
 		// Every branch, the untouched passthroughs included: a turn-state token
 		// goes upstream only to the account that issued it.
 		this.turnState.scope(transformed.headers, clientTurnHeaders, account?.id);
 		transformed.headers.delete(CODEX_INTERNAL_REPLAY_HEADER);
-		this.replayMessagesTurn(transformed.headers, requestId, account?.id);
+		this.replayMessagesTurn(
+			state.messagesTurn,
+			transformed.headers,
+			requestId,
+			account?.id,
+		);
 		return transformed;
 	}
 
@@ -875,27 +935,29 @@ export class CodexProvider extends BaseProvider {
 	 * accounts through /v1/messages and never replays the token itself.
 	 */
 	private replayMessagesTurn(
+		turns: Map<string, MessagesTurnEntry>,
 		outbound: Headers,
 		requestId: string | null,
 		accountId: string | undefined,
 	): void {
 		if (!requestId || !accountId) return;
-		const lookup = this.messagesTurnByRequest.get(
+		const lookup = turns.get(
 			messagesTurnRequestKey(requestId, accountId),
 		)?.lookup;
 		if (lookup?.token) outbound.set(CODEX_TURN_STATE_HEADER, lookup.token);
 	}
 
 	private recordMessagesTurn(
+		turns: Map<string, MessagesTurnEntry>,
 		response: Response,
 		accountId: string | undefined,
 	): void {
 		const requestId = response.headers.get("x-better-ccflare-request-id");
 		if (!response.ok || !requestId || !accountId) return;
 		const key = messagesTurnRequestKey(requestId, accountId);
-		const lookup = this.messagesTurnByRequest.get(key)?.lookup;
+		const lookup = turns.get(key)?.lookup;
 		if (!lookup) return;
-		this.messagesTurnByRequest.delete(key);
+		turns.delete(key);
 		this.turnState.recordMessagesTurn(
 			lookup,
 			accountId,
@@ -904,15 +966,16 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private pendMessagesTurn(
+		turns: Map<string, MessagesTurnEntry>,
 		key: string,
 		entry: { lookup: MessagesTurnLookup; ts: number },
 	): void {
-		this.messagesTurnByRequest.delete(key);
-		this.messagesTurnByRequest.set(key, entry);
+		turns.delete(key);
+		turns.set(key, entry);
 		// Insertion order is oldest first.
-		for (const oldest of this.messagesTurnByRequest.keys()) {
-			if (this.messagesTurnByRequest.size <= MESSAGES_TURN_PENDING_MAX) break;
-			this.messagesTurnByRequest.delete(oldest);
+		for (const oldest of turns.keys()) {
+			if (turns.size <= MESSAGES_TURN_PENDING_MAX) break;
+			turns.delete(oldest);
 		}
 	}
 
@@ -925,7 +988,8 @@ export class CodexProvider extends BaseProvider {
 
 	private async transformRequestBodyForAccount(
 		request: Request,
-		account?: Account,
+		account: Account | undefined,
+		state: CodexRequestState,
 	): Promise<Request> {
 		// /v1/models is handled as a passthrough GET.
 		const codexModelsUrl = `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`;
@@ -1057,6 +1121,7 @@ export class CodexProvider extends BaseProvider {
 				delete codexBody.previous_response_id;
 				if (requestId) {
 					this.prepareNativeContinuation(
+						state.pendingContinuation,
 						codexBody,
 						request.headers,
 						account,
@@ -1120,6 +1185,7 @@ export class CodexProvider extends BaseProvider {
 						codexBody.instructions = "";
 					}
 					this.prepareNativeContinuation(
+						state.pendingContinuation,
 						codexBody,
 						request.headers,
 						account,
@@ -1145,7 +1211,7 @@ export class CodexProvider extends BaseProvider {
 				);
 
 			if (requestId) {
-				this.requestStreamById.set(requestId, {
+				state.requestStream.set(requestId, {
 					stream: body.stream === true,
 					hasCustomTools,
 					nativeResponses,
@@ -1179,14 +1245,18 @@ export class CodexProvider extends BaseProvider {
 			// lookup is kept for processResponse: the per-message digests die
 			// with this call, so a refused request pins nothing.
 			if (derivedTurn && requestId && account?.id) {
-				this.pendMessagesTurn(messagesTurnRequestKey(requestId, account.id), {
-					lookup: this.turnState.lookupMessagesTurn(
-						derivedTurn,
-						account.id,
-						requestId,
-					),
-					ts: this.now(),
-				});
+				this.pendMessagesTurn(
+					state.messagesTurn,
+					messagesTurnRequestKey(requestId, account.id),
+					{
+						lookup: this.turnState.lookupMessagesTurn(
+							derivedTurn,
+							account.id,
+							requestId,
+						),
+						ts: this.now(),
+					},
+				);
 			}
 
 			return new Request(request.url, {
@@ -1216,7 +1286,10 @@ export class CodexProvider extends BaseProvider {
 		_account: Account | null,
 		_requestHeaders?: Headers,
 		drainAbort?: AbortController,
+		context?: ProviderRequestContext,
 	): Promise<Response> {
+		const state = this.stateFor(context);
+		const pendingById = state.pendingContinuation;
 		// Filed against the account that answered, under the keys the client's
 		// next request in this turn will carry (SB23-2370). The first value per
 		// key is kept, as the client's OnceLock keeps it: a later 2xx in the
@@ -1228,7 +1301,7 @@ export class CodexProvider extends BaseProvider {
 				response.headers.get(CODEX_TURN_STATE_HEADER),
 			);
 		}
-		this.recordMessagesTurn(response, _account?.id);
+		this.recordMessagesTurn(state.messagesTurn, response, _account?.id);
 
 		// /v1/models responses: translate Codex format → OpenAI /v1/models format
 		// with full capability fields preserved for the CLI.
@@ -1240,12 +1313,12 @@ export class CodexProvider extends BaseProvider {
 		const contentType = response.headers.get("content-type")?.toLowerCase();
 		const requestId = response.headers.get("x-better-ccflare-request-id");
 		const fallbackEntry = requestId
-			? this.requestStreamById.get(requestId)
+			? state.requestStream.get(requestId)
 			: undefined;
 		// Sliding TTL: refresh on read so a still-retrying request survives the
 		// 30s sweep instead of expiring mid-backoff.
 		if (requestId && fallbackEntry) {
-			this.requestStreamById.set(requestId, {
+			state.requestStream.set(requestId, {
 				...fallbackEntry,
 				ts: Date.now(),
 			});
@@ -1287,6 +1360,7 @@ export class CodexProvider extends BaseProvider {
 			// Responses a second time.
 			if (nativeResponses) {
 				return this.buildNativeResponsesPassthroughResponse(
+					pendingById,
 					response,
 					requestId,
 					response.ok,
@@ -1296,9 +1370,13 @@ export class CodexProvider extends BaseProvider {
 			// buffering and stream straight through.
 			if (!mightHaveCustomToolCalls) {
 				if (requestedStream) {
-					return this.transformStreamingResponse(response, drainAbort);
+					return this.transformStreamingResponse(
+						pendingById,
+						response,
+						drainAbort,
+					);
 				}
-				return this.transformSseResponseToJson(response);
+				return this.transformSseResponseToJson(pendingById, response);
 			}
 			// A custom_tool_call can appear at any point in the stream, and the
 			// passthrough-vs-transform choice must be made before the first byte
@@ -1326,17 +1404,18 @@ export class CodexProvider extends BaseProvider {
 				statusText: response.statusText,
 				headers: response.headers,
 			});
-			return this.transformSseResponseToJson(streamResponse);
+			return this.transformSseResponseToJson(pendingById, streamResponse);
 		}
 
 		if (response.ok && response.body !== null) {
 			const probeText = await response.text();
 			if (nativeResponses) {
 				const continuationResult = requestId
-					? this.pendingContinuationByRequest.get(requestId)
+					? pendingById.get(requestId)
 					: undefined;
-				this.observeNativeJsonResponse(requestId, probeText);
+				this.observeNativeJsonResponse(pendingById, requestId, probeText);
 				return this.buildNativeResponsesPassthroughResponse(
+					pendingById,
 					new Response(probeText, {
 						status: response.status,
 						statusText: response.statusText,
@@ -1374,9 +1453,13 @@ export class CodexProvider extends BaseProvider {
 					headers,
 				});
 				if (requestedStream) {
-					return this.transformStreamingResponse(sseResponse, drainAbort);
+					return this.transformStreamingResponse(
+						pendingById,
+						sseResponse,
+						drainAbort,
+					);
 				}
-				return this.transformSseResponseToJson(sseResponse);
+				return this.transformSseResponseToJson(pendingById, sseResponse);
 			}
 
 			const headers = sanitizeResponseHeaders(response.headers);
@@ -1600,6 +1683,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private prepareNativeContinuation(
+		pendingById: Map<string, PendingContinuation>,
 		body: CodexRequest,
 		headers: Headers,
 		account: Account | undefined,
@@ -1681,7 +1765,7 @@ export class CodexProvider extends BaseProvider {
 			result === "hit" && previous
 				? previous.replayPrefixDigests
 				: inputDigests;
-		this.pendingContinuationByRequest.set(requestId, {
+		pendingById.set(requestId, {
 			continuationSuppressed,
 			legacyProjection,
 			laneKey,
@@ -1715,13 +1799,13 @@ export class CodexProvider extends BaseProvider {
 		response: Response,
 		originalRequest: Request,
 		account: Account,
+		context?: ProviderRequestContext,
 	): Promise<Request | null> {
+		const pendingById = this.stateFor(context).pendingContinuation;
 		const requestId = originalRequest.headers.get(
 			"x-better-ccflare-request-id",
 		);
-		const pending = requestId
-			? this.pendingContinuationByRequest.get(requestId)
-			: undefined;
+		const pending = requestId ? pendingById.get(requestId) : undefined;
 		if (
 			!requestId ||
 			!pending?.legacyProjection ||
@@ -1756,11 +1840,11 @@ export class CodexProvider extends BaseProvider {
 				this.now() + this.continuationTtlMs,
 			);
 		}
-		this.pendingContinuationByRequest.delete(requestId);
+		pendingById.delete(requestId);
 		log.info("Codex Messages continuation rejected; retrying full history", {
 			result: "previous_response_not_found",
 		});
-		return this.transformRequestBody(originalRequest, account);
+		return this.transformRequestBody(originalRequest, account, context);
 	}
 
 	private projectedOutputDigests(
@@ -1812,6 +1896,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private commitNativeContinuation(
+		pendingById: Map<string, PendingContinuation>,
 		requestId: string | null,
 		responseId: unknown,
 		responseOutput: unknown,
@@ -1824,10 +1909,11 @@ export class CodexProvider extends BaseProvider {
 			return;
 		}
 		if (!Array.isArray(responseOutput)) {
-			this.pendingContinuationByRequest.delete(requestId);
+			pendingById.delete(requestId);
 			return;
 		}
 		this.commitNativeContinuationDigests(
+			pendingById,
 			requestId,
 			responseId,
 			responseOutput.map((item) => this.replayItemDigest(item)),
@@ -1835,13 +1921,14 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private commitNativeContinuationDigests(
+		pendingById: Map<string, PendingContinuation>,
 		requestId: string,
 		responseId: string,
 		outputDigests: string[],
 	): void {
-		const pending = this.pendingContinuationByRequest.get(requestId);
+		const pending = pendingById.get(requestId);
 		if (!pending) return;
-		this.pendingContinuationByRequest.delete(requestId);
+		pendingById.delete(requestId);
 		if (
 			pending.continuationSuppressed ||
 			this.messagesContinuationRejected.has(pending.laneKey)
@@ -1865,6 +1952,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private observeNativeTerminalEvent(
+		pendingById: Map<string, PendingContinuation>,
 		requestId: string | null,
 		eventText: string,
 	): void {
@@ -1898,30 +1986,30 @@ export class CodexProvider extends BaseProvider {
 			} catch {
 				// A malformed event makes the stream ambiguous even if a completion
 				// candidate appeared earlier. Fail closed and never advance the chain.
-				if (requestId) this.pendingContinuationByRequest.delete(requestId);
+				if (requestId) pendingById.delete(requestId);
 				return;
 			}
 		}
 		const dataType = typeof data?.type === "string" ? data.type : "";
 		if (eventName && dataType && eventName !== dataType) {
-			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			if (requestId) pendingById.delete(requestId);
 			return;
 		}
 		if (
 			dataText &&
 			requestId &&
-			this.pendingContinuationByRequest.get(requestId)?.terminalCandidate
+			pendingById.get(requestId)?.terminalCandidate
 		) {
 			// response.completed must be the final data-bearing event. Anything
 			// after it makes the terminal checkpoint ambiguous, even if that later
 			// event is otherwise a valid non-terminal lifecycle event.
-			this.pendingContinuationByRequest.delete(requestId);
+			pendingById.delete(requestId);
 			return;
 		}
 		const isFailureTerminal = (type: string): boolean =>
 			type === "response.failed" || type === "response.incomplete";
 		if (isFailureTerminal(eventName) || isFailureTerminal(dataType)) {
-			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			if (requestId) pendingById.delete(requestId);
 			return;
 		}
 		const claimsCompleted =
@@ -1930,11 +2018,11 @@ export class CodexProvider extends BaseProvider {
 			return;
 		}
 		if (data.response?.status !== "completed") {
-			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			if (requestId) pendingById.delete(requestId);
 			return;
 		}
 		if (!requestId) return;
-		const pending = this.pendingContinuationByRequest.get(requestId);
+		const pending = pendingById.get(requestId);
 		if (!pending) return;
 		const responseId = data.response?.id;
 		const output = data.response?.output;
@@ -1946,7 +2034,7 @@ export class CodexProvider extends BaseProvider {
 		) {
 			// Multiple terminal completions or malformed terminal state are
 			// ambiguous. Never choose one and advance a continuation chain.
-			this.pendingContinuationByRequest.delete(requestId);
+			pendingById.delete(requestId);
 			return;
 		}
 		const outputDigests = this.projectedOutputDigests(
@@ -1954,24 +2042,26 @@ export class CodexProvider extends BaseProvider {
 			pending.legacyProjection === true,
 		);
 		if (!outputDigests) {
-			this.pendingContinuationByRequest.delete(requestId);
+			pendingById.delete(requestId);
 			return;
 		}
 		pending.terminalCandidate = { responseId, outputDigests };
 	}
 
 	private finalizeNativeContinuationStream(
+		pendingById: Map<string, PendingContinuation>,
 		requestId: string | null,
 		cleanEof: boolean,
 	): void {
 		if (!requestId) return;
-		const pending = this.pendingContinuationByRequest.get(requestId);
+		const pending = pendingById.get(requestId);
 		if (!pending) return;
 		if (!cleanEof || !pending.terminalCandidate) {
-			this.pendingContinuationByRequest.delete(requestId);
+			pendingById.delete(requestId);
 			return;
 		}
 		this.commitNativeContinuationDigests(
+			pendingById,
 			requestId,
 			pending.terminalCandidate.responseId,
 			pending.terminalCandidate.outputDigests,
@@ -1979,6 +2069,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private observeNativeJsonResponse(
+		pendingById: Map<string, PendingContinuation>,
 		requestId: string | null,
 		responseText: string,
 	): void {
@@ -1989,28 +2080,32 @@ export class CodexProvider extends BaseProvider {
 				output?: unknown;
 			};
 			if (response.status === "completed") {
-				this.commitNativeContinuation(requestId, response.id, response.output);
+				this.commitNativeContinuation(
+					pendingById,
+					requestId,
+					response.id,
+					response.output,
+				);
 			} else if (requestId) {
-				this.pendingContinuationByRequest.delete(requestId);
+				pendingById.delete(requestId);
 			}
 		} catch {
 			// A malformed upstream body is not a successful continuation checkpoint.
-			if (requestId) this.pendingContinuationByRequest.delete(requestId);
+			if (requestId) pendingById.delete(requestId);
 		}
 	}
 
 	private buildNativeResponsesPassthroughResponse(
+		pendingById: Map<string, PendingContinuation>,
 		response: Response,
 		requestId: string | null,
 		observeStream = true,
 		continuationSnapshot?: PendingContinuation,
 	): Response {
-		const pending = requestId
-			? this.pendingContinuationByRequest.get(requestId)
-			: undefined;
+		const pending = requestId ? pendingById.get(requestId) : undefined;
 		const diagnostics = continuationSnapshot ?? pending;
 		if (!response.ok && response.status !== 529 && requestId) {
-			this.pendingContinuationByRequest.delete(requestId);
+			pendingById.delete(requestId);
 		}
 		const headers = sanitizeResponseHeaders(response.headers);
 		for (const attestationHeader of [
@@ -2074,7 +2169,7 @@ export class CodexProvider extends BaseProvider {
 			const events = buffer.split(/\r?\n\r?\n/);
 			buffer = events.pop() ?? "";
 			for (const event of events) {
-				this.observeNativeTerminalEvent(requestId, event);
+				this.observeNativeTerminalEvent(pendingById, requestId, event);
 			}
 		};
 		const upstreamReader = response.body.getReader();
@@ -2082,7 +2177,7 @@ export class CodexProvider extends BaseProvider {
 		const failClosed = (): void => {
 			if (settled) return;
 			settled = true;
-			this.finalizeNativeContinuationStream(requestId, false);
+			this.finalizeNativeContinuationStream(pendingById, requestId, false);
 		};
 		const observed = new ReadableStream<Uint8Array>(
 			{
@@ -2097,6 +2192,7 @@ export class CodexProvider extends BaseProvider {
 							// upstream EOF; cancellation and transport errors fail closed below.
 							settled = true;
 							this.finalizeNativeContinuationStream(
+								pendingById,
 								requestId,
 								buffer.trim().length === 0,
 							);
@@ -2981,11 +3077,12 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private async transformSseResponseToJson(
+		pendingById: Map<string, PendingContinuation>,
 		response: Response,
 	): Promise<Response> {
 		const requestId =
 			response.headers.get("x-better-ccflare-request-id") ?? "unknown";
-		const transformed = this.transformStreamingResponse(response);
+		const transformed = this.transformStreamingResponse(pendingById, response);
 		const reader = transformed.body
 			?.pipeThrough(new TextDecoderStream())
 			.getReader();
@@ -3185,6 +3282,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private transformStreamingResponse(
+		pendingById: Map<string, PendingContinuation>,
 		response: Response,
 		drainAbort?: AbortController,
 	): Response {
@@ -3196,11 +3294,8 @@ export class CodexProvider extends BaseProvider {
 			);
 		}
 		const controlledMessages =
-			response.ok &&
-			this.pendingContinuationByRequest.get(requestId)?.legacyProjection ===
-				true;
-		if (!response.ok && response.status !== 529)
-			this.pendingContinuationByRequest.delete(requestId);
+			response.ok && pendingById.get(requestId)?.legacyProjection === true;
+		if (!response.ok && response.status !== 529) pendingById.delete(requestId);
 		const state: StreamState = {
 			buffer: "",
 			messageId: `msg_${crypto.randomUUID().replace(/-/g, "").substring(0, 24)}`,
@@ -3221,6 +3316,7 @@ export class CodexProvider extends BaseProvider {
 		const headers = controlledMessages
 			? new Headers(
 					this.buildNativeResponsesPassthroughResponse(
+						pendingById,
 						new Response(null, {
 							status: response.status,
 							headers: response.headers,
@@ -3369,7 +3465,7 @@ export class CodexProvider extends BaseProvider {
 				if (upstreamCancelStarted || !reader) return;
 				upstreamCancelStarted = true;
 				if (controlledMessages)
-					this.finalizeNativeContinuationStream(requestId, false);
+					this.finalizeNativeContinuationStream(pendingById, requestId, false);
 				upstreamDrainPromise = drainUpstream();
 				upstreamDrainPromise.catch(() => undefined);
 			};
@@ -3436,7 +3532,11 @@ export class CodexProvider extends BaseProvider {
 						);
 
 						if (controlledMessages)
-							this.observeNativeTerminalEvent(requestId, eventText);
+							this.observeNativeTerminalEvent(
+								pendingById,
+								requestId,
+								eventText,
+							);
 						const eventLine = eventText
 							.split(/\r?\n/)
 							.find((l) => l.startsWith("event:"));
@@ -3523,12 +3623,20 @@ export class CodexProvider extends BaseProvider {
 						if (success) {
 							for (const frame of terminalFrames) await writer.write(frame);
 						}
-						this.finalizeNativeContinuationStream(requestId, success);
+						this.finalizeNativeContinuationStream(
+							pendingById,
+							requestId,
+							success,
+						);
 					}
 					await writer.close();
 				} catch {
 					if (controlledMessages)
-						this.finalizeNativeContinuationStream(requestId, false);
+						this.finalizeNativeContinuationStream(
+							pendingById,
+							requestId,
+							false,
+						);
 				}
 			}
 		};
@@ -3978,8 +4086,14 @@ export async function recoverCodexMessagesContinuation(
 	response: Response,
 	originalRequest: Request,
 	account: Account,
+	context?: ProviderRequestContext,
 ): Promise<Request | null> {
 	return provider instanceof CodexProvider
-		? provider.recoverMessagesContinuation(response, originalRequest, account)
+		? provider.recoverMessagesContinuation(
+				response,
+				originalRequest,
+				account,
+				context,
+			)
 		: null;
 }
