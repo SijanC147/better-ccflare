@@ -83,6 +83,8 @@ export interface OpenObserveConfig {
 	user: string;
 	logStream: string;
 	requestStream: string;
+	/** Receives the exporter's own counters. The server supplies it on every read. */
+	metricsStream: string;
 	shipPayloads: boolean;
 	/** The lowest log level shipped. The server supplies it on every read. */
 	logMinLevel: OpenObserveLogMinLevel;
@@ -149,8 +151,8 @@ export type OpenObserveLogMinLevel =
 
 /**
  * An omitted `token` leaves the stored one alone; an empty string clears it.
- * An omitted `logMinLevel` likewise leaves the stored level alone, so a client
- * that has not read the current value yet cannot wipe it.
+ * An omitted `logMinLevel` or `metricsStream` likewise leaves the stored value
+ * alone, so a client that has not read the current value yet cannot wipe it.
  */
 export type OpenObserveConfigUpdate = Omit<
 	OpenObserveConfig,
@@ -159,7 +161,12 @@ export type OpenObserveConfigUpdate = Omit<
 	| "tokenFromEnvironment"
 	| "endpointFromEnvironment"
 	| "logMinLevel"
-> & { token?: string; logMinLevel?: OpenObserveLogMinLevel };
+	| "metricsStream"
+> & {
+	token?: string;
+	logMinLevel?: OpenObserveLogMinLevel;
+	metricsStream?: string;
+};
 
 // Agent response interface
 export interface AgentsResponse {

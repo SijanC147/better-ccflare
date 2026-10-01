@@ -156,6 +156,35 @@ function decodePayloadForShipping(
 	}
 }
 
+/**
+ * The serving account's name and provider, for the record shipped to
+ * OpenObserve, so one request stream can be split by account. The account's id
+ * already ships as `accountUsed`.
+ *
+ * Empty when no account served the request. `providerName` on a start message
+ * falls back to the server's default provider when there is no account
+ * (`response-handler.ts`, and every `accountId: null` start in `proxy.ts`), so
+ * shipping it unconditionally would name a provider for an account that does
+ * not exist. Never a credential: the name is the operator's own label.
+ *
+ * Added at the ship site rather than to the `summary` literal, which is typed
+ * as the dashboard's `RequestResponse` and feeds the live request feed.
+ */
+function shippedAccountAttributes(
+	startMessage: StartMessage,
+): Record<string, string> {
+	if (!startMessage.accountId || startMessage.accountId === NO_ACCOUNT_ID) {
+		return {};
+	}
+	const attributes: Record<string, string> = {
+		accountProvider: startMessage.providerName,
+	};
+	if (startMessage.accountName) {
+		attributes.accountName = startMessage.accountName;
+	}
+	return attributes;
+}
+
 // Limits to prevent unbounded growth
 const MAX_REQUESTS_MAP_SIZE = 10000;
 const MAX_MISSING_STATE_WARNINGS = 1000;
@@ -1152,6 +1181,7 @@ export class UsageCollector {
 				...summary,
 				worktreePath: startMessage.worktreePath ?? undefined,
 				projectId: startMessage.projectId ?? undefined,
+				...shippedAccountAttributes(startMessage),
 				...(shippedBodies ?? {}),
 			});
 		}

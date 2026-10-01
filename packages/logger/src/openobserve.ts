@@ -19,8 +19,8 @@ import { logBus } from "./log-bus";
  * or `bytes` lives in one of five functions (`resetBuffer`, `evictOverflow`,
  * `enqueue`, `requeue`, `takeBatch`), in each the array mutation and the byte
  * adjustment are adjacent statements with no branch between them, and every
- * `await` in this module is inside `post` or `flush` and never inside one of
- * those five. So no mutator can be observed part-way through, and
+ * `await` in this module is inside `post`, `flush` or `shipMetricsSnapshot`
+ * and never inside one of those five. So no mutator can be observed part-way through, and
  * `bytes === sum(records[i].bytes)` survives any interleaving. Keep that true
  * when editing: putting an `await` inside a mutator breaks it silently.
  *
@@ -30,6 +30,15 @@ import { logBus } from "./log-bus";
  * one constraint the exporter is built around. Records still evict oldest-first
  * under pressure, so this stream is lossy by design and is not a record of
  * anything that must survive.
+ *
+ * The exporter reports on itself too: once a minute it posts a snapshot of
+ * cumulative counters (shipped, deferred, evicted, rejected, failed, exhausted,
+ * discarded, filtered, and what is still held) to a third stream over the same
+ * bulk endpoint. A snapshot is built when it is sent and posted exactly once.
+ * It is never buffered and never retried, because the counters are cumulative
+ * and the next snapshot carries everything a lost one would have. That is what
+ * keeps the metrics from becoming the retention path the rest of this module
+ * avoids.
  *
  * This module lives in the logger package because it subscribes to `logBus`,
  * and it is configured by a getter pushed in at startup rather than by reading
@@ -49,6 +58,12 @@ export interface OpenObserveSettings {
 	logStream: string;
 	/** Stream that receives one record per proxied request. */
 	requestStream: string;
+	/**
+	 * Stream that receives the exporter's own counters, one snapshot a minute.
+	 * Empty turns the snapshot off; the config package never produces empty,
+	 * because it defaults this the same way it defaults the other two streams.
+	 */
+	metricsStream: string;
 	/**
 	 * Whether request records carry the request and response bodies. Separate
 	 * from the endpoint being configured on purpose: shipping bodies off the
@@ -102,15 +117,82 @@ const MAX_RETRY_BACKOFF_MS = 60_000;
 // contract this exporter already advertises; an unbounded stall is not.
 const MAX_BATCH_ATTEMPTS = 6;
 
+// How often the exporter posts a snapshot of its own counters.
+const METRICS_INTERVAL_MS = 60_000;
+
 interface BufferedRecord {
 	json: string;
 	bytes: number;
 }
 
+/**
+ * Cumulative counts since the process started, for the metrics snapshot.
+ *
+ * Kept apart from `dropped`, which is a reporting debt that is zeroed once a
+ * warning carrying it has been emitted, and apart from everything
+ * `resetBuffer` clears: a counter that saw-tooths cannot be summed or rated.
+ *
+ * Every record `enqueue` accepts ends in exactly one terminal counter or is
+ * still held, so at any synchronous point
+ *
+ *   enqueued = shipped + evicted + failed + exhausted + discarded
+ *              + buffered + inFlight
+ *
+ * `deferred` is not terminal: a deferred record goes back into the buffer and
+ * is counted again when it finally ships or is dropped. `rejected` and
+ * `filtered` never entered the buffer, so they sit outside the identity.
+ */
+interface StreamCounters {
+	/** Records accepted into the buffer. */
+	enqueued: number;
+	/** Records the endpoint accepted. */
+	shipped: number;
+	/** Successful posts. */
+	shippedBatches: number;
+	/** Records put back for another attempt, counted once per deferral. */
+	deferred: number;
+	/** Records discarded oldest-first under the count or byte bound. */
+	evicted: number;
+	/** Records refused at enqueue: unserializable, or larger than the bound. */
+	rejected: number;
+	/** Records dropped on a failure not worth retrying (4xx, bad URL). */
+	failed: number;
+	/** Records dropped after MAX_BATCH_ATTEMPTS. */
+	exhausted: number;
+	/** Records thrown away because the exporter or its stream was turned off. */
+	discarded: number;
+	/** Log events below the configured minimum level. Log stream only. */
+	filtered: number;
+	/** Records taken by a post that has not settled yet. A gauge. */
+	inFlight: number;
+}
+
+function emptyCounters(): StreamCounters {
+	return {
+		enqueued: 0,
+		shipped: 0,
+		shippedBatches: 0,
+		deferred: 0,
+		evicted: 0,
+		rejected: 0,
+		failed: 0,
+		exhausted: 0,
+		discarded: 0,
+		filtered: 0,
+		inFlight: 0,
+	};
+}
+
 interface StreamBuffer {
 	records: BufferedRecord[];
 	bytes: number;
+	/**
+	 * Losses not yet reported in a warning. Zeroed once one has been emitted,
+	 * so it is not a count of anything over time: that is `counters`.
+	 */
 	dropped: number;
+	/** Never cleared by `resetBuffer`; see StreamCounters. */
+	counters: StreamCounters;
 	/**
 	 * Failed attempts since the last success, which is what the backoff window
 	 * is computed from. Reset by a success, and by a failure that is not worth
@@ -129,6 +211,7 @@ function emptyBuffer(): StreamBuffer {
 		records: [],
 		bytes: 0,
 		dropped: 0,
+		counters: emptyCounters(),
 		consecutiveFailures: 0,
 		retryAfter: 0,
 	};
@@ -137,9 +220,11 @@ function emptyBuffer(): StreamBuffer {
 /**
  * Discard everything a buffer holds, including its retry state. Used when the
  * exporter is turned off or a stream is unconfigured: the new settings must
- * not inherit a window the old ones opened.
+ * not inherit a window the old ones opened. The cumulative counters survive,
+ * and the records thrown away here are counted as discarded.
  */
 function resetBuffer(buffer: StreamBuffer): void {
+	buffer.counters.discarded += buffer.records.length;
 	buffer.records = [];
 	buffer.bytes = 0;
 	buffer.dropped = 0;
@@ -161,6 +246,7 @@ function evictOverflow(buffer: StreamBuffer): void {
 		if (!evicted) break;
 		buffer.bytes -= evicted.bytes;
 		buffer.dropped++;
+		buffer.counters.evicted++;
 	}
 }
 
@@ -220,6 +306,22 @@ let warnsSuppressed = 0;
 const logBuffer = emptyBuffer();
 const requestBuffer = emptyBuffer();
 
+// Metrics snapshot state. The id and start time are what let a consumer tell a
+// restart, where every counter falls to zero, from a stream that lost records.
+let runId: string = crypto.randomUUID();
+let runStartedAt = Date.now();
+let metricsTimer: ReturnType<typeof setInterval> | null = null;
+let metricsInFlight = false;
+// Snapshots the endpoint did not take. Shipped in the next one that lands, so
+// an operator can see the gap was a failed post rather than an idle exporter.
+let metricsFailures = 0;
+// The metrics post keeps its own warning window. Sharing warnThrottled's would
+// let a once-a-minute snapshot failure take the window the record streams use
+// to report losses. On the timer alone it never suppresses anything, because
+// METRICS_INTERVAL_MS equals WARN_THROTTLE_MS and every tick that fails warns;
+// it only bites when a caller snapshots between ticks.
+let lastMetricsWarnAt = 0;
+
 /**
  * Warn at most once per window. Returns whether the message was actually
  * emitted, so a caller carrying a number in it can keep that number for the
@@ -271,15 +373,18 @@ function enqueue(buffer: StreamBuffer, value: unknown): void {
 	} catch {
 		// A record that cannot be serialized is dropped rather than retried.
 		buffer.dropped++;
+		buffer.counters.rejected++;
 		return;
 	}
 	const bytes = Buffer.byteLength(json);
 	if (bytes > MAX_BUFFER_BYTES) {
 		buffer.dropped++;
+		buffer.counters.rejected++;
 		return;
 	}
 	buffer.records.push({ json, bytes });
 	buffer.bytes += bytes;
+	buffer.counters.enqueued++;
 	evictOverflow(buffer);
 	startTimer();
 }
@@ -387,6 +492,7 @@ function handleFailedBatch(
 		// clock set for a failure nobody is retrying.
 		buffer.consecutiveFailures = 0;
 		buffer.retryAfter = 0;
+		buffer.counters.failed += batch.length;
 		warnThrottled(
 			`dropped ${batch.length} record(s) for stream ${stream}: ${reason}`,
 		);
@@ -401,14 +507,19 @@ function handleFailedBatch(
 	if (buffer.consecutiveFailures >= MAX_BATCH_ATTEMPTS) {
 		// Out of attempts. Drop this batch instead of returning it to the front,
 		// where it would be taken first every time and stall everything behind
-		// it. Counted as a drop so the loss is reported, not silent.
-		buffer.dropped += batch.length;
-		warnThrottled(
+		// it. Counted as a drop so the loss is reported, not silent: carried
+		// into `dropped` only when this warning was throttled, because a count
+		// already reported here and again by the buffer-pressure warning is the
+		// same loss told twice.
+		buffer.counters.exhausted += batch.length;
+		const reported = warnThrottled(
 			`dropped ${batch.length} record(s) for stream ${stream} after ${buffer.consecutiveFailures} attempts: ${reason}`,
 		);
+		if (!reported) buffer.dropped += batch.length;
 		return;
 	}
 	requeue(buffer, batch);
+	buffer.counters.deferred += batch.length;
 	// Fold the eviction count into this one message rather than leaving it to
 	// the separate buffer-pressure warning. Both go through the same 60s
 	// throttle window, and this one is emitted first on every attempting tick,
@@ -417,7 +528,8 @@ function handleFailedBatch(
 	const lost = buffer.dropped;
 	// "lost", not "evicted": buffer.dropped also counts the unserializable and
 	// oversized records enqueue rejected outright, which were never in the
-	// buffer to be evicted from it.
+	// buffer to be evicted from it, and an exhausted batch whose own warning
+	// was throttled.
 	const losses = lost > 0 ? `; ${lost} older record(s) lost` : "";
 	const emitted = warnThrottled(
 		`deferring ${batch.length} record(s) for stream ${stream}: ${reason}; next attempt in ${Math.round(wait / 1000)}s${losses}`,
@@ -490,11 +602,19 @@ async function runFlush(force: boolean): Promise<void> {
 			while (buffer.records.length > 0) {
 				const batch = takeBatch(buffer);
 				if (batch.length === 0) break;
+				// Counted while the post is awaited, so a snapshot taken in that
+				// window still balances: these records are neither buffered nor
+				// settled yet.
+				buffer.counters.inFlight = batch.length;
 				try {
 					await post(settings, stream, batch);
+					buffer.counters.inFlight = 0;
+					buffer.counters.shipped += batch.length;
+					buffer.counters.shippedBatches++;
 					buffer.consecutiveFailures = 0;
 					buffer.retryAfter = 0;
 				} catch (error) {
+					buffer.counters.inFlight = 0;
 					handleFailedBatch(buffer, stream, batch, error);
 					// Stop after one failure. Continuing would re-take the batch
 					// just put back and spin against an endpoint already failing.
@@ -558,8 +678,13 @@ function onLog(event: LogEvent): void {
 	// comparison. Read through currentSettings() so a level changed in the
 	// dashboard takes effect with no restart.
 	const eventRank = LEVEL_RANK[event.level];
-	if (eventRank !== undefined && eventRank < minLevelRank(settings.logMinLevel))
+	if (
+		eventRank !== undefined &&
+		eventRank < minLevelRank(settings.logMinLevel)
+	) {
+		logBuffer.counters.filtered++;
 		return;
+	}
 	enqueue(logBuffer, {
 		_timestamp: event.ts,
 		level: event.level,
@@ -591,6 +716,7 @@ export function configureOpenObserve(
 	getSettings = getter;
 	if (!getter) {
 		stopTimer();
+		stopMetricsTimer();
 		resetBuffer(logBuffer);
 		resetBuffer(requestBuffer);
 		return;
@@ -598,6 +724,112 @@ export function configureOpenObserve(
 	if (!subscribed) {
 		logBus.on("log", onLog);
 		subscribed = true;
+	}
+	startMetricsTimer();
+}
+
+/**
+ * Its own interval rather than the flush timer, which stops whenever both
+ * buffers are empty. An idle exporter still reports, so a missing snapshot
+ * means the process or the endpoint is down, never that nothing happened.
+ */
+function startMetricsTimer(): void {
+	if (metricsTimer) return;
+	metricsTimer = setInterval(() => {
+		void shipMetricsSnapshot();
+	}, METRICS_INTERVAL_MS);
+	metricsTimer.unref?.();
+}
+
+function stopMetricsTimer(): void {
+	if (!metricsTimer) return;
+	clearInterval(metricsTimer);
+	metricsTimer = null;
+}
+
+/**
+ * One record per record stream, both in a single post, so a snapshot lands or
+ * fails whole. Field names are snake_case because OpenObserve lowercases on
+ * ingest: `shipped_records` survives that readable, `shippedRecords` becomes
+ * `shippedrecords`. Carries counts and stream names only, never the endpoint,
+ * the user or anything from a record.
+ */
+function metricsRecords(
+	settings: OpenObserveSettings,
+	now: number,
+): Record<string, unknown>[] {
+	return (
+		[
+			["logs", settings.logStream, logBuffer],
+			["requests", settings.requestStream, requestBuffer],
+		] as const
+	).map(([kind, stream, buffer]) => {
+		const c = buffer.counters;
+		return {
+			_timestamp: now,
+			service: "better-ccflare",
+			run_id: runId,
+			run_started_at: runStartedAt,
+			uptime_ms: now - runStartedAt,
+			stream_kind: kind,
+			stream,
+			enqueued_records: c.enqueued,
+			shipped_records: c.shipped,
+			shipped_batches: c.shippedBatches,
+			deferred_records: c.deferred,
+			evicted_records: c.evicted,
+			rejected_records: c.rejected,
+			failed_records: c.failed,
+			exhausted_records: c.exhausted,
+			discarded_records: c.discarded,
+			filtered_records: c.filtered,
+			buffered_records: buffer.records.length,
+			buffered_bytes: buffer.bytes,
+			in_flight_records: c.inFlight,
+			consecutive_failures: buffer.consecutiveFailures,
+			snapshot_failures: metricsFailures,
+		};
+	});
+}
+
+/**
+ * Post one snapshot of the exporter's counters to the metrics stream.
+ *
+ * Built at send time and attempted exactly once. A failure is counted and the
+ * snapshot is gone; nothing is kept for later. That is safe only because every
+ * counter is cumulative since the process started: the next snapshot that
+ * lands carries all of it. Turning these into deltas would make a failed post
+ * lose data and would bring back the retry this design avoids.
+ *
+ * Exported so a test can drive it without waiting a minute.
+ */
+export async function shipMetricsSnapshot(): Promise<void> {
+	const settings = currentSettings();
+	if (!settings?.metricsStream) return;
+	// A post still waiting on a hung endpoint is not joined by a second one.
+	// REQUEST_TIMEOUT_MS is well under the interval, so this only bites when a
+	// test or a shutdown calls in between ticks.
+	if (metricsInFlight) return;
+	metricsInFlight = true;
+	try {
+		const batch = metricsRecords(settings, Date.now()).map((record) => {
+			const json = JSON.stringify(record);
+			return { json, bytes: Buffer.byteLength(json) };
+		});
+		await post(settings, settings.metricsStream, batch);
+		metricsFailures = 0;
+	} catch (error) {
+		metricsFailures++;
+		const now = Date.now();
+		if (now - lastMetricsWarnAt >= WARN_THROTTLE_MS) {
+			lastMetricsWarnAt = now;
+			const reason = error instanceof Error ? error.message : "unknown error";
+			console.warn(
+				`[openobserve] metrics snapshot not delivered (${metricsFailures} in a row): ${reason}`,
+			);
+		}
+	} finally {
+		metricsInFlight = false;
 	}
 }
 
@@ -621,8 +853,23 @@ export function shipRequestRecord(record: Record<string, unknown>): void {
  */
 export function resetWarnThrottleForTests(lastWarnedAt = 0): void {
 	lastWarnAt = lastWarnedAt - WARN_THROTTLE_MS - 1;
+	lastMetricsWarnAt = lastWarnedAt - WARN_THROTTLE_MS - 1;
 	warnsSuppressed = 0;
 	warnedBadLevels.clear();
+}
+
+/**
+ * Test seam: start the counters and the run identity again. They are
+ * module-level and cumulative by design, so without this every count a test
+ * asserts would depend on which tests ran before it.
+ */
+export function resetMetricsForTests(): void {
+	logBuffer.counters = emptyCounters();
+	requestBuffer.counters = emptyCounters();
+	runId = crypto.randomUUID();
+	runStartedAt = Date.now();
+	metricsFailures = 0;
+	metricsInFlight = false;
 }
 
 /** Test seam: buffered counts, without exposing the records. */

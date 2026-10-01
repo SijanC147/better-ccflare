@@ -37,6 +37,8 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				user: settings?.user ?? "",
 				logStream: settings?.logStream ?? "better_ccflare_logs",
 				requestStream: settings?.requestStream ?? "better_ccflare_requests",
+				metricsStream:
+					settings?.metricsStream ?? "better_ccflare_exporter_metrics",
 				shipPayloads: settings?.shipPayloads ?? false,
 				logMinLevel: settings?.logMinLevel ?? "INFO",
 				tokenSet: config.hasOpenObserveToken(),
@@ -57,6 +59,7 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				token?: unknown;
 				logStream?: unknown;
 				requestStream?: unknown;
+				metricsStream?: unknown;
 				shipPayloads?: unknown;
 				logMinLevel?: unknown;
 			};
@@ -85,6 +88,21 @@ export function createOpenObserveConfigHandlers(config: Config) {
 			}
 			if (typeof body.shipPayloads !== "boolean") {
 				return errorResponse(BadRequest("shipPayloads must be a boolean"));
+			}
+
+			// Absent leaves the stored stream alone, the same posture as the level
+			// below rather than the required strings above: a dashboard built
+			// before this field existed sends the rest of the form, and must still
+			// be able to save. Empty falls back to the default like its siblings.
+			let metricsStream =
+				config.getOpenObserveSettings()?.metricsStream ??
+				"better_ccflare_exporter_metrics";
+			if (body.metricsStream !== undefined) {
+				if (typeof body.metricsStream !== "string") {
+					return errorResponse(BadRequest("metricsStream must be a string"));
+				}
+				metricsStream =
+					body.metricsStream.trim() || "better_ccflare_exporter_metrics";
 			}
 
 			// Absent leaves the stored level alone, the same posture as the token:
@@ -118,6 +136,7 @@ export function createOpenObserveConfigHandlers(config: Config) {
 				user: strings.user,
 				logStream: strings.logStream || "better_ccflare_logs",
 				requestStream: strings.requestStream || "better_ccflare_requests",
+				metricsStream,
 				shipPayloads: body.shipPayloads,
 				logMinLevel,
 			});

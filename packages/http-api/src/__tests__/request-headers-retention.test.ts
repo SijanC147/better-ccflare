@@ -200,6 +200,7 @@ describe("headers-only request storage persists a readable header set (SB23-2572
 			token: "not-a-real-token",
 			logStream: "better_ccflare_logs",
 			requestStream: OO_REQUEST_STREAM,
+			metricsStream: "",
 			shipPayloads: true,
 			logMinLevel: "INFO",
 		}));
@@ -402,6 +403,7 @@ describe("headers-only request storage persists a readable header set (SB23-2572
 			token: "not-a-real-token",
 			logStream: "better_ccflare_logs",
 			requestStream: OO_REQUEST_STREAM,
+			metricsStream: "",
 			shipPayloads: true,
 			logMinLevel: "INFO",
 		};
