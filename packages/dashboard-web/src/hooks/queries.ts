@@ -57,14 +57,18 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
  * warm, so this only has to read it; per the convention in this file it does
  * not poll in a hidden tab.
  */
-export const useServiceStatus = () => {
-	return useQuery({
+export function serviceStatusQueryOptions() {
+	return {
 		queryKey: queryKeys.serviceStatus(),
 		queryFn: () => api.getServiceStatus(),
 		staleTime: 60_000,
 		refetchInterval: 120_000,
 		refetchIntervalInBackground: false,
-	});
+	};
+}
+
+export const useServiceStatus = () => {
+	return useQuery(serviceStatusQueryOptions());
 };
 
 export const useStorageInfo = (refetchInterval?: number) => {
@@ -982,8 +986,8 @@ export const useDiscoverProjects = () => {
 	});
 };
 
-export const useAlerts = () => {
-	return useQuery({
+export function alertsQueryOptions() {
+	return {
 		queryKey: queryKeys.insightsAlerts(),
 		queryFn: async () => {
 			const res = await api.getAlerts(200);
@@ -992,7 +996,11 @@ export const useAlerts = () => {
 		staleTime: 15_000,
 		refetchInterval: 30_000,
 		refetchIntervalInBackground: false,
-	});
+	};
+}
+
+export const useAlerts = () => {
+	return useQuery(alertsQueryOptions());
 };
 
 /**
