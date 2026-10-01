@@ -755,6 +755,8 @@ describe("check-optional-chain-silent-skip", () => {
 		["not.toBeOneOf a list without undefined", ["expect(row).toBeDefined();", "expect(row?.x).not.toBeOneOf([1, 2]);"]],
 		["toContainKeys([])", ["expect(row).toBeDefined();", "expect(row?.x).toContainKeys([]);"]],
 		["not.toContainKeys a non-empty list", ["expect(row).toBeDefined();", 'expect(row?.x).not.toContainKeys(["a"]);']],
+		// PR #295's reviewer: a literal undefined decides it whatever the other elements hold.
+		["toBeOneOf a list holding undefined and an unfixed element", ["expect(row).toBeDefined();", "expect(row?.x).toBeOneOf([undefined, other]);"]],
 	];
 
 	for (const [matcher, body] of argumentReported) {
@@ -805,6 +807,8 @@ describe("check-optional-chain-silent-skip", () => {
 		["a stored function whose name an inner const rebinds", ["const act = () => {", "\tsink?.flush();", "};", "{", "\tconst act = () => {};", "\texpect(act).toThrow();", "}"]],
 		["a stored function whose name a callback parameter rebinds", ["const act = () => {", "\tsink?.flush();", "};", "[() => {}].forEach((act) => expect(act).toThrow());"]],
 		["a function stored under a let", ["let act = () => {", "\tsink?.flush();", "};", "expect(act).toThrow();"]],
+		// PR #295's reviewer: a loop binding is a different `act`.
+		["a stored function whose name a for-of binding rebinds", ["const act = () => {", "\tsink?.flush();", "};", "for (const act of [() => {}]) expect(act).toThrow();"]],
 	];
 
 	for (const [position, body] of heldButSilent) {
@@ -823,6 +827,9 @@ describe("check-optional-chain-silent-skip", () => {
 		["a stored async function that expect holds for rejects", ["const act = async () => {", "\tawait sink?.close();", "};", "await expect(act).rejects.toThrow();"]],
 		["a stored function held by expect inside a nested test", ["const act = () => {", "\tsink?.flush();", "};", 'test("inner", () => {', "\texpect(act).toThrow();", "});"]],
 		["a statement inside a function expect holds for rejects.not.toThrow", ["await expect(async () => {", "\tawait sink?.close();", "}).rejects.not.toThrow();"]],
+		// PR #295's reviewer: both snapshot forms fail when the function does not throw.
+		["a statement inside a function expect holds for toThrowErrorMatchingSnapshot", ["expect(() => {", "\tsink?.flush();", "}).toThrowErrorMatchingSnapshot();"]],
+		["a statement inside a function expect holds for toThrowErrorMatchingInlineSnapshot", ["expect(() => {", "\tsink?.flush();", "}).toThrowErrorMatchingInlineSnapshot();"]],
 	];
 
 	for (const [position, body] of heldAndObserved) {
@@ -832,6 +839,15 @@ describe("check-optional-chain-silent-skip", () => {
 			expect(exitCode).toBe(0);
 		});
 	}
+
+	test("does not match two reads at a call-computed index as one value", () => {
+		// PR #295's reviewer: `arr[next()]` twice is two indices, the same argument as N4.
+		const { dir } = sb23_2498Fixture(["expect(arr[next()]).toBeDefined();", "arr[next()]?.clear();"]);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(stderr).toBe("");
+		expect(stdout).toContain("0 guarded optional chains, 0 offences");
+		expect(exitCode).toBe(0);
+	});
 
 	test("does not match two calls with identical text as one value", () => {
 		// N4 from PR #288's review: each call returns a new value, which is why a `const`

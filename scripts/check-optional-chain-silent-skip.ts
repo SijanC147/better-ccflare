@@ -441,6 +441,11 @@ type ResolveAlias = (name: string) => string | null | undefined;
  * so a guard written in one spelling covers a chain written in another. `viaAlias` records
  * whether a `const` alias was followed, so the survey can split that axis out.
  */
+function containsCall(node: ts.Node): boolean {
+	if (ts.isCallExpression(node) || ts.isNewExpression(node)) return true;
+	return ts.forEachChild(node, containsCall) === true;
+}
+
 function canonicalKey(
 	expr: ts.Expression,
 	resolveAlias: ResolveAlias,
@@ -467,6 +472,8 @@ function canonicalKey(
 					: `${walk(e.expression)}[${JSON.stringify(key.text)}]`;
 			}
 			if (ts.isNumericLiteral(key)) return `${walk(e.expression)}[${Number(key.text)}]`;
+			// `arr[next()]` read twice is two reads at two indices. PR #295's reviewer.
+			if (containsCall(key)) hasCall = true;
 			return `${walk(e.expression)}[${normalise(key.getText())}]`;
 		}
 		if (ts.isCallExpression(e)) {
@@ -879,6 +886,14 @@ function isValueDiscarded(node: ts.Node, readsThroughMembers = false): boolean {
  * every matcher that never calls the function (`toBeFunction`, `toBeDefined`). So only those
  * two shapes observe a skip.
  */
+const THROW_MATCHERS = new Set([
+	"toThrow",
+	"toThrowError",
+	// PR #295's reviewer: both fail when the function does not throw, measured on Bun 1.4.2.
+	"toThrowErrorMatchingSnapshot",
+	"toThrowErrorMatchingInlineSnapshot",
+]);
+
 function expectObservesSkip(expectCall: ts.CallExpression): boolean {
 	let node: ts.Node = expectCall;
 	let negated = false;
@@ -890,7 +905,7 @@ function expectObservesSkip(expectCall: ts.CallExpression): boolean {
 		else if (name !== "resolves") {
 			const call = node.parent.parent;
 			if (call === undefined || !ts.isCallExpression(call) || call.expression !== node.parent) return false;
-			return rejects || (!negated && (name === "toThrow" || name === "toThrowError"));
+			return rejects || (!negated && THROW_MATCHERS.has(name));
 		}
 		node = node.parent;
 	}
@@ -920,6 +935,11 @@ function declaresName(scope: ts.Node, name: string): boolean {
 	}
 	if (ts.isCatchClause(scope)) {
 		return scope.variableDeclaration !== undefined && binds(scope.variableDeclaration.name);
+	}
+	// `for (const act of fns) expect(act).toThrow()` binds a different `act`. PR #295's reviewer.
+	if (ts.isForOfStatement(scope) || ts.isForInStatement(scope) || ts.isForStatement(scope)) {
+		const init = scope.initializer;
+		return init !== undefined && ts.isVariableDeclarationList(init) && init.declarations.some((d) => binds(d.name));
 	}
 	const statements =
 		ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) || ts.isCaseClause(scope) || ts.isDefaultClause(scope)

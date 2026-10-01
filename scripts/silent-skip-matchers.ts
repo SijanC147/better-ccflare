@@ -139,8 +139,9 @@ function isKnown(shape: ArgShape): boolean {
  *     behaviour PR #288 shipped; `expect(x?.y).not.toBe(expected)` is reported on that basis.
  *   - `toBeTypeOf("undefined")` passes on `undefined`; any other type string does not. A
  *     non-literal type is `unknown`.
- *   - `toBeOneOf([...])` passes when the literal array holds `undefined`. An array with an
- *     element the source does not fix, or a non-literal argument, is `unknown`.
+ *   - `toBeOneOf([...])` passes when the literal array holds a literal `undefined`, whatever
+ *     else it holds. Otherwise an element the source does not fix, or a non-literal argument,
+ *     is `unknown`.
  *   - `toContainKeys([])` passes on `undefined`; a non-empty literal array does not. A
  *     non-literal argument is `unknown`.
  *   - `toSatisfy(fn)` is always `unknown`.
@@ -156,8 +157,11 @@ export function matcherVerdictOnUndefined(name: string, negated: boolean, args: 
 		return flip(one.value === "undefined" ? "tolerates" : "rejects", negated);
 	}
 	if (name === "toBeOneOf") {
-		if (one?.kind !== "array" || !isKnown(one)) return "unknown";
-		return flip(one.elements.some((e) => e.kind === "undefined") ? "tolerates" : "rejects", negated);
+		if (one?.kind !== "array") return "unknown";
+		// A literal `undefined` element decides it whatever the other elements hold.
+		if (one.elements.some((e) => e.kind === "undefined")) return flip("tolerates", negated);
+		if (!isKnown(one)) return "unknown";
+		return flip("rejects", negated);
 	}
 	if (name === "toContainKeys") {
 		if (one?.kind !== "array") return "unknown";

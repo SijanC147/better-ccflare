@@ -117,6 +117,12 @@ const checker = program.getTypeChecker();
  * directive in a project `.d.ts` module does not make it a default library on TypeScript 6.0.2,
  * where the check is membership of the program's lib files, measured the same day.
  *
+ * One configuration this does not cover, found by PR #295's reviewer: a project with `noLib:
+ * true` and a hand-written lib file has no default-library file at all, so the real global
+ * `Object` would be reported. This repository does not use `noLib`; comparing against the
+ * symbol `checker.resolveName("Object", ...)` returns would cover both, and is the change to
+ * make if one ever does.
+ *
  * `.some` rather than `.every` on purpose. An augmented global `Object` has declarations in
  * `lib.es5.d.ts` and in the project's own file, and the merged type still accepts primitives,
  * so it must stay silent.
