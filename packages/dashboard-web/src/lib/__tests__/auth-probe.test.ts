@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { HttpError } from "@better-ccflare/http-common";
-import { authProbeFailure } from "../auth-probe";
+import {
+	type AuthProbeDeps,
+	authProbeFailure,
+	runAuthProbe,
+} from "../auth-probe";
 
 describe("authProbeFailure", () => {
 	it("asks for a key on 401, with no message of its own", () => {
@@ -39,5 +43,78 @@ describe("authProbeFailure", () => {
 			reprompt: false,
 		});
 		expect(authProbeFailure(undefined)).toEqual({ reprompt: false });
+	});
+});
+
+describe("runAuthProbe", () => {
+	const recorder = (
+		probe: () => Promise<unknown>,
+		storedKey: boolean,
+	): { deps: AuthProbeDeps; calls: string[] } => {
+		const calls: string[] = [];
+		return {
+			calls,
+			deps: {
+				probe,
+				hasStoredKey: () => storedKey,
+				clearApiKey: () => calls.push("clearApiKey"),
+				setIsAuthenticated: (v) => calls.push(`isAuthenticated=${v}`),
+				setAuthRequired: (v) => calls.push(`authRequired=${v}`),
+				setAuthError: (v) => calls.push(`authError=${v}`),
+				setShowAuthDialog: (v) => calls.push(`showAuthDialog=${v}`),
+			},
+		};
+	};
+
+	it("authenticates with a stored key that the server accepts", async () => {
+		const { deps, calls } = recorder(async () => ({}), true);
+		await runAuthProbe(deps);
+		expect(calls).toEqual(["isAuthenticated=true", "authRequired=true"]);
+	});
+
+	it("authenticates with auth off and no stored key", async () => {
+		const { deps, calls } = recorder(async () => ({}), false);
+		await runAuthProbe(deps);
+		expect(calls).toEqual(["isAuthenticated=true", "authRequired=false"]);
+	});
+
+	it("opens the dialog with no message on 401", async () => {
+		const { deps, calls } = recorder(async () => {
+			throw new HttpError(401, "Invalid API key");
+		}, true);
+		await runAuthProbe(deps);
+		expect(calls).toEqual([
+			"clearApiKey",
+			"authError=null",
+			"authRequired=true",
+			"showAuthDialog=true",
+		]);
+	});
+
+	// The case SB23-3746 created: a stored api-only key now gets 403. Before
+	// the probe handled it, none of these calls happened and the dashboard
+	// painted an empty shell with no dialog.
+	it("opens the dialog with the server's reason on 403", async () => {
+		const { deps, calls } = recorder(async () => {
+			throw new HttpError(
+				403,
+				"Unauthorized: This API key does not have dashboard access",
+			);
+		}, true);
+		await runAuthProbe(deps);
+		expect(calls).toEqual([
+			"clearApiKey",
+			"authError=Unauthorized: This API key does not have dashboard access",
+			"authRequired=true",
+			"showAuthDialog=true",
+		]);
+	});
+
+	it("keeps the key and opens nothing on a server error", async () => {
+		const { deps, calls } = recorder(async () => {
+			throw new HttpError(500, "boom");
+		}, true);
+		await runAuthProbe(deps);
+		expect(calls).toEqual([]);
 	});
 });

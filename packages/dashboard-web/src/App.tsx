@@ -33,7 +33,7 @@ import { SettingsTab } from "./components/SettingsTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { NotificationsProvider } from "./contexts/notifications-context";
 import { ThemeProvider } from "./contexts/theme-context";
-import { authProbeFailure } from "./lib/auth-probe";
+import { runAuthProbe } from "./lib/auth-probe";
 import { cn } from "./lib/utils";
 import "./index.css";
 
@@ -276,21 +276,15 @@ export function App() {
 			// Always verify with a test request, even if we have a stored key
 			// The stored key might be invalid, deleted, or expired
 			try {
-				await api.getStats();
-				// If successful, we're authenticated (either no auth required, or valid key)
-				setIsAuthenticated(true);
-				// Auth is required only if we got here with a stored key
-				setAuthRequired(!!api.getApiKey());
-			} catch (error) {
-				// A 401 or 403 means this key cannot use the dashboard: ask for one
-				const failure = authProbeFailure(error);
-				if (failure.reprompt) {
-					// Clear the stored key that was refused
-					api.clearApiKey();
-					setAuthError(failure.message);
-					setAuthRequired(true);
-					setShowAuthDialog(true);
-				}
+				await runAuthProbe({
+					probe: () => api.getStats(),
+					hasStoredKey: () => !!api.getApiKey(),
+					clearApiKey: () => api.clearApiKey(),
+					setIsAuthenticated,
+					setAuthRequired,
+					setAuthError,
+					setShowAuthDialog,
+				});
 			} finally {
 				setIsCheckingAuth(false);
 			}

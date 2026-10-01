@@ -24,3 +24,40 @@ export function authProbeFailure(
 	if (error.status === 403) return { reprompt: true, message: error.message };
 	return { reprompt: false };
 }
+
+export interface AuthProbeDeps {
+	/** The probe request; any authenticated /api read. App uses GET /api/stats. */
+	probe: () => Promise<unknown>;
+	hasStoredKey: () => boolean;
+	clearApiKey: () => void;
+	setIsAuthenticated: (value: boolean) => void;
+	setAuthRequired: (value: boolean) => void;
+	setAuthError: (value: string | null) => void;
+	setShowAuthDialog: (value: boolean) => void;
+}
+
+/**
+ * The dashboard's load-time auth check: the body of App's `checkAuth` effect,
+ * kept here so it runs under test without mounting App. App imports every tab
+ * and renders the key dialog through a Radix portal, which stops rendering
+ * once another test file in the same process has loaded Radix, so a mounted
+ * App test would pass alone and fail in the full suite.
+ */
+export async function runAuthProbe(deps: AuthProbeDeps): Promise<void> {
+	try {
+		await deps.probe();
+		// Authenticated: either auth is off, or the stored key is valid
+		deps.setIsAuthenticated(true);
+		// Auth is required only if we got here with a stored key
+		deps.setAuthRequired(deps.hasStoredKey());
+	} catch (error) {
+		const failure = authProbeFailure(error);
+		if (failure.reprompt) {
+			// Clear the stored key that was refused
+			deps.clearApiKey();
+			deps.setAuthError(failure.message);
+			deps.setAuthRequired(true);
+			deps.setShowAuthDialog(true);
+		}
+	}
+}
