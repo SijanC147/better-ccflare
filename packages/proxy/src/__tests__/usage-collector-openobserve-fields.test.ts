@@ -54,7 +54,7 @@ import {
 	flushOpenObserve,
 	type OpenObserveSettings,
 } from "@better-ccflare/logger";
-import type { RequestResponse } from "@better-ccflare/types";
+import { NO_ACCOUNT_ID, type RequestResponse } from "@better-ccflare/types";
 import { UsageCollector } from "../usage-collector";
 import type { EndMessage, StartMessage } from "../worker-messages";
 
@@ -173,7 +173,10 @@ describe("UsageCollector - token fields on the record shipped to OpenObserve", (
 		shipped = [];
 	});
 
-	function makeStart(requestId: string): StartMessage {
+	function makeStart(
+		requestId: string,
+		overrides: Partial<StartMessage> = {},
+	): StartMessage {
 		return {
 			type: "start",
 			messageId: `msg-${requestId}`,
@@ -205,6 +208,7 @@ describe("UsageCollector - token fields on the record shipped to OpenObserve", (
 			apiKeyName: null,
 			retryAttempt: 0,
 			failoverAttempts: 0,
+			...overrides,
 		};
 	}
 
@@ -221,8 +225,9 @@ describe("UsageCollector - token fields on the record shipped to OpenObserve", (
 		requestId: string,
 		drive: () => void,
 		end: Partial<EndMessage> = {},
+		start: Partial<StartMessage> = {},
 	): Promise<Record<string, unknown>> {
-		collector.handleStart(makeStart(requestId));
+		collector.handleStart(makeStart(requestId, start));
 		drive();
 		await collector.handleEnd({
 			type: "end",
@@ -351,5 +356,74 @@ describe("UsageCollector - token fields on the record shipped to OpenObserve", (
 		expect(record.id).toBe(requestId);
 		expect(record.success).toBe(false);
 		expect(record.statusCode).toBe(200);
+	});
+
+	// SB23-1760: the account that served a request, so one request stream can
+	// be split by account. The id already ships as accountUsed; these two are
+	// what the start message carries beside it.
+	describe("account attributes", () => {
+		test("a request an account served ships that account's name and provider", async () => {
+			const requestId = "openobserve-account";
+			const record = await shipOne(
+				requestId,
+				() => {},
+				{},
+				{
+					accountId: "acct-work-codex",
+					accountName: "work-codex",
+					providerName: "codex",
+				},
+			);
+
+			expect(record.accountUsed).toBe("acct-work-codex");
+			expect(record.accountName).toBe("work-codex");
+			expect(record.accountProvider).toBe("codex");
+		});
+
+		test("a request no account served ships neither, not the server's default provider", async () => {
+			// The start messages proxy.ts sends before any account is chosen carry
+			// accountId null and the server default as providerName. Shipping that
+			// provider would describe an account that does not exist.
+			const requestId = "openobserve-no-account";
+			const record = await shipOne(
+				requestId,
+				() => {},
+				{},
+				{ accountId: null, accountName: null, providerName: "anthropic" },
+			);
+
+			expect(record).not.toHaveProperty("accountName");
+			expect(record).not.toHaveProperty("accountProvider");
+		});
+
+		test("the no_account sentinel is treated as no account", async () => {
+			const requestId = "openobserve-sentinel-account";
+			const record = await shipOne(
+				requestId,
+				() => {},
+				{},
+				{
+					accountId: NO_ACCOUNT_ID,
+					accountName: "should-not-ship",
+					providerName: "anthropic",
+				},
+			);
+
+			expect(record).not.toHaveProperty("accountName");
+			expect(record).not.toHaveProperty("accountProvider");
+		});
+
+		test("an account with no name still ships its provider, and no empty name", async () => {
+			const requestId = "openobserve-unnamed-account";
+			const record = await shipOne(
+				requestId,
+				() => {},
+				{},
+				{ accountId: "acct-unnamed", accountName: null, providerName: "zai" },
+			);
+
+			expect(record.accountProvider).toBe("zai");
+			expect(record).not.toHaveProperty("accountName");
+		});
 	});
 });

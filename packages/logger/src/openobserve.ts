@@ -802,7 +802,7 @@ function metricsRecords(
  */
 export async function shipMetricsSnapshot(): Promise<void> {
 	const settings = currentSettings();
-	if (!settings || !settings.metricsStream) return;
+	if (!settings?.metricsStream) return;
 	// A post still waiting on a hung endpoint is not joined by a second one.
 	// REQUEST_TIMEOUT_MS is well under the interval, so this only bites when a
 	// test or a shutdown calls in between ticks.

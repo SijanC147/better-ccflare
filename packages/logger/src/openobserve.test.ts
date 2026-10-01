@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { logBus } from "./log-bus";
 import {
 	configureOpenObserve,
@@ -7,7 +7,9 @@ import {
 	openObserveBufferSizes,
 	openObserveEnabled,
 	openObserveShipsPayloads,
+	resetMetricsForTests,
 	resetWarnThrottleForTests,
+	shipMetricsSnapshot,
 	shipRequestRecord,
 } from "./openobserve";
 
@@ -914,5 +916,351 @@ describe("openobserve retry", () => {
 
 		expect(captures).toHaveLength(2);
 		expect((captures[1].body as { id: string }[])[0].id).toBe("req-2");
+	});
+});
+
+const METRICS_STREAM = "better_ccflare_exporter_metrics";
+
+type MetricsRecord = Record<string, unknown> & {
+	stream_kind: "logs" | "requests";
+};
+
+/** Every metrics post captured, in order. */
+function metricsPosts(captures: Capture[]): MetricsRecord[][] {
+	return captures
+		.filter((c) => c.url.includes(METRICS_STREAM))
+		.map((c) => c.body as MetricsRecord[]);
+}
+
+function kind(
+	snapshot: MetricsRecord[],
+	streamKind: "logs" | "requests",
+): MetricsRecord {
+	const record = snapshot.find((r) => r.stream_kind === streamKind);
+	if (!record) throw new Error(`no ${streamKind} record in the snapshot`);
+	return record;
+}
+
+/** Every record accepted is shipped, dropped for a named reason, or held. */
+function balances(record: MetricsRecord): boolean {
+	const n = (key: string) => record[key] as number;
+	return (
+		n("enqueued_records") ===
+		n("shipped_records") +
+			n("evicted_records") +
+			n("failed_records") +
+			n("exhausted_records") +
+			n("discarded_records") +
+			n("buffered_records") +
+			n("in_flight_records")
+	);
+}
+
+/**
+ * SB23-1760: the exporter's own counters, shipped to a third stream over the
+ * same bulk endpoint. The constraint is the same one retry was held to: no
+ * second retention path. A snapshot is built when it is sent and posted once;
+ * the counters are cumulative, so the next snapshot carries whatever a lost
+ * one would have.
+ */
+describe("openobserve metrics", () => {
+	test("posts one record per record stream to the metrics stream, with the counts so far", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings());
+
+		logBus.emit("log", { ts: 1, level: "INFO", msg: "one" });
+		logBus.emit("log", { ts: 2, level: "ERROR", msg: "two" });
+		logBus.emit("log", { ts: 3, level: "DEBUG", msg: "below the floor" });
+		shipRequestRecord({ id: "req-1" });
+		shipRequestRecord({ id: "req-2" });
+		shipRequestRecord({ id: "req-3" });
+		await flush();
+		await shipMetricsSnapshot();
+
+		const metricsCaptures = captures.filter((c) =>
+			c.url.includes(METRICS_STREAM),
+		);
+		expect(metricsCaptures).toHaveLength(1);
+		expect(metricsCaptures[0].url).toBe(
+			`http://openobserve.invalid:5080/api/default/${METRICS_STREAM}/_json`,
+		);
+		const [snapshot] = metricsPosts(captures);
+		expect(snapshot).toHaveLength(2);
+
+		const logs = kind(snapshot, "logs");
+		expect(logs.stream).toBe("better_ccflare_logs");
+		expect(logs.enqueued_records).toBe(2);
+		expect(logs.shipped_records).toBe(2);
+		expect(logs.shipped_batches).toBe(1);
+		expect(logs.filtered_records).toBe(1);
+		expect(logs.buffered_records).toBe(0);
+
+		const requests = kind(snapshot, "requests");
+		expect(requests.stream).toBe("better_ccflare_requests");
+		expect(requests.enqueued_records).toBe(3);
+		expect(requests.shipped_records).toBe(3);
+		expect(requests.shipped_batches).toBe(1);
+		expect(requests.filtered_records).toBe(0);
+
+		expect(balances(logs)).toBe(true);
+		expect(balances(requests)).toBe(true);
+	});
+
+	test("carries counts and stream names only, never the endpoint or the credentials", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() =>
+			settings({ token: "metrics-secret-token", user: "metrics-user" }),
+		);
+
+		shipRequestRecord({ id: "req-1", accountName: "should-not-leak" });
+		await flush();
+		await shipMetricsSnapshot();
+
+		const [snapshot] = metricsPosts(captures);
+		for (const record of snapshot) {
+			expect(Object.keys(record).sort()).toEqual(
+				[
+					"_timestamp",
+					"service",
+					"run_id",
+					"run_started_at",
+					"uptime_ms",
+					"stream_kind",
+					"stream",
+					"enqueued_records",
+					"shipped_records",
+					"shipped_batches",
+					"deferred_records",
+					"evicted_records",
+					"rejected_records",
+					"failed_records",
+					"exhausted_records",
+					"discarded_records",
+					"filtered_records",
+					"buffered_records",
+					"buffered_bytes",
+					"in_flight_records",
+					"consecutive_failures",
+					"snapshot_failures",
+				].sort(),
+			);
+		}
+		const wire = JSON.stringify(snapshot);
+		expect(wire).not.toContain("metrics-secret-token");
+		expect(wire).not.toContain("metrics-user");
+		expect(wire).not.toContain("openobserve.invalid");
+		expect(wire).not.toContain("should-not-leak");
+	});
+
+	test("a failed snapshot is counted and gone: never buffered, never retried", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings());
+		// Owns the clock so the metrics warning window starts open: an earlier
+		// test's clock can leave its stamp in the future, which suppresses the
+		// warning asserted on below.
+		fakeClock();
+
+		shipRequestRecord({ id: "req-1" });
+		await flush();
+
+		captureFetch(captures, 503);
+		const warnings = await withSilencedWarnings(() => shipMetricsSnapshot());
+		expect(metricsPosts(captures)).toHaveLength(1);
+		expect(warnings.some((w) => w.includes("metrics snapshot"))).toBe(true);
+
+		// Nothing was put anywhere: the record buffers are untouched and a flush
+		// has nothing of the snapshot's to send.
+		expect(openObserveBufferSizes()).toEqual({ logs: 0, requests: 0 });
+		await flush();
+		expect(metricsPosts(captures)).toHaveLength(1);
+
+		// The next snapshot carries the totals the lost one would have, plus the
+		// fact that one was lost.
+		captureFetch(captures, 200);
+		shipRequestRecord({ id: "req-2" });
+		await flush();
+		await shipMetricsSnapshot();
+
+		const snapshots = metricsPosts(captures);
+		expect(snapshots).toHaveLength(2);
+		const requests = kind(snapshots[1], "requests");
+		expect(requests.shipped_records).toBe(2);
+		expect(requests.snapshot_failures).toBe(1);
+
+		// And a delivered snapshot clears it.
+		await shipMetricsSnapshot();
+		expect(kind(metricsPosts(captures)[2], "requests").snapshot_failures).toBe(
+			0,
+		);
+	});
+
+	test("counts outlive the loss warning that zeroes the reporting debt", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings());
+		fakeClock();
+
+		// Five over the 1000-record bound: the oldest five are evicted on enqueue.
+		for (let i = 0; i < 1005; i++) shipRequestRecord({ id: `req-${i}` });
+		const warnings = await withSilencedWarnings(() => flush());
+		expect(
+			warnings.some((w) =>
+				w.includes("dropped 5 record(s) for stream better_ccflare_requests"),
+			),
+		).toBe(true);
+
+		await shipMetricsSnapshot();
+		await shipMetricsSnapshot();
+		const snapshots = metricsPosts(captures);
+		for (const snapshot of snapshots) {
+			const requests = kind(snapshot, "requests");
+			expect(requests.evicted_records).toBe(5);
+			expect(requests.enqueued_records).toBe(1005);
+			expect(requests.shipped_records).toBe(1000);
+			expect(balances(requests)).toBe(true);
+		}
+	});
+
+	test("every accepted record is accounted for across deferral, exhaustion, failure and discard", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		configureOpenObserve(() => settings());
+		const clock = fakeClock();
+
+		// Three records fail six times: five deferrals each, then dropped.
+		captureFetch(captures, 503);
+		for (let i = 0; i < 3; i++) shipRequestRecord({ id: `retry-${i}` });
+		await withSilencedWarnings(async () => {
+			for (let attempt = 0; attempt < 6; attempt++) {
+				await flush();
+				clock.advance(61_000);
+			}
+		});
+
+		// Two refused outright by a non-retryable status.
+		captureFetch(captures, 400);
+		for (let i = 0; i < 2; i++) shipRequestRecord({ id: `bad-${i}` });
+		await withSilencedWarnings(() => flush());
+
+		// Four shipped.
+		captureFetch(captures, 200);
+		for (let i = 0; i < 4; i++) shipRequestRecord({ id: `ok-${i}` });
+		await flush();
+
+		// One still buffered when the exporter is turned off and on again.
+		shipRequestRecord({ id: "discarded" });
+		configureOpenObserve(null);
+		configureOpenObserve(() => settings());
+		// And one rejected at enqueue, which never enters the identity.
+		shipRequestRecord({ id: "unserializable", n: 1n });
+
+		await shipMetricsSnapshot();
+		const requests = kind(metricsPosts(captures)[0], "requests");
+		expect(requests.deferred_records).toBe(15);
+		expect(requests.exhausted_records).toBe(3);
+		expect(requests.failed_records).toBe(2);
+		expect(requests.shipped_records).toBe(4);
+		expect(requests.discarded_records).toBe(1);
+		expect(requests.rejected_records).toBe(1);
+		expect(requests.enqueued_records).toBe(10);
+		expect(requests.buffered_records).toBe(0);
+		expect(balances(requests)).toBe(true);
+	});
+
+	test("an empty metrics stream sends no snapshot", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings({ metricsStream: "" }));
+
+		shipRequestRecord({ id: "req-1" });
+		await flush();
+		await shipMetricsSnapshot();
+
+		expect(metricsPosts(captures)).toHaveLength(0);
+		expect(captures).toHaveLength(1);
+	});
+
+	test("one run id per process, and uptime measured from the run's start", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		configureOpenObserve(() => settings());
+		const clock = fakeClock();
+
+		await shipMetricsSnapshot();
+		clock.advance(90_000);
+		await shipMetricsSnapshot();
+
+		const [first, second] = metricsPosts(captures).map((s) => kind(s, "logs"));
+		expect(typeof first.run_id).toBe("string");
+		expect(second.run_id).toBe(first.run_id);
+		expect(second.run_started_at).toBe(first.run_started_at);
+		expect((second._timestamp as number) - (first._timestamp as number)).toBe(
+			90_000,
+		);
+		expect(second.uptime_ms).toBe(
+			(second._timestamp as number) - (second.run_started_at as number),
+		);
+	});
+
+	test("snapshots run on their own interval, with nothing buffered, and stop when turned off", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures);
+		jest.useFakeTimers();
+		try {
+			// Configured inside the fake clock so the interval is created on it.
+			configureOpenObserve(() => settings());
+			expect(openObserveBufferSizes()).toEqual({ logs: 0, requests: 0 });
+
+			jest.advanceTimersByTime(60_000);
+			expect(metricsPosts(captures)).toHaveLength(1);
+			jest.advanceTimersByTime(60_000);
+			expect(metricsPosts(captures)).toHaveLength(2);
+
+			configureOpenObserve(null);
+			jest.advanceTimersByTime(180_000);
+			expect(metricsPosts(captures)).toHaveLength(2);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+});
+
+describe("openobserve attempt-limit drop", () => {
+	// PR #144 left this counted twice: once in the attempt-limit warning and
+	// again later as "under buffer pressure", which it was not.
+	test("a drop reported by its own warning is not reported again as buffer pressure", async () => {
+		resetMetricsForTests();
+		const captures: Capture[] = [];
+		captureFetch(captures, 503);
+		configureOpenObserve(() => settings());
+		const clock = fakeClock();
+
+		shipRequestRecord({ id: "req-1" });
+		const warnings = await withSilencedWarnings(async () => {
+			for (let attempt = 0; attempt < 6; attempt++) {
+				await flush();
+				clock.advance(61_000);
+			}
+			shipRequestRecord({ id: "req-2" });
+			captureFetch(captures, 200);
+			await flush();
+			clock.advance(61_000);
+			await flush();
+		});
+
+		expect(warnings.some((w) => w.includes("after 6 attempts"))).toBe(true);
+		expect(warnings.some((w) => w.includes("under buffer pressure"))).toBe(
+			false,
+		);
 	});
 });

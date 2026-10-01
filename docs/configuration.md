@@ -10,6 +10,7 @@ This guide covers all configuration options for better-ccflare, including file-b
 - [Config File Permissions and Trust](#config-file-permissions-and-trust)
 - [Configuration Options](#configuration-options)
 - [Environment Variables](#environment-variables)
+- [OpenObserve Shipping](#openobserve-shipping)
 - [Model Catalog](#model-catalog)
 - [Editable Provider Model Defaults](#editable-provider-model-defaults)
 - [Force Account Model](#force-account-model)
@@ -231,6 +232,34 @@ These environment variables are not stored in the configuration file and must be
 | `USAGE_POLL_INTERVAL_MS` | How often the usage poller refreshes each account's quota windows from its provider's free usage endpoint (Anthropic `/api/oauth/usage`, Codex `chatgpt.com/backend-api/wham/usage`, xAI, MiniMax, …). Clamped to 10 s – 60 min. Same as the `usage_poll_interval_ms` config file field; env var takes precedence | `90000` (90 s) | `USAGE_POLL_INTERVAL_MS=60000` |
 | `CCFLARE_CODEX_MESSAGES_CONTINUATION` | Opt-in: let the Codex provider retain server-owned Responses continuation (`previous_response_id`) while serving `/v1/messages` clients, instead of replaying full translated history every turn. Requires an authenticated API key, a selected account, and a nonempty prompt cache key. State is partitioned by account, model, authenticated caller, session, and protocol; ambiguous, failed, expired, or cancelled turns never create or reuse a checkpoint, and the switch never changes model selection, fallback policy, or `store:false`. See [README](../README.md#claude-messages-continuation-on-codex-opt-in) for details | unset (off) | `CCFLARE_CODEX_MESSAGES_CONTINUATION=1` |
 | `CCFLARE_CODEX_MESSAGES_CONTINUATION_MODELS` | Restricts the above bridge to an exact, comma-separated allowlist of resolved model names. Unset enables all models (when the switch above is on); an empty string enables none | unset (all models) | `CCFLARE_CODEX_MESSAGES_CONTINUATION_MODELS=gpt-6-astra,gpt-5.6-sol` |
+
+## OpenObserve Shipping
+
+better-ccflare can ship application log lines, one record per proxied request,
+and its exporter's own counters to an OpenObserve instance over the plain JSON
+bulk endpoint (`POST {url}/api/{org}/{stream}/_json`). Setting the URL is the
+switch: with no URL nothing is shipped and no connection is opened. Every key is
+also settable from the dashboard's OpenObserve card and through
+`POST /api/config/openobserve`, and a change takes effect with no restart. The
+environment wins over the config file.
+
+| Config file field | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `openobserve_url` | `BETTER_CCFLARE_OPENOBSERVE_URL` | unset (off) | Base URL, e.g. `http://host:5080` |
+| `openobserve_org` | `BETTER_CCFLARE_OPENOBSERVE_ORG` | `default` | Organisation |
+| `openobserve_user` | `BETTER_CCFLARE_OPENOBSERVE_USER` | empty | Basic-auth user |
+| `openobserve_token` | `BETTER_CCFLARE_OPENOBSERVE_TOKEN` | empty | Basic-auth token. Never returned by the API |
+| `openobserve_log_stream` | `BETTER_CCFLARE_OPENOBSERVE_LOG_STREAM` | `better_ccflare_logs` | Application log lines |
+| `openobserve_request_stream` | `BETTER_CCFLARE_OPENOBSERVE_REQUEST_STREAM` | `better_ccflare_requests` | One record per proxied request |
+| `openobserve_metrics_stream` | `BETTER_CCFLARE_OPENOBSERVE_METRICS_STREAM` | `better_ccflare_exporter_metrics` | The exporter's own counters, one snapshot a minute |
+| `openobserve_ship_payloads` | `BETTER_CCFLARE_OPENOBSERVE_SHIP_PAYLOADS` | `false` | Whether request records carry request and response bodies |
+| `openobserve_log_min_level` | `BETTER_CCFLARE_OPENOBSERVE_LOG_MIN_LEVEL` | `INFO` | Lowest level shipped to the log stream: `DEBUG`, `INFO`, `WARN`, `ERROR` |
+
+An empty stream name falls back to its default, so a stream cannot be turned
+off on its own; turning the exporter off is unsetting the URL. The metrics
+stream is on by default, so an install upgraded with a URL already set starts a
+third stream on its first snapshot. What each stream holds, and what misleads
+people querying it, is in [`api-surface.md`](api-surface.md#what-the-openobserve-request-stream-holds).
 
 ## Outbound Proxy
 

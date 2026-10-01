@@ -211,8 +211,8 @@ export function OpenObserveCard() {
 							placeholder="better_ccflare_exporter_metrics"
 						/>
 						<p className="text-xs text-muted-foreground">
-							The exporter's own counters, posted once a minute: records shipped,
-							deferred for retry, evicted and dropped, per stream.
+							The exporter's own counters, posted once a minute: records
+							shipped, deferred for retry, evicted and dropped, per stream.
 						</p>
 					</div>
 				</div>
