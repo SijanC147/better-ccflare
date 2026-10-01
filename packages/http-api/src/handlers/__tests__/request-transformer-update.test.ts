@@ -11,7 +11,9 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import { DatabaseFactory } from "@better-ccflare/database";
 import { createAccountRequestTransformerUpdateHandler } from "../accounts";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-request-transformer-update.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-request-transformer-update-${process.pid}.db`;
 
 function cleanupDbFiles(): void {
 	for (const suffix of ["", "-wal", "-shm"]) {

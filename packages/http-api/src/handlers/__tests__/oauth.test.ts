@@ -340,7 +340,9 @@ mock.module("@better-ccflare/providers/qwen", () => ({
 	})),
 }));
 
-const CODEX_REAUTH_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-codex-reauth-handler.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const CODEX_REAUTH_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-codex-reauth-handler-${process.pid}.db`;
 
 describe("createCodexReauthHandler", () => {
 	let dbOps: DatabaseOperations;
@@ -348,8 +350,12 @@ describe("createCodexReauthHandler", () => {
 
 	beforeAll(async () => {
 		try {
-			if (existsSync(CODEX_REAUTH_DB_PATH)) {
-				unlinkSync(CODEX_REAUTH_DB_PATH);
+			for (const f of [
+				CODEX_REAUTH_DB_PATH,
+				`${CODEX_REAUTH_DB_PATH}-wal`,
+				`${CODEX_REAUTH_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -364,8 +370,12 @@ describe("createCodexReauthHandler", () => {
 	afterAll(async () => {
 		await dbOps.close();
 		try {
-			if (existsSync(CODEX_REAUTH_DB_PATH)) {
-				unlinkSync(CODEX_REAUTH_DB_PATH);
+			for (const f of [
+				CODEX_REAUTH_DB_PATH,
+				`${CODEX_REAUTH_DB_PATH}-wal`,
+				`${CODEX_REAUTH_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -515,7 +525,9 @@ describe("createCodexReauthHandler", () => {
 // Qwen reauth handler
 // ---------------------------------------------------------------------------
 
-const QWEN_REAUTH_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-qwen-reauth-handler.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const QWEN_REAUTH_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-qwen-reauth-handler-${process.pid}.db`;
 
 describe("createQwenReauthHandler", () => {
 	let dbOps: DatabaseOperations;
@@ -523,8 +535,12 @@ describe("createQwenReauthHandler", () => {
 
 	beforeAll(async () => {
 		try {
-			if (existsSync(QWEN_REAUTH_DB_PATH)) {
-				unlinkSync(QWEN_REAUTH_DB_PATH);
+			for (const f of [
+				QWEN_REAUTH_DB_PATH,
+				`${QWEN_REAUTH_DB_PATH}-wal`,
+				`${QWEN_REAUTH_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -537,8 +553,12 @@ describe("createQwenReauthHandler", () => {
 	afterAll(async () => {
 		await dbOps.close();
 		try {
-			if (existsSync(QWEN_REAUTH_DB_PATH)) {
-				unlinkSync(QWEN_REAUTH_DB_PATH);
+			for (const f of [
+				QWEN_REAUTH_DB_PATH,
+				`${QWEN_REAUTH_DB_PATH}-wal`,
+				`${QWEN_REAUTH_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -590,7 +610,9 @@ describe("createQwenReauthHandler", () => {
 // Anthropic reauth init handler
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_REAUTH_INIT_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-anthropic-reauth-init-handler.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const ANTHROPIC_REAUTH_INIT_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-anthropic-reauth-init-handler-${process.pid}.db`;
 
 describe("createAnthropicReauthInitHandler", () => {
 	let dbOps: DatabaseOperations;
@@ -603,8 +625,12 @@ describe("createAnthropicReauthInitHandler", () => {
 
 	beforeAll(async () => {
 		try {
-			if (existsSync(ANTHROPIC_REAUTH_INIT_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_INIT_DB_PATH);
+			for (const f of [
+				ANTHROPIC_REAUTH_INIT_DB_PATH,
+				`${ANTHROPIC_REAUTH_INIT_DB_PATH}-wal`,
+				`${ANTHROPIC_REAUTH_INIT_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -617,8 +643,12 @@ describe("createAnthropicReauthInitHandler", () => {
 	afterAll(async () => {
 		await dbOps.close();
 		try {
-			if (existsSync(ANTHROPIC_REAUTH_INIT_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_INIT_DB_PATH);
+			for (const f of [
+				ANTHROPIC_REAUTH_INIT_DB_PATH,
+				`${ANTHROPIC_REAUTH_INIT_DB_PATH}-wal`,
+				`${ANTHROPIC_REAUTH_INIT_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -690,7 +720,9 @@ describe("createAnthropicReauthInitHandler", () => {
 // Anthropic reauth callback handler
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_REAUTH_CALLBACK_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-anthropic-reauth-callback-handler.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const ANTHROPIC_REAUTH_CALLBACK_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-anthropic-reauth-callback-handler-${process.pid}.db`;
 
 describe("createAnthropicReauthCallbackHandler", () => {
 	let dbOps: DatabaseOperations;
@@ -702,8 +734,12 @@ describe("createAnthropicReauthCallbackHandler", () => {
 
 	beforeAll(async () => {
 		try {
-			if (existsSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH);
+			for (const f of [
+				ANTHROPIC_REAUTH_CALLBACK_DB_PATH,
+				`${ANTHROPIC_REAUTH_CALLBACK_DB_PATH}-wal`,
+				`${ANTHROPIC_REAUTH_CALLBACK_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -716,8 +752,12 @@ describe("createAnthropicReauthCallbackHandler", () => {
 	afterAll(async () => {
 		await dbOps.close();
 		try {
-			if (existsSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH);
+			for (const f of [
+				ANTHROPIC_REAUTH_CALLBACK_DB_PATH,
+				`${ANTHROPIC_REAUTH_CALLBACK_DB_PATH}-wal`,
+				`${ANTHROPIC_REAUTH_CALLBACK_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -906,7 +946,9 @@ describe("OAuth session persistence must be awaited (Codex P2)", () => {
 // Device-flow adds must start usage polling for the account they just created
 // ---------------------------------------------------------------------------
 
-const DEVICE_FLOW_POLLING_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-device-flow-polling.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const DEVICE_FLOW_POLLING_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-device-flow-polling-${process.pid}.db`;
 const DEVICE_FLOW_SERVER_ID = "test-device-flow-polling-server";
 
 describe("device flow adds start usage polling", () => {
@@ -915,8 +957,12 @@ describe("device flow adds start usage polling", () => {
 
 	beforeAll(async () => {
 		try {
-			if (existsSync(DEVICE_FLOW_POLLING_DB_PATH)) {
-				unlinkSync(DEVICE_FLOW_POLLING_DB_PATH);
+			for (const f of [
+				DEVICE_FLOW_POLLING_DB_PATH,
+				`${DEVICE_FLOW_POLLING_DB_PATH}-wal`,
+				`${DEVICE_FLOW_POLLING_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore
@@ -952,8 +998,12 @@ describe("device flow adds start usage polling", () => {
 		unregisterPollingRestarter(DEVICE_FLOW_SERVER_ID);
 		await dbOps.close();
 		try {
-			if (existsSync(DEVICE_FLOW_POLLING_DB_PATH)) {
-				unlinkSync(DEVICE_FLOW_POLLING_DB_PATH);
+			for (const f of [
+				DEVICE_FLOW_POLLING_DB_PATH,
+				`${DEVICE_FLOW_POLLING_DB_PATH}-wal`,
+				`${DEVICE_FLOW_POLLING_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch {
 			// ignore

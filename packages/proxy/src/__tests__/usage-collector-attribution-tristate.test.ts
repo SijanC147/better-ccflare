@@ -31,7 +31,9 @@ import type { RequestResponse } from "@better-ccflare/types";
 import { UsageCollector } from "../usage-collector";
 import type { EndMessage, StartMessage } from "../worker-messages";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-usage-collector-attribution-tristate.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-usage-collector-attribution-tristate-${process.pid}.db`;
 
 describe("UsageCollector - attribution tri-state (real collector, end-to-end)", () => {
 	let dbOps: DatabaseOperations;
@@ -41,7 +43,13 @@ describe("UsageCollector - attribution tri-state (real collector, end-to-end)", 
 
 	beforeAll(() => {
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
+			}
 		} catch (error) {
 			console.warn("Failed to clean up existing test database:", error);
 		}
@@ -64,7 +72,13 @@ describe("UsageCollector - attribution tri-state (real collector, end-to-end)", 
 		await collector.drain();
 		DatabaseFactory.reset();
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
+			}
 		} catch (error) {
 			console.warn("Failed to clean up test database:", error);
 		}

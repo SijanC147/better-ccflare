@@ -345,7 +345,9 @@ describe("Error Handling", () => {
 
 // Conventional test pattern (mirrors account-remove-handler.test.ts). Requires
 // the generated `inline-*-worker.ts` build artifacts to be present.
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-token-health-handler.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-token-health-handler-${process.pid}.db`;
 
 describe("createAccountTokenHealthHandler — HTTP response codes", () => {
 	let dbOps: DatabaseOperations;
