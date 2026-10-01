@@ -1461,7 +1461,7 @@ OAuth tokens will need to be re-authenticated.
 		accountName: string;
 		verifier: string;
 		mode: "console" | "claude-oauth";
-		customEndpoint?: string;
+		customEndpoint?: string | undefined;
 		priority: number;
 	} | null> {
 		return this.oauth.getSession(sessionId);
@@ -1818,8 +1818,8 @@ OAuth tokens will need to be re-authenticated.
 		walLog: number;
 		walCheckpointed: number;
 		vacuumed: boolean;
-		walTruncateBusy?: number;
-		error?: string;
+		walTruncateBusy?: number | undefined;
+		error?: string | undefined;
 	}> {
 		if (!this.sqliteDb || !this.resolvedDbPath) {
 			return { walBusy: 0, walLog: 0, walCheckpointed: 0, vacuumed: false };
