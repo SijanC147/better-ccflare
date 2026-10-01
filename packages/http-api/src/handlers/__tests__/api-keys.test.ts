@@ -21,7 +21,8 @@ import { createApiKeysGenerateHandler } from "../api-keys";
  * Fix: when the caller does not explicitly request a role and no active
  * keys exist, the bootstrap key defaults to "admin".
  */
-const TEST_DB_PATH = "/tmp/test-api-keys-bootstrap.db";
+// Per process: a fixed /tmp name is shared by every worktree's suite.
+const TEST_DB_PATH = `/tmp/test-api-keys-bootstrap-${process.pid}.db`;
 
 describe("API key generate handler — first-key bootstrap (Codex P2)", () => {
 	let dbOps: DatabaseOperations;

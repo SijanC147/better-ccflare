@@ -24,7 +24,8 @@ import type { RequestResponse } from "@better-ccflare/types";
 import { UsageCollector } from "../usage-collector";
 import type { EndMessage, StartMessage } from "../worker-messages";
 
-const TEST_DB_PATH = "/tmp/test-usage-collector-stream-terminal-state.db";
+// Per process: a fixed /tmp name is shared by every worktree's suite.
+const TEST_DB_PATH = `/tmp/test-usage-collector-stream-terminal-state-${process.pid}.db`;
 
 describe("UsageCollector - stream terminal state in the live summary", () => {
 	let dbOps: DatabaseOperations;

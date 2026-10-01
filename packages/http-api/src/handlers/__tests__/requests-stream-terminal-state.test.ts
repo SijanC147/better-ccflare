@@ -15,7 +15,8 @@ import { DatabaseFactory } from "@better-ccflare/database";
 import type { RequestResponse } from "@better-ccflare/types";
 import { createRequestsSummaryHandler } from "../requests";
 
-const TEST_DB_PATH = "/tmp/test-requests-stream-terminal-state.db";
+// Per process: a fixed /tmp name is shared by every worktree's suite.
+const TEST_DB_PATH = `/tmp/test-requests-stream-terminal-state-${process.pid}.db`;
 
 async function saveWithTerminalState(
 	dbOps: DatabaseOperations,

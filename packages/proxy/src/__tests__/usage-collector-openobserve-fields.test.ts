@@ -58,7 +58,8 @@ import type { RequestResponse } from "@better-ccflare/types";
 import { UsageCollector } from "../usage-collector";
 import type { EndMessage, StartMessage } from "../worker-messages";
 
-const TEST_DB_PATH = "/tmp/test-usage-collector-openobserve-fields.db";
+// Per process: a fixed /tmp name is shared by every worktree's suite.
+const TEST_DB_PATH = `/tmp/test-usage-collector-openobserve-fields-${process.pid}.db`;
 const BASE_URL = "http://openobserve.invalid:5080";
 const REQUEST_STREAM = "better_ccflare_requests";
 
