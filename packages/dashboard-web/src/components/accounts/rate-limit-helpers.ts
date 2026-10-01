@@ -316,10 +316,19 @@ function readMoney(
 	const money = value as Record<string, unknown>;
 	const amount = finiteNumber(money.amount_minor);
 	const currency = nonEmptyString(money.currency);
-	const exponent = finiteNumber(money.exponent);
+	const exponent = validExponent(money.exponent);
 	if (amount === null || currency === null || exponent === null) return null;
-	if (!Number.isInteger(exponent) || exponent < 0) return null;
 	return { amount, unit: { currency, exponent } };
+}
+
+/**
+ * A usable exponent: a whole number from 0 to 20. `toFixed()` throws above 100
+ * and below 0, and a throw in render unmounts the whole dashboard, which has no
+ * error boundary. Live exponents are 2; 20 leaves room for any real currency.
+ */
+function validExponent(value: unknown): number | null {
+	const n = finiteNumber(value);
+	return n !== null && Number.isInteger(n) && n >= 0 && n <= 20 ? n : null;
 }
 
 function sameUnit(a: ExtraUsageUnit, b: ExtraUsageUnit): boolean {
@@ -356,14 +365,9 @@ function extraReading(
 	const limit = finiteNumber(extra.monthly_limit);
 	if (used === null && limit === null) return null;
 	const currency = nonEmptyString(extra.currency);
-	const exponent = finiteNumber(extra.decimal_places);
+	const exponent = validExponent(extra.decimal_places);
 	const unit =
-		currency !== null &&
-		exponent !== null &&
-		Number.isInteger(exponent) &&
-		exponent >= 0
-			? { currency, exponent }
-			: null;
+		currency !== null && exponent !== null ? { currency, exponent } : null;
 	return { used, limit, unit };
 }
 
@@ -434,9 +438,17 @@ export function resolveExtraUsageDisplay(
 	// clamps at zero while the raw pair stays visible beside it.
 	const remaining =
 		used !== null && limit !== null ? Math.max(0, limit - used) : null;
+	// The percent comes from the same source as the amounts, so the bar can
+	// never disagree with the numbers beside it. With no amounts at all, either
+	// source's own percent is all there is.
+	const sourcePercent =
+		reading === null
+			? (finiteNumber(spend?.percent) ?? finiteNumber(extra?.utilization))
+			: reading === fromSpend
+				? finiteNumber(spend?.percent)
+				: finiteNumber(extra?.utilization);
 	const percent =
-		finiteNumber(spend?.percent) ??
-		finiteNumber(extra?.utilization) ??
+		sourcePercent ??
 		(used !== null && limit !== null && limit > 0
 			? (used / limit) * 100
 			: null);

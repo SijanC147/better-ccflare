@@ -536,24 +536,93 @@ describe("resolveExtraUsageDisplay", () => {
 		expect(d).toMatchObject({ used: 0, limit: null, remaining: null });
 	});
 
-	it("takes percent from spend, then utilization, then the ratio", () => {
+	it("takes percent from the source the amounts came from, then the ratio", () => {
+		const money = (amount_minor: number) => ({
+			amount_minor,
+			currency: "USD",
+			exponent: 2,
+		});
+		// Amounts from spend: spend's percent, never extra_usage's.
+		expect(
+			resolveExtraUsageDisplay({
+				...extra({ monthly_limit: 100, used_credits: 50, utilization: 7 }),
+				spend: {
+					enabled: true,
+					percent: 3,
+					used: money(50),
+					limit: money(100),
+				},
+			}),
+		).toMatchObject({ percent: 3 });
+		// Amounts from extra_usage: its utilization, even when spend has a percent.
 		expect(
 			resolveExtraUsageDisplay({
 				...extra({ monthly_limit: 100, used_credits: 50, utilization: 7 }),
 				spend: { enabled: true, percent: 3 },
 			}),
-		).toMatchObject({ percent: 3 });
-		expect(
-			resolveExtraUsageDisplay(
-				extra({ monthly_limit: 100, used_credits: 50, utilization: 7 }),
-			),
 		).toMatchObject({ percent: 7 });
+		// The winning source has no percent: the ratio, not the other source's.
 		expect(
-			resolveExtraUsageDisplay(extra({ monthly_limit: 200, used_credits: 50 })),
+			resolveExtraUsageDisplay({
+				...extra({ monthly_limit: 200, used_credits: 50 }),
+				spend: { enabled: true, percent: 3 },
+			}),
 		).toMatchObject({ percent: 25 });
 		expect(
 			resolveExtraUsageDisplay(extra({ monthly_limit: 0, used_credits: 0 })),
 		).toMatchObject({ percent: null, limitReached: true });
+		// No amounts anywhere: whichever percent exists.
+		expect(
+			resolveExtraUsageDisplay({ spend: { enabled: true, percent: 9 } }),
+		).toMatchObject({ used: null, percent: 9 });
+	});
+
+	it("rejects an exponent outside 0 to 20, which toFixed would throw on", () => {
+		for (const exponent of [-1, 21, 101, 1.5]) {
+			expect(
+				resolveExtraUsageDisplay({
+					spend: {
+						enabled: true,
+						used: { amount_minor: 5, currency: "USD", exponent },
+						limit: { amount_minor: 9, currency: "USD", exponent },
+					},
+				}),
+			).toMatchObject({ used: null, limit: null, unit: null });
+			expect(
+				resolveExtraUsageDisplay(
+					extra({
+						monthly_limit: 9,
+						used_credits: 5,
+						currency: "USD",
+						decimal_places: exponent,
+					}),
+				),
+			).toMatchObject({ used: 5, limit: 9, unit: null });
+		}
+	});
+
+	it("treats NaN and Infinity as missing, never as an amount", () => {
+		expect(
+			resolveExtraUsageDisplay(
+				extra({
+					monthly_limit: Number.POSITIVE_INFINITY,
+					used_credits: Number.NaN,
+				}),
+			),
+		).toMatchObject({ used: null, limit: null, remaining: null });
+	});
+
+	it("invents no unit from an empty currency code", () => {
+		expect(
+			resolveExtraUsageDisplay(
+				extra({
+					monthly_limit: 2000,
+					used_credits: 500,
+					currency: "",
+					decimal_places: 2,
+				}),
+			),
+		).toMatchObject({ remaining: 1500, unit: null });
 	});
 
 	it("reports the limit reached from spend_limit_reached alone", () => {

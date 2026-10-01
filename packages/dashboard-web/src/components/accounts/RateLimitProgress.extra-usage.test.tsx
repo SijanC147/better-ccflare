@@ -95,7 +95,7 @@ function text(markup: string): string {
 	return markup.replace(/<[^>]*>/g, "");
 }
 
-describe("RateLimitProgress — Anthropic extra usage", () => {
+describe("RateLimitProgress, Anthropic extra usage", () => {
 	it("renders nothing when the payload carries neither extra_usage nor spend", () => {
 		const html = render(usage());
 
@@ -168,6 +168,9 @@ describe("RateLimitProgress — Anthropic extra usage", () => {
 
 		expect(remaining(html)).toBe("250");
 		expect(text(b)).toContain("250 credits left");
+		// Headroom left: nothing is marked as reached.
+		expect(b).not.toContain("text-red-600");
+		expect(b).not.toContain("bg-red-500");
 		expect(text(b)).toContain("750 of 1000 credits used");
 		// No unit was reported, so none is invented.
 		expect(b).not.toContain("$");
@@ -203,6 +206,9 @@ describe("RateLimitProgress — Anthropic extra usage", () => {
 		expect(text(b)).toContain("1123");
 		expect(text(b)).toContain("1000");
 		expect(b).not.toContain("-123");
+		// The reached limit is marked on the figure and on the bar.
+		expect(b).toContain("text-red-600");
+		expect(b).toContain("bg-red-500");
 	});
 
 	it("renders currency from spend when spend carries money objects", () => {
@@ -258,6 +264,43 @@ describe("RateLimitProgress — Anthropic extra usage", () => {
 
 		expect(text(b)).toBe("Extra usageOn");
 		expect(text(b ?? "")).not.toMatch(/\d/);
+	});
+
+	it("shows an unreported spend as unknown, never as zero", () => {
+		const html = render(
+			usage({ is_enabled: true, monthly_limit: 1000, used_credits: null }),
+		);
+		const b = text(block(html) ?? "");
+
+		expect(b).toBe("Extra usageOn? of 1000 credits used");
+		expect(b).not.toMatch(/\b0 of/);
+		expect(remaining(html)).toBeNull();
+	});
+
+	it("clamps the bar to 0..100 whatever percent upstream sends", () => {
+		const over = block(
+			render(
+				usage({
+					is_enabled: true,
+					monthly_limit: 100,
+					used_credits: 1,
+					utilization: 250,
+				}),
+			),
+		);
+		const under = block(
+			render(
+				usage({
+					is_enabled: true,
+					monthly_limit: 100,
+					used_credits: 1,
+					utilization: -40,
+				}),
+			),
+		);
+
+		expect(over).toContain("translateX(-0%)");
+		expect(under).toContain("translateX(-100%)");
 	});
 
 	it("renders no extra-usage block on a Codex card that carries the key", () => {
@@ -329,7 +372,7 @@ describe("RateLimitProgress — Anthropic extra usage", () => {
 	});
 });
 
-describe("AccountListItem — extra usage", () => {
+describe("AccountListItem, extra usage", () => {
 	const account: Account = {
 		id: "account-1",
 		name: "test-account",
@@ -414,12 +457,18 @@ describe("AccountListItem — extra usage", () => {
  * Every hour-bearing date formatter in RateLimitProgress.tsx, each paired with
  * whether it pins the 24-hour clock. A formatter left to the locale prints
  * "3:04 PM" for one viewer and "15:04" for the next.
+ *
+ * It reads the call's own argument text, so it sees `toLocale*String(...)` and
+ * `new Intl.DateTimeFormat(...)` with inline options. Options passed by
+ * reference (`clockOptions` for the peak labels) carry no `hour:` in the call
+ * and are not seen; SB23-3521 covers those and the dashboard-wide toggle.
  */
 function hourFormatterCalls(
 	source: string,
 ): { call: string; pinned: boolean }[] {
 	const out: { call: string; pinned: boolean }[] = [];
-	const opener = /\.toLocale(?:Time|Date)?String\(/g;
+	const opener =
+		/\.toLocale(?:Time|Date)?String\(|\bnew\s+Intl\.DateTimeFormat\(/g;
 	for (let m = opener.exec(source); m !== null; m = opener.exec(source)) {
 		let depth = 1;
 		let i = m.index + m[0].length;
@@ -437,7 +486,7 @@ function hourFormatterCalls(
 	return out;
 }
 
-describe("RateLimitProgress — 24-hour clock", () => {
+describe("RateLimitProgress, 24-hour clock", () => {
 	it("pins hourCycle h23 on every hour-bearing formatter", () => {
 		const source = readFileSync(
 			join(import.meta.dir, "RateLimitProgress.tsx"),
@@ -455,9 +504,11 @@ describe("RateLimitProgress — 24-hour clock", () => {
 		const calls = hourFormatterCalls(
 			'd.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });\n' +
 				'd.toLocaleString(undefined, { hour: "2-digit", hour12: false, hourCycle: "h23" });\n' +
-				'd.toLocaleDateString(undefined, { month: "short" });',
+				'd.toLocaleDateString(undefined, { month: "short" });\n' +
+				'new Intl.DateTimeFormat(undefined, { hour: "2-digit" }).format(d);\n' +
+				'new Intl.DateTimeFormat(undefined, { hour: "2-digit", hourCycle: "h23" });',
 		);
 
-		expect(calls.map((c) => c.pinned)).toEqual([false, false]);
+		expect(calls.map((c) => c.pinned)).toEqual([false, false, false, true]);
 	});
 });
