@@ -96,6 +96,27 @@ jobs:
         if: steps.changes.outputs.relevant != 'false'
         run: bun run check:optional-chain-silent-skip
 
+      # SB23-3844. `$TMPDIR` is per user, not per checkout, so a fixed test
+      # database name under it is one file shared by every worktree's suite
+      # running at once. Two suites then open, checkpoint and unlink the same
+      # SQLite file, which produced `SQLITE_IOERR_VNODE` in teardown and a test
+      # program that shrank between two runs at one head (SB23-2480). PR #290
+      # made all 28 such paths per-process with `${process.pid}`; nothing
+      # stopped the 29th, and the failure reads as a load flake in someone
+      # else's lane, so no test can be relied on to catch it.
+      #
+      # Fails on a path rooted at `$TMPDIR`, `tmpdir()` or a literal `/tmp`,
+      # ending in `.db`, `.sqlite` or `.sqlite3`, with no varying component
+      # after the root, including one built inline in a database constructor.
+      # Measured 6 offences in one file before the fix in the same PR, 0 after.
+      #
+      # A step inside this job for the same reason as the three around it: both
+      # job names are required checks in ruleset `hextap/main` and a new job
+      # would need a ruleset change.
+      - name: Check for fixed test database paths under a shared temp directory
+        if: steps.changes.outputs.relevant != 'false'
+        run: bun run check:shared-tmp-db-path
+
       # SB23-3758. `bun run typecheck` cannot see a file no program includes: it
       # produces no diagnostic, so a new directory or root-level script outside
       # every target passes typecheck by being invisible to it. SB23-2304 and
