@@ -2352,8 +2352,8 @@ async function notifyServersToForceResetRateLimit(
 
 	// The local-control-secret (issue #216) lets this notification through
 	// AuthService's HTTP gate even when API-key auth is enabled — the CLI
-	// and the server both resolve it from the same on-disk config file, so
-	// this never involves handling a real API key.
+	// reads the copy the server publishes beside the config, or the config
+	// file itself, so this never involves handling a real API key (SB23-3809).
 	const localControlSecret = config.getLocalControlSecret();
 
 	for (const port of ports) {
@@ -2826,8 +2826,8 @@ export async function reauthenticateAccount(
 
 		// The local-control-secret (issue #216) lets this notification through
 		// AuthService's HTTP gate even when API-key auth is enabled — the CLI
-		// and the server both resolve it from the same on-disk config file, so
-		// this never involves handling a real API key.
+		// reads the copy the server publishes beside the config, or the config
+		// file itself, so this never involves handling a real API key (SB23-3809).
 		const localControlSecret = config.getLocalControlSecret();
 
 		for (const port of [defaultPort, testPort]) {

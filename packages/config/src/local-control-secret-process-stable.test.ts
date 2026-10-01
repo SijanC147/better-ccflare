@@ -22,9 +22,10 @@ import { Config } from "./index";
  *
  * What these tests are NOT evidence of, stated so a green line is not read as
  * more: the CLI runs as a separate process and reads the secret from the file,
- * which a refused save never writes, so a CLI still cannot learn the server's
- * secret while the refusal holds. No in-process memo can change that, and the
- * refusal messages now say so. Tracked separately.
+ * which a refused save never writes, so no in-process memo lets a CLI learn the
+ * server's secret while the refusal holds. The sidecar the server publishes does
+ * (SB23-3809), and its cross-process test is
+ * packages/http-api/src/services/__tests__/local-control-sidecar-two-process.test.ts.
  *
  * Every fixture lives under mkdtemp, and every Config names its path except the
  * one test that must reproduce oauth.ts's no-argument construction, which

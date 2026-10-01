@@ -4,6 +4,7 @@ import {
 	closeSync,
 	existsSync,
 	fchownSync,
+	constants as fsConstants,
 	fstatSync,
 	fsyncSync,
 	lstatSync,
@@ -59,6 +60,29 @@ const TEMP_FILE_STALE_AFTER_MS = 60_000;
  */
 const CONFIG_FILE_MODE = 0o600;
 const CONFIG_DIR_MODE = 0o700;
+
+/**
+ * Appended to the configured path to name the file a server publishes its
+ * local_control_secret to, so a CLI can read it while the config itself cannot
+ * be written (SB23-3809). Beside the CONFIGURED path, never beside a symlink's
+ * target, because that is the one path the server and the CLI both derive the
+ * same way, before any trust decision about the config.
+ */
+const LOCAL_CONTROL_SIDECAR_SUFFIX = ".local-control";
+
+/**
+ * Larger than any sidecar this code writes by two orders of magnitude, and
+ * small enough that reading one never costs anything. A bigger file is not
+ * ours, so it is refused rather than read.
+ */
+const LOCAL_CONTROL_SIDECAR_MAX_BYTES = 4096;
+
+/**
+ * Sidecar diagnoses already emitted, once per message per process, for the
+ * same reason as refusalsEmitted below: the condition is a fact about one path
+ * and the CLI may build more than one Config.
+ */
+const sidecarReportsEmitted = new Set<string>();
 
 /**
  * Paths already reported as unenforceable, so the warning below lands once per
@@ -173,7 +197,8 @@ const strippedFieldsReported = new Set<string>();
  * mint a fresh value while AuthService holds the startup one. Nothing an
  * attacker wrote can enter this way, because this.data and the disk re-read
  * both sit behind the strip that drops local_control_secret from a file other
- * users can write.
+ * users can write, and the sidecar getLocalControlSecret() reads first sits
+ * behind its own directory, owner, link-count and mode checks (SB23-3809).
  *
  * Keyed on this.configPath, the validated configured path, rather than on
  * writeTarget()'s resolved target, because the untrusted-path refusal has no
@@ -185,8 +210,10 @@ const strippedFieldsReported = new Set<string>();
  * reason: AuthService keeps the value it read for the life of the process, so
  * the process has to keep agreeing with it. What this cannot do is reach
  * another process. The CLI reads the secret from the file, which a refused save
- * never writes, so it still cannot learn the server's value while the refusal
- * holds, and the refusal messages say so.
+ * never writes, so on its own this does not let it learn the server's value
+ * while the refusal holds. The sidecar the server publishes does
+ * (publishLocalControlSecret(), SB23-3809), wherever its directory passes the
+ * trust checks.
  *
  * It also outlives the file it came from. If the operator deletes the config,
  * the next instance creates a fresh file and a getLocalControlSecret() on it
@@ -342,6 +369,17 @@ type RefusedTrust = "directory" | "sticky-entry";
 type EntryTrust = "trusted" | RefusedTrust;
 
 /**
+ * What inspecting the local control secret file found (SB23-3809). Three
+ * outcomes, because absent and refused call for different things: absent is
+ * every server that predates the file and says nothing, refused is a file
+ * someone put there that must not be believed and is reported.
+ */
+type SidecarReading =
+	| { kind: "absent" }
+	| { kind: "refused"; reason: string }
+	| { kind: "ok"; secret: string };
+
+/**
  * Refusal diagnoses already emitted, so each distinct one lands once per
  * process rather than once per reader (SB23-2357).
  *
@@ -459,6 +497,39 @@ function verifySavedMode(fd: number, target: string): void {
 	log.warn(
 		`fchmod to 0600 on the config being saved to ${target} did not take: the new file reads ${modeText(after)}. ${exposure} Filesystems without Unix modes behave this way, including Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes. The save goes ahead, because the file it replaces sits on the same filesystem and refusing would lose the setting without changing its mode. Move the config onto a filesystem that enforces modes, or mount it so only this user can read it. This line does not repeat for this path in this process.`,
 	);
+}
+
+/**
+ * Remove temp files a crashed save left beside `target`. Only plain files whose
+ * name is `<basename(target)>.tmp-<uuid>`, because that is the only name
+ * saveByRename() produces, and only ones older than TEMP_FILE_STALE_AFTER_MS.
+ * See Config#sweepStaleTempFiles() for why the whole UUID shape is matched.
+ */
+function sweepTempSiblings(target: string, what: string): void {
+	const dir = dirname(target);
+	// Lowercase hex only, because that is what randomUUID() produces. If the
+	// generator in saveByRename() ever changes, this must change with it. The
+	// failure direction is safe: a mismatch leaves clutter, never deletes.
+	const ours = new RegExp(
+		`^${escapeForRegExp(basename(target))}\\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+	);
+	const cutoff = Date.now() - TEMP_FILE_STALE_AFTER_MS;
+	try {
+		for (const entry of readdirSync(dir)) {
+			if (!ours.test(entry)) continue;
+			const stale = join(dir, entry);
+			try {
+				const info = lstatSync(stale);
+				if (!info.isFile()) continue;
+				if (info.mtimeMs > cutoff) continue;
+				unlinkSync(stale);
+			} catch {
+				// Gone already, or not ours to remove. Either way, nothing to do.
+			}
+		}
+	} catch (error) {
+		log.warn(`Could not sweep stale ${what} temp files: ${error}`);
+	}
 }
 
 /** `0o600` for a log line, so a mode is never printed as the decimal 384. */
@@ -1479,30 +1550,7 @@ export class Config extends EventEmitter {
 	private sweepStaleTempFiles(): void {
 		const target = this.writeTarget();
 		if (target === null) return;
-		const dir = dirname(target);
-		// Lowercase hex only, because that is what randomUUID() produces. If the
-		// generator in saveByRename() ever changes, this must change with it. The
-		// failure direction is safe: a mismatch leaves clutter, never deletes.
-		const ours = new RegExp(
-			`^${escapeForRegExp(basename(target))}\\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
-		);
-		const cutoff = Date.now() - TEMP_FILE_STALE_AFTER_MS;
-		try {
-			for (const entry of readdirSync(dir)) {
-				if (!ours.test(entry)) continue;
-				const stale = join(dir, entry);
-				try {
-					const info = lstatSync(stale);
-					if (!info.isFile()) continue;
-					if (info.mtimeMs > cutoff) continue;
-					unlinkSync(stale);
-				} catch {
-					// Gone already, or not ours to remove. Either way, nothing to do.
-				}
-			}
-		} catch (error) {
-			log.warn(`Could not sweep stale config temp files: ${error}`);
-		}
+		sweepTempSiblings(target, "config");
 	}
 
 	/**
@@ -1967,7 +2015,7 @@ export class Config extends EventEmitter {
 		// deduplicated either.
 		if (this.strippedFields.size > 0) {
 			log.error(
-				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process generates one and keeps it until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process, and neither can a client holding an earlier secret. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
+				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. While this lasts local_control_secret is never written to this file: this process generates one and keeps it until it exits. A server publishes the one it holds to ${this.getLocalControlSidecarPath()}, which the CLI reads first, unless that file's directory is writable by other local users, in which case a separate line says so and the CLI cannot authenticate against the server. A client holding an earlier secret cannot either. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
 			);
 			return;
 		}
@@ -1996,7 +2044,7 @@ export class Config extends EventEmitter {
 		// as readily as at boot.
 		if (this.unparseableFrom !== undefined) {
 			log.error(
-				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process keeps the one it already holds, or generates one, until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process. Fix the file, or move it aside so a fresh one is created, then restart.`,
+				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. While this lasts local_control_secret is never written to this file: this process keeps the one it already holds, or generates one, until it exits. A server publishes the one it holds to ${this.getLocalControlSidecarPath()}, which the CLI reads first, unless that file's directory is writable by other local users, in which case a separate line says so and the CLI cannot authenticate against the server. Fix the file, or move it aside so a fresh one is created, then restart.`,
 			);
 			return;
 		}
@@ -2187,7 +2235,9 @@ export class Config extends EventEmitter {
 		target: string,
 		content: string,
 		keepExistingOwner = true,
+		forSidecar = false,
 	): boolean {
+		const what = forSidecar ? "local control secret file" : "config file";
 		const tmpPath = `${target}.tmp-${randomUUID()}`;
 		try {
 			// "wx" is O_WRONLY|O_CREAT|O_EXCL: fails if the path exists at all,
@@ -2205,7 +2255,21 @@ export class Config extends EventEmitter {
 				// because a filesystem without Unix modes reports success and keeps
 				// whatever mode it presents (SB23-2274).
 				fchmodForConfig(fd, CONFIG_FILE_MODE);
-				verifySavedMode(fd, target);
+				// The sidecar holds nothing but the secret, and its reader refuses any
+				// mode but 0600, so a sidecar whose fchmod did not take is pure
+				// exposure: published where others may read it, and never believed.
+				// Refuse it here instead, which the config cannot do, because for the
+				// config refusing loses the setting without changing its mode.
+				if (forSidecar) {
+					const landed = fstatSync(fd).mode & 0o777;
+					if (landed !== CONFIG_FILE_MODE) {
+						throw new Error(
+							`the new file reads ${modeText(landed)} after fchmod to 0600, so it was not published`,
+						);
+					}
+				} else {
+					verifySavedMode(fd, target);
+				}
 				// The temp inode belongs to whoever is writing, and the rename
 				// discards the old file's ownership. An administrator running the CLI
 				// as root against a config owned by the service account would leave
@@ -2228,11 +2292,11 @@ export class Config extends EventEmitter {
 			renameSync(tmpPath, target);
 			return true;
 		} catch (error) {
-			log.warn(`Could not replace the config file atomically: ${error}`);
+			log.warn(`Could not replace the ${what} atomically: ${error}`);
 			try {
 				if (existsSync(tmpPath)) unlinkSync(tmpPath);
 			} catch (cleanupError) {
-				log.warn(`Failed to remove temporary config file: ${cleanupError}`);
+				log.warn(`Failed to remove temporary ${what}: ${cleanupError}`);
 			}
 			return false;
 		}
@@ -2582,18 +2646,79 @@ export class Config extends EventEmitter {
 	}
 
 	/**
-	 * Returns the persisted local-control secret, generating and persisting
-	 * one on first access. Both the server (via AuthService) and the CLI
-	 * (via this same Config, backed by the same on-disk config file) resolve
-	 * to the identical value, so the CLI can authorize its own notify calls
-	 * to its own locally-running server without ever handling a real API
-	 * key (issue #216).
+	 * The local-control secret a CLI sends to its own locally-running server, so
+	 * it can authorize its notify calls without ever handling a real API key
+	 * (issue #216).
 	 *
-	 * While a save is refused the value cannot reach the file, so it is shared
-	 * within this process only: every Config here returns the same one, and a
-	 * CLI process cannot learn it (SB23-2489, localControlSecretsByPath).
+	 * Reads the sidecar the server published first (SB23-3809), because that is
+	 * the value the running server holds whatever state the config file is in.
+	 * Without it, a config whose saves are refused never receives the server's
+	 * secret, so the CLI generated one of its own and every notify failed
+	 * AuthService#isLocalControlRequest while API keys were active. First rather
+	 * than last for a second reason: on a config other users could write, the
+	 * server strips the file's secret and then brings the file to 0600, so the
+	 * CLI, a new process, reads a clean-looking file and would adopt the very
+	 * value the server refused.
+	 *
+	 * An absent sidecar, from a server that predates it or a directory it could
+	 * not trust, falls back silently to the chain below, which is what every
+	 * caller had before. A sidecar that is present and refused falls back too,
+	 * with one warning per process saying why.
+	 *
+	 * The server does not call this; it calls publishLocalControlSecret(), which
+	 * never reads the sidecar.
 	 */
 	getLocalControlSecret(): string {
+		const published = this.readLocalControlSidecar();
+		if (published !== undefined) {
+			return this.rememberLocalControlSecret(published);
+		}
+		return this.resolveLocalControlSecret();
+	}
+
+	/**
+	 * The server's half of getLocalControlSecret(): resolve the secret from the
+	 * config as before, then publish it to `<configPath>.local-control` so a CLI
+	 * can read the value this process will hold (SB23-3809). apps/server calls
+	 * this once at startup and hands the result to AuthService.
+	 *
+	 * The value published is the one resolveLocalControlSecret() returns, so on
+	 * a config whose credential fields were stripped, or whose path was refused,
+	 * it is the secret this process minted, never one read from the file it
+	 * refused: the strip drops local_control_secret before it reaches this.data,
+	 * and a refused path is never read at all.
+	 *
+	 * Never reads the sidecar to choose the value. Doing so would make the
+	 * sidecar outrank the config, so an operator rotating the secret by editing
+	 * the config would see the edit ignored on every restart. Every boot
+	 * republishes, so the sidecar mirrors whichever server started last and
+	 * never outlives a change to the config.
+	 *
+	 * Publishing is best effort. It fails closed into the behaviour that existed
+	 * before it: no sidecar, so the CLI reads the config.
+	 */
+	publishLocalControlSecret(): string {
+		const secret = this.resolveLocalControlSecret();
+		this.writeLocalControlSidecar(secret);
+		return secret;
+	}
+
+	/** Where publishLocalControlSecret() writes, and getLocalControlSecret() reads. */
+	getLocalControlSidecarPath(): string {
+		return `${this.configPath}${LOCAL_CONTROL_SIDECAR_SUFFIX}`;
+	}
+
+	/**
+	 * The secret from the config: the in-memory data, a fresh read of the file,
+	 * the value this process already handed out, or a new one, in that order.
+	 * What getLocalControlSecret() returned before the sidecar existed.
+	 *
+	 * While a save is refused the value cannot reach the file, so it is shared
+	 * within this process only: every Config here returns the same one
+	 * (SB23-2489, localControlSecretsByPath). Another process learns it only
+	 * through the sidecar.
+	 */
+	private resolveLocalControlSecret(): string {
 		const existing = this.data.local_control_secret;
 		if (typeof existing === "string" && existing.length > 0) {
 			return this.rememberLocalControlSecret(existing);
@@ -2638,6 +2763,243 @@ export class Config extends EventEmitter {
 			localControlSecretsByPath.set(this.configPath, secret);
 		}
 		return secret;
+	}
+
+	/**
+	 * Read the published sidecar, returning its secret only when every check
+	 * passes, and warning once per process when a sidecar is present and refused.
+	 * An absent one returns undefined silently: that is every install whose
+	 * server predates the sidecar, and every directory a server would not write.
+	 */
+	private readLocalControlSidecar(): string | undefined {
+		const reading = this.inspectLocalControlSidecar();
+		if (reading.kind === "ok") return reading.secret;
+		if (reading.kind === "refused") {
+			this.reportSidecar(
+				`Ignoring the local control secret file ${this.getLocalControlSidecarPath()}: ${reading.reason}. Falling back to the secret in the config file, so a notification to the server fails to authenticate while API keys are active and that file's saves are refused. The server replaces this file with one it can trust the next time it starts, wherever its directory is not writable by other local users.`,
+			);
+		}
+		return undefined;
+	}
+
+	/**
+	 * Every check a sidecar must pass before its secret is believed, with no
+	 * logging, so the read and the write can both use it (SB23-3809).
+	 *
+	 * The directory first, through the same entryIsTrusted() the config's own
+	 * links pass: ours or root's, and not writable by group or other unless it is
+	 * sticky and this entry is a single-named one of ours. Then the entry itself,
+	 * which entryIsTrusted() reads only in the sticky case: opened with
+	 * O_NOFOLLOW, so a symlink is refused rather than followed, and O_NONBLOCK, so
+	 * a FIFO cannot stall the CLI the way one stalled the config read in PR #57;
+	 * then a regular file, one name, owned by us, and no group or other bits.
+	 *
+	 * No group or other READ bit either, which is stricter than the config gets.
+	 * A sidecar others could read has already disclosed the secret, so believing
+	 * it buys nothing a fresh one would not, and the server replaces it with a
+	 * 0600 file on its next start.
+	 *
+	 * Owned by us, strictly, not "us or root" as trustedRegularPath() accepts for
+	 * the config. A root-owned sidecar at 0600 is unreadable to anyone else
+	 * anyway, and a root CLI reading it has uid 0, so the root clause would admit
+	 * nothing this does not.
+	 *
+	 * The uid comes from lstatEntryForTrust(), the same seam entryIsTrusted()
+	 * uses, so a test can make a sidecar of ours read as another user's without
+	 * root (SB23-2316). The mode, type and link count come from fstat on the
+	 * descriptor actually read, so they describe the bytes this returns.
+	 *
+	 * Skipped on win32, where none of these checks mean anything: Stats.uid is
+	 * synthesised and the mode reads 0666 for any writable file. A sidecar there
+	 * would be believed on no evidence, so there is none, and the CLI falls back
+	 * to the config as it always has.
+	 */
+	private inspectLocalControlSidecar(): SidecarReading {
+		if (process.platform === "win32") return { kind: "absent" };
+		const path = this.getLocalControlSidecarPath();
+		try {
+			lstatSync(path);
+		} catch {
+			return { kind: "absent" };
+		}
+		const trust = this.entryIsTrusted(path);
+		if (trust === "directory") {
+			return {
+				kind: "refused",
+				reason:
+					"its directory could not be examined, belongs to another user, or is writable by other local users without the sticky bit, so anyone could have written it",
+			};
+		}
+		if (trust !== "trusted") {
+			return {
+				kind: "refused",
+				reason:
+					"it sits in a sticky directory and is not a single-named file of ours",
+			};
+		}
+		let fd: number;
+		try {
+			fd = openSync(
+				path,
+				fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+			);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			return {
+				kind: "refused",
+				reason:
+					code === "ELOOP"
+						? "it is a symlink, and a link is never followed to a secret"
+						: `it could not be opened (${code ?? "unknown error"})`,
+			};
+		}
+		try {
+			const info = fstatSync(fd);
+			if (!info.isFile()) {
+				return { kind: "refused", reason: "it is not a regular file" };
+			}
+			if (info.nlink !== 1) {
+				return {
+					kind: "refused",
+					reason: `it has ${info.nlink} hard links, so owning its name does not prove this user wrote it`,
+				};
+			}
+			const uid = process.getuid?.();
+			const owner = lstatEntryForTrust(path).uid;
+			if (uid === undefined || owner !== uid) {
+				return {
+					kind: "refused",
+					reason: `it is owned by uid ${owner}, not by this process's uid ${uid ?? "unknown"}`,
+				};
+			}
+			if ((info.mode & 0o077) !== 0) {
+				return {
+					kind: "refused",
+					reason: `it is mode ${modeText(info.mode & 0o777)}, so other local users can read or write it; this file must be 0600. A filesystem that does not enforce Unix modes, such as a Docker bind mount from a macOS or Windows host or a FAT or exFAT volume, reads this way on every start`,
+				};
+			}
+			if (info.size > LOCAL_CONTROL_SIDECAR_MAX_BYTES) {
+				return {
+					kind: "refused",
+					reason: `it is ${info.size} bytes, larger than any this code writes`,
+				};
+			}
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(readFileSync(fd, "utf8"));
+			} catch (error) {
+				// The parser's message can quote the offending token, and in this
+				// file that token is the secret. Name the error, never the text.
+				return {
+					kind: "refused",
+					reason: `it is not valid JSON (${describeParseError(error)})`,
+				};
+			}
+			const secret =
+				parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+					? (parsed as { local_control_secret?: unknown }).local_control_secret
+					: undefined;
+			if (typeof secret !== "string" || secret.length === 0) {
+				return {
+					kind: "refused",
+					reason: "it holds no local_control_secret string",
+				};
+			}
+			return { kind: "ok", secret };
+		} finally {
+			closeSync(fd);
+		}
+	}
+
+	/**
+	 * Publish the secret this server holds, when the sidecar's directory passes
+	 * entryIsTrusted() (SB23-3809).
+	 *
+	 * Gated on the SIDECAR's location, not on whether the config path itself was
+	 * trusted, deliberately. The sidecar's safety is whether anyone else can
+	 * replace or read it, which is its directory plus the reader's checks; the
+	 * config's trust decides whether the config's values are believed, which is
+	 * a separate question already answered by what resolveLocalControlSecret()
+	 * returned. So a hardlinked config, or one owned by another uid, in a
+	 * directory only this user can write, still gets a sidecar, and what it
+	 * holds is the secret this process minted.
+	 *
+	 * In a sticky directory such as /tmp, entryIsTrusted() requires an entry of
+	 * ours to exist already, and nothing here creates one, so no publish there
+	 * succeeds until the operator creates the file. That is the config's own rule
+	 * for the same reason: a name nobody owns yet is another user's to claim
+	 * first.
+	 *
+	 * Written by saveByRename(): a random O_EXCL temp file, fchmod 0600 read back,
+	 * fsync, rename. The rename replaces whatever is at the name, a symlink or a
+	 * hardlink included, without writing through it. Not keepExistingOwner,
+	 * because that fchowns the new file to the owner of the old one, which for a
+	 * planted sidecar is the planter.
+	 *
+	 * Skipped when the sidecar already holds this value, so a server restart
+	 * against a config that is fine writes nothing.
+	 *
+	 * If the directory is refused or the write fails, a sidecar holding a
+	 * different value is removed rather than left in place: the CLI reads the
+	 * sidecar first, so a stale one would outrank a config that is correct.
+	 *
+	 * The write itself refuses a file whose 0600 did not take (saveByRename()
+	 * with forSidecar), so on a filesystem without Unix modes no sidecar is
+	 * published at all, rather than one the reader would refuse anyway.
+	 */
+	private writeLocalControlSidecar(secret: string): void {
+		if (process.platform === "win32") return;
+		const path = this.getLocalControlSidecarPath();
+		const reading = this.inspectLocalControlSidecar();
+		if (reading.kind === "ok" && reading.secret === secret) return;
+		const trust = this.entryIsTrusted(path);
+		if (trust !== "trusted") {
+			// Remove what is not being replaced. A sidecar left from a start when
+			// this directory was trusted would outrank a correct config the moment
+			// the directory is trusted again, silently, because every reader check
+			// passes on it. Nothing usable is lost: while the directory is
+			// untrusted the reader refuses the file anyway. unlinkSync never
+			// follows a link, and in a sticky directory it removes only a name
+			// whose inode is ours.
+			if (reading.kind !== "absent") {
+				try {
+					unlinkSync(path);
+				} catch {
+					// Not ours to remove. The reader's directory check still refuses it.
+				}
+			}
+			const consequence =
+				"Where the config file can be saved, the CLI reads the secret from there instead; where it cannot, CLI notifications such as --reauthenticate and --force-reset-rate-limit fail to authenticate against this server while API keys are active.";
+			this.reportSidecar(
+				trust === "sticky-entry"
+					? `Did not write the local control secret file ${path}: it would sit in a sticky directory, where it is trusted only once a single-named file of yours already exists at that name, and this server never creates one there. ${consequence} Create it yourself at mode 0600, or move the config to a directory only this user can write.`
+					: `Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. ${consequence} Move the config to a directory only this user can write.`,
+			);
+			return;
+		}
+		sweepTempSiblings(path, "local control secret");
+		const content = `${JSON.stringify({ local_control_secret: secret }, null, 2)}\n`;
+		if (this.saveByRename(path, content, false, true)) {
+			log.info(`Published the local control secret to ${path} at 0600`);
+			return;
+		}
+		if (reading.kind !== "absent") {
+			try {
+				unlinkSync(path);
+			} catch {
+				// Gone already, or not removable. The read checks still apply to it.
+			}
+		}
+		log.warn(
+			`Could not write the local control secret file ${path}, reported just above. The CLI falls back to the config file for the secret.`,
+		);
+	}
+
+	/** Emit a sidecar diagnosis at most once per message per process. */
+	private reportSidecar(message: string): void {
+		if (sidecarReportsEmitted.has(message)) return;
+		sidecarReportsEmitted.add(message);
+		log.warn(message);
 	}
 
 	/**
