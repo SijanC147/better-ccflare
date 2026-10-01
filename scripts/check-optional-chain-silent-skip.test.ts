@@ -571,6 +571,121 @@ describe("check-optional-chain-silent-skip", () => {
 		});
 	}
 
+	/**
+	 * SB23-2498. A guard spelled differently from the chain it licenses. Each case is a
+	 * guard line then a discarded skipped call, inside one test body; the offence is on the
+	 * last body line. Every axis has near-misses that must stay silent, because a widened
+	 * condition 2 is only shippable if it can still say "different value".
+	 */
+	function sb23_2498Fixture(body: string[]): { dir: string; line: number } {
+		const lines = [
+			'import { expect, test } from "bun:test";',
+			'test("a guard spelled differently", () => {',
+			...body.map((l) => `\t${l}`),
+			"});",
+		];
+		return { dir: makeFixture(lines.join("\n")), line: 2 + body.length };
+	}
+
+	const differentlySpelled: Array<[string, string[]]> = [
+		// spelling
+		["a non-null assertion in the guard", ["expect(res!.body).not.toBeNull();", "res.body?.flush();"]],
+		["an `as` cast in the guard", ["expect(cb as () => void).not.toBeNull();", "cb?.();"]],
+		["parentheses in the guard", ["expect((cb)).not.toBeNull();", "cb?.();"]],
+		["a string-literal element access in the guard", ['expect(handlers["flush"]).toBeDefined();', "handlers.flush?.();"]],
+		["an optional link in a guard that rejects undefined", ["expect(res?.body).toBeDefined();", "res.body?.flush();"]],
+		// alias
+		["a const alias of the guarded value", ["const handler = holder.cb;", "expect(holder.cb).not.toBeNull();", "handler?.();"]],
+		["a guard on the const alias", ["const handler = holder.cb;", "expect(handler).not.toBeNull();", "holder.cb?.();"]],
+		// prefix
+		["a receiver the guard's evaluation proves present", ["expect(conn.stream.id).not.toBeNull();", "conn?.close();"]],
+		["a receiver past an optional link under a matcher rejecting undefined", ["expect(conn?.stream).toBeDefined();", "conn?.close();"]],
+		["the receiver of a call in the guard", ['expect(store.get("k")).toBeDefined();', "store?.clear();"]],
+		// matcher
+		["toBeInstanceOf", ["expect(res).toBeInstanceOf(Response);", "res?.text();"]],
+		["toHaveProperty", ['expect(obj).toHaveProperty("x");', "obj?.flush();"]],
+		["toHaveLength", ["expect(obj).toHaveLength(1);", "obj?.flush();"]],
+		["toMatchObject", ["expect(obj).toMatchObject({});", "obj?.flush();"]],
+		["toContain", ['expect(obj).toContain("x");', "obj?.flush();"]],
+		["toContainEqual", ["expect(obj).toContainEqual(1);", "obj?.flush();"]],
+		["toBeFunction", ["expect(cb).toBeFunction();", "cb?.();"]],
+		["toBeArray", ["expect(obj).toBeArray();", "obj?.flush();"]],
+		["toBeString", ["expect(obj).toBeString();", "obj?.flush();"]],
+		["toBeNumber", ["expect(obj).toBeNumber();", "obj?.flush();"]],
+		["toBeBoolean", ["expect(obj).toBeBoolean();", "obj?.flush();"]],
+		["toBeTypeOf a present type", ['expect(cb).toBeTypeOf("function");', "cb?.();"]],
+		["typeof compared to a present type", ['expect(typeof cb).toBe("function");', "cb?.();"]],
+		["typeof compared away from undefined", ['expect(typeof cb).not.toBe("undefined");', "cb?.();"]],
+		["a loose comparison with null", ["expect(cb != null).toBe(true);", "cb?.();"]],
+		["a strict comparison with undefined", ["expect(cb !== undefined).toBeTruthy();", "cb?.();"]],
+		["a comparison with null on the left", ["expect(null !== cb).toBe(true);", "cb?.();"]],
+		["a double negation", ["expect(!!cb).toBe(true);", "cb?.();"]],
+		["Boolean()", ["expect(Boolean(cb)).toBeTruthy();", "cb?.();"]],
+		["not.toBe(null)", ["expect(cb).not.toBe(null);", "cb?.();"]],
+		["not.toEqual(undefined)", ["expect(cb).not.toEqual(undefined);", "cb?.();"]],
+		["not.toBeFalsy", ["expect(cb).not.toBeFalsy();", "cb?.();"]],
+		["toEqual(expect.any())", ["expect(cb).toEqual(expect.any(Function));", "cb?.();"]],
+		["toStrictEqual(expect.anything())", ["expect(cb).toStrictEqual(expect.anything());", "cb?.();"]],
+		["toEqual(expect.objectContaining())", ["expect(obj).toEqual(expect.objectContaining({}));", "obj?.flush();"]],
+		["toEqual(expect.arrayContaining())", ["expect(obj).toEqual(expect.arrayContaining([]));", "obj?.flush();"]],
+		// Condition 4b: `not.toHaveProperty` passes on undefined, measured.
+		["a value handed to not.toHaveProperty", ["expect(row).toBeInstanceOf(Object);", 'expect(row?.data).not.toHaveProperty("x");']],
+	];
+
+	for (const [spelling, body] of differentlySpelled) {
+		test(`reports a skipped call under a guard spelled as ${spelling}`, () => {
+			const { dir, line } = sb23_2498Fixture(body);
+			const { exitCode, stderr } = runGate(dir);
+			expect(exitCode).toBe(1);
+			expect(stderr).toContain(`subject.test.ts:${line}:`);
+		});
+	}
+
+	const differentValues: Array<[string, string[]]> = [
+		// The issue's own example: `res.body` and `res.data` are two values, not two spellings.
+		["a guard on a sibling property", ["expect(res.body).not.toBeNull();", "res.data?.flush();"]],
+		["a guard on the receiver of the chain's subject", ["expect(conn).not.toBeNull();", "conn.stream?.close();"]],
+		["a receiver past an optional link under not.toBeNull", ["expect(conn?.stream).not.toBeNull();", "conn?.close();"]],
+		["a receiver inside an optional link under not.toBeNull", ["expect(a?.b.c).not.toBeNull();", "a.b?.flush();"]],
+		["a let, which can be reassigned", ["let handler = holder.cb;", "expect(holder.cb).not.toBeNull();", "handler?.();"]],
+		["a const holding a call's result", ["const handler = make();", "expect(make()).not.toBeNull();", "handler?.();"]],
+		["a parameter shadowing a const alias", ["const handler = holder.cb;", "expect(holder.cb).not.toBeNull();", "[1].forEach((handler) => handler?.());"]],
+		["typeof compared to object, which null also is", ['expect(typeof cb).toBe("object");', "cb?.();"]],
+		["toBeTypeOf object", ['expect(cb).toBeTypeOf("object");', "cb?.();"]],
+		["not.toBe a value", ["expect(cb).not.toBe(5);", "cb?.();"]],
+		["toEqual a literal", ["expect(cb).toEqual(5);", "cb?.();"]],
+		["not.toBeInstanceOf", ["expect(cb).not.toBeInstanceOf(Function);", "cb?.();"]],
+		["a comparison asserted false", ["expect(cb !== null).toBe(false);", "cb?.();"]],
+		["a double negation asserted false", ["expect(!!cb).toBe(false);", "cb?.();"]],
+		// Condition 4b correction: `not.toContain` FAILS on undefined in Bun, measured, so
+		// the skip is observed. This was a false positive the widening surfaced on the tree.
+		["a value handed to not.toContain", ["expect(row).toBeInstanceOf(Object);", 'expect(row?.argv).not.toContain("x");']],
+	];
+
+	for (const [difference, body] of differentValues) {
+		test(`does not report ${difference}`, () => {
+			const { dir } = sb23_2498Fixture(body);
+			const { exitCode, stderr } = runGate(dir);
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+		});
+	}
+
+	test("--survey dates its count with the head and splits the widening by axis", () => {
+		const { dir } = sb23_2498Fixture(["expect(res!.body).not.toBeNull();", "res.body?.flush();"]);
+		const { exitCode, stdout } = runGate(dir, "--survey");
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("widened by spelling: 1 guarded optional chains, 1 of which skip a call");
+		// A short sha, optionally marked dirty; never the bare count with no head beside it.
+		expect(stdout).toMatch(/survey at [0-9a-f]{8}(\+dirty)?: 1 guarded optional chains in 1 files/);
+		// The same text under a widened matcher is the matcher axis ALONE. Tagging it as a
+		// spelling too would credit the survey's spelling count with matches it did not make.
+		const matcherOnly = sb23_2498Fixture(["expect(res).toBeInstanceOf(Response);", "res?.text();"]);
+		const second = runGate(matcherOnly.dir, "--survey");
+		expect(second.stdout).toContain("widened by matcher: 1 guarded optional chains");
+		expect(second.stdout).not.toContain("spelling");
+	});
+
 	test("reads zero offences on the repository as it stands", () => {
 		// Explicit timeout: this spawns the gate over the whole tree, about 1.7 s at
 		// load 100. Bun's 5 s default timed it out at load 163 in a full suite

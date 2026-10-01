@@ -20,10 +20,22 @@
  * WHAT THIS CATCHES, precisely, and all four conditions must hold:
  *   1. in a `*.test.ts` or `*.test.tsx` file (this tree has no `*.spec.ts` or `*_test.ts`,
  *      checked with `find` rather than assumed),
- *   2. an optional chain whose SUBJECT TEXT is identical to the argument of an
- *      `expect(...)` presence assertion appearing EARLIER in the same block or any
- *      enclosing block. The presence assertions are `.not.toBeNull()`,
- *      `.not.toBeUndefined()`, `.toBeDefined()` and `.toBeTruthy()`,
+ *   2. an optional chain whose subject is a value an `expect(...)` appearing EARLIER in the
+ *      same block or any enclosing block asserts present. The original presence assertions
+ *      are `.not.toBeNull()`, `.not.toBeUndefined()`, `.toBeDefined()` and `.toBeTruthy()`.
+ *      SB23-2498 widened this along four axes, each tagged in `--survey`:
+ *        - spelling: `res!.body`, `(res as R).body`, `res?.body` and `res["body"]` all name
+ *          `res.body`;
+ *        - alias: `const h = holder.cb;` makes `h` and `holder.cb` one value;
+ *        - prefix: `expect(a.b.c).not.toBeNull()` throws unless `a` and `a.b` exist, so it
+ *          also guards `a?.f()` and `a.b?.f()`, with the optional-link rule in
+ *          impliedReceivers;
+ *        - matcher: assertions that fail on a missing value without saying so, such as
+ *          `toBeInstanceOf`, `toHaveProperty`, `toEqual(expect.any(...))`,
+ *          `expect(typeof x).toBe("function")` and `expect(x != null).toBe(true)`.
+ *      Measured at 435041b6 before gating: 0 spelling, 0 alias, 4 prefix and 43 matcher
+ *      matches, of which 3 skipped a call. Two were real and are fixed in the same change;
+ *      the third was a condition 4b false positive, corrected below,
  *   3. where short-circuiting the chain skips a CALL, including one further up the chain
  *      as in `x?.foo.bar()`, and
  *   4. and NOTHING DOWNSTREAM CAN REJECT `undefined`, which is true in two ways:
@@ -97,25 +109,32 @@
  * A throw states the precondition instead of letting a `?.` skip it, it narrows the type
  * for real, and it fails loudly with a message naming what did not happen.
  *
- * WHAT IT DOES NOT CATCH, stated so nobody reads this as a ban on optional chaining:
+ * WHAT IT DOES NOT CATCH, stated so nobody reads this as a ban on optional chaining, leading
+ * limitation first:
+ *   - a guard on EVIDENCE of the value rather than on the value. `expect(spy)
+ *     .toHaveBeenCalledTimes(1); captured?.()` asserts that the stub ran, and the chain uses
+ *     what the stub was meant to capture; nothing in the syntax joins the two. This is what
+ *     SB23-2498's "guard spelled differently" mostly turns out to be once the spellings
+ *     the four axes cover are taken out, and it needs the stub's body to see.
+ *   - a guard on a DIFFERENT value. `expect(res.body).not.toBeNull()` does not license a
+ *     report on `res.data?.x`: the two are siblings, and neither proves the other exists.
+ *     SB23-2498 cited that pair as its example, and it stays unreported on purpose.
+ *   - an alias the gate cannot prove: a `let` (it can be reassigned), a destructured
+ *     binding, or a `const` holding a call's result (a new value, not a second name).
  *   - an UNGUARDED `?.`. `dbOps.dispose?.()`, `process.getgid?.()` and
  *     `provider.isStreamingResponse?.(res)` are optional members of their types and are
  *     correct as written. Measured 2026-09-21: 1248 `?.` occurrences across 169 test files,
  *     which is why the guard clause is the whole predicate and not a detail of it. This
  *     narrowing is what makes the gate shippable as a build failure rather than a warning,
- *     and it is also the gate's blind spot: a captured-stub call with no `expect` guard in
- *     front of it, such as `let cb; ...; cb?.()`, silently skips exactly the same way and
- *     is NOT reported. SB23-2460's own worked examples include several of those.
- *   - a guard on a DIFFERENT expression text. `expect(res.body).not.toBeNull()` does not
- *     license a report on `res.data?.x`. Subject matching is on normalised source text,
- *     so `expect(a.b).not.toBeNull()` does cover `a.b?.c`, but a spelling that differs by
- *     more than whitespace is treated as a different subject.
+ *     and it is also a blind spot: a captured-stub call with no guard in front of it, such
+ *     as `let cb; ...; cb?.()`, silently skips exactly the same way and is NOT reported.
  *   - a reassignment between the guard and the use. If the subject is written to in
  *     between, the guard genuinely no longer holds and the `?.` may be correct. Tracking
  *     that needs flow analysis; this gate does not attempt it and will report the site.
  *     Silence it by moving the guard, not by widening this script.
- *   - `toBeInstanceOf`, `toEqual` and every other matcher. Only the four presence
- *     assertions above imply "this exists from here on".
+ *   - `toEqual(literal)`, `toBe(value)` and every matcher not named in recogniseGuard.
+ *     `toBeTypeOf("object")` and `expect(typeof x).toBe("object")` are deliberately absent,
+ *     because `typeof null` is `"object"`.
  *   - non-test files. A `?.` in production code guarded by an `expect` is not a thing.
  *
  * WHY SYNTACTIC AND NOT TYPE-AWARE: the defect is a statement about source order and the
@@ -151,6 +170,18 @@ const searchRoots = roots.length > 0 ? roots : ["packages", "apps", "scripts"];
  */
 const scanningWholeRepo = roots.length === 0;
 const scanMode = scanningWholeRepo ? "whole-tree" : "scoped";
+
+/**
+ * The commit the scanned tree came from, so a survey count dates itself. `+dirty` when tracked
+ * files differ from it. Never an exit: a survey without git still measures the tree.
+ */
+function headSha(): string {
+	const rev = Bun.spawnSync(["git", "-C", repoRoot, "rev-parse", "--short=8", "HEAD"]);
+	if (rev.exitCode !== 0) return "an unknown head";
+	const sha = rev.stdout.toString().trim();
+	const status = Bun.spawnSync(["git", "-C", repoRoot, "status", "--porcelain", "--untracked-files=no"]);
+	return status.exitCode === 0 && status.stdout.toString().trim() !== "" ? `${sha}+dirty` : sha;
+}
 
 /** Directories that never hold source we own. */
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".git", "coverage", ".turbo"]);
@@ -195,24 +226,67 @@ function normalise(text: string): string {
 const PRESENCE_MATCHERS = new Set(["toBeNull", "toBeUndefined", "toBeDefined", "toBeTruthy"]);
 const NEGATED_MATCHERS = new Set(["toBeNull", "toBeUndefined"]);
 
-type Guard = { subject: string; end: number; matcher: string; line: number };
+/**
+ * What an `expect(...)` line asserts present, and how. `target` is the expression asserted,
+ * `rejectsUndefined` says whether the matcher fails on `undefined` (which is what licenses
+ * every receiver in the target's chain, see impliedReceivers), and `extended` is false only
+ * for the four presence matchers above, which are what the gate read before SB23-2498.
+ */
+type GuardMatch = {
+	target: ts.Expression;
+	matcher: string;
+	rejectsUndefined: boolean;
+	extended: boolean;
+};
 
 /**
- * Recognises `expect(X).not.toBeNull()`, `expect(X).not.toBeUndefined()`,
- * `expect(X).toBeDefined()` and `expect(X).toBeTruthy()`, and returns the normalised text
- * of `X`. Anything else returns null.
+ * SB23-2498. Matchers that also fail on a missing value although they were not written to
+ * say "this exists". Each one fails on `undefined`, so a `?.` on its subject below it is the
+ * same silent skip as one under `toBeDefined()`.
+ */
+const TYPE_AND_SHAPE_MATCHERS = new Set([
+	"toBeInstanceOf",
+	"toHaveProperty",
+	"toHaveLength",
+	"toMatchObject",
+	"toContain",
+	"toContainEqual",
+]);
+const NO_ARG_TYPE_MATCHERS = new Set([
+	"toBeFunction",
+	"toBeArray",
+	"toBeString",
+	"toBeNumber",
+	"toBeBoolean",
+]);
+const ASYMMETRIC_PRESENT = new Set(["any", "anything", "objectContaining", "arrayContaining"]);
+/** `typeof x` values that a missing `x` cannot produce. `"object"` is absent: `typeof null`. */
+const PRESENT_TYPEOF = new Set(["function", "string", "number", "boolean", "bigint", "symbol"]);
+
+function isNullLiteral(e: ts.Expression): boolean {
+	return e.kind === ts.SyntaxKind.NullKeyword;
+}
+function isUndefinedIdentifier(e: ts.Expression): boolean {
+	return ts.isIdentifier(e) && e.text === "undefined";
+}
+
+/**
+ * Recognises a presence assertion and returns what it asserts present. The original four,
+ * `expect(X).not.toBeNull()`, `expect(X).not.toBeUndefined()`, `expect(X).toBeDefined()`
+ * and `expect(X).toBeTruthy()`, are `extended: false`. SB23-2498 adds the guards spelled
+ * differently: `not.toBe(null)`, `toBeInstanceOf(...)`, `toHaveProperty(...)`,
+ * `toEqual(expect.any(...))`, `expect(typeof X).toBe("function")`,
+ * `expect(X != null).toBe(true)`, `expect(!!X).toBe(true)` and the rest below.
  *
  * `.not.toBeNull()` must be negated and `.toBeDefined()` must not: `expect(x).toBeNull()`
  * asserts the OPPOSITE and a `?.` below it is correct, so reading the `.not.` is not a
  * detail. Getting that backwards would report the one shape that is right.
  */
-function guardSubject(node: ts.Node): { subject: string; matcher: string } | null {
+function recogniseGuard(node: ts.Node): GuardMatch | null {
 	if (!ts.isCallExpression(node)) return null;
-	if (node.arguments.length !== 0) return null;
 	const matcherAccess = node.expression;
 	if (!ts.isPropertyAccessExpression(matcherAccess)) return null;
 	const matcher = matcherAccess.name.text;
-	if (!PRESENCE_MATCHERS.has(matcher)) return null;
 
 	// Walk back over `.not`, recording whether we crossed it.
 	let receiver: ts.Expression = matcherAccess.expression;
@@ -221,20 +295,201 @@ function guardSubject(node: ts.Node): { subject: string; matcher: string } | nul
 		negated = !negated;
 		receiver = receiver.expression;
 	}
-	// `expect(x).not.toBeNull()` and `expect(x).toBeDefined()` are guards.
-	// `expect(x).toBeNull()` and `expect(x).not.toBeDefined()` are the opposite claim.
-	if (NEGATED_MATCHERS.has(matcher) !== negated) return null;
-
 	if (!ts.isCallExpression(receiver)) return null;
 	if (!ts.isIdentifier(receiver.expression) || receiver.expression.text !== "expect") return null;
 	if (receiver.arguments.length !== 1) return null;
 	const arg = receiver.arguments[0];
 	if (!arg) return null;
+	const args = node.arguments;
 	// Report the spelling the author wrote. Printing the bare matcher name turns
 	// `expect(x).not.toBeNull()` into "asserted present by expect(...).toBeNull", which
 	// reads as the opposite of what the line says and sends the reader to the wrong line.
-	return { subject: normalise(arg.getText()), matcher: negated ? `not.${matcher}` : matcher };
+	const spelled = negated ? `not.${matcher}` : matcher;
+
+	const one = args.length === 1 ? args[0] : undefined;
+	const truthy =
+		!negated && ((matcher === "toBe" && one?.kind === ts.SyntaxKind.TrueKeyword) || (matcher === "toBeTruthy" && args.length === 0));
+
+	// `expect(typeof X).toBe("function")` and `expect(typeof X).not.toBe("undefined")`.
+	if (ts.isTypeOfExpression(arg)) {
+		if (!one || !ts.isStringLiteral(one)) return null;
+		if (!["toBe", "toEqual", "toStrictEqual"].includes(matcher)) return null;
+		const present = negated ? one.text === "undefined" : PRESENT_TYPEOF.has(one.text);
+		return present ? { target: arg.expression, matcher: `typeof ${spelled}`, rejectsUndefined: true, extended: true } : null;
+	}
+	// `expect(X != null).toBe(true)`, `expect(X !== undefined).toBeTruthy()`.
+	if (ts.isBinaryExpression(arg) && truthy) {
+		const op = arg.operatorToken.kind;
+		const loose = op === ts.SyntaxKind.ExclamationEqualsToken;
+		if (!loose && op !== ts.SyntaxKind.ExclamationEqualsEqualsToken) return null;
+		const [subject, other] = isNullLiteral(arg.right) || isUndefinedIdentifier(arg.right) ? [arg.left, arg.right] : [arg.right, arg.left];
+		if (!isNullLiteral(other) && !isUndefinedIdentifier(other)) return null;
+		// `X !== null` is true for `undefined`, so only that spelling accepts a missing value.
+		const rejectsUndefined = loose || isUndefinedIdentifier(other);
+		return { target: subject, matcher: `comparison ${spelled}`, rejectsUndefined, extended: true };
+	}
+	// `expect(!!X).toBe(true)`, `expect(Boolean(X)).toBeTruthy()`.
+	if (truthy) {
+		if (
+			ts.isPrefixUnaryExpression(arg) &&
+			arg.operator === ts.SyntaxKind.ExclamationToken &&
+			ts.isPrefixUnaryExpression(arg.operand) &&
+			arg.operand.operator === ts.SyntaxKind.ExclamationToken
+		) {
+			return { target: arg.operand.operand, matcher: `!! ${spelled}`, rejectsUndefined: true, extended: true };
+		}
+		if (ts.isCallExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === "Boolean" && arg.arguments.length === 1 && arg.arguments[0]) {
+			return { target: arg.arguments[0], matcher: `Boolean ${spelled}`, rejectsUndefined: true, extended: true };
+		}
+	}
+	// The original four come after the spellings above, because `expect(!!x).toBeTruthy()`
+	// asserts `x`, not `!!x`, and no chain is ever spelled `!!x?.f()`.
+	if (PRESENCE_MATCHERS.has(matcher)) {
+		if (args.length !== 0) return null;
+		// `expect(x).not.toBeNull()` and `expect(x).toBeDefined()` are guards.
+		// `expect(x).toBeNull()` and `expect(x).not.toBeDefined()` are the opposite claim.
+		if (NEGATED_MATCHERS.has(matcher) !== negated) return null;
+		// `not.toBeNull()` passes on `undefined`; the other three fail on it.
+		return { target: arg, matcher: spelled, rejectsUndefined: matcher !== "toBeNull", extended: false };
+	}
+
+	if (negated) {
+		// `expect(X).not.toBe(null)`, `.not.toEqual(undefined)` and `.not.toBeFalsy()`.
+		if (["toBe", "toEqual", "toStrictEqual"].includes(matcher) && one) {
+			if (isNullLiteral(one)) return { target: arg, matcher: spelled, rejectsUndefined: false, extended: true };
+			if (isUndefinedIdentifier(one)) return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
+			return null;
+		}
+		if (matcher === "toBeFalsy" && args.length === 0) {
+			return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
+		}
+		return null;
+	}
+	if (TYPE_AND_SHAPE_MATCHERS.has(matcher) && args.length >= 1) {
+		return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
+	}
+	if (NO_ARG_TYPE_MATCHERS.has(matcher) && args.length === 0) {
+		return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
+	}
+	if (matcher === "toBeTypeOf" && one && ts.isStringLiteral(one) && PRESENT_TYPEOF.has(one.text)) {
+		return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
+	}
+	// `expect(X).toEqual(expect.any(Function))`, `.toEqual(expect.objectContaining({...}))`.
+	if (
+		(matcher === "toEqual" || matcher === "toStrictEqual") &&
+		one &&
+		ts.isCallExpression(one) &&
+		ts.isPropertyAccessExpression(one.expression) &&
+		ts.isIdentifier(one.expression.expression) &&
+		one.expression.expression.text === "expect" &&
+		ASYMMETRIC_PRESENT.has(one.expression.name.text)
+	) {
+		return { target: arg, matcher: spelled, rejectsUndefined: true, extended: true };
+	}
+	return null;
 }
+
+/** Strips what changes a spelling without changing the value: parentheses, `!`, `as`. */
+function unwrapValue(expr: ts.Expression): ts.Expression {
+	let e = expr;
+	while (
+		ts.isParenthesizedExpression(e) ||
+		ts.isNonNullExpression(e) ||
+		ts.isAsExpression(e) ||
+		ts.isSatisfiesExpression(e) ||
+		ts.isTypeAssertionExpression(e)
+	) {
+		e = e.expression;
+	}
+	return e;
+}
+
+/** A name in scope: a `const` alias's canonical key, or null for any other binding. */
+type ResolveAlias = (name: string) => string | null | undefined;
+
+/**
+ * The value an expression names, spelled one way. SB23-2498: `res!.body`, `(res as R).body`,
+ * `res?.body`, `res["body"]` and, through `const r = res;`, `r.body` all become `res.body`,
+ * so a guard written in one spelling covers a chain written in another. `viaAlias` records
+ * whether a `const` alias was followed, so the survey can split that axis out.
+ */
+function canonicalKey(expr: ts.Expression, resolveAlias: ResolveAlias): { key: string; viaAlias: boolean } {
+	let viaAlias = false;
+	const walk = (node: ts.Expression): string => {
+		const e = unwrapValue(node);
+		if (ts.isIdentifier(e)) {
+			const alias = resolveAlias(e.text);
+			if (typeof alias === "string") {
+				viaAlias = true;
+				return alias;
+			}
+			return e.text;
+		}
+		if (e.kind === ts.SyntaxKind.ThisKeyword) return "this";
+		if (ts.isPropertyAccessExpression(e)) return `${walk(e.expression)}.${e.name.text}`;
+		if (ts.isElementAccessExpression(e)) {
+			const key = unwrapValue(e.argumentExpression);
+			if (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) {
+				return /^[A-Za-z_$][\w$]*$/.test(key.text)
+					? `${walk(e.expression)}.${key.text}`
+					: `${walk(e.expression)}[${JSON.stringify(key.text)}]`;
+			}
+			if (ts.isNumericLiteral(key)) return `${walk(e.expression)}[${Number(key.text)}]`;
+			return `${walk(e.expression)}[${normalise(key.getText())}]`;
+		}
+		if (ts.isCallExpression(e)) {
+			return `${walk(e.expression)}(${e.arguments.map((a) => normalise(a.getText())).join(",")})`;
+		}
+		return normalise(e.getText());
+	};
+	return { key: walk(expr), viaAlias };
+}
+
+/**
+ * Every receiver in the target's chain that the assertion proves present. Evaluating
+ * `a.b.c` throws unless `a` and `a.b` are present, so `expect(a.b.c).not.toBeNull()` covers
+ * `a?.f()` and `a.b?.f()` as well as `a.b.c?.f()`.
+ *
+ * An optional link changes that, and the matcher decides by how much. `a?.b` short-circuits
+ * to `undefined` when `a` is missing, which `not.toBeNull()` ACCEPTS, so under it neither `a`
+ * nor anything past the `?.` is proved. A matcher that rejects `undefined` proves the chain
+ * did not short-circuit at all, so under it every receiver is present.
+ */
+function impliedReceivers(target: ts.Expression, rejectsUndefined: boolean): ts.Expression[] {
+	const links: Array<{ receiver: ts.Expression; optional: boolean }> = [];
+	let e = unwrapValue(target);
+	while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isCallExpression(e)) {
+		links.push({ receiver: e.expression, optional: e.questionDotToken !== undefined });
+		e = unwrapValue(e.expression);
+	}
+	if (rejectsUndefined) return links.map((l) => l.receiver);
+	// links[0] is the outermost. Receiver k is proved only when link k and every link inside
+	// it are non-optional, so that evaluating the target must have evaluated link k.
+	const proved: ts.Expression[] = [];
+	for (let k = 0; k < links.length; k++) {
+		const link = links[k];
+		if (link && links.slice(k).every((l) => !l.optional)) proved.push(link.receiver);
+	}
+	return proved;
+}
+
+/**
+ * A guard as recorded in a scope. `exact` is the pre-SB23-2498 key, the normalised source
+ * text, and is set only for the four original matchers, so a match on it is the baseline
+ * the gate always reported. Everything else is a widening and is tagged with its axis.
+ */
+type Guard = {
+	exact: string | null;
+	/** The normalised text of what was asserted, whichever matcher asserted it. */
+	text: string;
+	key: string;
+	viaAlias: boolean;
+	implied: Array<{ key: string; viaAlias: boolean }>;
+	extended: boolean;
+	end: number;
+	matcher: string;
+	line: number;
+};
 
 /**
  * True when this optional access is what a call is being made THROUGH, so short-circuiting
@@ -302,6 +557,37 @@ const UNDEFINED_TOLERANT_MATCHERS = new Set([
 ]);
 
 /**
+ * Matchers that FAIL on `undefined` even under `.not`, because they reject a value of the
+ * wrong type before comparing anything. Every entry was measured, 2026-10-01 on Bun 1.4,
+ * with `expect(undefined).not.<matcher>(...)` failing. The SB23-2498 widening is what found
+ * the gap: `expect(inv?.argv).not.toContain("--resume")` was reported as silent, and it is
+ * not. The same probe found `not.toHaveProperty`, `not.toBeInstanceOf`, `not.toStartWith`,
+ * `not.toEndWith`, `not.toInclude`, `not.toContainKeys` and `not.toContainValue` PASS on
+ * `undefined`, so those stay tolerant.
+ */
+const REJECTS_UNDEFINED_EVEN_NEGATED = new Set([
+	"toContain",
+	"toContainEqual",
+	"toContainKey",
+	"toHaveLength",
+	"toMatch",
+	"toMatchObject",
+	"toBeEmpty",
+	"toBeCloseTo",
+	"toBeGreaterThan",
+	"toBeGreaterThanOrEqual",
+	"toBeLessThan",
+	"toBeLessThanOrEqual",
+	"toHaveBeenCalled",
+	"toHaveBeenCalledWith",
+	"toHaveBeenCalledTimes",
+	"toHaveBeenLastCalledWith",
+	"toHaveBeenNthCalledWith",
+	"toThrow",
+	"toThrowError",
+]);
+
+/**
  * True when this chain's value is handed to an `expect(...)` whose matcher PASSES on
  * `undefined`, which makes the skip invisible exactly as discarding it does.
  *
@@ -338,6 +624,9 @@ function isConsumedByUndefinedTolerantMatcher(node: ts.Node): boolean {
 		// `.resolves` / `.rejects` change what is asserted about, so the skip is observed by
 		// the promise machinery rather than by the matcher. Treat as rejecting.
 		if (name === "resolves" || name === "rejects") return false;
+		// Some matchers throw on a value they cannot inspect whichever way round they are
+		// asked, so `not.` does not make them tolerant. Measured in Bun 1.4: see the set.
+		if (negated && REJECTS_UNDEFINED_EVEN_NEGATED.has(name)) return false;
 		const tolerantWhenPositive = UNDEFINED_TOLERANT_MATCHERS.has(name);
 		return negated ? !tolerantWhenPositive : tolerantWhenPositive;
 	}
@@ -602,10 +891,13 @@ function isResultDiscarded(node: ts.Node): boolean {
  * The two kinds are not the same defect and the gate treats them differently. See
  * SKIPPED_CALL_ONLY below.
  */
-function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsCall: boolean } | null {
+function optionalSubject(
+	node: ts.Node,
+): { subject: string; subjectNode: ts.Expression; kind: string; skipsCall: boolean } | null {
 	if (ts.isPropertyAccessExpression(node) && node.questionDotToken) {
 		return {
 			subject: normalise(node.expression.getText()),
+			subjectNode: node.expression,
 			kind: isCalleeOfCall(node) ? "optional call through a member" : "optional property access",
 			skipsCall:
 				(isCalleeOfCall(node) && isResultDiscarded(node)) ||
@@ -615,6 +907,7 @@ function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsC
 	if (ts.isElementAccessExpression(node) && node.questionDotToken) {
 		return {
 			subject: normalise(node.expression.getText()),
+			subjectNode: node.expression,
 			kind: isCalleeOfCall(node) ? "optional call through an element" : "optional element access",
 			skipsCall:
 				(isCalleeOfCall(node) && isResultDiscarded(node)) ||
@@ -624,6 +917,7 @@ function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsC
 	if (ts.isCallExpression(node) && node.questionDotToken) {
 		return {
 			subject: normalise(node.expression.getText()),
+			subjectNode: node.expression,
 			kind: "optional call",
 			skipsCall: isResultDiscarded(node) || isConsumedByUndefinedTolerantMatcher(node),
 		};
@@ -662,6 +956,18 @@ function optionalSubject(node: ts.Node): { subject: string; kind: string; skipsC
  */
 const SKIPPED_CALL_ONLY = true;
 
+/**
+ * SB23-2498. Which widened matches fail the build, by axis. A match needing several axes is
+ * gated only when every one of them is:
+ *   - `spelling`: the guard names the same value spelled differently (`res!.body`,
+ *     `(res as R).body`, `res?.body`, `res["body"]` all name `res.body`).
+ *   - `alias`: the guard and the chain reach the same value through a `const` alias.
+ *   - `prefix`: the chain's subject is a receiver the guard's own evaluation proves present.
+ *   - `matcher`: the guard is a matcher that fails on a missing value without saying so,
+ *     such as `toBeInstanceOf` or `expect(typeof x).toBe("function")`.
+ */
+const GATED_AXES = new Set(["spelling", "alias", "prefix", "matcher"]);
+
 type Offence = {
 	file: string;
 	line: number;
@@ -671,6 +977,8 @@ type Offence = {
 	matcher: string;
 	guardLine: number;
 	skipsCall: boolean;
+	/** "" for the baseline match; otherwise the SB23-2498 axes the match needed, "+"-joined. */
+	axes: string;
 	text: string;
 };
 
@@ -699,30 +1007,87 @@ for (const root of searchRoots) {
 		// A guard declared in an outer block still holds inside a nested one: in
 		// cache-body-store.test.ts the `?.` sat in a `for` body inside the guarded block,
 		// so descending the scope chain is load-bearing rather than thorough.
-		const scopes: Guard[][] = [];
+		//
+		// A function also opens a scope, for its parameters only, so a parameter named like
+		// an outer `const` alias shadows it. Guards never go into a function scope: an
+		// expression-bodied arrow holding an `expect` records it in the enclosing block, as
+		// it did before SB23-2498.
+		type Scope = { guards: Guard[]; aliases: Map<string, string | null>; isFunction: boolean };
+		const scopes: Scope[] = [];
+		const resolveAlias: ResolveAlias = (name) => {
+			for (let i = scopes.length - 1; i >= 0; i--) {
+				const aliases = scopes[i]?.aliases;
+				if (aliases?.has(name)) return aliases.get(name);
+			}
+			return undefined;
+		};
+		const shadow = (binding: ts.BindingName, into: Scope | undefined): void => {
+			if (!into) return;
+			if (ts.isIdentifier(binding)) into.aliases.set(binding.text, null);
+			else for (const el of binding.elements) if (!ts.isOmittedExpression(el)) shadow(el.name, into);
+		};
 
 		const visit = (node: ts.Node): void => {
-			const opensScope =
+			const opensBlock =
 				ts.isBlock(node) ||
 				ts.isSourceFile(node) ||
 				ts.isModuleBlock(node) ||
 				ts.isCaseClause(node) ||
 				ts.isDefaultClause(node);
-			if (opensScope) scopes.push([]);
+			const opensFunction = isFunctionLike(node);
+			if (opensBlock || opensFunction) {
+				scopes.push({ guards: [], aliases: new Map(), isFunction: opensFunction });
+			}
+			if (opensFunction) {
+				const fn = node as ts.SignatureDeclaration;
+				for (const param of fn.parameters) shadow(param.name, scopes[scopes.length - 1]);
+			}
 
-			const guard = guardSubject(node);
+			// `const r = res;` makes `r` another spelling of `res`. Only a `const` whose
+			// initialiser names an existing value counts; a call makes a new value, and a
+			// `let` can be reassigned. Every other binding shadows any outer alias.
+			if (ts.isVariableDeclaration(node)) {
+				const innermost = scopes[scopes.length - 1];
+				const init = node.initializer ? unwrapValue(node.initializer) : undefined;
+				const isConst = (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const) !== 0;
+				if (
+					innermost &&
+					isConst &&
+					ts.isIdentifier(node.name) &&
+					init !== undefined &&
+					(ts.isIdentifier(init) ||
+						init.kind === ts.SyntaxKind.ThisKeyword ||
+						ts.isPropertyAccessExpression(init) ||
+						ts.isElementAccessExpression(init))
+				) {
+					innermost.aliases.set(node.name.text, canonicalKey(init, resolveAlias).key);
+				} else {
+					shadow(node.name, innermost);
+				}
+			}
+
+			const guard = recogniseGuard(node);
 			if (guard) {
 				guardsFound++;
 				const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-				const current = scopes[scopes.length - 1];
-				if (current) {
-					current.push({
-						subject: guard.subject,
-						end: node.getEnd(),
-						matcher: guard.matcher,
-						line: line + 1,
-					});
+				let target: Scope | undefined;
+				for (let i = scopes.length - 1; i >= 0 && !target; i--) {
+					if (!scopes[i]?.isFunction) target = scopes[i];
 				}
+				const canonical = canonicalKey(guard.target, resolveAlias);
+				target?.guards.push({
+					exact: guard.extended ? null : normalise(guard.target.getText()),
+					text: normalise(guard.target.getText()),
+					key: canonical.key,
+					viaAlias: canonical.viaAlias,
+					implied: impliedReceivers(guard.target, guard.rejectsUndefined).map((r) =>
+						canonicalKey(r, resolveAlias),
+					),
+					extended: guard.extended,
+					end: node.getEnd(),
+					matcher: guard.matcher,
+					line: line + 1,
+				});
 			}
 
 			const optional = optionalSubject(node);
@@ -731,38 +1096,65 @@ for (const root of searchRoots) {
 				// Search innermost scope outwards. The guard must END before this node
 				// STARTS, which is what makes `expect(x).not.toBeNull()` inside the very
 				// expression being checked unable to license itself.
+				//
+				// The best match wins: the baseline (same text, one of the original four
+				// matchers) over the same value spelled differently, over a receiver the
+				// guard proves present. Ties go to the innermost, earliest guard.
 				const start = node.getStart();
-				let matched: Guard | undefined;
-				for (let i = scopes.length - 1; i >= 0 && !matched; i--) {
+				const chain = canonicalKey(optional.subjectNode, resolveAlias);
+				let matched: { guard: Guard; rank: number; axes: string[] } | undefined;
+				for (let i = scopes.length - 1; i >= 0 && matched?.rank !== 0; i--) {
 					const scope = scopes[i];
 					if (!scope) continue;
-					for (const g of scope) {
-						if (g.subject === optional.subject && g.end <= start) {
-							matched = g;
-							break;
+					for (const g of scope.guards) {
+						if (g.end > start) continue;
+						let candidate: { rank: number; axes: string[] } | undefined;
+						if (g.exact !== null && g.exact === optional.subject) {
+							candidate = { rank: 0, axes: [] };
+						} else if (g.key === chain.key) {
+							// Same text under a widened matcher is the matcher axis alone.
+							const viaAlias = g.viaAlias || chain.viaAlias;
+							const axes = g.text === optional.subject ? [] : [viaAlias ? "alias" : "spelling"];
+							candidate = { rank: 1, axes };
+						} else {
+							const hit = g.implied.find((r) => r.key === chain.key);
+							if (hit) {
+								const axes = ["prefix"];
+								if (hit.viaAlias || chain.viaAlias) axes.push("alias");
+								candidate = { rank: 2, axes };
+							}
+						}
+						if (!candidate) continue;
+						if (candidate.rank > 0 && g.extended) candidate.axes.push("matcher");
+						if (!matched || candidate.rank < matched.rank) {
+							matched = { guard: g, rank: candidate.rank, axes: candidate.axes };
+							if (candidate.rank === 0) break;
 						}
 					}
 				}
 				if (matched) {
 					const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
+					const axes = [...matched.axes].sort().join("+");
 					const found: Offence = {
 						file: path.relative(repoRoot, fileName),
 						line: line + 1,
 						column: character + 1,
 						kind: optional.kind,
 						subject: optional.subject,
-						matcher: matched.matcher,
-						guardLine: matched.line,
+						matcher: matched.guard.matcher,
+						guardLine: matched.guard.line,
 						skipsCall: optional.skipsCall,
+						axes,
 						text: node.getText().replace(/\s+/g, " ").slice(0, 100),
 					};
 					surveyed.push(found);
-					if (!SKIPPED_CALL_ONLY || found.skipsCall) offences.push(found);
+					const gated = matched.axes.every((a) => GATED_AXES.has(a));
+					if ((!SKIPPED_CALL_ONLY || found.skipsCall) && gated) offences.push(found);
 				}
 			}
 
 			ts.forEachChild(node, visit);
-			if (opensScope) scopes.pop();
+			if (opensBlock || opensFunction) scopes.pop();
 		};
 
 		visit(sourceFile);
@@ -832,16 +1224,37 @@ if (scannedNothing) {
 // narrowing leaves out, and exits 0 whatever it finds. It is a measurement, never a gate:
 // giving it a failing exit code would make the narrowing pointless.
 if (survey) {
+	// The population drifts with every merge, so the figure carries the head it was measured
+	// at (SB23-2498): 275 at eaa5859a and 260 at c043c20a were both quoted later without one.
+	const head = headSha();
 	const byFile = new Map<string, number>();
 	for (const o of surveyed) byFile.set(o.file, (byFile.get(o.file) ?? 0) + 1);
 	if (!asJson) {
 		for (const [file, count] of [...byFile].sort((a, b) => b[1] - a[1])) {
 			console.log(`  ${String(count).padStart(4)}  ${file}`);
 		}
+		// The widened population, split by axis and then by file, so a widening can be judged
+		// on what it adds rather than on one total.
+		const byAxes = new Map<string, Offence[]>();
+		for (const o of surveyed) {
+			if (o.axes === "") continue;
+			byAxes.set(o.axes, [...(byAxes.get(o.axes) ?? []), o]);
+		}
+		for (const [axes, found] of [...byAxes].sort((a, b) => a[0].localeCompare(b[0]))) {
+			const skips = found.filter((o) => o.skipsCall).length;
+			console.log(`widened by ${axes}: ${found.length} guarded optional chains, ${skips} of which skip a call`);
+			const perFile = new Map<string, number>();
+			for (const o of found) perFile.set(o.file, (perFile.get(o.file) ?? 0) + 1);
+			for (const [file, count] of [...perFile].sort((a, b) => b[1] - a[1])) {
+				console.log(`  ${String(count).padStart(4)}  ${file}`);
+			}
+		}
 		const skipsCall = surveyed.filter((o) => o.skipsCall).length;
 		console.log(
-			`survey: ${surveyed.length} guarded optional chains in ${byFile.size} files, ${skipsCall} of which skip a call`,
+			`survey at ${head}: ${surveyed.length} guarded optional chains in ${byFile.size} files, ${skipsCall} of which skip a call`,
 		);
+	} else {
+		console.log(JSON.stringify({ head }));
 	}
 	process.exit(0);
 }

@@ -301,17 +301,19 @@ describe("proxyWithAccount — Codex count_tokens", () => {
 				makeProxyContext(),
 			);
 
-			expect(result).toBeInstanceOf(Response);
-			expect(result?.status).toBe(200);
+			if (!(result instanceof Response)) {
+				throw new Error("proxyWithAccount returned no Response for a 200 upstream");
+			}
+			expect(result.status).toBe(200);
 			// Issue #444 regression guard: a real (non-synthetic) upstream response
 			// must never carry the synthetic marker, even if the client tried to
 			// forge one on the inbound request — materializeSyntheticResponse only
 			// runs for genuinely synthetic provider Requests, and its header copy
 			// must stay conditional rather than unconditional.
 			expect(
-				result?.headers.get("x-better-ccflare-synthetic-response"),
+				result.headers.get("x-better-ccflare-synthetic-response"),
 			).toBeNull();
-			await result?.text();
+			await result.text();
 		} finally {
 			collectorSpy.mockRestore();
 		}
