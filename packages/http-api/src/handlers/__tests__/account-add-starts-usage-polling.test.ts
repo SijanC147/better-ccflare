@@ -11,7 +11,9 @@ import {
 	createZaiAccountAddHandler,
 } from "../accounts";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-add-starts-polling.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-add-starts-polling-${process.pid}.db`;
 const SERVER_ID = "test-account-add-polling-server";
 
 describe("account add handlers start usage polling for the new account", () => {

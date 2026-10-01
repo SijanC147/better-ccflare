@@ -11,18 +11,40 @@
  * bootstrap, which is what makes `PRAGMA incremental_vacuum(N)` actually
  * return free pages to the OS.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "bun:test";
 import { randomBytes } from "node:crypto";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseOperations } from "../database-operations";
 
+const createdDbPaths: string[] = [];
+
 function tempDbPath(): string {
-	return join(
+	const dbPath = join(
 		tmpdir(),
 		`test-incvac-adaptive-${randomBytes(6).toString("hex")}.db`,
 	);
+	createdDbPaths.push(dbPath);
+	return dbPath;
 }
+
+// Each case disposes its database, but the files stayed in TMPDIR, three per
+// case: 3186 of them on one machine on 2026-10-01 (SB23-2480).
+afterAll(() => {
+	for (const dbPath of createdDbPaths) {
+		for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+			rmSync(f, { force: true });
+		}
+	}
+});
 
 /**
  * Insert `count` request + payload rows with a `bytesPerRow`-ish JSON blob so

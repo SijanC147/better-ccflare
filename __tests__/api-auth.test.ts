@@ -5,7 +5,9 @@ import { generateApiKey, listApiKeys, disableApiKey, enableApiKey, deleteApiKey,
 import { NodeCryptoUtils } from "@better-ccflare/types";
 
 // Test data
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-api-auth.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-api-auth-${process.pid}.db`;
 
 describe("API Authentication", () => {
 	let dbOps: any;
@@ -13,8 +15,8 @@ describe("API Authentication", () => {
 
 	beforeAll(async () => {
 		// Clean up any existing test database
-		if (require("fs").existsSync(TEST_DB_PATH)) {
-			require("fs").unlinkSync(TEST_DB_PATH);
+		for (const f of [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`]) {
+			if (require("fs").existsSync(f)) require("fs").unlinkSync(f);
 		}
 
 		// Initialize test database
@@ -29,11 +31,13 @@ describe("API Authentication", () => {
 	});
 
 	afterAll(() => {
-		// Clean up test database
-		if (require("fs").existsSync(TEST_DB_PATH)) {
-			require("fs").unlinkSync(TEST_DB_PATH);
-		}
+		// Close before unlinking: the close-time checkpoint on an unlinked
+		// file fails with SQLITE_IOERR_VNODE on macOS (SB23-2480).
 		DatabaseFactory.reset();
+		// Clean up test database
+		for (const f of [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`]) {
+			if (require("fs").existsSync(f)) require("fs").unlinkSync(f);
+		}
 	});
 
 	describe("API Key Generation", () => {

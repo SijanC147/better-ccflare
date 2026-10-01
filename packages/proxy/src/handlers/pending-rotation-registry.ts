@@ -115,6 +115,11 @@ export function clearAllPendingRotationsForTests(): void {
 	pending.clear();
 }
 
+/** Test-only: how many rotations are pending, so a test file can assert it leaves none. */
+export function pendingRotationCountForTests(): number {
+	return pending.size;
+}
+
 /**
  * Attempts to persist a pending rotation for the account.
  * - "none": no entry for this account.

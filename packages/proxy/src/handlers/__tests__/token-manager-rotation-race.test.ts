@@ -1,15 +1,36 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from "bun:test";
 import { type AuthFailureEvt, authFailureEvents } from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
 import {
 	clearAllPendingRotationsForTests,
 	getPendingRotation,
+	pendingRotationCountForTests,
 	recordPendingRotation,
 } from "../pending-rotation-registry";
 import { refreshAccessTokenSafe } from "../token-manager";
 
 beforeEach(() => {
 	clearAllPendingRotationsForTests();
+});
+
+// The registry is module state, and bun test runs every file in one process.
+// beforeEach protects this file from what ran before it; afterEach protects
+// what runs after it, which a beforeEach alone never does: the last case's
+// rotation stayed in the map for the next file (SB23-2484).
+afterEach(() => {
+	clearAllPendingRotationsForTests();
+});
+
+afterAll(() => {
+	expect(pendingRotationCountForTests()).toBe(0);
 });
 
 function makeAccount(id: string, overrides: Partial<Account> = {}): Account {

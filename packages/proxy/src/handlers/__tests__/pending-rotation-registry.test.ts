@@ -1,10 +1,19 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from "bun:test";
 import {
 	clearAllPendingRotationsForTests,
 	clearPendingRotation,
 	flushPendingRotation,
 	getPendingRotation,
 	type PendingRotationDbOps,
+	pendingRotationCountForTests,
 	recordPendingRotation,
 } from "../pending-rotation-registry";
 
@@ -18,6 +27,18 @@ function makeDbOps(overrides: Partial<PendingRotationDbOps> = {}) {
 
 beforeEach(() => {
 	clearAllPendingRotationsForTests();
+});
+
+// The registry is module state, and bun test runs every file in one process.
+// beforeEach protects this file from what ran before it; afterEach protects
+// what runs after it, which a beforeEach alone never does: the last case's
+// rotation stayed in the map for the next file (SB23-2484).
+afterEach(() => {
+	clearAllPendingRotationsForTests();
+});
+
+afterAll(() => {
+	expect(pendingRotationCountForTests()).toBe(0);
 });
 
 describe("recordPendingRotation / getPendingRotation", () => {

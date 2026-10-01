@@ -4,7 +4,9 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import { DatabaseFactory } from "@better-ccflare/database";
 import { createAccountAddHandler } from "../accounts";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-add-duplicate-guard.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-add-duplicate-guard-${process.pid}.db`;
 
 describe("createAccountAddHandler — duplicate (name, provider, custom_endpoint) guard", () => {
 	let dbOps: DatabaseOperations;
