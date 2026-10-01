@@ -112,6 +112,25 @@ async function waitUntil(
 	}
 }
 
+/**
+ * Whether the refreshed catalog has reached disk. The in-memory catalog goes
+ * live one await before the file is written, so a wait that stopped there let
+ * afterEach's `rm` race the write. A half-written file fails to parse and
+ * reads as not yet.
+ */
+async function cacheFileHas(modelId: string): Promise<boolean> {
+	try {
+		const raw = await fs.readFile(
+			join(TEST_CACHE_DIR, "anthropic-models.json"),
+			"utf8",
+		);
+		const catalog = JSON.parse(raw) as ModelCatalog;
+		return catalog.models.some((model) => model.id === modelId);
+	} catch {
+		return false;
+	}
+}
+
 async function cleanCacheDir() {
 	await fs.rm(TEST_CACHE_DIR, { recursive: true, force: true });
 }
@@ -610,7 +629,8 @@ describe("model-catalog", () => {
 			await waitUntil(
 				async () =>
 					fetchMock.mock.calls.length > 0 &&
-					(await getModelCatalog()).source === "live",
+					(await getModelCatalog()).source === "live" &&
+					(await cacheFileHas("claude-sonnet-5")),
 			);
 			unregister();
 
@@ -681,7 +701,8 @@ describe("model-catalog", () => {
 			await waitUntil(
 				async () =>
 					fetchMock.mock.calls.length > 0 &&
-					(await getModelCatalog()).models[0]?.id === "claude-sonnet-5",
+					(await getModelCatalog()).models[0]?.id === "claude-sonnet-5" &&
+					(await cacheFileHas("claude-sonnet-5")),
 			);
 			unregister();
 
@@ -752,7 +773,11 @@ describe("model-catalog", () => {
 
 			const ctx = makeCtx([makeAccount()]);
 			const unregister = initModelCatalogRefresh(ctx, { initialDelayMs: 5 });
-			await waitUntil(() => fetchMock.mock.calls.length > 0);
+			await waitUntil(
+				async () =>
+					fetchMock.mock.calls.length > 0 &&
+					(await cacheFileHas("claude-sonnet-5")),
+			);
 			unregister();
 
 			expect(fetchMock).toHaveBeenCalled();
@@ -793,7 +818,11 @@ describe("model-catalog", () => {
 					{ status: 200 },
 				),
 			);
-			await waitUntil(async () => (await getModelCatalog()).source === "live");
+			await waitUntil(
+				async () =>
+					(await getModelCatalog()).source === "live" &&
+					(await cacheFileHas("claude-sonnet-5")),
+			);
 			unregister();
 
 			expect((await getModelCatalog()).source).toBe("live");
@@ -845,7 +874,8 @@ describe("model-catalog", () => {
 			await waitUntil(
 				async () =>
 					fetchMock.mock.calls.length > 0 &&
-					(await getModelCatalog()).source === "live",
+					(await getModelCatalog()).source === "live" &&
+					(await cacheFileHas("claude-sonnet-5")),
 			);
 			unregister();
 
