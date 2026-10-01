@@ -108,10 +108,10 @@ function makeCtx(
 		},
 		asyncWriter: { enqueue: mock(() => {}) },
 		config: {
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getCombosEnabled: undefined,
-			getForceAccountModel: undefined,
-			getModelScopedCapacityRouting: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getCombosEnabled: () => true,
+			getForceAccountModel: () => false,
+			getModelScopedCapacityRouting: () => "off",
 		},
 	});
 }
@@ -607,11 +607,11 @@ describe("selectAccountsForRequest — combo routing", () => {
 			},
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
-				getModelScopedCapacityRouting: undefined,
-				getComboSessionFallback: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
+				getModelScopedCapacityRouting: () => "off",
+				getComboSessionFallback: () => true,
 			},
 		});
 
@@ -658,10 +658,10 @@ describe("selectAccountsForRequest — combo routing", () => {
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getComboSessionFallback: () => false,
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
-				getModelScopedCapacityRouting: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
+				getModelScopedCapacityRouting: () => "off",
 			},
 		});
 

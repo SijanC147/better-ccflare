@@ -30,10 +30,10 @@ function timingSafeStringEqual(a: string, b: string): boolean {
 export interface AuthenticationResult {
 	isAuthenticated: boolean;
 	apiKey?: ApiKey;
-	apiKeyId?: string;
+	apiKeyId?: string | undefined;
 	apiKeyName?: string;
-	role?: ApiKeyRole;
-	error?: string;
+	role?: ApiKeyRole | undefined;
+	error?: string | undefined;
 }
 
 /** Header carrying the process-local secret that gates internal-probe markers.
@@ -97,15 +97,15 @@ const STREAM_TOKEN_PATHS = new Set([
 
 interface StreamTokenRecord {
 	expiresAt: number;
-	apiKeyId?: string;
-	role?: ApiKeyRole;
+	apiKeyId?: string | undefined;
+	role?: ApiKeyRole | undefined;
 }
 
 export class AuthService {
 	private crypto: NodeCryptoUtils;
 	private dbOps: DatabaseOperations;
-	private internalProbeSecret?: string;
-	private localControlSecret?: string;
+	private internalProbeSecret?: string | undefined;
+	private localControlSecret?: string | undefined;
 	/** In-memory, single-use tokens minted by mintLogsStreamToken() and
 	 * consumed by validateAndConsumeLogsStreamToken(). No DB persistence —
 	 * these are ephemeral (60s TTL) and only ever needed within the same

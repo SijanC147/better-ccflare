@@ -110,9 +110,9 @@ function makeCtx(
 		asyncWriter: { enqueue: mock(() => {}) },
 		config: {
 			getModelScopedCapacityRouting: () => opts.capacityRoutingMode ?? "off",
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getCombosEnabled: undefined,
-			getForceAccountModel: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getCombosEnabled: () => true,
+			getForceAccountModel: () => false,
 		},
 	});
 }
@@ -412,10 +412,10 @@ describe("selectAccountsForRequest — model-scoped capacity filter (combo routi
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getModelScopedCapacityRouting: () => "exhausted",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
-				getComboSessionFallback: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
+				getComboSessionFallback: () => true,
 			},
 		});
 		const meta = makeRequestMeta();
@@ -807,9 +807,9 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getModelScopedCapacityRouting: () => "exhausted",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
 			},
 		});
 		const meta = makeRequestMeta();
@@ -840,9 +840,9 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getModelScopedCapacityRouting: () => "exhausted",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
 			},
 		});
 		const meta = makeRequestMeta();
@@ -879,9 +879,9 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getModelScopedCapacityRouting: () => "exhausted",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
 			},
 		});
 		const meta = makeRequestMeta();
@@ -919,9 +919,9 @@ describe("selectAccountsForRequest — cooldown-masked capacity exhaustion", () 
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getModelScopedCapacityRouting: () => "exhausted",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
 			},
 		});
 		const meta = makeRequestMeta();
@@ -972,9 +972,9 @@ describe("selectAccountsForRequest — cooldown-masked sweep respects exclude-pr
 			asyncWriter: { enqueue: mock(() => {}) },
 			config: {
 				getModelScopedCapacityRouting: () => "exhausted",
-				// Absent in production means the default; undefined keeps the path the old literal took.
-				getCombosEnabled: undefined,
-				getForceAccountModel: undefined,
+				// Required on Config: each returns its read site's fallback, so the default branch runs.
+				getCombosEnabled: () => true,
+				getForceAccountModel: () => false,
 			},
 		});
 		const meta = makeRequestMeta({

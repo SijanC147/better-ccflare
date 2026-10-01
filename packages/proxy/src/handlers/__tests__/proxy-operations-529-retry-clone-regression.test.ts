@@ -35,7 +35,7 @@ describe("issue #382 — 529 in-place retry Request clone", () => {
 	it("rebuilds the retry Request from the buffered body text instead of a clone", () => {
 		const source = readSource();
 		expect(source).toMatch(
-			/const retryRequest = new Request\(outgoing\.request\.url, \{[\s\S]*?body: outgoing\.bodyText \|\| undefined,/,
+			/const retryRequest = new Request\(outgoing\.request\.url, \{[\s\S]*?body: outgoing\.bodyText \|\| null,/,
 		);
 	});
 

@@ -81,7 +81,7 @@ export interface AnthropicTerminalRecoveryOptions {
 	 * fetch-level controller keep working; without it, deadline expiry falls
 	 * back to releasing the reader lock only.
 	 */
-	drainAbort?: AbortController;
+	drainAbort?: AbortController | undefined;
 	onRecovery?: (reason: AnthropicTerminalRecoveryReason) => void;
 	onCancelError?: (
 		error: unknown,

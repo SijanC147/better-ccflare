@@ -106,9 +106,6 @@ function makeContext(): ProxyContext {
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			// Absent on the old literal, which answered undefined for both.
-			resolverManager: undefined,
-			updateRequestUsage: undefined,
 		},
 		runtime: { clientId: "test" },
 		// Only `name` is supplied. proxyWithAccount resolves

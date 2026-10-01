@@ -47,9 +47,9 @@ function makeContext(observed: boolean[]): ProxyContext {
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
 			getForceAccountModel: () => true,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getCombosEnabled: undefined,
-			getModelScopedCapacityRouting: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getCombosEnabled: () => true,
+			getModelScopedCapacityRouting: () => "off",
 		},
 		provider: {
 			name: "codex",

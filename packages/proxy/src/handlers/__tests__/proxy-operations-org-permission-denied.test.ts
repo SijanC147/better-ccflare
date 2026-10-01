@@ -145,8 +145,7 @@ function makeCtx(): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			// Absent on the old literal; the attribution read sits in a try, so undefined takes its catch as before.
-			resolverManager: undefined,
+			// resolverManager is not named: the attribution read sits in a try, so the stub's throw takes its catch.
 		},
 		runtime: { clientId: "test" },
 		// getProvider("anthropic") from the registry wins over this, by design —

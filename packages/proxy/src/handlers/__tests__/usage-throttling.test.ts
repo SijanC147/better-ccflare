@@ -488,7 +488,7 @@ describe("weekly throttle and a credit-covered Codex account (SB23-2541)", () =>
 	function payload(opts: {
 		fiveHour?: number;
 		weekly?: number;
-		credits?: Credits;
+		credits?: Credits | undefined;
 	}) {
 		return {
 			five_hour: {

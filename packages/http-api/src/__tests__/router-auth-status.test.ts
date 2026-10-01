@@ -102,7 +102,7 @@ describe("APIRouter — refusal status", () => {
 			new Request(url, {
 				method,
 				headers,
-				body: method === "GET" ? undefined : "{}",
+				body: method === "GET" ? null : "{}",
 			}),
 		);
 	};

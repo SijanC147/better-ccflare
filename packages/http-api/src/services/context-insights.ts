@@ -111,11 +111,11 @@ export interface ContextInsightsOptions {
 	/** Whether the payload candidate fetch hit its scan limit (echoed in meta). */
 	truncated: boolean;
 	/** Whether the growth-curve row fetch hit its scan cap. Default false. */
-	growthScanTruncated?: boolean;
+	growthScanTruncated?: boolean | undefined;
 	/** Contributors returned. Default 10. */
-	topContributors?: number;
+	topContributors?: number | undefined;
 	/** Gap (minutes) that splits two requests into separate sessions. Default 30. */
-	sessionGapMinutes?: number;
+	sessionGapMinutes?: number | undefined;
 }
 
 export interface BuildContextInsightsInput {

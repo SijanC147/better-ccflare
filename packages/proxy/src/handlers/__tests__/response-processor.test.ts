@@ -65,7 +65,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 function makeCtx(opts: {
 	isStream: boolean;
 	rateLimited: boolean;
-	resetTime?: number;
+	resetTime?: number | undefined;
 }) {
 	const calls = {
 		markRateLimited: [] as Array<{ accountId: string; resetTime: number }>,
@@ -125,7 +125,7 @@ function makeCtx(opts: {
 function makeCtxWithReason(opts: {
 	isStream: boolean;
 	rateLimited: boolean;
-	resetTime?: number;
+	resetTime?: number | undefined;
 }) {
 	const calls = {
 		markRateLimited: [] as Array<{

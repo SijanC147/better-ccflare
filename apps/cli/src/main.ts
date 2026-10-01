@@ -155,7 +155,7 @@ interface ParsedArgs {
 		| null;
 	priority: number | null;
 	profile: string | null;
-	crossRegionMode?: "geographic" | "global" | "regional";
+	crossRegionMode?: "geographic" | "global" | "regional" | undefined;
 	list: boolean;
 	remove: string | null;
 	pause: string | null;

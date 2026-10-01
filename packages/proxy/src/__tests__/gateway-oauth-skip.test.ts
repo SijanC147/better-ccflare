@@ -169,10 +169,10 @@ function makeContext(
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () => "off",
 			getStorePayloads: () => false,
-			// Absent in production means the default; undefined keeps the path the old literal took.
-			getForceAccountModel: undefined,
-			getCombosEnabled: undefined,
-			getComboSessionFallback: undefined,
+			// Required on Config: each returns its read site's fallback, so the default branch runs.
+			getForceAccountModel: () => false,
+			getCombosEnabled: () => true,
+			getComboSessionFallback: () => true,
 		},
 		// A `claude-console-api` row is not a registered provider name, so it
 		// resolves to `ctx.provider`, which the server sets to Anthropic.

@@ -5,10 +5,10 @@ import { TIME_CONSTANTS } from "./constants";
 import { CLAUDE_MODEL_IDS, MODEL_DISPLAY_NAMES } from "./models";
 
 export interface TokenBreakdown {
-	inputTokens?: number;
+	inputTokens?: number | undefined;
 	outputTokens?: number;
-	cacheReadInputTokens?: number;
-	cacheCreationInputTokens?: number;
+	cacheReadInputTokens?: number | undefined;
+	cacheCreationInputTokens?: number | undefined;
 }
 
 interface ModelCost {

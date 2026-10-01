@@ -17,9 +17,9 @@ export interface UsageWindowSnapshot {
 	resetAtMs: number;
 	window: string;
 	/** Set for per-model weekly caps (weekly_scoped); drives model-aware throttling. */
-	modelFamily?: string;
+	modelFamily?: string | undefined;
 	/** True for a weekly_scoped (per-model) cap — even when its family is unknown. */
-	scoped?: boolean;
+	scoped?: boolean | undefined;
 }
 
 // Minimal shape of Anthropic's generic limits[] entries (see providers UsageLimit).
