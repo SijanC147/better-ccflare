@@ -1,3 +1,8 @@
+// A side-effect import first, because the App graph reads the DOM at load
+// and biome's import sorting would otherwise move the named import from
+// test/dom below it: measured, that left a module initialised without a DOM
+// and broke OpenAIGatewaysCard.test.tsx later in the same process.
+import "../../test/dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AccountResponse } from "@better-ccflare/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -586,6 +591,16 @@ describe("navigation and route", () => {
 	});
 
 	test("the sidebar links to /notifications and marks it active there", async () => {
+		// The sidebar's version card fetches on mount. Unstubbed, Bun's fetch
+		// throws on the relative URL, and the API client retries a thrown
+		// request once after a second, which then lands in whichever test file
+		// is running by then (measured: OpenAIGatewaysCard.test.tsx). A 404 is
+		// not retried.
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify({ error: "not stubbed" }), {
+				status: 404,
+				headers: { "content-type": "application/json" },
+			})) as unknown as typeof fetch;
 		const qc = client();
 		qc.setQueryData(queryKeys.insightsAlerts(), {
 			alerts: [],
