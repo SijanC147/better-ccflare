@@ -86,6 +86,8 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			gateway_hint_prev_tool_durations: string | null;
 			gateway_hint_compaction: string | null;
 			gateway_hint_context_compacted: string | null;
+			inbound_format: string | null;
+			inbound_gateway: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name
@@ -154,6 +156,10 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			gatewayHintCompaction: request.gateway_hint_compaction || undefined,
 			gatewayHintContextCompacted:
 				request.gateway_hint_context_compacted || undefined,
+			// The OpenAI-shaped API and named gateway a translated request
+			// arrived through; its path reads /v1/messages (SB23-2727).
+			inboundFormat: request.inbound_format || undefined,
+			inboundGateway: request.inbound_gateway || undefined,
 		}));
 
 		return jsonResponse(response);

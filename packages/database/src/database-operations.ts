@@ -1323,6 +1323,8 @@ OAuth tokens will need to be re-authenticated.
 		gatewayHintContextCompacted?: string | null,
 		projectId?: string | null,
 		worktreePath?: string | null,
+		inboundFormat?: string | null,
+		inboundGateway?: string | null,
 	): Promise<void> {
 		await withDatabaseRetry(
 			() =>
@@ -1356,6 +1358,8 @@ OAuth tokens will need to be re-authenticated.
 					gatewayHintContextCompacted,
 					projectId,
 					worktreePath,
+					inboundFormat,
+					inboundGateway,
 				}),
 			this.retryConfig,
 			"saveRequest",

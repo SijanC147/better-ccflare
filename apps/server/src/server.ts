@@ -55,6 +55,7 @@ import {
 } from "@better-ccflare/logger";
 import {
 	dispatchOpenAIGatewayRequest,
+	dropClientGatewayHeaders,
 	handleChatCompletionsRequest,
 	handleClaudeCodeEndpointRequest,
 	handleResponsesRequest,
@@ -116,8 +117,6 @@ import { validatePathOrThrow } from "@better-ccflare/security";
 import {
 	type Account,
 	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
-	GATEWAY_COMBO_HEADER,
-	GATEWAY_REQUIRE_MODEL_HEADER,
 	type LoadBalancingStrategy,
 	matchOpenAIGatewayAliasPath,
 	matchOpenAIGatewayPath,
@@ -1738,20 +1737,9 @@ export default async function startServer(options?: {
 			async fetch(req: Request) {
 				const url = new URL(req.url);
 
-				// The gateway routing headers are internal: only the gateway
-				// handler may set them, on its own synthetic request. A client's
-				// copy is dropped here, before any path can read it, so a direct
-				// /v1/messages or /v1/responses request cannot pick a ladder or
-				// lift the model filter (SB23-3389 review, finding 1).
-				if (
-					req.headers.has(GATEWAY_COMBO_HEADER) ||
-					req.headers.has(GATEWAY_REQUIRE_MODEL_HEADER)
-				) {
-					const headers = new Headers(req.headers);
-					headers.delete(GATEWAY_COMBO_HEADER);
-					headers.delete(GATEWAY_REQUIRE_MODEL_HEADER);
-					req = new Request(req, { headers });
-				}
+				// The gateway routing headers and the inbound marker are
+				// internal; a client's copy is dropped before any path reads it.
+				req = dropClientGatewayHeaders(req);
 
 				// Gateway short form: `/<name>/v1/<rest>` is `/v1/gateways/<name>/<rest>`.
 				// Rewritten here, before the SPA check and the auth layer, so both

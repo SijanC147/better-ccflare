@@ -33,6 +33,7 @@ import type {
 import { cacheBodyStore } from "../cache-body-store";
 import { ensureCodexModelDefaults } from "../codex-model-catalog";
 import { extractGatewayHintHeadersFromRequest } from "../gateway-hint-headers";
+import { extractInboundMarkerFromRequest } from "../inbound-marker";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
@@ -913,6 +914,7 @@ export async function proxyWithAccount(
 		// UsageCollector) threads these through, matching what the collector
 		// itself does from the `StartMessage` header map (usage-collector.ts).
 		const gatewayHint = extractGatewayHintHeadersFromRequest(req.headers);
+		const inbound = extractInboundMarkerFromRequest(req.headers);
 
 		// Dedicated controller so a stuck-upstream drain deadline (see
 		// anthropic-terminal-recovery.ts) can abort this request's fetch
@@ -1444,6 +1446,11 @@ export async function proxyWithAccount(
 						gatewayHint.prevToolDurations,
 						gatewayHint.compaction,
 						gatewayHint.contextCompacted,
+						// Not resolved on this path; positional, to reach the marker.
+						undefined,
+						undefined,
+						inbound.format,
+						inbound.gateway,
 					),
 				);
 				// Do not bench the account or fail over — pass Anthropic's real error
@@ -1556,6 +1563,11 @@ export async function proxyWithAccount(
 							gatewayHint.prevToolDurations,
 							gatewayHint.compaction,
 							gatewayHint.contextCompacted,
+							// Not resolved on this path; positional, to reach the marker.
+							undefined,
+							undefined,
+							inbound.format,
+							inbound.gateway,
 						),
 					);
 				}
@@ -1655,6 +1667,11 @@ export async function proxyWithAccount(
 						gatewayHint.prevToolDurations,
 						gatewayHint.compaction,
 						gatewayHint.contextCompacted,
+						// Not resolved on this path; positional, to reach the marker.
+						undefined,
+						undefined,
+						inbound.format,
+						inbound.gateway,
 					),
 				);
 				cancelDiscardedResponseBody(rawResponse);
@@ -1759,6 +1776,11 @@ export async function proxyWithAccount(
 							gatewayHint.prevToolDurations,
 							gatewayHint.compaction,
 							gatewayHint.contextCompacted,
+							// Not resolved on this path; positional, to reach the marker.
+							undefined,
+							undefined,
+							inbound.format,
+							inbound.gateway,
 						),
 					);
 					// The body is the only statement of why (SB23-2781); log its start
@@ -1828,6 +1850,11 @@ export async function proxyWithAccount(
 						gatewayHint.prevToolDurations,
 						gatewayHint.compaction,
 						gatewayHint.contextCompacted,
+						// Not resolved on this path; positional, to reach the marker.
+						undefined,
+						undefined,
+						inbound.format,
+						inbound.gateway,
 					),
 				);
 				cancelDiscardedResponseBody(rawResponse);
@@ -2193,6 +2220,11 @@ export async function proxyWithAccount(
 								gatewayHint.prevToolDurations,
 								gatewayHint.compaction,
 								gatewayHint.contextCompacted,
+								// Not resolved on this path; positional, to reach the marker.
+								undefined,
+								undefined,
+								inbound.format,
+								inbound.gateway,
 							),
 						);
 					}
@@ -2626,6 +2658,11 @@ export async function proxyWithAccount(
 							gatewayHint.prevToolDurations,
 							gatewayHint.compaction,
 							gatewayHint.contextCompacted,
+							// Not resolved on this path; positional, to reach the marker.
+							undefined,
+							undefined,
+							inbound.format,
+							inbound.gateway,
 						),
 					);
 					cancelDiscardedResponseBody(response);
