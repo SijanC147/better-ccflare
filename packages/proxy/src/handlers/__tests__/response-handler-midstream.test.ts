@@ -88,18 +88,10 @@ function makeCtxWithReason() {
 	};
 
 	const ctx = {
-		provider: {
-			name: "anthropic",
-			isStreamingResponse: () => true,
-			parseRateLimit: () => ({
-				isRateLimited: true,
-				resetTime: undefined,
-				statusHeader: undefined,
-				remaining: undefined,
-			}),
-			parseUsage: undefined,
-			extractUsageInfo: undefined,
-		},
+		// No provider methods: handleRateLimitResponse takes the rate-limit info
+		// as an argument and never reads ctx.provider, so the stub that stood
+		// here never ran (SB23-2536).
+		provider: { name: "anthropic" },
 		dbOps: {
 			markAccountRateLimited: (
 				accountId: string,
