@@ -7,7 +7,7 @@ import {
 import {
 	describeUsagePauseWindow,
 	getThresholdLabels,
-	storedWindowSettings,
+	reportableWindowSettings,
 } from "./usage-pause-helpers";
 
 /**
@@ -260,7 +260,9 @@ export function accountMenuActions(
 		// Both conditions, not the percent alone: a window with only a reset
 		// minimum is configured too, and would otherwise read as "not set"
 		// (SB23-2575).
-		const { fiveHour, weekly } = storedWindowSettings(account);
+		// Only the windows this provider reports: an xAI 5-hour setting is never
+		// evaluated, so naming it would promise a pause that never comes.
+		const { fiveHour, weekly } = reportableWindowSettings(account);
 		const { fiveHourLabel, weeklyLabel } = getThresholdLabels(account);
 		const activeUsageThresholds = [
 			describeUsagePauseWindow(fiveHourLabel, fiveHour),

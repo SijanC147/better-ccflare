@@ -737,6 +737,171 @@ describe("RateLimitProgress — usage pause threshold marker", () => {
 	});
 });
 
+describe("RateLimitProgress — xAI credits row carries the weekly pause (SB23-3686)", () => {
+	const xaiUsage = {
+		credits: {
+			utilization: 70,
+			resets_at: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString(),
+		},
+	};
+
+	it("marks the Grok credits bar at the weekly threshold", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={70}
+				usageWindow="credits"
+				usageData={xaiUsage}
+				provider="xai"
+				showWeekly
+				pauseThresholdFiveHour={null}
+				pauseThresholdWeekly={85}
+			/>,
+		);
+
+		expect(html).toContain("Grok credits");
+		expect(html).toContain("Pause threshold · 85%");
+		expect(html).toContain("left:85%");
+	});
+
+	// The row key "credits" alone must not carry a threshold: only the xAI arm
+	// produces it today, and SB23-2462 is what trusting a `credits` key did.
+	// Kills a mutation that drops the provider check in thresholdForWindow.
+	it("does not mark a credits row from any other provider", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={70}
+				usageWindow="credits"
+				usageData={null}
+				provider="anthropic"
+				showWeekly
+				pauseThresholdFiveHour={null}
+				pauseThresholdWeekly={85}
+				pauseMinResetWeeklyMs={2 * 60 * 60 * 1000}
+			/>,
+		);
+
+		expect(html).not.toContain("Pause threshold ·");
+		expect(html).not.toContain("Pauses while the reset");
+	});
+
+	it("leaves a Codex account carrying a credits balance on its own weekly bar", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={40}
+				usageWindow="seven_day"
+				usageData={{
+					seven_day: {
+						utilization: 40,
+						resets_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+					},
+					credits: { has_credits: true, unlimited: false, balance: "3.00" },
+				}}
+				provider="codex"
+				showWeekly
+				pauseThresholdFiveHour={null}
+				pauseThresholdWeekly={90}
+			/>,
+		);
+
+		expect(html).not.toContain("Grok credits");
+		expect(html.split("Pause threshold ·").length - 1).toBe(1);
+		expect(html).toContain("Pause threshold · 90%");
+	});
+});
+
+describe("RateLimitProgress — reset condition on the usage bar (SB23-3691)", () => {
+	const anthropicUsage: AnthropicUsageData = {
+		five_hour: {
+			utilization: 30,
+			resets_at: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+		},
+		seven_day: {
+			utilization: 40,
+			resets_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+		},
+	};
+
+	it("names a reset-only window's condition on its bar, which has no marker to draw", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={30}
+				usageWindow="five_hour"
+				usageData={anthropicUsage}
+				provider="anthropic"
+				showWeekly
+				pauseMinResetFiveHourMs={2 * 60 * 60 * 1000}
+			/>,
+		);
+
+		expect(html).not.toContain("Pause threshold ·");
+		expect(html.split("data-pause-reset-condition").length - 1).toBe(1);
+		expect(html).toContain("Pauses while the reset is at least 2h away");
+	});
+
+	it("names the condition in the marker tooltip as well when the window has a percent too", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={30}
+				usageWindow="five_hour"
+				usageData={anthropicUsage}
+				provider="anthropic"
+				showWeekly
+				pauseThresholdWeekly={80}
+				pauseMinResetWeeklyMs={36 * 60 * 60 * 1000}
+			/>,
+		);
+
+		expect(html).toContain("Pause threshold · 80%");
+		expect(
+			html.split("Pauses while the reset is at least 36h away").length - 1,
+		).toBe(2);
+	});
+
+	it("shows nothing for a window with no reset condition", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={30}
+				usageWindow="five_hour"
+				usageData={anthropicUsage}
+				provider="anthropic"
+				showWeekly
+				pauseThresholdFiveHour={80}
+			/>,
+		);
+
+		expect(html).not.toContain("Pauses while the reset");
+	});
+
+	it("names the reset condition on the xAI credits bar", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={10}
+				usageWindow="credits"
+				usageData={{
+					credits: {
+						utilization: 10,
+						resets_at: new Date(
+							Date.now() + 4 * 24 * 60 * 60 * 1000,
+						).toISOString(),
+					},
+				}}
+				provider="xai"
+				showWeekly
+				pauseMinResetWeeklyMs={24 * 60 * 60 * 1000}
+			/>,
+		);
+
+		expect(html).toContain("Pauses while the reset is at least 24h away");
+	});
+});
+
 describe("RateLimitProgress — threshold tooltip wording", () => {
 	const usage = {
 		five_hour: {

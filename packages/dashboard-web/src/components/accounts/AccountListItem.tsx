@@ -524,6 +524,21 @@ export function AccountListItem({
 							? account.usagePauseWeeklyThreshold
 							: null
 					}
+					// The reset condition beside each percent (SB23-3691): a window
+					// with only a reset minimum has no marker to draw, so without these
+					// its bar showed nothing at all.
+					pauseMinResetFiveHourMs={
+						supportsUsagePauseThreshold(account.provider) &&
+						account.usagePauseFiveHourEnabled
+							? (account.usagePauseFiveHourMinResetRemainingMs ?? null)
+							: null
+					}
+					pauseMinResetWeeklyMs={
+						supportsUsagePauseThreshold(account.provider) &&
+						account.usagePauseWeeklyEnabled
+							? (account.usagePauseWeeklyMinResetRemainingMs ?? null)
+							: null
+					}
 					renewalDay={account.renewalDay}
 				/>
 			)}

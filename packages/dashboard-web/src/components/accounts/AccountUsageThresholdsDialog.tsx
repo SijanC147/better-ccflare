@@ -16,10 +16,12 @@ import {
 	draftFromSetting,
 	getThresholdLabels,
 	MAX_RESET_HOURS,
+	reportableWindowSetting,
+	reportableWindowSettings,
 	settingFromDraft,
-	storedWindowSettings,
 	type UsagePauseWindowDraft,
 	type UsagePauseWindowSetting,
+	unavailableWindowReason,
 	validateWindowDraft,
 } from "./usage-pause-helpers";
 
@@ -53,40 +55,51 @@ export function AccountUsageThresholdsDialog({
 	onOpenChange,
 	onUpdateThresholds,
 }: AccountUsageThresholdsDialogProps) {
+	// Seeded from the windows this provider reports: a window it cannot report
+	// starts switched off (numbers kept) and is saved that way, which clears a
+	// stale setting the poller would ignore anyway (SB23-3686).
 	const [fiveHour, setFiveHour] = useState<UsagePauseWindowDraft>(() =>
-		draftFromSetting(storedWindowSettings(account).fiveHour),
+		draftFromSetting(reportableWindowSettings(account).fiveHour),
 	);
 	const [weekly, setWeekly] = useState<UsagePauseWindowDraft>(() =>
-		draftFromSetting(storedWindowSettings(account).weekly),
+		draftFromSetting(reportableWindowSettings(account).weekly),
 	);
 	const [isUpdating, setIsUpdating] = useState(false);
 	const { fiveHourLabel, weeklyLabel } = getThresholdLabels(account);
+	const fiveHourUnavailable = unavailableWindowReason(account, "five_hour");
+	const weeklyUnavailable = unavailableWindowReason(account, "weekly");
 
 	// Reset the fields whenever the dialog is pointed at another account.
 	useEffect(() => {
 		setFiveHour(
-			draftFromSetting({
-				enabled: account?.usagePauseFiveHourEnabled ?? false,
-				percent: account?.usagePauseFiveHourThreshold ?? null,
-				minResetRemainingMs:
-					account?.usagePauseFiveHourMinResetRemainingMs ?? null,
-			}),
+			draftFromSetting(
+				reportableWindowSetting(account?.provider, "five_hour", {
+					enabled: account?.usagePauseFiveHourEnabled ?? false,
+					percent: account?.usagePauseFiveHourThreshold ?? null,
+					minResetRemainingMs:
+						account?.usagePauseFiveHourMinResetRemainingMs ?? null,
+				}),
+			),
 		);
 	}, [
+		account?.provider,
 		account?.usagePauseFiveHourThreshold,
 		account?.usagePauseFiveHourEnabled,
 		account?.usagePauseFiveHourMinResetRemainingMs,
 	]);
 	useEffect(() => {
 		setWeekly(
-			draftFromSetting({
-				enabled: account?.usagePauseWeeklyEnabled ?? false,
-				percent: account?.usagePauseWeeklyThreshold ?? null,
-				minResetRemainingMs:
-					account?.usagePauseWeeklyMinResetRemainingMs ?? null,
-			}),
+			draftFromSetting(
+				reportableWindowSetting(account?.provider, "weekly", {
+					enabled: account?.usagePauseWeeklyEnabled ?? false,
+					percent: account?.usagePauseWeeklyThreshold ?? null,
+					minResetRemainingMs:
+						account?.usagePauseWeeklyMinResetRemainingMs ?? null,
+				}),
+			),
 		);
 	}, [
+		account?.provider,
 		account?.usagePauseWeeklyThreshold,
 		account?.usagePauseWeeklyEnabled,
 		account?.usagePauseWeeklyMinResetRemainingMs,
@@ -131,12 +144,14 @@ export function AccountUsageThresholdsDialog({
 						label={fiveHourLabel}
 						draft={fiveHour}
 						onDraftChange={setFiveHour}
+						unavailableReason={fiveHourUnavailable}
 					/>
 					<ThresholdRow
 						id="usage-threshold-weekly"
 						label={weeklyLabel}
 						draft={weekly}
 						onDraftChange={setWeekly}
+						unavailableReason={weeklyUnavailable}
 					/>
 					<div className="text-sm text-muted-foreground">
 						A pause from a threshold is lifted by the usage poller once no
@@ -172,6 +187,12 @@ interface ThresholdRowProps {
 	label: string;
 	draft: UsagePauseWindowDraft;
 	onDraftChange: (next: UsagePauseWindowDraft) => void;
+	/**
+	 * Why this window cannot carry a pause on this account (an xAI 5-hour
+	 * window, SB23-3686), or null. A row with a reason is shown switched off
+	 * and read-only, with the reason in place of its fields.
+	 */
+	unavailableReason?: string | null;
 }
 
 /**
@@ -182,11 +203,38 @@ interface ThresholdRowProps {
  * down before the window is switched on, and the ones already stored stay
  * visible instead of disappearing when the window is turned off.
  */
-function ThresholdRow({ id, label, draft, onDraftChange }: ThresholdRowProps) {
+export function ThresholdRow({
+	id,
+	label,
+	draft,
+	onDraftChange,
+	unavailableReason = null,
+}: ThresholdRowProps) {
 	const { percent, resetMs, error } = validateWindowDraft(draft);
 	const percentHintId = `${id}-percent-hint`;
 	const resetHintId = `${id}-reset-hint`;
 	const muted = draft.enabled ? "" : "text-muted-foreground";
+
+	if (unavailableReason !== null) {
+		return (
+			<div className="space-y-2" data-window-unavailable="">
+				<div className="flex items-center justify-between gap-3">
+					<p className="text-sm font-medium text-muted-foreground">
+						{label} window
+					</p>
+					<Switch
+						checked={false}
+						disabled
+						title={`The ${label.toLowerCase()} window is not available on this account`}
+						aria-label={`Pause on the ${label.toLowerCase()} window`}
+					/>
+				</div>
+				<p className="pl-1 text-[11px] text-muted-foreground">
+					Unavailable: {unavailableReason}
+				</p>
+			</div>
+		);
+	}
 
 	return (
 		<div className="space-y-2">

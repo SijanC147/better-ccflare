@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { Account } from "../../api";
-import { getThresholdLabels } from "./AccountUsageThresholdsDialog";
+import {
+	getThresholdLabels,
+	ThresholdRow,
+} from "./AccountUsageThresholdsDialog";
 
 const baseAccount: Account = {
 	id: "account-1",
@@ -75,5 +79,49 @@ describe("getThresholdLabels", () => {
 			fiveHourLabel: "5-hour",
 			weeklyLabel: "Weekly",
 		});
+	});
+});
+
+describe("the xAI rows (SB23-3686)", () => {
+	it("labels the weekly row Grok credits for xAI accounts", () => {
+		expect(getThresholdLabels({ ...baseAccount, provider: "xai" })).toEqual({
+			fiveHourLabel: "5-hour",
+			weeklyLabel: "Grok credits",
+		});
+	});
+
+	it("renders an unavailable row switched off with its reason and no fields", () => {
+		const html = renderToStaticMarkup(
+			<ThresholdRow
+				id="usage-threshold-5h"
+				label="5-hour"
+				draft={{ enabled: true, percent: "50", minResetHours: "" }}
+				onDraftChange={() => {}}
+				unavailableReason="xAI reports one usage window, Grok Build credits, and no 5-hour window, so there is nothing here to pause on."
+			/>,
+		);
+
+		expect(html).toContain("data-window-unavailable");
+		expect(html).toContain(
+			"Unavailable: xAI reports one usage window, Grok Build credits, and no 5-hour window",
+		);
+		expect(html).toContain("disabled");
+		expect(html).not.toContain('id="usage-threshold-5h"');
+		expect(html).not.toContain("Account usage is at or above");
+	});
+
+	it("renders an available row with its fields", () => {
+		const html = renderToStaticMarkup(
+			<ThresholdRow
+				id="usage-threshold-weekly"
+				label="Grok credits"
+				draft={{ enabled: true, percent: "80", minResetHours: "" }}
+				onDraftChange={() => {}}
+			/>,
+		);
+
+		expect(html).toContain("Grok credits window");
+		expect(html).toContain('id="usage-threshold-weekly"');
+		expect(html).not.toContain("data-window-unavailable");
 	});
 });

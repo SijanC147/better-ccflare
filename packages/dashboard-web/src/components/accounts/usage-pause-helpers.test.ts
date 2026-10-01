@@ -8,10 +8,13 @@ import {
 import {
 	describeUsagePauseWindow,
 	draftFromSetting,
+	getThresholdLabels,
 	MAX_RESET_HOURS,
 	parsePauseResetHoursField,
+	reportableWindowSettings,
 	settingFromDraft,
 	storedWindowSettings,
+	unavailableWindowReason,
 	validateWindowDraft,
 } from "./usage-pause-helpers";
 
@@ -155,6 +158,66 @@ describe("usage pause summaries (SB23-2575)", () => {
 		expect(item?.configured).toBe(true);
 		expect(item?.title).toBe(
 			"Pauses on the 5-hour window when reset >= 2h away",
+		);
+	});
+});
+
+describe("xAI windows in the dashboard (SB23-3686)", () => {
+	const xai = {
+		id: "x",
+		name: "x",
+		provider: "xai",
+		usagePauseFiveHourEnabled: true,
+		usagePauseFiveHourThreshold: 50,
+		usagePauseFiveHourMinResetRemainingMs: null,
+		usagePauseWeeklyEnabled: true,
+		usagePauseWeeklyThreshold: 80,
+		usagePauseWeeklyMinResetRemainingMs: 24 * MS_PER_HOUR,
+	} as Account;
+
+	it("labels the weekly slot by what xAI reports, not by a period", () => {
+		expect(getThresholdLabels(xai)).toStrictEqual({
+			fiveHourLabel: "5-hour",
+			weeklyLabel: "Grok credits",
+		});
+	});
+
+	it("gives the xAI 5-hour window a reason and the credits window none", () => {
+		expect(unavailableWindowReason(xai, "five_hour")).toBe(
+			"xAI reports one usage window, Grok Build credits, and no 5-hour window, so there is nothing here to pause on.",
+		);
+		expect(unavailableWindowReason(xai, "weekly")).toBeNull();
+	});
+
+	it("leaves both windows available for every other provider", () => {
+		for (const provider of [
+			"anthropic",
+			"codex",
+			"zai",
+			"nanogpt",
+			"minimax",
+		]) {
+			const account = { ...xai, provider } as Account;
+			expect(unavailableWindowReason(account, "five_hour")).toBeNull();
+			expect(unavailableWindowReason(account, "weekly")).toBeNull();
+		}
+	});
+
+	it("switches the xAI 5-hour window off and keeps its numbers", () => {
+		expect(reportableWindowSettings(xai)).toStrictEqual({
+			fiveHour: { enabled: false, percent: 50, minResetRemainingMs: null },
+			weekly: storedWindowSettings(xai).weekly,
+		});
+	});
+
+	it("names only the credits window in the card menu summary", () => {
+		const item = accountMenuActions(xai, {
+			usageThresholds: true,
+		} as AccountMenuHandlers).find(
+			(action) => action.id === "usage-thresholds",
+		);
+		expect(item?.title).toBe(
+			"Pauses on the Grok credits window when usage >= 80% and reset >= 24h away",
 		);
 	});
 });

@@ -1,3 +1,7 @@
+import {
+	type UsagePauseWindow,
+	usagePauseWindowsForProvider,
+} from "@better-ccflare/core";
 import { MAX_MIN_RESET_REMAINING_MS } from "@better-ccflare/types";
 import type { Account } from "../../api";
 import {
@@ -148,14 +152,69 @@ export function storedWindowSettings(account: Account | null): {
  * only changes what the rows are called, because for NanoGPT accounts those
  * same two slots govern NanoGPT's daily and monthly usage windows instead of
  * a 5-hour/weekly one.
+ *
+ * xAI's weekly slot holds its one Grok Build credits window (SB23-3686), and
+ * is labelled by what that window is rather than by a period: the fetcher
+ * decodes a reset time but no period, so "Weekly" would claim more than the
+ * code knows. The same words the usage bar prints for that row.
  */
 export function getThresholdLabels(account: Account | null): {
 	fiveHourLabel: string;
 	weeklyLabel: string;
 } {
+	if (account?.provider === "xai") {
+		return { fiveHourLabel: "5-hour", weeklyLabel: "Grok credits" };
+	}
 	const isNanoGpt = account?.provider === "nanogpt";
 	return {
 		fiveHourLabel: isNanoGpt ? "Daily" : "5-hour",
 		weeklyLabel: isNanoGpt ? "Monthly" : "Weekly",
 	};
+}
+
+/**
+ * Why a window cannot carry a pause on this account, or null when it can.
+ *
+ * The windows come from core's `usagePauseWindowsForProvider`, the same list
+ * the poller filters on, so the dialog cannot offer a window the server would
+ * then ignore.
+ */
+export function unavailableWindowReason(
+	account: Pick<Account, "provider"> | null,
+	window: UsagePauseWindow,
+): string | null {
+	if (usagePauseWindowsForProvider(account?.provider).includes(window)) {
+		return null;
+	}
+	if (account?.provider === "xai") {
+		return "xAI reports one usage window, Grok Build credits, and no 5-hour window, so there is nothing here to pause on.";
+	}
+	return "This provider does not report this window, so there is nothing here to pause on.";
+}
+
+/**
+ * The stored settings with every window this account cannot report switched
+ * off, numbers kept: what the overflow summary names and what the dialog
+ * saves, so neither promises a pause the poller will never make.
+ */
+export function reportableWindowSettings(account: Account | null): {
+	fiveHour: UsagePauseWindowSetting;
+	weekly: UsagePauseWindowSetting;
+} {
+	const { fiveHour, weekly } = storedWindowSettings(account);
+	return {
+		fiveHour: reportableWindowSetting(account?.provider, "five_hour", fiveHour),
+		weekly: reportableWindowSetting(account?.provider, "weekly", weekly),
+	};
+}
+
+/** One window's setting, switched off when the provider cannot report it. */
+export function reportableWindowSetting(
+	provider: string | null | undefined,
+	window: UsagePauseWindow,
+	setting: UsagePauseWindowSetting,
+): UsagePauseWindowSetting {
+	return usagePauseWindowsForProvider(provider).includes(window)
+		? setting
+		: { ...setting, enabled: false };
 }

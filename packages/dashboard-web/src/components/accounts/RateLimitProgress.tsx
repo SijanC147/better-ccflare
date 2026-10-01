@@ -17,6 +17,7 @@ import {
 	ZAI_PEAK_WINDOW,
 } from "../../utils/provider-utils";
 import { formatRenewalDate, viewerRenewal } from "../../utils/renewal";
+import { formatHoursForSummary } from "../combos/slot-throttle-helpers";
 import { Progress } from "../ui/progress";
 import {
 	collectAnthropicUsageRows,
@@ -161,6 +162,8 @@ interface RateLimitProgressProps {
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	pauseThresholdFiveHour?: number | null; // Pause at this percent of the 5-hour window; null = off
 	pauseThresholdWeekly?: number | null; // Pause at this percent of the all-models weekly window; null = off
+	pauseMinResetFiveHourMs?: number | null; // 5-hour pause holds only while its reset is at least this far away; null = off
+	pauseMinResetWeeklyMs?: number | null; // Weekly pause holds only while its reset is at least this far away; null = off
 	renewalDay?: number | null; // Operator-set subscription renewal day (1-31); null = not set
 }
 
@@ -209,15 +212,31 @@ function thresholdTooltipDetail(
 	return `${window.charAt(0).toUpperCase()}${window.slice(1)} usage is ${current}%; this account pauses at ${threshold}% and resumes when the window resets.`;
 }
 
-function thresholdForWindow(
+function thresholdForWindow<T>(
 	window: string | null,
-	fiveHour: number | null,
-	weekly: number | null,
-): number | null {
+	provider: string,
+	fiveHour: T | null,
+	weekly: T | null,
+): T | null {
 	if (!window) return null;
 	if (window === "five_hour") return fiveHour;
 	if (window === "seven_day") return weekly;
+	// xAI's one Grok credits window is its weekly pause slot (SB23-3686). Keyed
+	// on the provider as well as the row: the row key is only "credits"
+	// because the xAI arm is its sole producer today, and SB23-2462 is what
+	// trusting a `credits` key alone did.
+	if (window === "credits" && provider === PROVIDER_NAMES.XAI) return weekly;
 	return null;
+}
+
+/**
+ * The tooltip line for a window's reset condition (SB23-3691): a window with a
+ * reset minimum, with or without a percent, says so on its usage bar. A
+ * reset-only window has no percent to draw a marker at, so this line is the
+ * only place the bar shows it.
+ */
+export function describePauseResetCondition(minResetMs: number): string {
+	return `Pauses while the reset is at least ${formatHoursForSummary(minResetMs)}h away`;
 }
 
 function computeWindowThrottleUntil(
@@ -316,6 +335,8 @@ export function RateLimitProgress({
 	showWeekly = false,
 	pauseThresholdFiveHour = null,
 	pauseThresholdWeekly = null,
+	pauseMinResetFiveHourMs = null,
+	pauseMinResetWeeklyMs = null,
 	renewalDay = null,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
@@ -832,9 +853,20 @@ export function RateLimitProgress({
 								expectedPct !== null && (percentage ?? 0) > expectedPct;
 							const pauseThreshold = thresholdForWindow(
 								usage.window ?? null,
+								provider,
 								pauseThresholdFiveHour,
 								pauseThresholdWeekly,
 							);
+							const pauseMinResetMs = thresholdForWindow(
+								usage.window ?? null,
+								provider,
+								pauseMinResetFiveHourMs,
+								pauseMinResetWeeklyMs,
+							);
+							const resetConditionLine =
+								pauseMinResetMs === null
+									? null
+									: describePauseResetCondition(pauseMinResetMs);
 							const isWindowThrottled = usage.window
 								? throttledWindowSet.has(usage.window)
 								: false;
@@ -889,6 +921,14 @@ export function RateLimitProgress({
 											<div className="mb-1 font-medium">
 												{windowLabel} usage
 											</div>
+											{resetConditionLine && (
+												<div
+													className="text-muted-foreground"
+													data-pause-reset-condition=""
+												>
+													{resetConditionLine}
+												</div>
+											)}
 											{projectedMessage && (
 												<div
 													className={
@@ -963,6 +1003,11 @@ export function RateLimitProgress({
 															pauseThreshold,
 														)}
 													</div>
+													{resetConditionLine && (
+														<div className="text-muted-foreground">
+															{resetConditionLine}
+														</div>
+													)}
 												</div>
 												{/* The theme variables hold plain colour literals, so
 												    they are read here directly: this build generates no
