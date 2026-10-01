@@ -11,6 +11,15 @@ const MODEL = "claude-sonnet-5";
 const HI = { role: "user", content: "hi" } as const;
 
 /**
+ * A request carrying tool history must also define tools, or the translator
+ * rewrites that history as text (SB23-2727 item 3). Fixtures that assert the
+ * tool_use and tool_result blocks themselves carry this.
+ */
+const TOOLS: ChatCompletionRequest["tools"] = [
+	{ type: "function", function: { name: "lookup", parameters: {} } },
+];
+
+/**
  * The translator reads untrusted JSON, so refusal fixtures deliberately break
  * the request type. One cast, here, rather than one per test.
  */
@@ -191,6 +200,7 @@ describe("3. assistant messages", () => {
 	test("text plus tool_calls become text and tool_use blocks; empty strings dropped; empty arguments become {}", () => {
 		const body = translated({
 			model: MODEL,
+			tools: TOOLS,
 			messages: [
 				HI,
 				{
@@ -280,6 +290,7 @@ describe("3. assistant messages", () => {
 	test("legacy function_call gets a synthesized id that the following function message answers", () => {
 		const body = translated({
 			model: MODEL,
+			tools: TOOLS,
 			messages: [
 				HI,
 				{
@@ -341,6 +352,7 @@ describe("4. tool messages", () => {
 	test("become a tool_result inside a user message, text parts joined into a string", () => {
 		const body = translated({
 			model: MODEL,
+			tools: TOOLS,
 			messages: [
 				HI,
 				{
@@ -393,6 +405,7 @@ describe("5. adjacent same-role messages merge", () => {
 	test("a multi-turn tool conversation folds two tool results and the next user turn into one user message", () => {
 		const body = translated({
 			model: MODEL,
+			tools: TOOLS,
 			messages: [
 				{ role: "user", content: "weather and time in Valletta?" },
 				{
@@ -559,6 +572,7 @@ describe("2b. empty user content", () => {
 	test("an empty user turn merging into tool results still produces a valid request", () => {
 		const body = translated({
 			model: MODEL,
+			tools: TOOLS,
 			messages: [
 				HI,
 				{

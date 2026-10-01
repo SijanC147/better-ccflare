@@ -5,6 +5,7 @@ import {
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import { getRequestTools, getTranslatedToolName } from "./custom-tools";
+import { flattenToolHistory, parseBase64DataUrl } from "./inbound-compat";
 import type {
 	AnthropicContent,
 	AnthropicImageContent,
@@ -121,14 +122,14 @@ function translateContentItem(c: {
 		const imageUrl = c.image_url;
 		if (typeof imageUrl === "string") {
 			const trimmed = imageUrl.trim();
-			const dataUrlMatch = /^data:([^;]+);base64,(.+)$/.exec(trimmed);
-			if (dataUrlMatch) {
+			const dataUrl = parseBase64DataUrl(trimmed);
+			if (dataUrl) {
 				return {
 					type: "image",
 					source: {
 						type: "base64",
-						media_type: dataUrlMatch[1],
-						data: dataUrlMatch[2],
+						media_type: dataUrl.mediaType,
+						data: dataUrl.data,
 					},
 				};
 			}
@@ -248,6 +249,10 @@ export function translateRequestToAnthropic(
 	}
 
 	const translatedTools = translateTools(getRequestTools(req));
+	if (translatedTools.length === 0) {
+		// Anthropic refuses tool history without tool definitions (SB23-2727).
+		result.messages = flattenToolHistory(result.messages);
+	}
 	if (translatedTools.length > 0) {
 		result.tools = translatedTools;
 		const toolChoice = translateToolChoice(req.tool_choice);
