@@ -1,5 +1,15 @@
 {
 	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		// `exactOptionalPropertyTypes` rejects an explicit `undefined` on an optional
+		// member, which closes the `Partial<T>` hole in fixture factories such as
+		// `makeAccount` and `makeZaiUsage` (SB23-2456). It applies to every file this
+		// program reaches through the `@better-ccflare/*` path map, so a violation in
+		// `packages/core` fails this target as well as `typecheck:core`. The root
+		// config does not set it yet, because proxy and the programs that import it
+		// still carry sites; set per package until they reach zero.
+		"exactOptionalPropertyTypes": true
+	},
 	// The root `include` is `packages/*/src/**/*` and `apps/*/src/**/*`, so no
 	// file under bench/ was in any program, and two stale `@ts-expect-error`
 	// directives sat in `drain-strategy-harness.ts` unseen (SB23-3689).
