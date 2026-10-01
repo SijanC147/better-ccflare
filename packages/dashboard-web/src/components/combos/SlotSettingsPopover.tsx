@@ -16,7 +16,7 @@ import {
 	validateDraft,
 } from "./slot-throttle-helpers";
 
-interface SlotSettingsFormProps {
+export interface SlotSettingsFormProps {
 	slot: ComboSlot;
 	comboId: string;
 	onSaved: () => void;
@@ -26,29 +26,72 @@ interface SlotSettingsFormProps {
  * Lives inside PopoverContent so it mounts fresh on every open and seeds its
  * state from the slot once. Nothing syncs the draft back to the slot with an
  * effect: the same rule the add form in ComboSlotBuilder follows.
+ *
+ * Exported so a test can mount it without opening the Popover: a Radix portal
+ * does not mount after another test file has loaded Radix in the same process.
  */
-function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
+export function SlotSettingsForm({
+	slot,
+	comboId,
+	onSaved,
+}: SlotSettingsFormProps) {
 	const [draft, setDraft] = useState<SlotThrottleDraft>(() =>
 		draftFromSlot(slot),
 	);
 	const updateSlot = useUpdateComboSlot();
 
-	const { percent, resetMs } = validateDraft(draft);
-	const update = buildSlotUpdate(slot, draft);
-	const dirty = isDirty(update);
-	// Stable ids so each field's message can be announced with the field it
-	// belongs to, rather than leaving a screen reader with "invalid" and no
-	// reason.
-	const percentHintId = `slot-max-util-hint-${slot.id}`;
-	const resetHintId = `slot-min-reset-hint-${slot.id}`;
-
 	const handleSave = () => {
-		if (!update || !dirty) return;
+		const update = buildSlotUpdate(slot, draft);
+		if (!update || !isDirty(update)) return;
 		updateSlot.mutate(
 			{ comboId, slotId: slot.id, params: update },
 			{ onSuccess: onSaved },
 		);
 	};
+
+	return (
+		<SlotSettingsFormView
+			slot={slot}
+			draft={draft}
+			onDraftChange={setDraft}
+			onSave={handleSave}
+			isPending={updateSlot.isPending}
+			isError={updateSlot.isError}
+			error={updateSlot.error}
+		/>
+	);
+}
+
+export interface SlotSettingsFormViewProps {
+	slot: ComboSlot;
+	draft: SlotThrottleDraft;
+	/** Takes an updater, so two quick edits cannot overwrite each other. */
+	onDraftChange: (
+		update: (draft: SlotThrottleDraft) => SlotThrottleDraft,
+	) => void;
+	onSave: () => void;
+	isPending: boolean;
+	isError: boolean;
+	error: unknown;
+}
+
+/** The form body, with no hooks, so every state renders in a test. */
+export function SlotSettingsFormView({
+	slot,
+	draft,
+	onDraftChange,
+	onSave,
+	isPending,
+	isError,
+	error,
+}: SlotSettingsFormViewProps) {
+	const { percent, resetMs } = validateDraft(draft);
+	const dirty = isDirty(buildSlotUpdate(slot, draft));
+	// Stable ids so each field's message can be announced with the field it
+	// belongs to, rather than leaving a screen reader with "invalid" and no
+	// reason.
+	const percentHintId = `slot-max-util-hint-${slot.id}`;
+	const resetHintId = `slot-min-reset-hint-${slot.id}`;
 
 	return (
 		<div className="space-y-4">
@@ -62,7 +105,9 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 				<Switch
 					id={`slot-enabled-${slot.id}`}
 					checked={draft.enabled}
-					onCheckedChange={(enabled) => setDraft((d) => ({ ...d, enabled }))}
+					onCheckedChange={(enabled) =>
+						onDraftChange((d) => ({ ...d, enabled }))
+					}
 				/>
 			</div>
 
@@ -96,7 +141,7 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 							placeholder="off"
 							value={draft.maxUtilizationPercent}
 							onChange={(e) =>
-								setDraft((d) => ({
+								onDraftChange((d) => ({
 									...d,
 									maxUtilizationPercent: e.target.value,
 								}))
@@ -134,7 +179,7 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 							placeholder="off"
 							value={draft.minResetRemainingHours}
 							onChange={(e) =>
-								setDraft((d) => ({
+								onDraftChange((d) => ({
 									...d,
 									minResetRemainingHours: e.target.value,
 								}))
@@ -184,21 +229,15 @@ function SlotSettingsForm({ slot, comboId, onSaved }: SlotSettingsFormProps) {
 
 			{/* A failed save is otherwise silent to a screen reader: the button
 			 * returns from "Saving..." to "Save" and nothing announces why. */}
-			{updateSlot.isError && (
+			{isError && (
 				<p role="alert" className="text-[11px] text-destructive">
-					{updateSlot.error instanceof Error
-						? updateSlot.error.message
-						: "Could not save the slot."}
+					{error instanceof Error ? error.message : "Could not save the slot."}
 				</p>
 			)}
 
 			<div className="flex justify-end">
-				<Button
-					size="sm"
-					onClick={handleSave}
-					disabled={!dirty || updateSlot.isPending}
-				>
-					{updateSlot.isPending ? "Saving..." : "Save"}
+				<Button size="sm" onClick={onSave} disabled={!dirty || isPending}>
+					{isPending ? "Saving..." : "Save"}
 				</Button>
 			</div>
 		</div>
