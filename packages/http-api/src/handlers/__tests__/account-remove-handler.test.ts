@@ -7,7 +7,9 @@ import { createAccountRemoveHandler } from "../accounts";
 
 // Conventional test pattern (mirrors kilo.test.ts). Requires the
 // generated `inline-*-worker.ts` build artifacts to be present.
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-remove-handler.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-remove-handler-${process.pid}.db`;
 
 describe("createAccountRemoveHandler — id-scoped delete", () => {
 	let dbOps: DatabaseOperations;

@@ -11,7 +11,9 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import { DatabaseFactory } from "@better-ccflare/database";
 import { createAccountProviderSettingsUpdateHandler } from "../accounts";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-provider-settings-update.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-provider-settings-update-${process.pid}.db`;
 
 const OLD_KEY = "sk-old-2c1f4a7b";
 const NEW_KEY = "sk-new-9e84d3f0";

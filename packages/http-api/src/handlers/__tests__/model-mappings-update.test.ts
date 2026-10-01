@@ -11,7 +11,9 @@ import type { DatabaseOperations } from "@better-ccflare/database";
 import { DatabaseFactory } from "@better-ccflare/database";
 import { createAccountModelMappingsUpdateHandler } from "../accounts";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-model-mappings-update.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-model-mappings-update-${process.pid}.db`;
 
 /** Insert a minimal account row and return its generated id. */
 async function insertAccount(
@@ -63,7 +65,13 @@ describe("createAccountModelMappingsUpdateHandler — replace semantics", () => 
 	let handler: (req: Request, accountId: string) => Promise<Response>;
 
 	beforeAll(() => {
-		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+		for (const f of [
+			TEST_DB_PATH,
+			`${TEST_DB_PATH}-wal`,
+			`${TEST_DB_PATH}-shm`,
+		]) {
+			if (existsSync(f)) unlinkSync(f);
+		}
 		DatabaseFactory.initialize(TEST_DB_PATH);
 		dbOps = DatabaseFactory.getInstance();
 		handler = createAccountModelMappingsUpdateHandler(dbOps);
@@ -72,7 +80,13 @@ describe("createAccountModelMappingsUpdateHandler — replace semantics", () => 
 	afterAll(() => {
 		DatabaseFactory.reset();
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
+			}
 		} catch {
 			// ignore
 		}

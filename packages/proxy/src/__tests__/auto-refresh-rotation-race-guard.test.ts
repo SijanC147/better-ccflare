@@ -18,11 +18,20 @@
  * moments ago and is merely waiting to be persisted, so the "failure" being
  * handled here is just a replay of the now-consumed token.
  */
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from "bun:test";
 import { type AuthFailureEvt, authFailureEvents } from "@better-ccflare/core";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import {
 	clearAllPendingRotationsForTests,
+	pendingRotationCountForTests,
 	recordPendingRotation,
 } from "../handlers/pending-rotation-registry";
 import type { ProxyContext } from "../handlers/proxy-types";
@@ -121,6 +130,18 @@ async function collectEvents(
 
 beforeEach(() => {
 	clearAllPendingRotationsForTests();
+});
+
+// The registry is module state, and bun test runs every file in one process.
+// beforeEach protects this file from what ran before it; afterEach protects
+// what runs after it, which a beforeEach alone never does: the last case's
+// rotation stayed in the map for the next file (SB23-2484).
+afterEach(() => {
+	clearAllPendingRotationsForTests();
+});
+
+afterAll(() => {
+	expect(pendingRotationCountForTests()).toBe(0);
 });
 
 // ── tests ─────────────────────────────────────────────────────────────────────

@@ -27,7 +27,9 @@ import {
 	runMigrations,
 } from "../../../../database/src/migrations";
 
-const TEST_DB_PATH = `${process.env.TMPDIR ?? "/tmp"}/test-account-add-duplicate-guard-atomic.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR ?? "/tmp"}/test-account-add-duplicate-guard-atomic-${process.pid}.db`;
 
 describe("createAccountAddHandler — atomic DB-level guard (Greptile P1)", () => {
 	let db: Database;
@@ -39,7 +41,13 @@ describe("createAccountAddHandler — atomic DB-level guard (Greptile P1)", () =
 		// for the UNIQUE index.
 		try {
 			// biome-ignore lint/suspicious/noExplicitAny: bun:sqlite Database unlink via fs is fine here
-			require("node:fs").unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				require("node:fs").rmSync(f, { force: true });
+			}
 		} catch {
 			// best-effort cleanup
 		}
@@ -51,7 +59,13 @@ describe("createAccountAddHandler — atomic DB-level guard (Greptile P1)", () =
 	afterEach(() => {
 		try {
 			// biome-ignore lint/suspicious/noExplicitAny: bun:sqlite Database unlink via fs is fine here
-			require("node:fs").unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				require("node:fs").rmSync(f, { force: true });
+			}
 		} catch {
 			// best-effort cleanup
 		}

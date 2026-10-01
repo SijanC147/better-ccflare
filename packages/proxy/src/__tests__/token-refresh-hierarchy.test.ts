@@ -9,7 +9,9 @@ import type { ProxyContext } from "../proxy";
 import type { PublicSurface } from "./public-surface";
 
 // Test database path
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-token-refresh-hierarchy.db`;
+// Per process: a fixed name under TMPDIR is shared by every worktree's
+// suite, and a concurrent run deletes the file under SQLite (SB23-2480).
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-token-refresh-hierarchy-${process.pid}.db`;
 
 type SchedulerProbe = PublicSurface<AutoRefreshScheduler> & {
 	shouldRefreshAccount(
@@ -37,8 +39,12 @@ describe("Auto-Refresh Token Hierarchy", () => {
 	beforeAll(async () => {
 		// Clean up any existing test database
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch (error) {
 			console.warn("Failed to clean up existing test database:", error);
@@ -64,15 +70,21 @@ describe("Auto-Refresh Token Hierarchy", () => {
 	});
 
 	afterAll(() => {
+		// Close before unlinking: the close-time checkpoint on an unlinked
+		// file fails with SQLITE_IOERR_VNODE on macOS (SB23-2480).
+		DatabaseFactory.reset();
 		// Clean up test database
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
+			for (const f of [
+				TEST_DB_PATH,
+				`${TEST_DB_PATH}-wal`,
+				`${TEST_DB_PATH}-shm`,
+			]) {
+				if (existsSync(f)) unlinkSync(f);
 			}
 		} catch (error) {
 			console.warn("Failed to clean up test database:", error);
 		}
-		DatabaseFactory.reset();
 	});
 
 	describe("Window Refresh Logic", () => {
