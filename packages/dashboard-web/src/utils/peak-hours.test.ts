@@ -21,7 +21,7 @@ import { ANTHROPIC_PEAK_WINDOW, ZAI_PEAK_WINDOW } from "./provider-utils";
  * stays covered now that the real Zai window is Monday to Friday.
  */
 const EVERY_DAY_WINDOW = { ...ZAI_PEAK_WINDOW, weekdaysOnly: false };
-const MALTA = { timeZone: "Europe/Malta", locale: "en-GB", hour12: false };
+const MALTA = { timeZone: "Europe/Malta", locale: "en-GB" };
 const NEW_YORK = { timeZone: "America/New_York", locale: "en-US" };
 
 /**
@@ -95,10 +95,13 @@ describe("formatPeakRange", () => {
 		expect(formatPeakRange(occurrence, MALTA)).toBe("14:00–20:00");
 	});
 
-	it("renders the same window differently in New York", () => {
+	it("renders New York's clock on the 24-hour cycle for an en-US viewer", () => {
 		const occurrence = resolvePeakOccurrence(ANTHROPIC_PEAK_WINDOW, WED_INSIDE);
-		// 12:00–18:00 UTC is 8:00 AM–2:00 PM in New York during EDT.
-		expect(formatPeakRange(occurrence, NEW_YORK)).toBe("8:00 AM–2:00 PM");
+		// 12:00–18:00 UTC is 8am–2pm in New York during EDT. en-US would print
+		// "8:00 AM–2:00 PM" if the hour cycle were left to the locale; it is
+		// pinned to h23 (SB23-3521), so the zone moves the hours and the locale
+		// changes nothing but the zero padding.
+		expect(formatPeakRange(occurrence, NEW_YORK)).toBe("08:00–14:00");
 	});
 
 	it("renders the Zai window in Malta's local clock", () => {
@@ -220,11 +223,7 @@ describe("vendor-zone resolution of the Anthropic window", () => {
 	});
 
 	it("renders 5–11am in Los Angeles on both of those dates", () => {
-		const LA = {
-			timeZone: "America/Los_Angeles",
-			locale: "en-GB",
-			hour12: false,
-		};
+		const LA = { timeZone: "America/Los_Angeles", locale: "en-GB" };
 		const winter = resolvePeakOccurrence(
 			ANTHROPIC_PEAK_WINDOW,
 			Date.parse("2027-01-13T09:00:00Z"),

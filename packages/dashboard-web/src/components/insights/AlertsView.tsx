@@ -16,7 +16,7 @@ import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader } from "../ui/card";
 
 function formatTimestamp(ts: number): string {
-	return new Date(ts).toLocaleString();
+	return new Date(ts).toLocaleString(undefined, { hourCycle: "h23" });
 }
 
 // Severity has always been stored and returned but never rendered, so a

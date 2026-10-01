@@ -9,11 +9,7 @@ import {
 import { useEffect, useState } from "react";
 import { formatRelativeReset } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
-import {
-	type PeakLabel,
-	peakHoursLabel,
-	prefersTwentyFourHourClock,
-} from "../../utils/peak-hours";
+import { type PeakLabel, peakHoursLabel } from "../../utils/peak-hours";
 import {
 	ANTHROPIC_PEAK_WINDOW,
 	providerShowsCreditsBalance,
@@ -706,18 +702,11 @@ export function RateLimitProgress({
 		});
 	}
 
-	// One preference read per render, shared by both badges. The label helpers
-	// stay pure so they can be tested against a pinned zone and instant.
-	const clockOptions = {
-		hour12: prefersTwentyFourHourClock() ? false : undefined,
-	};
 	const zaiPeak =
-		provider === "zai"
-			? peakHoursLabel(ZAI_PEAK_WINDOW, now, clockOptions)
-			: null;
+		provider === "zai" ? peakHoursLabel(ZAI_PEAK_WINDOW, now) : null;
 	const anthropicPeak =
 		provider === "anthropic"
-			? peakHoursLabel(ANTHROPIC_PEAK_WINDOW, now, clockOptions)
+			? peakHoursLabel(ANTHROPIC_PEAK_WINDOW, now)
 			: null;
 	const throttledWindowSet = new Set(usageThrottledWindows);
 

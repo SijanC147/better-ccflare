@@ -143,13 +143,20 @@ export function DataRetentionCard() {
 							{cleanupNow.data.payloadCutoffIso ? (
 								<>
 									older than{" "}
-									{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString()}
+									{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString(
+										undefined,
+										{ hourCycle: "h23" },
+									)}
 								</>
 							) : (
 								<>all — storage disabled</>
 							)}
 							) and {cleanupNow.data.removedRequests} requests (older than{" "}
-							{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}).
+							{new Date(cleanupNow.data.requestCutoffIso).toLocaleString(
+								undefined,
+								{ hourCycle: "h23" },
+							)}
+							).
 						</p>
 						{(cleanupNow.data.dbSizeBytes > 0 ||
 							cleanupNow.data.tableRowCounts.length > 0) && (
