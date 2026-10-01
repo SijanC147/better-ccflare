@@ -300,15 +300,48 @@ export interface UsageLimit {
 	is_active?: boolean;
 }
 
+/** An amount in minor units: `amount_minor / 10 ** exponent` of `currency`. */
+export interface UsageMoney {
+	amount_minor: number;
+	currency: string;
+	exponent: number;
+}
+
 // Overage / pay-as-you-go credit spend block.
+//
+// `limit` is typed here and left `unknown` on the providers side
+// (`packages/providers/src/usage-fetcher.ts`), deliberately: only the
+// dashboard reads it. Measured 2026-10-01 on seven live accounts, it is a
+// money object when a monthly limit is set and null when none is (SB23-3266).
+// The cast at `accounts.ts` checks nothing, so readers still validate it.
 export interface UsageSpend {
-	used?: { amount_minor: number; currency: string; exponent: number } | null;
-	limit?: unknown;
+	used?: UsageMoney | null;
+	limit?: UsageMoney | null;
 	percent?: number | null;
 	severity?: string;
 	enabled?: boolean;
 	currency?: string | null;
 	disabled_reason?: string | null;
+}
+
+/**
+ * Anthropic's extra-usage pool, the `extra_usage` block of `/api/oauth/usage`.
+ *
+ * Mirrors `ExtraUsage` in `@better-ccflare/providers`. `monthly_limit` and
+ * `used_credits` are minor units of `currency` with `decimal_places` digits:
+ * on every live account carrying both, they equalled `spend.limit.amount_minor`
+ * and `spend.used.amount_minor` (measured 2026-10-01, SB23-3266). The block has
+ * no reset date; nothing in the payload says when the pool renews.
+ */
+export interface ExtraUsageData {
+	is_enabled: boolean;
+	monthly_limit: number | null;
+	used_credits: number | null;
+	utilization: number | null;
+	currency?: string | null;
+	decimal_places?: number | null;
+	disabled_reason?: string | null;
+	spend_limit_reached?: boolean;
 }
 
 /**
@@ -336,6 +369,8 @@ export interface AnthropicUsageData {
 	// disambiguate with Array.isArray(usageData.limits).
 	limits?: UsageLimit[];
 	spend?: UsageSpend;
+	// Anthropic only. Gate on the provider before reading it, never on the key.
+	extra_usage?: ExtraUsageData;
 	// Codex only. Absent unless upstream reported a credit balance.
 	credits?: CodexCreditsData;
 }
