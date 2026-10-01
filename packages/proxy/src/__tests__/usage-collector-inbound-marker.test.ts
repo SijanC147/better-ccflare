@@ -9,7 +9,7 @@
  * extraction must run on the raw map at start.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -99,12 +99,21 @@ describe("UsageCollector - inbound marker", () => {
 		);
 	});
 
+	// The `trash` spawn is the whole cost of this hook: 12 copies of this file
+	// at load average 138 measured it at 2750 to 3390 ms, against under 130 ms
+	// for dispose, drain and reset together, and in a loaded full suite the
+	// hook passed Bun's 5000 ms default (SB23-3905), which Bun reports as an
+	// extra "(unnamed)" failure. So the hook carries its own limit. `trash` is
+	// macOS-only, and on the Linux CI runner the old `.nothrow()` swallowed its
+	// absence and left the directory behind on every run.
 	afterAll(async () => {
 		collector.dispose();
 		await collector.drain();
 		DatabaseFactory.reset();
-		await Bun.$`trash ${dir}`.quiet().nothrow();
-	});
+		const trashed =
+			Bun.which("trash") && Bun.spawnSync(["trash", dir]).exitCode === 0;
+		if (!trashed) rmSync(dir, { recursive: true, force: true });
+	}, 30_000);
 
 	function makeStart(
 		requestId: string,

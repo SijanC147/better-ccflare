@@ -192,7 +192,10 @@ const argv = process.argv.slice(2);
 const asJson = argv.includes("--json");
 const survey = argv.includes("--survey");
 const roots = argv.filter((a: string) => !a.startsWith("--"));
-const searchRoots = roots.length > 0 ? roots : ["packages", "apps", "scripts"];
+// The root `__tests__` directory is walked too, as `check-shared-tmp-db-path.ts` already does:
+// without it this gate read 501 files where that one read 502 on the same tree, the missing one
+// being `__tests__/api-auth.test.ts` (SB23-3925). The two must agree, and a test asserts it.
+const searchRoots = roots.length > 0 ? roots : ["packages", "apps", "scripts", "__tests__"];
 
 /**
  * Which of the two invariants below applies, decided once and PRINTED, so that turning the

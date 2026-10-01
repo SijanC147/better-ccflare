@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	test,
+} from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -18,10 +25,24 @@ import {
 	type FakeMode,
 	isAlive,
 	makeFakeClaude,
+	removeFakeDirs,
 	waitFor,
 } from "./fake-claude";
 
+/*
+ * Every case passes a 30_000 ms limit. Every case that starts the fake starts
+ * a Bun process, and five of them start five. Under load that is the cost,
+ * not the code: 12 copies of this file at load average 138 failed 12 of 12
+ * runs, 1 to 3 cases each, against Bun's 5000 ms default (SB23-3861). With
+ * the limit, 12 copies at load 143 passed 50 of 50 each, and the slowest
+ * case, a five-spawn one, ran 8.3 s, so 30 s is about three and a half times
+ * that. A numeric literal rather than a named constant, because the formatter
+ * keeps a test call on one line only when its third argument is a literal.
+ */
+
 let fake: FakeClaude | null = null;
+/** Fixture directories, removed in one `trash` call after the file. */
+const fakeDirs: string[] = [];
 
 function setup(
 	mode: FakeMode,
@@ -29,7 +50,6 @@ function setup(
 	fakeOptions: {
 		textDeltas?: string[];
 		resultText?: string;
-		delayMs?: number;
 	} = {},
 ) {
 	fake = makeFakeClaude({ mode, ...fakeOptions });
@@ -85,9 +105,12 @@ beforeEach(() => resetClaudeCodeRunnerStateForTests());
 // process, so they are reset after each case as well as before (SB23-2484).
 afterEach(() => {
 	resetClaudeCodeRunnerStateForTests();
-	fake?.cleanup();
+	if (fake) fakeDirs.push(fake.dir);
 	fake = null;
 });
+// One `trash` spawn per case was the slow hook: its worst of 588 measured
+// spawns was 5101 ms, past the 5000 ms `afterEach` limit (SB23-3861).
+afterAll(() => removeFakeDirs(fakeDirs.splice(0)), 30_000);
 
 describe("GET /models", () => {
 	test("lists the endpoint's models as owned by claude-code", async () => {
@@ -107,7 +130,7 @@ describe("GET /models", () => {
 		expect(body.data.map((m) => m.id)).toEqual(["default", "opus", "sonnet"]);
 		expect(body.data.every((m) => m.owned_by === "claude-code")).toBe(true);
 		expect(fake?.invocations()).toEqual([]);
-	});
+	}, 30_000);
 
 	test("an unknown path is a 404 and never starts the CLI", async () => {
 		const ctx = setup("ok");
@@ -119,7 +142,7 @@ describe("GET /models", () => {
 		);
 		expect(res.status).toBe(404);
 		expect(fake?.invocations()).toEqual([]);
-	});
+	}, 30_000);
 });
 
 describe("request validation", () => {
@@ -136,7 +159,7 @@ describe("request validation", () => {
 		expect(body.error.code).toBe("model_not_found");
 		expect(body.error.message).toContain("default, opus, sonnet");
 		expect(fake?.invocations()).toEqual([]);
-	});
+	}, 30_000);
 
 	const messages = [{ role: "user", content: "hi" }];
 	const refusals: Array<[string, Record<string, unknown>]> = [
@@ -180,14 +203,14 @@ describe("request validation", () => {
 			const res = await call(ctx, { model: "opus", messages, ...extra });
 			expect(res.status).toBe(400);
 			expect(fake?.invocations()).toEqual([]);
-		});
+		}, 30_000);
 	}
 
 	test("an empty tools array is accepted", async () => {
 		const ctx = setup("ok");
 		const res = await call(ctx, { model: "opus", messages, tools: [] });
 		expect(res.status).toBe(200);
-	});
+	}, 30_000);
 });
 
 describe("argv", () => {
@@ -223,7 +246,7 @@ describe("argv", () => {
 		expect(fs.realpathSync(inv?.cwd ?? "")).toBe(
 			fs.realpathSync(ctx.endpoint.directory),
 		);
-	});
+	}, 30_000);
 
 	test("a named model passes --model, and system messages reach the CLI through a 0600 file, never argv", async () => {
 		const ctx = setup("ok");
@@ -252,7 +275,7 @@ describe("argv", () => {
 		expect(fs.existsSync(path.dirname(file?.path ?? "/nonexistent/x"))).toBe(
 			false,
 		);
-	});
+	}, 30_000);
 
 	test("stream: the system prompt file is gone once the body is consumed", async () => {
 		const ctx = setup("ok");
@@ -268,7 +291,7 @@ describe("argv", () => {
 		const [inv] = fake?.invocations() ?? [];
 		expect(inv?.systemPromptFile?.content).toBe("Be terse.");
 		expect(fs.existsSync(inv?.systemPromptFile?.path ?? "")).toBe(false);
-	});
+	}, 30_000);
 
 	test("no system message passes no prompt file", async () => {
 		const ctx = setup("ok");
@@ -279,7 +302,7 @@ describe("argv", () => {
 		const [inv] = fake?.invocations() ?? [];
 		expect(inv?.argv).not.toContain("--append-system-prompt-file");
 		expect(inv?.systemPromptFile).toBeNull();
-	});
+	}, 30_000);
 });
 
 describe("responses", () => {
@@ -321,7 +344,7 @@ describe("responses", () => {
 			total_tokens: 20,
 			prompt_tokens_details: { cached_tokens: 3 },
 		});
-	});
+	}, 30_000);
 
 	test("stream emits role, text deltas, stop, a usage chunk and [DONE]", async () => {
 		const ctx = setup("ok", {}, { textDeltas: ["A", "B", "C"] });
@@ -355,7 +378,7 @@ describe("responses", () => {
 		expect(usageChunk.usage.total_tokens).toBe(20);
 		expect(chunks.every((c) => c.model === "opus")).toBe(true);
 		expect(new Set(chunks.map((c) => c.id)).size).toBe(1);
-	});
+	}, 30_000);
 
 	test("stream without include_usage has no usage chunk", async () => {
 		const ctx = setup("ok");
@@ -367,7 +390,7 @@ describe("responses", () => {
 		const raw = await res.text();
 		expect(raw).not.toContain('"usage"');
 		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
-	});
+	}, 30_000);
 });
 
 describe("session resume", () => {
@@ -397,7 +420,7 @@ describe("session resume", () => {
 		expect(flag(b?.argv ?? [], "--resume")).toBe(firstId);
 		expect(b?.argv).not.toContain("--session-id");
 		expect(b?.stdin).toBe("question two");
-	});
+	}, 30_000);
 
 	test("a streamed first turn is resumable too", async () => {
 		const ctx = setup("ok", {}, { textDeltas: ["Streamed ", "reply"] });
@@ -420,7 +443,7 @@ describe("session resume", () => {
 			flag(a?.argv ?? [], "--session-id"),
 		);
 		expect(b?.stdin).toBe("q2");
-	});
+	}, 30_000);
 
 	test("a miss starts a new session with the whole history flattened", async () => {
 		const ctx = setup("ok");
@@ -437,7 +460,7 @@ describe("session resume", () => {
 		expect(inv?.argv).toContain("--session-id");
 		expect(inv?.argv).not.toContain("--resume");
 		expect(inv?.stdin).toBe("User: first\n\nAssistant: second\n\nUser: third");
-	});
+	}, 30_000);
 
 	test("a different endpoint name never resumes another endpoint's session", async () => {
 		const ctx = setup("ok", {}, { textDeltas: ["r"] });
@@ -456,7 +479,7 @@ describe("session resume", () => {
 		});
 		const [, b] = fake?.invocations() ?? [];
 		expect(b?.argv).not.toContain("--resume");
-	});
+	}, 30_000);
 });
 
 describe("review round 1", () => {
@@ -477,7 +500,7 @@ describe("review round 1", () => {
 		);
 		expect(res.status).toBe(415);
 		expect(fake?.invocations() ?? []).toHaveLength(0);
-	});
+	}, 30_000);
 
 	test("a cross-site browser request is a 403 and never starts the CLI", async () => {
 		const ctx = setup("ok");
@@ -499,7 +522,7 @@ describe("review round 1", () => {
 		);
 		expect(res.status).toBe(403);
 		expect(fake?.invocations() ?? []).toHaveLength(0);
-	});
+	}, 30_000);
 
 	test("a stored conversation state is resumed at most once", async () => {
 		const ctx = setup("ok", {}, { textDeltas: ["r"] });
@@ -522,7 +545,7 @@ describe("review round 1", () => {
 		const [, b, c] = fake?.invocations() ?? [];
 		expect(b?.argv).toContain("--resume");
 		expect(c?.argv).not.toContain("--resume");
-	});
+	}, 30_000);
 
 	test("moving an endpoint to another directory never resumes the old session", async () => {
 		const ctx = setup("ok", {}, { textDeltas: ["r"] });
@@ -532,7 +555,10 @@ describe("review round 1", () => {
 		});
 		const moved = {
 			...ctx,
-			endpoint: { ...ctx.endpoint, directory: `${ctx.endpoint.directory}/..` },
+			endpoint: {
+				...ctx.endpoint,
+				directory: `${ctx.endpoint.directory}/..`,
+			},
 		};
 		await call(moved, {
 			model: "opus",
@@ -544,7 +570,7 @@ describe("review round 1", () => {
 		});
 		const [, b] = fake?.invocations() ?? [];
 		expect(b?.argv).not.toContain("--resume");
-	});
+	}, 30_000);
 });
 
 describe("binary selection", () => {
@@ -567,7 +593,7 @@ describe("binary selection", () => {
 			if (previous === undefined) delete process.env[CLAUDE_CODE_BIN_ENV];
 			else process.env[CLAUDE_CODE_BIN_ENV] = previous;
 		}
-	});
+	}, 30_000);
 });
 
 describe("failures", () => {
@@ -587,7 +613,7 @@ describe("failures", () => {
 		);
 		// A fresh session is never retried.
 		expect(fake?.invocations()).toHaveLength(1);
-	});
+	}, 30_000);
 
 	test("stream: stderr stays out of a mid-stream error frame too", async () => {
 		const ctx = setup("exit3");
@@ -604,7 +630,7 @@ describe("failures", () => {
 		const raw = await res.text();
 		expect(raw).toContain("claude_code_failed");
 		expect(raw).not.toContain("boom");
-	});
+	}, 30_000);
 
 	test("a result with is_error is a 502 carrying its text", async () => {
 		const ctx = setup("is-error");
@@ -615,7 +641,7 @@ describe("failures", () => {
 		expect(res.status).toBe(502);
 		const body = (await res.json()) as { error: { message: string } };
 		expect(body.error.message).toContain("model overloaded");
-	});
+	}, 30_000);
 
 	test("a missing binary is a 502, not a crash", async () => {
 		const ctx = setup("ok");
@@ -629,7 +655,7 @@ describe("failures", () => {
 			{ bin: `${ctx.endpoint.directory}/does-not-exist` },
 		);
 		expect(res.status).toBe(502);
-	});
+	}, 30_000);
 
 	test("stream: a failure before any text still gets a real status", async () => {
 		const ctx = setup("exit3");
@@ -639,7 +665,7 @@ describe("failures", () => {
 			messages: [{ role: "user", content: "hi" }],
 		});
 		expect(res.status).toBe(502);
-	});
+	}, 30_000);
 
 	test("the failed request releases its concurrency slot", async () => {
 		const ctx = setup("exit3", { max_concurrency: 1 });
@@ -650,14 +676,17 @@ describe("failures", () => {
 			});
 			expect(res.status).toBe(502);
 		}
-	});
+	}, 30_000);
 });
 
 describe("concurrency, timeout and abort", () => {
 	test("over max_concurrency is a 429 with retry-after 5; aborting frees the slot", async () => {
 		const ctx = setup("hang", { max_concurrency: 1 });
 		const abort = new AbortController();
-		const body = { model: "opus", messages: [{ role: "user", content: "hi" }] };
+		const body = {
+			model: "opus",
+			messages: [{ role: "user", content: "hi" }],
+		};
 		const inFlight = call(ctx, body, abort.signal);
 		await waitFor(() => (fake?.invocations().length ?? 0) === 1);
 
@@ -677,7 +706,7 @@ describe("concurrency, timeout and abort", () => {
 			body,
 		);
 		expect((await again).status).toBe(504);
-	});
+	}, 30_000);
 
 	test("timeout kills the whole process group and answers 504", async () => {
 		const ctx = setup("hang", { timeout_ms: 400 });
@@ -692,7 +721,7 @@ describe("concurrency, timeout and abort", () => {
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	});
+	}, 30_000);
 
 	test("a process that ignores SIGTERM is killed after the grace period", async () => {
 		// A client abort starts the termination here, not `timeout_ms`. The
@@ -725,7 +754,7 @@ describe("concurrency, timeout and abort", () => {
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	}, 10_000);
+	}, 30_000);
 
 	test("client abort kills the process group", async () => {
 		const ctx = setup("hang");
@@ -744,7 +773,7 @@ describe("concurrency, timeout and abort", () => {
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	});
+	}, 30_000);
 
 	test("stream: a timeout after text ends the stream with an error frame", async () => {
 		// The timeout fires when the test says, after the text has arrived. A
@@ -799,7 +828,7 @@ describe("concurrency, timeout and abort", () => {
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	}, 10_000);
+	}, 30_000);
 
 	test("a finished run cancels its timeout", async () => {
 		const ctx = setup("ok");
@@ -821,7 +850,46 @@ describe("concurrency, timeout and abort", () => {
 		expect(res.status).toBe(200);
 		expect(armed).toEqual([30_000]);
 		expect(cancels).toBe(1);
-	});
+	}, 30_000);
+
+	test("a finished run cancels its default timeout timer, not only some timer", async () => {
+		// The injected-seam case above proves dispose() calls the cancel; this
+		// one proves what the DEFAULT cancel does. Replacing its
+		// `() => clearTimeout(timer)` with `() => {}` survived every case before
+		// it (SB23-3861, reviewer M5 on #290). The first-event wait also calls
+		// clearTimeout on its own timer, so "clearTimeout was called" proves
+		// nothing: the id armed with the endpoint's timeout_ms is the one that
+		// has to come back.
+		const ctx = setup("ok", { timeout_ms: 43_210 });
+		const realSet = globalThis.setTimeout;
+		const realClear = globalThis.clearTimeout;
+		const armed: unknown[] = [];
+		const cleared = new Set<unknown>();
+		globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+			const id = realSet(...args);
+			if (args[1] === 43_210) armed.push(id);
+			return id;
+		}) as typeof setTimeout;
+		globalThis.clearTimeout = ((id?: Parameters<typeof clearTimeout>[0]) => {
+			cleared.add(id);
+			realClear(id);
+		}) as typeof clearTimeout;
+		try {
+			const res = await call(ctx, {
+				model: "opus",
+				messages: [{ role: "user", content: "hi" }],
+			});
+			expect(res.status).toBe(200);
+			await res.text();
+			expect(armed).toHaveLength(1);
+			expect(cleared.has(armed[0])).toBe(true);
+		} finally {
+			for (const id of armed)
+				realClear(id as Parameters<typeof clearTimeout>[0]);
+			globalThis.setTimeout = realSet;
+			globalThis.clearTimeout = realClear;
+		}
+	}, 30_000);
 
 	test("stream: cancelling the response body kills the process group", async () => {
 		const ctx = setup("hang-after-text");
@@ -838,7 +906,7 @@ describe("concurrency, timeout and abort", () => {
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	});
+	}, 30_000);
 });
 
 describe("SB23-3408 follow-ups", () => {
@@ -874,7 +942,7 @@ describe("SB23-3408 follow-ups", () => {
 		expect(retryId).toBeDefined();
 		expect(retryId).not.toBe(firstId);
 		expect(c?.stdin).toBe("User: q1\n\nAssistant: Hello world\n\nUser: q2");
-	});
+	}, 30_000);
 
 	test("item 1: the retry works for a stream too, and its session is the one resumed next", async () => {
 		const ctx = setup("resume-missing");
@@ -896,7 +964,7 @@ describe("SB23-3408 follow-ups", () => {
 		expect(flag(invs[3]?.argv ?? [], "--resume")).toBe(
 			flag(invs[2]?.argv ?? [], "--session-id"),
 		);
-	});
+	}, 30_000);
 
 	test("item 1: a resume that fails after the model ran a tool is not retried", async () => {
 		const ctx = setup("resume-fail-after-tool");
@@ -904,11 +972,15 @@ describe("SB23-3408 follow-ups", () => {
 		const res = await call(ctx, turnTwo());
 		expect(res.status).toBe(502);
 		expect(fake?.invocations()).toHaveLength(2);
-	});
+	}, 30_000);
 
 	test("item 3: a slow first event starts the stream and sends keep-alives before the text", async () => {
-		const ctx = setup("slow-start", {}, { delayMs: 1500 });
-		const started = Date.now();
+		// The fake prints a tool call and then waits for `openGate()`, so it
+		// cannot print text until this test says so. Headers and a keep-alive
+		// arriving before that are "before the text" by construction. The old
+		// version slept 1500 ms in the fake and bounded the headers at 1200 ms
+		// of wall clock, and ran 7368 ms at main under load (SB23-3861).
+		const ctx = setup("slow-start");
 		const res = await call(
 			ctx,
 			{
@@ -919,16 +991,29 @@ describe("SB23-3408 follow-ups", () => {
 			undefined,
 			{ firstEventWaitMs: 100, keepAliveMs: 50 },
 		);
-		// Headers arrive long before the CLI's first text.
-		expect(Date.now() - started).toBeLessThan(1200);
 		expect(res.status).toBe(200);
-		const raw = await res.text();
+		const reader = res.body?.getReader();
+		if (!reader) throw new Error("streaming response has no body");
+		const decoder = new TextDecoder();
+		let raw = "";
+		while (!raw.includes(": keep-alive")) {
+			const { done, value } = await reader.read();
+			if (done) throw new Error(`stream ended before a keep-alive: ${raw}`);
+			raw += decoder.decode(value, { stream: true });
+		}
+		expect(raw).not.toContain('"content":"Hello"');
+		fake?.openGate();
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			raw += decoder.decode(value, { stream: true });
+		}
 		const keepAlive = raw.indexOf(": keep-alive");
 		const text = raw.indexOf('"content":"Hello"');
 		expect(keepAlive).toBeGreaterThan(-1);
 		expect(text).toBeGreaterThan(keepAlive);
 		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
-	});
+	}, 30_000);
 
 	test("item 3: a failure after the wait is an error frame on a 200 stream", async () => {
 		const ctx = setup("exit3");
@@ -946,7 +1031,7 @@ describe("SB23-3408 follow-ups", () => {
 		const raw = await res.text();
 		expect(raw).toContain('"code":"claude_code_failed"');
 		expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
-	});
+	}, 30_000);
 
 	test("item 1: cancelling a stream while a resume is pending never starts the retry", async () => {
 		const ctx = setup("hang", { timeout_ms: 5000 });
@@ -973,7 +1058,7 @@ describe("SB23-3408 follow-ups", () => {
 		await waitFor(() => !isAlive(inv?.pid ?? 0));
 		await new Promise((r) => setTimeout(r, 400));
 		expect(fake?.invocations()).toHaveLength(1);
-	});
+	}, 30_000);
 
 	test("item 3: the keep-alive timer is cleared when the stream finishes", async () => {
 		const ctx = setup("ok");
@@ -1001,7 +1086,7 @@ describe("SB23-3408 follow-ups", () => {
 			globalThis.setInterval = realSet;
 			globalThis.clearInterval = realClear;
 		}
-	});
+	}, 30_000);
 
 	test("item 5: subagent text never reaches the client", async () => {
 		const ctx = setup("subagent");
@@ -1020,7 +1105,7 @@ describe("SB23-3408 follow-ups", () => {
 			.map((c) => c.choices?.[0]?.delta?.content ?? "")
 			.join("");
 		expect(text).toBe("Hello world");
-	});
+	}, 30_000);
 
 	test("item 6: a Host that is not this machine is a 403 naming the config key, and the CLI never starts", async () => {
 		const ctx = setup("ok");
@@ -1035,7 +1120,7 @@ describe("SB23-3408 follow-ups", () => {
 		);
 		expect(body.error.message).toContain("claude_code_allowed_hosts");
 		expect(fake?.invocations()).toHaveLength(0);
-	});
+	}, 30_000);
 
 	test("item 6: allowed hosts are IP literals, this machine's names and the configured extras", async () => {
 		const ctx = setup("ok");
@@ -1056,5 +1141,5 @@ describe("SB23-3408 follow-ups", () => {
 			allowedHosts: ["ccflare.example.com"],
 		});
 		expect(refused.status).toBe(403);
-	});
+	}, 30_000);
 });
