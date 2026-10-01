@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StrategyName } from "@better-ccflare/core";
+import { stickyFixture } from "@better-ccflare/security/testing";
 import { Config } from "./index";
 
 /**
@@ -483,14 +484,26 @@ describe("config file permissions", () => {
 		// protection, because in a world-writable directory the attacker creates
 		// the landing path themselves and can make it a link before we write.
 		const home = mkdtempSync(join(tmpdir(), "better-ccflare-home-"));
-		const shared = join(tmpdir(), `better-ccflare-land-${process.pid}`);
+		// Sticky on both platforms, through the shared fixture (SB23-2360). This
+		// was mkdirSync plus chmodSync(shared, 0o1777), and Bun's chmodSync drops
+		// S_ISVTX on Linux (SB23-2319), so on CI the directory was 0777.
+		// entryIsTrusted() then refused at the non-sticky check before reaching
+		// the absent-entry branch, and the assertion below held either way: a
+		// mutation reading an absent entry as ours died on macOS and survived on
+		// Linux while the test passed on both. The sibling "is refused when the
+		// chain lands on a name nothing owns yet" in config-sticky-dir-trust.test.ts
+		// covers the same branch through the same fixture, so the two are one
+		// piece of evidence, not two.
+		//
+		// No recursive remove of fx.dir: on Linux it IS os.tmpdir(), so the
+		// fixture's cleanup() removes only the entries it handed out.
+		const fx = stickyFixture("file-mode-land");
 		try {
-			mkdirSync(shared);
-			// 1777 and it stays 1777. The landing path does not exist, and the
-			// sticky exception requires an entry of ours to already be there, so this
-			// is the fixture that kills a rule treating an absent entry as ours.
-			chmodSync(shared, 0o1777);
-			const landing = join(shared, "landed.json");
+			// The landing path does not exist, and the sticky exception requires an
+			// entry of ours to already be there, so this is the fixture that kills a
+			// rule treating an absent entry as ours.
+			const landing = fx.entry("landed.json");
+			expect(existsSync(landing)).toBe(false);
 			const link = join(home, "config.json");
 			symlinkSync(landing, link);
 
@@ -499,8 +512,8 @@ describe("config file permissions", () => {
 
 			expect(existsSync(landing)).toBe(false);
 		} finally {
+			fx.cleanup();
 			rmSync(home, { recursive: true, force: true });
-			rmSync(shared, { recursive: true, force: true });
 		}
 	});
 

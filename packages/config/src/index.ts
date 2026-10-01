@@ -35,6 +35,7 @@ import {
 import { Logger, type OpenObserveSettings } from "@better-ccflare/logger";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import { chmodForConfig, fchmodForConfig } from "./chmod-seam";
+import { lstatEntryForTrust } from "./entry-lstat-seam";
 import { resolveConfigPath } from "./paths";
 import { getPlatformConfigDir } from "./paths-common";
 import {
@@ -1786,9 +1787,13 @@ export class Config extends EventEmitter {
 	 * Argued from POSIX, not measured against a second local account, which this
 	 * host does not have. The same rung as the ownership check in
 	 * replaceUntrustedLink(), which shipped on the same argument in PR #145. What
-	 * the tests do reach is the comparison itself, through a root-owned sticky
-	 * directory (/tmp is uid 0 and 1777 on both macOS and Linux) so that a stubbed
-	 * uid is refused by this line rather than by the ownership test above it.
+	 * the tests do reach is the comparison itself, through the gated lstat seam in
+	 * ./entry-lstat-seam (SB23-2316): a link of ours in a sticky directory of ours
+	 * is made to read as another user's, so the directory checks pass for real and
+	 * the uid comparison is the only line that can refuse. An earlier version of
+	 * this paragraph said the tests reached it through a root-owned /tmp; that test
+	 * was written and deleted before merge, because the path validator's
+	 * allowed-paths cache made it pass alone and fail in the full suite.
 	 */
 	private entryIsTrusted(entry: string): EntryTrust {
 		let info: ReturnType<typeof statSync>;
@@ -1814,7 +1819,11 @@ export class Config extends EventEmitter {
 			// lstat, not stat: the entry's own ownership is the claim, and a link
 			// here would substitute the uid of whatever it points at, which is the
 			// attacker's choice.
-			const own = lstatSync(entry);
+			//
+			// Through the seam rather than lstatSync directly, so a test can make
+			// an entry of ours read as another user's (SB23-2316). Production gets
+			// lstatSync; the swap refuses outside NODE_ENV=test.
+			const own = lstatEntryForTrust(entry);
 			// A uid of ours does NOT mean we created this entry, and the first
 			// version of this check said it did. A hardlink carries the inode's
 			// owner to a new name, so another local user can manufacture an entry
