@@ -32,6 +32,7 @@ import {
 import { type AccountListItem, MS_PER_HOUR } from "@better-ccflare/types";
 import { type PromptAdapter, stdPromptAdapter } from "../prompts/index";
 import { openBrowser } from "../utils/browser";
+import { notifyServerToReload, postLocalControl } from "./local-control-notify";
 
 // Extended type for CLI-specific options that includes adapter functionality
 export interface AddAccountOptionsWithAdapter {
@@ -2344,46 +2345,24 @@ async function notifyServersToForceResetRateLimit(
 	accountId: string,
 	config: Config,
 ): Promise<boolean> {
-	const configuredPort = config.getRuntime().port || 8080;
-	const defaultPort = 8080;
-	const testPort = 8081;
-	const ports = [...new Set([configuredPort, defaultPort, testPort])];
-	let usagePollTriggered = false;
-
 	// The local-control-secret (issue #216) lets this notification through
-	// AuthService's HTTP gate even when API-key auth is enabled — the CLI
-	// reads the copy the server publishes beside the config, or the config
-	// file itself, so this never involves handling a real API key (SB23-3809).
-	const localControlSecret = config.getLocalControlSecret();
-
-	for (const port of ports) {
-		try {
-			const response = await fetch(
-				`http://localhost:${port}/api/accounts/${accountId}/force-reset-rate-limit`,
-				{
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						"x-better-ccflare-local-control-secret": localControlSecret,
-					},
-				},
-			);
-
-			if (response.ok) {
-				const data = (await response.json()) as {
-					usagePollTriggered?: boolean;
-				};
-				if (data.usagePollTriggered) {
-					usagePollTriggered = true;
-					break;
-				}
-			}
-		} catch {
-			// Best-effort only: ignore unreachable local ports.
-		}
+	// AuthService's HTTP gate even when API-key auth is enabled, without the CLI
+	// ever handling a real API key. It goes to the one server the published
+	// sidecar names, or the configured port when none is published, never to a
+	// fixed pair of ports (SB23-3809, SB23-4035).
+	const outcome = await postLocalControl(
+		config,
+		`/api/accounts/${accountId}/force-reset-rate-limit`,
+	);
+	if (outcome.kind !== "answered" || !outcome.response.ok) return false;
+	try {
+		const data = (await outcome.response.json()) as {
+			usagePollTriggered?: boolean;
+		};
+		return data.usagePollTriggered === true;
+	} catch {
+		return false;
 	}
-
-	return usagePollTriggered;
 }
 
 /**
@@ -2491,34 +2470,11 @@ async function reauthenticateQwenAccount(
 	);
 	console.log("OAuth tokens have been updated.");
 
-	// Notify running servers to reload tokens (best-effort). The
+	// Notify the running server to reload tokens (best-effort). The
 	// local-control-secret (issue #216) lets this through AuthService's HTTP
 	// gate even when API-key auth is enabled.
-	console.log("\nNotifying running servers to reload tokens...");
-	const localControlSecret = config.getLocalControlSecret();
-	for (const port of [8080, 8081]) {
-		try {
-			const response = await fetch(
-				`http://localhost:${port}/api/accounts/${account.id}/reload`,
-				{
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						"x-better-ccflare-local-control-secret": localControlSecret,
-					},
-				},
-			);
-			if (response.ok) {
-				console.log(`✓ Token reload successful on port ${port}`);
-			} else {
-				console.log(
-					`✗ Server not responding on port ${port} (${response.status})`,
-				);
-			}
-		} catch {
-			console.log(`✗ No server running on port ${port}`);
-		}
-	}
+	console.log("\nNotifying the running server to reload tokens...");
+	await notifyServerToReload(config, account.id);
 
 	return {
 		success: true,
@@ -2805,9 +2761,9 @@ export async function reauthenticateAccount(
 		);
 		console.log(`${updatedType} have been updated.`);
 
-		// Trigger token reload for running servers (non-blocking)
-		console.log("\nNotifying running servers to reload tokens...");
-		notifyServersToReload(accountId).catch(() => {
+		// Trigger token reload for the running server (non-blocking)
+		console.log("\nNotifying the running server to reload tokens...");
+		notifyServerToReload(config, accountId).catch(() => {
 			// Ignore errors - server notification is best-effort
 		});
 
@@ -2815,44 +2771,5 @@ export async function reauthenticateAccount(
 			success: true,
 			message: `Account '${name}' re-authenticated successfully. All metadata preserved.`,
 		};
-	}
-
-	/**
-	 * Notify running servers to reload tokens for an account
-	 */
-	async function notifyServersToReload(accountId: string): Promise<void> {
-		const defaultPort = 8080;
-		const testPort = 8081;
-
-		// The local-control-secret (issue #216) lets this notification through
-		// AuthService's HTTP gate even when API-key auth is enabled — the CLI
-		// reads the copy the server publishes beside the config, or the config
-		// file itself, so this never involves handling a real API key (SB23-3809).
-		const localControlSecret = config.getLocalControlSecret();
-
-		for (const port of [defaultPort, testPort]) {
-			try {
-				const response = await fetch(
-					`http://localhost:${port}/api/accounts/${accountId}/reload`,
-					{
-						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							"x-better-ccflare-local-control-secret": localControlSecret,
-						},
-					},
-				);
-
-				if (response.ok) {
-					console.log(`✓ Token reload successful on port ${port}`);
-				} else {
-					console.log(
-						`✗ Server not responding on port ${port} (${response.status})`,
-					);
-				}
-			} catch (_error) {
-				console.log(`✗ No server running on port ${port}`);
-			}
-		}
 	}
 }

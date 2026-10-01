@@ -44,6 +44,8 @@ const TRAILING_COMMA = `{"lb_strategy":"session","pg_password":"operator-value",
 const CONFIG_VALUE = "CONFIG-FIXTURE-VALUE";
 const SIDECAR_VALUE = "SIDECAR-FIXTURE-VALUE";
 const PLANTED_VALUE = "PLANTED-FIXTURE-VALUE";
+/** Where the server publishing in these tests says it listens (SB23-4035). */
+const LISTENER = { host: "127.0.0.1", port: 8999, pid: process.pid };
 
 function withFixture(fn: (dir: string) => void): void {
 	const dir = mkdtempSync(join(tmpdir(), "better-ccflare-sidecar-"));
@@ -127,7 +129,7 @@ describe("SB23-3809: the server publishes its local_control_secret", () => {
 			const path = seed(join(dir, "better-ccflare.json"), TRAILING_COMMA);
 			const config = new Config(path);
 
-			const held = config.publishLocalControlSecret();
+			const held = config.publishLocalControlSecret(LISTENER);
 			const sidecar = config.getLocalControlSidecarPath();
 
 			expect(sidecar).toBe(`${path}.local-control`);
@@ -150,7 +152,7 @@ describe("SB23-3809: the server publishes its local_control_secret", () => {
 				sidecarBytes(SIDECAR_VALUE),
 			);
 
-			const held = new Config(path).publishLocalControlSecret();
+			const held = new Config(path).publishLocalControlSecret(LISTENER);
 
 			expect(held === CONFIG_VALUE).toBe(true);
 			expect(readSidecar(sidecar) === CONFIG_VALUE).toBe(true);
@@ -164,10 +166,10 @@ describe("SB23-3809: the server publishes its local_control_secret", () => {
 				JSON.stringify({ local_control_secret: CONFIG_VALUE }),
 			);
 			const config = new Config(path);
-			config.publishLocalControlSecret();
+			config.publishLocalControlSecret(LISTENER);
 			const before = statSync(config.getLocalControlSidecarPath()).ino;
 
-			new Config(path).publishLocalControlSecret();
+			new Config(path).publishLocalControlSecret(LISTENER);
 
 			expect(statSync(config.getLocalControlSidecarPath()).ino).toBe(before);
 		});
@@ -195,7 +197,7 @@ describe("SB23-3809: the server publishes its local_control_secret", () => {
 				0o666,
 			);
 
-			const held = new Config(path).publishLocalControlSecret();
+			const held = new Config(path).publishLocalControlSecret(LISTENER);
 			const published = readSidecar(`${path}.local-control`);
 
 			expect(held === PLANTED_VALUE).toBe(false);
@@ -214,7 +216,7 @@ describe("SB23-3809: the server publishes its local_control_secret", () => {
 			linkSync(original, path);
 			expect(statSync(path).nlink).toBe(2);
 
-			const held = new Config(path).publishLocalControlSecret();
+			const held = new Config(path).publishLocalControlSecret(LISTENER);
 			const published = readSidecar(`${path}.local-control`);
 
 			expect(held === PLANTED_VALUE).toBe(false);
@@ -232,7 +234,7 @@ describe("SB23-3809: the server publishes its local_control_secret", () => {
 			const victim = seed(join(dir, "victim.txt"), "untouched");
 			symlinkSync(victim, `${path}.local-control`);
 
-			new Config(path).publishLocalControlSecret();
+			new Config(path).publishLocalControlSecret(LISTENER);
 
 			expect(readFileSync(victim, "utf8")).toBe("untouched");
 			const info = statSync(`${path}.local-control`);
@@ -252,7 +254,9 @@ describe("SB23-3809: an untrusted config directory writes no sidecar", () => {
 			const path = seed(join(dir, "better-ccflare.json"), TRAILING_COMMA);
 			const config = new Config(path);
 
-			const { logs } = captureLogs(() => config.publishLocalControlSecret());
+			const { logs } = captureLogs(() =>
+				config.publishLocalControlSecret(LISTENER),
+			);
 
 			expect(existsSync(`${path}.local-control`)).toBe(false);
 			expect(sidecarWarnings(logs)).toEqual([
@@ -268,7 +272,9 @@ describe("SB23-3809: an untrusted config directory writes no sidecar", () => {
 			seed(path, TRAILING_COMMA);
 			const config = new Config(path);
 
-			const { logs } = captureLogs(() => config.publishLocalControlSecret());
+			const { logs } = captureLogs(() =>
+				config.publishLocalControlSecret(LISTENER),
+			);
 
 			expect(existsSync(`${path}.local-control`)).toBe(false);
 			expect(sidecarWarnings(logs)).toEqual([
@@ -299,7 +305,7 @@ describe("SB23-3809: an untrusted config directory writes no sidecar", () => {
 			chmodSync(dir, 0o770);
 
 			const { logs } = captureLogs(() =>
-				new Config(path).publishLocalControlSecret(),
+				new Config(path).publishLocalControlSecret(LISTENER),
 			);
 
 			expect(existsSync(sidecar)).toBe(false);
@@ -329,7 +335,7 @@ describe("SB23-3809: a sidecar write that cannot be made safe publishes nothing"
 			__setFchmodForTest((fd) => fchmodSync(fd, 0o644));
 			try {
 				const { logs } = captureLogs(() =>
-					new Config(path).publishLocalControlSecret(),
+					new Config(path).publishLocalControlSecret(LISTENER),
 				);
 
 				expect(existsSync(sidecar)).toBe(false);
@@ -368,7 +374,7 @@ describe("SB23-3809: a sidecar write that cannot be made safe publishes nothing"
 			});
 			try {
 				const { logs } = captureLogs(() =>
-					new Config(path).publishLocalControlSecret(),
+					new Config(path).publishLocalControlSecret(LISTENER),
 				);
 
 				expect(existsSync(sidecar)).toBe(false);
@@ -411,7 +417,7 @@ describe("SB23-3809: the CLI reads the sidecar first", () => {
 				JSON.stringify({ local_control_secret: PLANTED_VALUE }),
 				0o666,
 			);
-			const held = new Config(path).publishLocalControlSecret();
+			const held = new Config(path).publishLocalControlSecret(LISTENER);
 			// What a CLI process finds on disk afterwards: the plant, at 0600.
 			chmodSync(path, 0o600);
 			const cliPath = join(dir, "cli-view.json");

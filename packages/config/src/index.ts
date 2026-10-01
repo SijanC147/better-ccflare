@@ -19,6 +19,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { isIP, isIPv6 } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import {
 	DEFAULT_AGENT_MODEL,
@@ -377,7 +378,142 @@ type EntryTrust = "trusted" | RefusedTrust;
 type SidecarReading =
 	| { kind: "absent" }
 	| { kind: "refused"; reason: string }
-	| { kind: "ok"; secret: string };
+	| { kind: "ok"; secret: string; listener: LocalControlListener | null };
+
+/**
+ * Where the server that holds the secret listens, published beside the secret
+ * so a CLI notifies that socket and nothing else (SB23-4035).
+ *
+ * Before this the CLI posted the secret to localhost:8080 and localhost:8081,
+ * so another local user who bound whichever of the two the server was not on
+ * received it. A port alone does not close that. Measured 2026-10-01 on macOS,
+ * Bun 1.4.2: with a server on 0.0.0.0:P, a second socket bound [::1]:P with
+ * no conflict, because the two families do not collide, and
+ * fetch("http://localhost:P") reached that second socket rather than the
+ * server. So `host` is the literal address to connect to, which
+ * localControlNotifyHost() derives from the address the server bound, and the
+ * CLI never resolves a name.
+ *
+ * `pid` is the server's, so the CLI can tell a server that has exited from a
+ * running one: once it exits its port is free for anyone to bind.
+ */
+export interface LocalControlListener {
+	host: string;
+	port: number;
+	pid: number;
+}
+
+/**
+ * Where a CLI's local-control notification goes, and with which secret
+ * (SB23-4035). Three outcomes:
+ *
+ * - "published": the server published its listener and its pid is a running
+ *   process of this user, so the notification goes to that address only.
+ * - "stale": the server published a listener and that pid is not a running
+ *   process of this user, so the server has exited and its port may now be
+ *   anyone's. Nothing is sent. Falling back to the configured port here would
+ *   post a secret that is usually still valid to a port nothing has verified,
+ *   which is the defect this exists to close.
+ * - "configured": nothing usable was published, from a server that predates the
+ *   listener, a sidecar that was refused, or none at all, so the notification
+ *   goes to the configured port alone, on the address the configured bind host
+ *   maps to. Never to a fixed pair of ports.
+ */
+export type LocalControlTarget =
+	| { kind: "published"; secret: string; baseUrl: string }
+	| { kind: "stale"; pid: number }
+	| { kind: "configured"; secret: string; baseUrl: string };
+
+/**
+ * The address a local client connects to for a server bound to `bindHost`
+ * (SB23-4035). A wildcard maps to its own family's loopback, because the
+ * wildcard socket is the one that owns that loopback port: 0.0.0.0 to
+ * 127.0.0.1, and :: to ::1. Never "localhost", which resolved to ::1 first in
+ * the measurement on LocalControlListener, where a server bound to 0.0.0.0
+ * does not listen. Any other address is its own answer. A name, such as
+ * BETTER_CCFLARE_HOST=localhost, is returned as given, so the CLI resolves it
+ * the way the server did, which is the one case this cannot pin to a socket.
+ */
+export function localControlNotifyHost(bindHost: string): string {
+	const host = bindHost.trim();
+	if (host === "" || host === "0.0.0.0") return "127.0.0.1";
+	const unbracketed =
+		host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+	if (unbracketed === "::") return "::1";
+	return unbracketed;
+}
+
+/** `http://<host>:<port>`, with an IPv6 literal bracketed. */
+function localControlBaseUrl(host: string, port: number): string {
+	return `http://${isIPv6(host) ? `[${host}]` : host}:${port}`;
+}
+
+/**
+ * A listener as the sidecar holds it, or null when the field is absent, which
+ * is a sidecar from a server that predates it, or "invalid". Every field is
+ * checked, because `host` and `port` become a URL the secret is sent to.
+ */
+function parseLocalControlListener(
+	value: unknown,
+): LocalControlListener | null | "invalid" {
+	if (value === undefined) return null;
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		return "invalid";
+	}
+	const { host, port, pid } = value as Record<string, unknown>;
+	if (
+		typeof host !== "string" ||
+		!(isIP(host) !== 0 || /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})$/.test(host))
+	) {
+		return "invalid";
+	}
+	if (
+		typeof port !== "number" ||
+		!Number.isInteger(port) ||
+		port < 1 ||
+		port > 65535
+	) {
+		return "invalid";
+	}
+	if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1) {
+		return "invalid";
+	}
+	return { host, port, pid };
+}
+
+/**
+ * Whether `entry` sits in a sticky directory other local users can write, such
+ * as /tmp. There, a name held by a file of ours stays ours only while that file
+ * holds it, so removing it hands the name to whoever creates it next. An
+ * unexaminable directory reads as true, the side that removes nothing.
+ */
+function inSharedStickyDirectory(entry: string): boolean {
+	try {
+		const mode = statSync(dirname(entry)).mode;
+		return (mode & 0o1000) !== 0 && (mode & 0o022) !== 0;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Whether `pid` is a running process this user may signal (SB23-4035).
+ * kill(pid, 0) sends nothing: it fails with ESRCH when no such process exists
+ * and with EPERM when one exists under another uid, which is a reused pid,
+ * never this user's server. Both read as false.
+ *
+ * What it does not cover: a process of this same user that reused the pid.
+ * That process could bind the port too, but it needs neither: it runs as the
+ * owner of the 0600 sidecar and can read the secret from the file directly.
+ */
+function pidIsRunningAsUs(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Refusal diagnoses already emitted, so each distinct one lands once per
@@ -2245,7 +2381,6 @@ export class Config extends EventEmitter {
 			// can redirect this write.
 			const fd = openSync(tmpPath, "wx", 0o600);
 			try {
-				writeFileSync(fd, content, "utf8");
 				// The create mode above is masked by umask: measured, under umask 0277
 				// it produces 0400, which the rename would carry onto the config and
 				// break every later write. Set through the descriptor rather than the
@@ -2254,20 +2389,30 @@ export class Config extends EventEmitter {
 				// another user can write. Read back like every other chmod here,
 				// because a filesystem without Unix modes reports success and keeps
 				// whatever mode it presents (SB23-2274).
-				fchmodForConfig(fd, CONFIG_FILE_MODE);
+				//
 				// The sidecar holds nothing but the secret, and its reader refuses any
 				// mode but 0600, so a sidecar whose fchmod did not take is pure
 				// exposure: published where others may read it, and never believed.
 				// Refuse it here instead, which the config cannot do, because for the
-				// config refusing loses the setting without changing its mode.
+				// config refusing loses the setting without changing its mode. And
+				// check the mode BEFORE the secret is written, so on a filesystem
+				// where 0600 does not take the secret never sits in the temp file at
+				// all, even for the moment before the catch below removes it
+				// (SB23-4035, L2 of the #309 fix-round review). The config's order is
+				// unchanged: it writes whatever the mode, so checking first buys it
+				// nothing.
 				if (forSidecar) {
+					fchmodForConfig(fd, CONFIG_FILE_MODE);
 					const landed = fstatSync(fd).mode & 0o777;
 					if (landed !== CONFIG_FILE_MODE) {
 						throw new Error(
 							`the new file reads ${modeText(landed)} after fchmod to 0600, so it was not published`,
 						);
 					}
+					writeFileSync(fd, content, "utf8");
 				} else {
+					writeFileSync(fd, content, "utf8");
+					fchmodForConfig(fd, CONFIG_FILE_MODE);
 					verifySavedMode(fd, target);
 				}
 				// The temp inode belongs to whoever is writing, and the rename
@@ -2671,35 +2816,101 @@ export class Config extends EventEmitter {
 	getLocalControlSecret(): string {
 		const published = this.readLocalControlSidecar();
 		if (published !== undefined) {
-			return this.rememberLocalControlSecret(published);
+			return this.rememberLocalControlSecret(published.secret);
 		}
 		return this.resolveLocalControlSecret();
 	}
 
 	/**
-	 * The server's half of getLocalControlSecret(): resolve the secret from the
-	 * config as before, then publish it to `<configPath>.local-control` so a CLI
-	 * can read the value this process will hold (SB23-3809). apps/server calls
-	 * this once at startup and hands the result to AuthService.
+	 * Where a CLI sends a local-control notification, and with which secret
+	 * (SB23-4035). See LocalControlTarget for the three outcomes.
 	 *
-	 * The value published is the one resolveLocalControlSecret() returns, so on
-	 * a config whose credential fields were stripped, or whose path was refused,
-	 * it is the secret this process minted, never one read from the file it
-	 * refused: the strip drops local_control_secret before it reaches this.data,
-	 * and a refused path is never read at all.
+	 * The secret is the one getLocalControlSecret() returns. The address comes
+	 * from the same sidecar read, so a target never pairs one server's secret
+	 * with another server's port.
+	 *
+	 * The configured fallback uses this process's view of the bind host,
+	 * BETTER_CCFLARE_HOST, and of the port, getRuntime(). A CLI run with a
+	 * different environment from the server's can disagree with it there, which
+	 * is why a server publishes its listener rather than leaving this to guess.
+	 */
+	getLocalControlTarget(): LocalControlTarget {
+		const published = this.readLocalControlSidecar();
+		if (published?.listener) {
+			const { host, port, pid } = published.listener;
+			if (!pidIsRunningAsUs(pid)) return { kind: "stale", pid };
+			return {
+				kind: "published",
+				secret: this.rememberLocalControlSecret(published.secret),
+				baseUrl: localControlBaseUrl(host, port),
+			};
+		}
+		const secret =
+			published !== undefined
+				? this.rememberLocalControlSecret(published.secret)
+				: this.resolveLocalControlSecret();
+		return {
+			kind: "configured",
+			secret,
+			baseUrl: localControlBaseUrl(
+				localControlNotifyHost(process.env.BETTER_CCFLARE_HOST ?? ""),
+				this.getRuntime().port,
+			),
+		};
+	}
+
+	/**
+	 * The server's half of getLocalControlSecret(): the secret it holds,
+	 * resolved from the config. apps/server calls this once at startup and hands
+	 * the result to AuthService, then publishes it with
+	 * publishLocalControlSecret() once it is listening, because only then does it
+	 * know the port (SB23-4035).
+	 *
+	 * Resolved from the config, as before the sidecar existed, so on a config
+	 * whose credential fields were stripped, or whose path was refused, it is
+	 * the secret this process minted, never one read from the file it refused:
+	 * the strip drops local_control_secret before it reaches this.data, and a
+	 * refused path is never read at all.
 	 *
 	 * Never reads the sidecar to choose the value. Doing so would make the
 	 * sidecar outrank the config, so an operator rotating the secret by editing
-	 * the config would see the edit ignored on every restart. Every boot
-	 * republishes, so the sidecar mirrors whichever server started last and
-	 * never outlives a change to the config.
-	 *
-	 * Publishing is best effort. It fails closed into the behaviour that existed
-	 * before it: no sidecar, so the CLI reads the config.
+	 * the config would see the edit ignored on every restart.
 	 */
-	publishLocalControlSecret(): string {
+	getServerLocalControlSecret(): string {
+		return this.resolveLocalControlSecret();
+	}
+
+	/**
+	 * Publish the secret this server holds, and where it listens, to
+	 * `<configPath>.local-control`, so a CLI can read the value this process
+	 * holds and send it to this socket only (SB23-3809, SB23-4035). Returns the
+	 * secret, which is getServerLocalControlSecret()'s.
+	 *
+	 * Called after the server is listening, with the port it actually bound and
+	 * the address localControlNotifyHost() derives from its bind host. That
+	 * order also means a second server that fails before it listens, such as
+	 * one the multi-instance guard stops, publishes nothing and leaves the
+	 * running server's file alone.
+	 *
+	 * The listener is required, so a sidecar that names no socket cannot be
+	 * written by this code; a CLI reading one, from a server that predates the
+	 * field, falls back to the configured port.
+	 *
+	 * Every boot republishes, so the sidecar mirrors whichever server started
+	 * last and never outlives a change to the config. Publishing is best effort.
+	 * It fails closed into the behaviour that existed before it: no sidecar, so
+	 * the CLI reads the config.
+	 */
+	publishLocalControlSecret(listener: LocalControlListener): string {
 		const secret = this.resolveLocalControlSecret();
-		this.writeLocalControlSidecar(secret);
+		const checked = parseLocalControlListener(listener);
+		if (checked === null || checked === "invalid") {
+			log.error(
+				`Did not write the local control secret file ${this.getLocalControlSidecarPath()}: the listener it was given (port ${listener.port}) is not one a CLI could be sent to. The CLI falls back to the configured port.`,
+			);
+			return secret;
+		}
+		this.writeLocalControlSidecar(secret, checked);
 		return secret;
 	}
 
@@ -2771,9 +2982,13 @@ export class Config extends EventEmitter {
 	 * An absent one returns undefined silently: that is every install whose
 	 * server predates the sidecar, and every directory a server would not write.
 	 */
-	private readLocalControlSidecar(): string | undefined {
+	private readLocalControlSidecar():
+		| { secret: string; listener: LocalControlListener | null }
+		| undefined {
 		const reading = this.inspectLocalControlSidecar();
-		if (reading.kind === "ok") return reading.secret;
+		if (reading.kind === "ok") {
+			return { secret: reading.secret, listener: reading.listener };
+		}
 		if (reading.kind === "refused") {
 			this.reportSidecar(
 				`Ignoring the local control secret file ${this.getLocalControlSidecarPath()}: ${reading.reason}. Falling back to the secret in the config file, so a notification to the server fails to authenticate while API keys are active and that file's saves are refused. The server replaces this file with one it can trust the next time it starts, wherever its directory is not writable by other local users.`,
@@ -2809,6 +3024,14 @@ export class Config extends EventEmitter {
 	 * root (SB23-2316). The mode, type and link count come from fstat on the
 	 * descriptor actually read, so they describe the bytes this returns.
 	 *
+	 * The descriptor must also be the entry the trust decision judged: the
+	 * device and inode from the lstat taken before entryIsTrusted() must match
+	 * the descriptor's (SB23-4035). Without that, a name swapped between the
+	 * lstat and the open, by a rename over it or a hardlink put in its place,
+	 * would be read on the strength of checks made on another inode. Checked
+	 * before the link count, so a swap is refused as a swap even when the new
+	 * entry also has two names.
+	 *
 	 * Skipped on win32, where none of these checks mean anything: Stats.uid is
 	 * synthesised and the mode reads 0666 for any writable file. A sidecar there
 	 * would be believed on no evidence, so there is none, and the CLI falls back
@@ -2817,8 +3040,9 @@ export class Config extends EventEmitter {
 	private inspectLocalControlSidecar(): SidecarReading {
 		if (process.platform === "win32") return { kind: "absent" };
 		const path = this.getLocalControlSidecarPath();
+		let judged: ReturnType<typeof lstatSync>;
 		try {
-			lstatSync(path);
+			judged = lstatSync(path);
 		} catch {
 			return { kind: "absent" };
 		}
@@ -2858,6 +3082,13 @@ export class Config extends EventEmitter {
 			if (!info.isFile()) {
 				return { kind: "refused", reason: "it is not a regular file" };
 			}
+			if (info.dev !== judged.dev || info.ino !== judged.ino) {
+				return {
+					kind: "refused",
+					reason:
+						"it was replaced between being checked and being opened, so what was opened is not the file that was checked",
+				};
+			}
 			if (info.nlink !== 1) {
 				return {
 					kind: "refused",
@@ -2895,17 +3126,29 @@ export class Config extends EventEmitter {
 					reason: `it is not valid JSON (${describeParseError(error)})`,
 				};
 			}
-			const secret =
+			const fields =
 				parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-					? (parsed as { local_control_secret?: unknown }).local_control_secret
+					? (parsed as { local_control_secret?: unknown; listener?: unknown })
 					: undefined;
+			const secret = fields?.local_control_secret;
 			if (typeof secret !== "string" || secret.length === 0) {
 				return {
 					kind: "refused",
 					reason: "it holds no local_control_secret string",
 				};
 			}
-			return { kind: "ok", secret };
+			// Refused whole rather than read without it: a listener this code did
+			// not write is not one to send the secret to, and falling back to the
+			// configured port is what the refusal already does.
+			const listener = parseLocalControlListener(fields?.listener);
+			if (listener === "invalid") {
+				return {
+					kind: "refused",
+					reason:
+						"its listener is not a host, a port from 1 to 65535 and a pid, so it names no address the secret could be sent to",
+				};
+			}
+			return { kind: "ok", secret, listener };
 		} finally {
 			closeSync(fd);
 		}
@@ -2936,32 +3179,61 @@ export class Config extends EventEmitter {
 	 * because that fchowns the new file to the owner of the old one, which for a
 	 * planted sidecar is the planter.
 	 *
-	 * Skipped when the sidecar already holds this value, so a server restart
-	 * against a config that is fine writes nothing.
+	 * Skipped when the sidecar already holds this value and this listener, so
+	 * a repeated publish by one process writes nothing. A restart always
+	 * rewrites, because the pid changes.
 	 *
-	 * If the directory is refused or the write fails, a sidecar holding a
-	 * different value is removed rather than left in place: the CLI reads the
-	 * sidecar first, so a stale one would outrank a config that is correct.
+	 * Where the directory itself is refused, or the write fails, whatever
+	 * entry is at the name is removed rather than left in place, whatever its
+	 * value or type: the CLI reads the sidecar first, so a stale one would
+	 * outrank a config that is correct. Not in a sticky directory, where the
+	 * entry may be the operator's own file with a second name planted on it
+	 * (L3 of the #309 fix-round review).
 	 *
 	 * The write itself refuses a file whose 0600 did not take (saveByRename()
 	 * with forSidecar), so on a filesystem without Unix modes no sidecar is
 	 * published at all, rather than one the reader would refuse anyway.
 	 */
-	private writeLocalControlSidecar(secret: string): void {
+	private writeLocalControlSidecar(
+		secret: string,
+		listener: LocalControlListener,
+	): void {
 		if (process.platform === "win32") return;
 		const path = this.getLocalControlSidecarPath();
 		const reading = this.inspectLocalControlSidecar();
-		if (reading.kind === "ok" && reading.secret === secret) return;
+		if (
+			reading.kind === "ok" &&
+			reading.secret === secret &&
+			reading.listener !== null &&
+			reading.listener.host === listener.host &&
+			reading.listener.port === listener.port &&
+			reading.listener.pid === listener.pid
+		) {
+			return;
+		}
 		const trust = this.entryIsTrusted(path);
 		if (trust !== "trusted") {
-			// Remove what is not being replaced. A sidecar left from a start when
-			// this directory was trusted would outrank a correct config the moment
-			// the directory is trusted again, silently, because every reader check
-			// passes on it. Nothing usable is lost: while the directory is
-			// untrusted the reader refuses the file anyway. unlinkSync never
-			// follows a link, and in a sticky directory it removes only a name
-			// whose inode is ours.
-			if (reading.kind !== "absent") {
+			// Remove what is not being replaced, where the directory itself is
+			// refused. A sidecar left from a start when this directory was trusted
+			// would outrank a correct config the moment the directory is trusted
+			// again, silently, because every reader check passes on it. Nothing
+			// usable is lost: while the directory is untrusted the reader refuses
+			// the file anyway. unlinkSync never follows the final component, so a
+			// planted link loses only its name. What it may remove is whatever the
+			// directory's rules allow this uid, which in a directory others can
+			// write without the sticky bit is any entry at this one name.
+			//
+			// Never in a sticky directory. There the entry may be the operator's
+			// own hand-made file with a second name planted on it, which reads as
+			// "sticky-entry" because of the link count. Removing ours frees the
+			// name for anyone to claim, and a file another user then creates there
+			// can be removed by nobody but its owner, the directory's owner and
+			// root, so the CLI would be stuck on the config until root steps in.
+			// Left alone, the operator recovers by removing the extra name, whose
+			// inode is theirs (L3 of the #309 fix-round review). An unprivileged
+			// server could only have removed names whose inode is its own, but one
+			// that owns the directory or runs as root could remove any entry here.
+			if (trust === "directory" && reading.kind !== "absent") {
 				try {
 					unlinkSync(path);
 				} catch {
@@ -2971,19 +3243,38 @@ export class Config extends EventEmitter {
 			const consequence =
 				"Where the config file can be saved, the CLI reads the secret from there instead; where it cannot, CLI notifications such as --reauthenticate and --force-reset-rate-limit fail to authenticate against this server while API keys are active.";
 			this.reportSidecar(
-				trust === "sticky-entry"
-					? `Did not write the local control secret file ${path}: it would sit in a sticky directory, where it is trusted only once a single-named file of yours already exists at that name, and this server never creates one there. ${consequence} Create it yourself at mode 0600, or move the config to a directory only this user can write.`
-					: `Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. ${consequence} Move the config to a directory only this user can write.`,
+				trust !== "sticky-entry"
+					? `Did not write the local control secret file ${path}: its directory could not be examined, belongs to another user, or is writable by other local users, so another local user could read or replace it. ${consequence} Move the config to a directory only this user can write.`
+					: reading.kind === "absent"
+						? `Did not write the local control secret file ${path}: it would sit in a sticky directory, where it is trusted only once a single-named file of yours already exists at that name, and this server never creates one there. ${consequence} Create it yourself at mode 0600, or move the config to a directory only this user can write.`
+						: `Did not write the local control secret file ${path}: it sits in a sticky directory, and the entry already at that name is not a single-named file of yours. It may be another user's, which only its owner or root can remove, or yours with a second name someone else made for it, which you can remove. ${consequence} Remove whichever of those is yours, or move the config to a directory only this user can write.`,
 			);
 			return;
 		}
 		sweepTempSiblings(path, "local control secret");
-		const content = `${JSON.stringify({ local_control_secret: secret }, null, 2)}\n`;
+		const content = `${JSON.stringify(
+			{
+				local_control_secret: secret,
+				listener: {
+					host: listener.host,
+					port: listener.port,
+					pid: listener.pid,
+				},
+			},
+			null,
+			2,
+		)}\n`;
 		if (this.saveByRename(path, content, false, true)) {
 			log.info(`Published the local control secret to ${path} at 0600`);
 			return;
 		}
-		if (reading.kind !== "absent") {
+		// The same rule as the refused branch above: never free the name in a
+		// sticky directory others can write, where it is ours only because a file
+		// of ours holds it. The file left there names the server that wrote it,
+		// so a CLI reaches that server while it runs and sends nothing once its
+		// pid has exited, until a start that can write replaces it.
+		const keep = reading.kind === "absent" || inSharedStickyDirectory(path);
+		if (!keep) {
 			try {
 				unlinkSync(path);
 			} catch {
@@ -2991,7 +3282,9 @@ export class Config extends EventEmitter {
 			}
 		}
 		log.warn(
-			`Could not write the local control secret file ${path}, reported just above. The CLI falls back to the config file for the secret.`,
+			reading.kind !== "absent" && keep
+				? `Could not write the local control secret file ${path}, reported just above. The one already there was left in place, because its directory is sticky and removing it would let another local user take the name; it still names the server that wrote it.`
+				: `Could not write the local control secret file ${path}, reported just above. The CLI falls back to the config file for the secret.`,
 		);
 	}
 

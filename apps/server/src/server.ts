@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import {
 	Config,
 	filterEnabledProviderModelDefaultOverrides,
+	localControlNotifyHost,
 	type RuntimeConfig,
 } from "@better-ccflare/config";
 import {
@@ -1230,7 +1231,10 @@ export default async function startServer(options?: {
 	// AuthService#isLocalControlRequest. Published to `<config>.local-control`
 	// as well as the config, because while the config's saves are refused the
 	// CLI could not otherwise learn the value this process holds (SB23-3809).
-	const localControlSecret = config.publishLocalControlSecret();
+	// Published only once this process is listening, below, with the address
+	// and port it bound, so the CLI sends it there and nowhere else
+	// (SB23-4035).
+	const localControlSecret = config.getServerLocalControlSecret();
 
 	DatabaseFactory.initialize(undefined, runtime);
 	const dbOps = await DatabaseFactory.getInstanceAsync();
@@ -2104,6 +2108,20 @@ export default async function startServer(options?: {
 		};
 
 		serverInstance = serve(serverConfig);
+		// Now that the port is held, tell the CLI where it is. After serve()
+		// rather than at the secret's resolution above, because only now is the
+		// port known (a configured 0 binds a kernel-chosen one), and because a
+		// server that never gets here, such as a second instance the
+		// multi-instance guard stops, must not overwrite the running server's
+		// file (SB23-4035).
+		const boundPort = serverInstance.port;
+		if (typeof boundPort === "number") {
+			config.publishLocalControlSecret({
+				host: localControlNotifyHost(hostname),
+				port: boundPort,
+				pid: process.pid,
+			});
+		}
 	} catch (error) {
 		if (
 			typeof error === "object" &&
