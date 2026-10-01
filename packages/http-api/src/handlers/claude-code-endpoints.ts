@@ -1,4 +1,5 @@
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
+import os from "node:os";
 import type { Config } from "@better-ccflare/config";
 import {
 	BadRequest,
@@ -8,13 +9,22 @@ import {
 	NotFound,
 } from "@better-ccflare/http-common";
 import {
+	CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY,
+	CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY,
 	CLAUDE_CODE_ENDPOINTS_CONFIG_KEY,
 	type ClaudeCodeEndpointConfig,
 	type ClaudeCodeEndpointListing,
 	type ClaudeCodeEndpoints,
+	claudeCodeDirectoryRootsMessage,
 	claudeCodeEndpointBasePath,
+	claudeCodeHostRefusalMessage,
+	claudeCodeMachineHostnames,
+	isClaudeCodeHostAllowed,
+	isPathWithinRoots,
 	isValidClaudeCodeEndpointName,
 	OPENAI_GATEWAYS_CONFIG_KEY,
+	parseClaudeCodeAllowedHosts,
+	parseClaudeCodeDirectoryRoots,
 	parseClaudeCodeEndpoints,
 	resolveClaudeCodeEndpoint,
 	validateClaudeCodeEndpointConfig,
@@ -35,6 +45,111 @@ import {
  */
 /** Refused beyond this, so a runaway client cannot grow the config file without bound. */
 export const MAX_CLAUDE_CODE_ENDPOINTS = 100;
+
+/** Overridable facts about the host, for tests. */
+export interface ClaudeCodeHostFacts {
+	/** Default root when `claude_code_directory_roots` is unset. */
+	homeDir?: string;
+	/** This machine's name, as `os.hostname()` gives it. */
+	hostname?: string;
+}
+
+/** `path` through symlinks when it exists, else as written. */
+function realOrSelf(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
+/**
+ * The roots an endpoint directory must sit in, resolved through symlinks, so
+ * a link inside a root that points at `/` is judged by where it lands.
+ */
+export function claudeCodeDirectoryRoots(
+	config: Config,
+	facts: ClaudeCodeHostFacts = {},
+): { roots: string[]; errors: string[] } {
+	const parsed = parseClaudeCodeDirectoryRoots(
+		config.getObjectSetting(CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY),
+	);
+	const roots = parsed.roots ?? [facts.homeDir ?? os.homedir()];
+	return { roots: roots.map(realOrSelf), errors: parsed.errors };
+}
+
+export function isClaudeCodeDirectoryAllowed(
+	directory: string,
+	roots: readonly string[],
+): boolean {
+	return isPathWithinRoots(realOrSelf(directory), roots);
+}
+
+/**
+ * The Host check for every request that can make this server run a command
+ * (SB23-3408, item 6): null when allowed, else the 403 to send. A request
+ * whose URL has no host (no Host header) is refused.
+ */
+export function claudeCodeHostRefusal(
+	req: Request,
+	config: Config,
+	facts: ClaudeCodeHostFacts = {},
+): Response | null {
+	let hostname: string | null = null;
+	try {
+		hostname = new URL(req.url).hostname || null;
+	} catch {
+		hostname = null;
+	}
+	const extra = parseClaudeCodeAllowedHosts(
+		config.getObjectSetting(CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY),
+	).hosts;
+	const machine = claudeCodeMachineHostnames(facts.hostname ?? os.hostname());
+	if (isClaudeCodeHostAllowed(hostname, machine, extra)) return null;
+	return new Response(
+		JSON.stringify({
+			error: claudeCodeHostRefusalMessage(hostname),
+			config_key: CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY,
+		}),
+		{ status: 403, headers: { "content-type": "application/json" } },
+	);
+}
+
+/**
+ * What may be served right now: endpoints whose config is valid and whose
+ * directory is inside the roots, plus every reason an entry was left out and
+ * every problem with the two allowlist keys. The server dispatch and the list
+ * route both read this, so an entry the list reports as an error is never
+ * served.
+ */
+export function loadClaudeCodeEndpointState(
+	config: Config,
+	facts: ClaudeCodeHostFacts = {},
+): {
+	endpoints: ClaudeCodeEndpoints;
+	errors: string[];
+	allowedHosts: string[];
+} {
+	const parsed = parseClaudeCodeEndpoints(
+		config.getObjectSetting(CLAUDE_CODE_ENDPOINTS_CONFIG_KEY),
+	);
+	const hosts = parseClaudeCodeAllowedHosts(
+		config.getObjectSetting(CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY),
+	);
+	const { roots, errors: rootErrors } = claudeCodeDirectoryRoots(config, facts);
+	const errors = [...parsed.errors, ...hosts.errors, ...rootErrors];
+	const endpoints: ClaudeCodeEndpoints = {};
+	for (const [name, endpoint] of Object.entries(parsed.endpoints)) {
+		if (!isClaudeCodeDirectoryAllowed(endpoint.directory, roots)) {
+			errors.push(
+				`endpoint ${name}: ${claudeCodeDirectoryRootsMessage(endpoint.directory)}`,
+			);
+			continue;
+		}
+		endpoints[name] = endpoint;
+	}
+	return { endpoints, errors, allowedHosts: hosts.hosts };
+}
 
 function directoryExists(directory: string): boolean {
 	try {
@@ -63,7 +178,10 @@ function listEndpoints(
 		.map((name) => toListing(name, endpoints[name]));
 }
 
-export function createClaudeCodeEndpointHandlers(config: Config) {
+export function createClaudeCodeEndpointHandlers(
+	config: Config,
+	facts: ClaudeCodeHostFacts = {},
+) {
 	/**
 	 * The stored object, copied so the write is a fresh value. Null when the
 	 * key holds something other than an object: overwriting that would destroy
@@ -85,9 +203,7 @@ export function createClaudeCodeEndpointHandlers(config: Config) {
 
 	return {
 		listEndpoints: (): Response => {
-			const parsed = parseClaudeCodeEndpoints(
-				config.getObjectSetting(CLAUDE_CODE_ENDPOINTS_CONFIG_KEY),
-			);
+			const parsed = loadClaudeCodeEndpointState(config, facts);
 			return jsonResponse({
 				endpoints: listEndpoints(parsed.endpoints),
 				errors: parsed.errors,
@@ -95,9 +211,7 @@ export function createClaudeCodeEndpointHandlers(config: Config) {
 		},
 
 		getEndpoint: (name: string): Response => {
-			const parsed = parseClaudeCodeEndpoints(
-				config.getObjectSetting(CLAUDE_CODE_ENDPOINTS_CONFIG_KEY),
-			);
+			const parsed = loadClaudeCodeEndpointState(config, facts);
 			if (!Object.hasOwn(parsed.endpoints, name)) {
 				return errorResponse(NotFound(`endpoint ${JSON.stringify(name)}`));
 			}
@@ -105,6 +219,8 @@ export function createClaudeCodeEndpointHandlers(config: Config) {
 		},
 
 		putEndpoint: async (req: Request, name: string): Promise<Response> => {
+			const hostRefusal = claudeCodeHostRefusal(req, config, facts);
+			if (hostRefusal) return hostRefusal;
 			if (!isValidClaudeCodeEndpointName(name)) {
 				return errorResponse(
 					BadRequest(
@@ -121,6 +237,15 @@ export function createClaudeCodeEndpointHandlers(config: Config) {
 			const result = validateClaudeCodeEndpointConfig(body);
 			if (!result.ok) {
 				return errorResponse(BadRequest(result.error));
+			}
+
+			// Roots first, so a path outside them is refused before anything
+			// says whether it exists: the reply must not probe the host.
+			const { roots } = claudeCodeDirectoryRoots(config, facts);
+			if (!isClaudeCodeDirectoryAllowed(result.value.directory, roots)) {
+				return errorResponse(
+					BadRequest(claudeCodeDirectoryRootsMessage(result.value.directory)),
+				);
 			}
 
 			let isDirectory = false;
@@ -180,7 +305,9 @@ export function createClaudeCodeEndpointHandlers(config: Config) {
 		 * Removes the stored key whether or not its entry is valid, because this
 		 * is the one API route that can clear an entry GET reports as broken.
 		 */
-		deleteEndpoint: (name: string): Response => {
+		deleteEndpoint: (req: Request, name: string): Response => {
+			const hostRefusal = claudeCodeHostRefusal(req, config, facts);
+			if (hostRefusal) return hostRefusal;
 			const stored = readStoredMap();
 			if (stored === null) return notAnObject();
 			if (!Object.hasOwn(stored, name)) {

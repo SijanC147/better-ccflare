@@ -19,6 +19,22 @@ import {
 
 export const CLAUDE_CODE_ENDPOINTS_CONFIG_KEY = "claude_code_endpoints";
 
+/**
+ * Extra Host names the command-execution surface answers to, besides IP
+ * literals, `localhost` and this machine's own name (SB23-3408, item 6).
+ * Config file only: no API writes it, so a page that has rebound a domain to
+ * this host cannot add its own name.
+ */
+export const CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY = "claude_code_allowed_hosts";
+
+/**
+ * Absolute directories an endpoint's `directory` must sit inside (SB23-3408,
+ * item 7). Unset means the home directory of the user running the server.
+ * Config file only, for the same reason as the allowed hosts.
+ */
+export const CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY =
+	"claude_code_directory_roots";
+
 /** Environment override for the CLI binary, used by tests and odd installs. */
 export const CLAUDE_CODE_BIN_ENV = "BETTER_CCFLARE_CLAUDE_BIN";
 
@@ -55,6 +71,86 @@ export const MIN_CLAUDE_CODE_TIMEOUT_MS = 10_000;
 export const MAX_CLAUDE_CODE_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CLAUDE_CODE_EXTRA_ARGS = 32;
 export const MAX_CLAUDE_CODE_MODELS = 32;
+
+/**
+ * The only flags `extra_args` may carry, with how many values each takes
+ * (SB23-3408, item 7). Everything else is refused, in particular the flags
+ * that run commands with no model involved (`--settings` hooks,
+ * `--mcp-config`, `--plugin-dir`), widen access (`--add-dir`,
+ * `--dangerously-skip-permissions`), or fight the runner's own argv
+ * (`--resume`, `--output-format`, `--system-prompt`, `--model`).
+ * Arity: 0 takes no value, 1 takes exactly one, "many" takes one or more.
+ */
+export const CLAUDE_CODE_EXTRA_ARG_FLAGS: Readonly<
+	Record<string, 0 | 1 | "many">
+> = {
+	"--bare": 0,
+	"--restricted": 0,
+	"--safe-mode": 0,
+	"--strict-mcp-config": 0,
+	"--disable-slash-commands": 0,
+	"--no-session-persistence": 0,
+	"--exclude-dynamic-system-prompt-sections": 0,
+	"--allowedTools": "many",
+	"--allowed-tools": "many",
+	"--disallowedTools": "many",
+	"--disallowed-tools": "many",
+	"--tools": "many",
+	"--agent": 1,
+	"--effort": 1,
+	"--fallback-model": 1,
+	"--max-budget-usd": 1,
+	"--setting-sources": 1,
+};
+
+/**
+ * Checks `extra_args` against {@link CLAUDE_CODE_EXTRA_ARG_FLAGS}. Returns
+ * null when every token is an allowed flag or one of its values. A value may
+ * not start with "-", and a bare word with no flag before it is refused,
+ * because the CLI would read it as a prompt.
+ */
+export function checkClaudeCodeExtraArgs(
+	args: readonly string[],
+): string | null {
+	const allowed = Object.keys(CLAUDE_CODE_EXTRA_ARG_FLAGS).join(", ");
+	let i = 0;
+	while (i < args.length) {
+		const token = args[i] as string;
+		const eq = token.startsWith("--") ? token.indexOf("=") : -1;
+		const flag = eq > 0 ? token.slice(0, eq) : token;
+		if (!Object.hasOwn(CLAUDE_CODE_EXTRA_ARG_FLAGS, flag)) {
+			return token.startsWith("-")
+				? `extra_args may not contain ${JSON.stringify(flag)}; allowed flags: ${allowed}`
+				: `extra_args entry ${JSON.stringify(token)} is not a flag or a flag's value`;
+		}
+		const arity = CLAUDE_CODE_EXTRA_ARG_FLAGS[flag];
+		i++;
+		if (eq > 0) {
+			if (arity === 0) return `${flag} takes no value`;
+			if (token.length === eq + 1) return `${flag}= needs a value`;
+			// An `=` form carries exactly one value whatever the arity: the CLI
+			// (commander) does not keep collecting after it, so a following
+			// bare word would be its prompt and is refused on the next pass.
+			continue;
+		}
+		if (arity === 1) {
+			const value = args[i];
+			if (value === undefined || value.startsWith("-")) {
+				return `${flag} needs a value`;
+			}
+			i++;
+			continue;
+		} else if (arity === "many") {
+			if (args[i] === undefined || (args[i] as string).startsWith("-")) {
+				return `${flag} needs at least one value`;
+			}
+		}
+		if (arity === "many") {
+			while (i < args.length && !(args[i] as string).startsWith("-")) i++;
+		}
+	}
+	return null;
+}
 
 /** As stored under `claude_code_endpoints.<name>` in the config file. */
 export interface ClaudeCodeEndpointConfig {
@@ -260,6 +356,8 @@ export function validateClaudeCodeEndpointConfig(
 				return refuse("extra_args entries must not contain a NUL character");
 			}
 		}
+		const argError = checkClaudeCodeExtraArgs(raw as string[]);
+		if (argError) return refuse(argError);
 		value.extra_args = [...(raw as string[])];
 	}
 
@@ -325,4 +423,160 @@ export function parseClaudeCodeEndpoints(raw: unknown): {
 		endpoints[name] = result.value;
 	}
 	return { endpoints, errors };
+}
+
+// ── Host allowlist (SB23-3408, item 6) ───────────────────────────────────
+
+const IPV4_PATTERN = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const HOSTNAME_PATTERN =
+	/^[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))*$/;
+
+/** Lowercase, without a trailing dot. Expects a URL hostname: no port. */
+export function normalizeHostname(hostname: string): string {
+	return hostname.toLowerCase().replace(/\.$/, "");
+}
+
+/** A dotted-quad IPv4 address, or a bracketed IPv6 address as URL.hostname gives it. */
+export function isIpLiteralHostname(hostname: string): boolean {
+	const v4 = IPV4_PATTERN.exec(hostname);
+	if (v4) return v4.slice(1).every((octet) => Number(octet) <= 255);
+	return /^\[[0-9a-f:.]+\]$/i.test(hostname) && hostname.includes(":");
+}
+
+/**
+ * This machine's own names as a client may write them: `os.hostname()` as
+ * given, and its `.local` and short forms.
+ */
+export function claudeCodeMachineHostnames(hostname: string): string[] {
+	const full = normalizeHostname(hostname);
+	if (!full) return [];
+	const short = full.endsWith(".local")
+		? full.slice(0, -".local".length)
+		: full;
+	return [...new Set([full, short, `${short}.local`])];
+}
+
+/** Reads `claude_code_allowed_hosts`: an array of host names, no ports. */
+export function parseClaudeCodeAllowedHosts(raw: unknown): {
+	hosts: string[];
+	errors: string[];
+} {
+	const hosts: string[] = [];
+	const errors: string[] = [];
+	if (raw === undefined || raw === null) return { hosts, errors };
+	if (!Array.isArray(raw)) {
+		errors.push(
+			`${CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY} must be an array of host names`,
+		);
+		return { hosts, errors };
+	}
+	for (const entry of raw) {
+		const host =
+			typeof entry === "string" ? normalizeHostname(entry.trim()) : "";
+		if (!HOSTNAME_PATTERN.test(host) && !isIpLiteralHostname(host)) {
+			errors.push(
+				`${CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY} entry ${JSON.stringify(entry)} is not a host name (no scheme, port or path)`,
+			);
+			continue;
+		}
+		hosts.push(host);
+	}
+	return { hosts, errors };
+}
+
+/**
+ * Whether a request's Host may reach the command-execution surface. A page
+ * that rebinds its own domain to this machine still sends its own name as
+ * Host, which is what this refuses. `hostname` is `new URL(req.url).hostname`
+ * (lowercase, no port); null means the request carried no usable Host.
+ */
+export function isClaudeCodeHostAllowed(
+	hostname: string | null,
+	machineHostnames: readonly string[],
+	extraHosts: readonly string[],
+): boolean {
+	if (!hostname) return false;
+	const host = normalizeHostname(hostname);
+	if (!host) return false;
+	if (isIpLiteralHostname(host) || host === "localhost") return true;
+	return machineHostnames.includes(host) || extraHosts.includes(host);
+}
+
+export function claudeCodeHostRefusalMessage(hostname: string | null): string {
+	return `Host ${JSON.stringify(hostname ?? "")} may not reach Claude Code endpoints. IP addresses, localhost and this machine's own name are allowed; add any other name to ${CLAUDE_CODE_ALLOWED_HOSTS_CONFIG_KEY} in the config file.`;
+}
+
+// ── Directory roots (SB23-3408, item 7) ──────────────────────────────────
+
+/**
+ * Collapses repeated separators, "." and ".." in an absolute path, without
+ * touching the filesystem. Windows drive paths use "/" afterwards. Returns
+ * null for a relative path.
+ */
+export function normalizeAbsolutePath(input: string): string | null {
+	const drive = /^([A-Za-z]):[\\/]/.exec(input);
+	if (!drive && !input.startsWith("/")) return null;
+	const body = drive ? input.slice(2).replace(/\\/g, "/") : input;
+	const out: string[] = [];
+	for (const segment of body.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") out.pop();
+		else out.push(segment);
+	}
+	const prefix = drive ? `${drive[1]?.toUpperCase()}:` : "";
+	return `${prefix}/${out.join("/")}`;
+}
+
+/** Whether `path` is one of `roots` or inside one. Both sides are normalized. */
+export function isPathWithinRoots(
+	path: string,
+	roots: readonly string[],
+): boolean {
+	const target = normalizeAbsolutePath(path);
+	if (target === null) return false;
+	return roots.some((root) => {
+		const base = normalizeAbsolutePath(root);
+		if (base === null) return false;
+		if (target === base) return true;
+		return target.startsWith(base.endsWith("/") ? base : `${base}/`);
+	});
+}
+
+/**
+ * Reads `claude_code_directory_roots`. `roots` is null when the key is unset
+ * or invalid, which means "use the default"; an invalid value is reported.
+ */
+export function parseClaudeCodeDirectoryRoots(raw: unknown): {
+	roots: string[] | null;
+	errors: string[];
+} {
+	if (raw === undefined || raw === null) return { roots: null, errors: [] };
+	const key = CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY;
+	if (!Array.isArray(raw) || raw.length === 0) {
+		return {
+			roots: null,
+			errors: [
+				`${key} must be a non-empty array of absolute paths; using the home directory`,
+			],
+		};
+	}
+	const roots: string[] = [];
+	for (const entry of raw) {
+		if (typeof entry !== "string" || normalizeAbsolutePath(entry) === null) {
+			return {
+				roots: null,
+				errors: [
+					`${key} entry ${JSON.stringify(entry)} is not an absolute path; using the home directory`,
+				],
+			};
+		}
+		roots.push(entry);
+	}
+	return { roots, errors: [] };
+}
+
+export function claudeCodeDirectoryRootsMessage(directory: string): string {
+	// The roots themselves stay out of the message: they name the home
+	// directory, and this text reaches unauthenticated clients.
+	return `directory ${JSON.stringify(directory)} is outside the allowed roots; add a root to ${CLAUDE_CODE_DIRECTORY_ROOTS_CONFIG_KEY} in the config file`;
 }

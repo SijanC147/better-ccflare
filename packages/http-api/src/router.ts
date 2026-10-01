@@ -1220,10 +1220,9 @@ export class APIRouter {
 
 			// DELETE /api/claude-code-endpoints/:name
 			if (parts.length === 4 && method === "DELETE") {
-				return await this.wrapHandler(() => handlers.deleteEndpoint(name))(
-					req,
-					url,
-				);
+				return await this.wrapHandler((req) =>
+					handlers.deleteEndpoint(req, name),
+				)(req, url);
 			}
 		}
 
