@@ -155,18 +155,20 @@ export interface RequestData {
 	 */
 	inboundFormat?: string | null | undefined;
 	inboundGateway?: string | null | undefined;
-	usage?: {
-		model?: string | undefined;
-		promptTokens?: number | undefined;
-		completionTokens?: number | undefined;
-		totalTokens?: number | undefined;
-		costUsd?: number | undefined;
-		inputTokens?: number | undefined;
-		cacheReadInputTokens?: number | undefined;
-		cacheCreationInputTokens?: number | undefined;
-		outputTokens?: number | undefined;
-		tokensPerSecond?: number | undefined;
-	} | undefined;
+	usage?:
+		| {
+				model?: string | undefined;
+				promptTokens?: number | undefined;
+				completionTokens?: number | undefined;
+				totalTokens?: number | undefined;
+				costUsd?: number | undefined;
+				inputTokens?: number | undefined;
+				cacheReadInputTokens?: number | undefined;
+				cacheCreationInputTokens?: number | undefined;
+				outputTokens?: number | undefined;
+				tokensPerSecond?: number | undefined;
+		  }
+		| undefined;
 }
 
 export class RequestRepository extends BaseRepository<RequestData> {

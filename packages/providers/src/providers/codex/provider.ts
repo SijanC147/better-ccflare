@@ -480,12 +480,14 @@ interface StreamState {
 	contextWindow: ContextWindow | null;
 	// Track function_call items: output_index → buffered arguments and block index
 	functionCallBlocks: Map<number, FunctionCallBuffer>;
-	upstreamError?: {
-		type: string;
-		message: string;
-		code?: string;
-		status?: string;
-	} | undefined;
+	upstreamError?:
+		| {
+				type: string;
+				message: string;
+				code?: string;
+				status?: string;
+		  }
+		| undefined;
 }
 
 /**
