@@ -1,0 +1,10 @@
+{
+	"extends": "../tsconfig.json",
+	// The root `include` is `packages/*/src/**/*` and `apps/*/src/**/*`, so no
+	// file under bench/ was in any program, and two stale `@ts-expect-error`
+	// directives sat in `drain-strategy-harness.ts` unseen (SB23-3689).
+	"include": ["**/*.ts"],
+	// `exclude` REPLACES the inherited value rather than merging. Wired into
+	// the root `typecheck:tests` chain; without that entry the gate never runs.
+	"exclude": ["node_modules"]
+}

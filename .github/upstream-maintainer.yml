@@ -87,6 +87,10 @@ defaults:
       - {glob: "README.md", resolve: ours}
       - {glob: "MERGELOG.md", resolve: ours}
       - {glob: "docs/**", resolve: ours}
+      # The fork deleted this file (SB23-3689: it imported `createProxyContext`, which no
+      # longer exists, and could not run). Upstream still tracks it, so an upstream edit
+      # would be a delete/modify, which aborts the run unless a rule keeps the delete.
+      - {glob: "debug_usage.ts", resolve: ours}
       # The fork owns 3 live workflows against upstream's ~10 and disables the rest by
       # renaming them `*.yml.disabled`, so upstream workflow changes arrive as new live
       # files or as modifies against a renamed file. Keeping ours wholesale is the
