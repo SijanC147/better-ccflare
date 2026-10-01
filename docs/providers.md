@@ -861,7 +861,9 @@ export interface Provider {
 
 ### Per-request state
 
-The proxy creates one `ProviderRequestContext` per upstream attempt and passes that same object to `prepareRequest`, `buildUrl` and every `processResponse` call of the attempt, in-place retries included. A failover to another account gets a new one. A provider that derives a value in one hook and needs it in a later one keys it on that object, for example in a module-private `WeakMap<ProviderRequestContext, T>`, as `vertex-ai` does for the model it puts in the URL and restores into the response.
+The proxy creates one `ProviderRequestContext` per upstream attempt and passes that same object to `prepareRequest`, `buildUrl`, every `transformRequestBody` and every `processResponse` call of the attempt, in-place retries and model-fallback re-transforms included. A failover to another account gets a new one. A provider that derives a value in one hook and needs it in a later one keys it on that object, for example in a `WeakMap<ProviderRequestContext, T>`, as `vertex-ai` does for the model it puts in the URL and restores into the response, and `codex` does for stream intent, the body-derived turn and the pending continuation (`SB23-3964`). Keyed on the carrier, the value lives as long as the attempt and anything still reading it, so no age sweep or size cap can drop it under a live response.
+
+On a model fallback the proxy sets `context.fallbackModel` to the model it is retrying with, then calls `prepareRequest` and `buildUrl` again on the same carrier, so a provider that names the model in the URL builds the fallback's URL (`SB23-3971`). That model is already an entry of the account's model list: use it verbatim rather than mapping it again.
 
 Never write per-request state onto the `Account` or onto the provider instance. Both outlive the request, and two concurrent requests handed one account object would read each other's values (`SB23-2457`, `SB23-2508`). `context.requestModel` is set by the proxy before `processResponse` and holds the model actually sent upstream.
 

@@ -36,6 +36,15 @@ export interface ProviderRequestContext {
 	 * `buildUrl`.
 	 */
 	requestModel?: string | null;
+	/**
+	 * Set by the proxy's model-fallback loop to the model it is about to retry
+	 * with, before it calls `prepareRequest` and `buildUrl` again on this same
+	 * carrier (SB23-3971). The name is already an entry of the account's model
+	 * list, so a provider that maps the client's model in `prepareRequest` uses
+	 * this one verbatim: mapping it again can turn a fallback in the primary's
+	 * family back into the primary.
+	 */
+	fallbackModel?: string;
 }
 
 /** The name this type had when only `processResponse` received it. */
@@ -123,9 +132,16 @@ export interface Provider {
 	): Promise<Response>;
 
 	/**
-	 * Transform the request body before sending to the provider
+	 * Transform the request body before sending to the provider. `context` is
+	 * the attempt's carrier, the same object `prepareRequest`, `buildUrl` and
+	 * `processResponse` receive, and it is passed to every transform of the
+	 * attempt (the model-fallback and recovery re-transforms included).
 	 */
-	transformRequestBody?(request: Request, account?: Account): Promise<Request>;
+	transformRequestBody?(
+		request: Request,
+		account?: Account,
+		context?: ProviderRequestContext,
+	): Promise<Request>;
 
 	/**
 	 * Extract tier information from response if available

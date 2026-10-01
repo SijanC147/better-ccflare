@@ -1048,11 +1048,18 @@ export async function proxyWithAccount(
 
 		// Get the provider for this account
 		const provider = getProvider(account.provider) || ctx.provider;
+		// The per-request carrier (SB23-2508): one object for this attempt, handed
+		// by reference to prepareRequest, buildUrl, every transformRequestBody and
+		// every processResponse call below, the in-place retries and the
+		// model-fallback re-transforms included. A provider keys anything it
+		// derives here on this object, never on `account`, which outlives the
+		// request. A failover re-enters this function and gets a fresh one.
+		const providerContext: ProviderRequestContext = {};
 		const transformRequestForAccount = async (
 			request: Request,
 		): Promise<Request> => {
 			const providerRequest = provider.transformRequestBody
-				? await provider.transformRequestBody(request, account)
+				? await provider.transformRequestBody(request, account, providerContext)
 				: request;
 			return applyAccountRequestTransformer(providerRequest, account);
 		};
@@ -1068,13 +1075,6 @@ export async function proxyWithAccount(
 		const accessToken = isSyntheticCodexCountTokens
 			? ""
 			: await getValidAccessToken(account, ctx);
-
-		// The per-request carrier (SB23-2508): one object for this attempt, handed
-		// by reference to prepareRequest, buildUrl and every processResponse call
-		// below, the in-place retries included. A provider keys anything it
-		// derives here on this object, never on `account`, which outlives the
-		// request. A failover re-enters this function and gets a fresh one.
-		const providerContext: ProviderRequestContext = {};
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
 		if (provider.prepareRequest) {
@@ -1269,6 +1269,7 @@ export async function proxyWithAccount(
 				rawResponse,
 				new Request(targetUrl, requestInit),
 				account,
+				providerContext,
 			);
 			if (recovered) {
 				// Exactly one retry on the same provider/account/model. Refresh the
@@ -2066,7 +2067,26 @@ export async function proxyWithAccount(
 						signal: req.signal,
 					};
 
-					const retryProviderRequest = new Request(targetUrl, retryRequestInit);
+					// A provider that names the model in the URL (vertex-ai) derives it
+					// in prepareRequest. Re-derive it for this model on the same carrier
+					// and rebuild the URL, or the retry asks the first model's URL for
+					// it (SB23-3971). Later in-place retries reuse this URL through
+					// `outgoing.request`.
+					let retryTargetUrl = targetUrl;
+					if (provider.prepareRequest) {
+						providerContext.fallbackModel = nextModel;
+						provider.prepareRequest(req, patchedBody, account, providerContext);
+						retryTargetUrl = provider.buildUrl(
+							url.pathname,
+							url.search,
+							account,
+							providerContext,
+						);
+					}
+					const retryProviderRequest = new Request(
+						retryTargetUrl,
+						retryRequestInit,
+					);
 					let retryTransformedRequest =
 						await transformRequestForAccount(retryProviderRequest);
 
@@ -2090,7 +2110,13 @@ export async function proxyWithAccount(
 					if (retryTransformedBodyText !== undefined) {
 						try {
 							const transformedBody = JSON.parse(retryTransformedBodyText);
-							if (transformedBody.model !== nextModel) {
+							// Only a body that still names a model was remapped. One the
+							// provider took the model out of (vertex-ai puts it in the URL)
+							// must not get it back.
+							if (
+								Object.hasOwn(transformedBody, "model") &&
+								transformedBody.model !== nextModel
+							) {
 								transformedBody.model = nextModel;
 								const repatchedBodyText = JSON.stringify(transformedBody);
 								const repatchedHeaders = new Headers(
@@ -2159,6 +2185,9 @@ export async function proxyWithAccount(
 						break; // Success — stop cycling
 					}
 				}
+				// Live only while the loop above re-prepares a model. A later hook
+				// that re-ran prepareRequest must not inherit it.
+				delete providerContext.fallbackModel;
 			}
 
 			// If still unavailable/rate-limited after exhausting the model list,
