@@ -34,6 +34,7 @@ import {
 	DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { SkippedConfigEntries } from "./SkippedConfigEntries";
 
 /**
  * One editable model row. `combo` is the empty string for "none". `id` only
@@ -582,8 +583,11 @@ export function OpenAIGatewaysCard() {
 	const [form, setForm] = useState<GatewayFormState | null>(null);
 	const [original, setOriginal] = useState<OpenAIGatewayListing | null>(null);
 	const [formError, setFormError] = useState<string | null>(null);
-	const [pendingDelete, setPendingDelete] =
-		useState<OpenAIGatewayListing | null>(null);
+	// `basePath` is null for a skipped entry, which is stored but not served.
+	const [pendingDelete, setPendingDelete] = useState<{
+		name: string;
+		basePath: string | null;
+	} | null>(null);
 
 	const gateways = data?.gateways ?? [];
 	const origin = currentOrigin();
@@ -645,7 +649,12 @@ export function OpenAIGatewaysCard() {
 
 	function openDelete(gateway: OpenAIGatewayListing) {
 		remove.reset();
-		setPendingDelete(gateway);
+		setPendingDelete({ name: gateway.name, basePath: gateway.base_path });
+	}
+
+	function openDeleteSkipped(name: string) {
+		remove.reset();
+		setPendingDelete({ name, basePath: null });
 	}
 
 	function handleDelete() {
@@ -711,17 +720,14 @@ export function OpenAIGatewaysCard() {
 					))}
 				</div>
 
-				{data && data.errors.length > 0 && (
-					<div className="space-y-1" role="alert">
-						<p className="text-xs font-medium text-destructive">
-							Skipped config entries
-						</p>
-						{data.errors.map((message) => (
-							<p key={message} className="text-xs text-destructive">
-								{message}
-							</p>
-						))}
-					</div>
+				{data && (
+					<SkippedConfigEntries
+						noun="gateway"
+						errors={data.errors}
+						invalid={data.invalid}
+						disabled={busy}
+						onDelete={openDeleteSkipped}
+					/>
 				)}
 			</CardContent>
 
@@ -780,9 +786,9 @@ export function OpenAIGatewaysCard() {
 					<DialogHeader>
 						<DialogTitle>Delete gateway</DialogTitle>
 						<DialogDescription>
-							Remove {pendingDelete?.name}? Clients using{" "}
-							{pendingDelete?.base_path} or /{pendingDelete?.name}/v1 will get
-							an error.
+							{pendingDelete?.basePath
+								? `Remove ${pendingDelete.name}? Clients using ${pendingDelete.basePath} or /${pendingDelete.name}/v1 will get an error.`
+								: `Remove the skipped entry ${pendingDelete?.name} from the config file? It is not being served now.`}
 						</DialogDescription>
 					</DialogHeader>
 					{remove.isError && (

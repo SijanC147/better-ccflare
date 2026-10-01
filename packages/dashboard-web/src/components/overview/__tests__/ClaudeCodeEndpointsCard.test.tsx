@@ -6,9 +6,13 @@ import {
 	MAX_CLAUDE_CODE_EXTRA_ARGS,
 	MAX_CLAUDE_CODE_MODELS,
 } from "@better-ccflare/types";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { byText, click, mount } from "../../../test/dom";
 import {
 	BYPASS_PERMISSIONS_WARNING,
+	ClaudeCodeEndpointsCard,
 	EndpointForm,
 	type EndpointFormState,
 	EndpointRow,
@@ -281,5 +285,134 @@ describe("EndpointRow", () => {
 		expect(html).toContain('title="Edit endpoint myproject"');
 		expect(html).toContain('aria-label="Delete endpoint myproject"');
 		expect(html).toContain('title="Delete endpoint myproject"');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The live card against a stubbed fetch, for the skipped-entry delete control
+// (SB23-3557). Every request is recorded and anything unexpected fails.
+// ---------------------------------------------------------------------------
+
+interface Call {
+	method: string;
+	url: string;
+}
+
+async function settle(): Promise<void> {
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	});
+}
+
+async function waitFor(predicate: () => boolean, what: string): Promise<void> {
+	for (let i = 0; i < 100; i++) {
+		if (predicate()) return;
+		await settle();
+	}
+	throw new Error(`timed out waiting for ${what}`);
+}
+
+async function withCard(
+	listed: {
+		endpoints: ClaudeCodeEndpointListing[];
+		errors: string[];
+		invalid: { name: string; error: string }[];
+	},
+	run: (calls: Call[]) => Promise<void>,
+): Promise<void> {
+	const calls: Call[] = [];
+	const unexpected: string[] = [];
+	const original = globalThis.fetch;
+	const stub = async (input: unknown, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : (input as Request).url;
+		const method = (init?.method ?? "GET").toUpperCase();
+		calls.push({ method, url });
+		if (method === "GET" && url === "/api/claude-code-endpoints") {
+			return new Response(JSON.stringify(listed), {
+				headers: { "content-type": "application/json" },
+			});
+		}
+		if (
+			method === "DELETE" &&
+			/^\/api\/claude-code-endpoints\/[^/]+$/.test(url)
+		) {
+			return new Response(null, { status: 204 });
+		}
+		unexpected.push(`${method} ${url}`);
+		return new Response(JSON.stringify({ error: "unexpected" }), {
+			status: 404,
+		});
+	};
+	globalThis.fetch = stub as unknown as typeof fetch;
+
+	const client = new QueryClient({
+		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+	});
+	const mounted = await mount(
+		<QueryClientProvider client={client}>
+			<ClaudeCodeEndpointsCard />
+		</QueryClientProvider>,
+	);
+	try {
+		await waitFor(
+			() =>
+				!client.isFetching() &&
+				calls.some((c) => c.url === "/api/claude-code-endpoints"),
+			"the initial query",
+		);
+		await settle();
+		await run(calls);
+		expect(unexpected).toEqual([]);
+	} finally {
+		await mounted.unmount();
+		client.clear();
+		globalThis.fetch = original;
+	}
+}
+
+describe("ClaudeCodeEndpointsCard skipped entries", () => {
+	it("deletes a skipped entry from the card by its stored key", async () => {
+		const escaped =
+			"endpoint escaped: directory is outside claude_code_directory_roots";
+		const hosts = "claude_code_allowed_hosts must be an array of host names";
+		await withCard(
+			{
+				endpoints: [listing()],
+				errors: [escaped, hosts],
+				invalid: [{ name: "escaped", error: escaped }],
+			},
+			async (calls) => {
+				const text = document.body.textContent ?? "";
+				expect(text.split(escaped).length - 1).toBe(1);
+				expect(text).toContain(hosts);
+				const controls = Array.from(
+					document.body.querySelectorAll(
+						'button[aria-label^="Delete skipped endpoint"]',
+					),
+				).map((b) => b.getAttribute("aria-label"));
+				expect(controls).toEqual(["Delete skipped endpoint escaped"]);
+
+				const control = document.body.querySelector(
+					'button[aria-label="Delete skipped endpoint escaped"]',
+				);
+				if (!control) throw new Error("expected the delete control");
+				await click(control);
+				expect(document.body.textContent ?? "").toContain(
+					"Remove the skipped entry escaped from the config file?",
+				);
+				expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
+
+				const confirm = byText(document.body, "button", "Delete");
+				expect(confirm.length).toBe(1);
+				await click(confirm[0]);
+				await waitFor(
+					() => calls.some((c) => c.method === "DELETE"),
+					"the DELETE",
+				);
+				expect(calls.filter((c) => c.method === "DELETE")).toEqual([
+					{ method: "DELETE", url: "/api/claude-code-endpoints/escaped" },
+				]);
+			},
+		);
 	});
 });

@@ -25,7 +25,8 @@ import {
  * parsed map. `parseOpenAIGateways` leaves invalid entries out, so saving its
  * output would delete every hand-edited gateway with a typo the first time the
  * dashboard touched an unrelated one. The invalid entry stays on disk, the
- * router keeps skipping it, and GET keeps naming it in `errors`.
+ * router keeps skipping it, and GET keeps naming it in `errors` and, by its
+ * stored key, in `invalid`, which is what DELETE takes.
  */
 /** Refused beyond this, so a runaway client cannot grow the config file without bound. */
 export const MAX_OPENAI_GATEWAYS = 100;
@@ -58,6 +59,7 @@ export function createOpenAIGatewayHandlers(config: Config) {
 			return jsonResponse({
 				gateways: listOpenAIGateways(parsed.gateways),
 				errors: parsed.errors,
+				invalid: parsed.invalid,
 			});
 		},
 

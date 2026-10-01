@@ -18,6 +18,7 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	ContextInsightsResponse,
+	InvalidConfigEntry,
 	LogEvent,
 	ModelCatalogRefreshResponse,
 	ModelCatalogResponse,
@@ -296,6 +297,8 @@ export interface ClaudeCodeEndpointsResponse {
 	endpoints: ClaudeCodeEndpointListing[];
 	/** Config entries the server skipped, each with the reason. */
 	errors: string[];
+	/** The skipped entries by stored key, for DELETE; each `error` is also in `errors`. */
+	invalid: InvalidConfigEntry[];
 }
 
 /** What `GET /api/openai-gateways` returns. */
@@ -303,6 +306,8 @@ export interface OpenAIGatewaysResponse {
 	gateways: OpenAIGatewayListing[];
 	/** Stored entries the server skipped, each with the reason. */
 	errors: string[];
+	/** The skipped entries by stored key, for DELETE; each `error` is also in `errors`. */
+	invalid: InvalidConfigEntry[];
 }
 
 class API extends HttpClient {
