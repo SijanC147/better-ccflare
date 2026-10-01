@@ -186,6 +186,12 @@ const strippedFieldsReported = new Set<string>();
  * another process. The CLI reads the secret from the file, which a refused save
  * never writes, so it still cannot learn the server's value while the refusal
  * holds, and the refusal messages say so.
+ *
+ * It also outlives the file it came from. If the operator deletes the config,
+ * the next instance creates a fresh file and a getLocalControlSecret() on it
+ * writes the remembered value back. Deliberate rather than overlooked: that is
+ * the value AuthService holds until the process exits, and a restart, which
+ * clears this map, is what the refusal messages already ask for.
  */
 const localControlSecretsByPath = new Map<string, string>();
 
@@ -1963,7 +1969,7 @@ export class Config extends EventEmitter {
 		// as readily as at boot.
 		if (this.unparseableFrom !== undefined) {
 			log.error(
-				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process generates one and keeps it until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process, and neither can a client holding an earlier secret. Fix the file, or move it aside so a fresh one is created, then restart.`,
+				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process keeps the one it already holds, or generates one, until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process. Fix the file, or move it aside so a fresh one is created, then restart.`,
 			);
 			return;
 		}

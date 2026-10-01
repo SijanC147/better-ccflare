@@ -231,6 +231,30 @@ describe("SB23-2489 — one local_control_secret per process while saves are ref
 		});
 	});
 
+	/**
+	 * The disk re-read is the #379 race as it happens in production: apps/server
+	 * builds its Config, the CLI then persists a secret, and the server's first
+	 * getLocalControlSecret() finds it on disk. AuthService keeps that value, so
+	 * it has to be the one remembered, not only values read from this.data.
+	 */
+	it("records a secret first found by the disk re-read", () => {
+		withFixture((dir) => {
+			const path = join(dir, "better-ccflare.json");
+			const server = new Config(path);
+			seed(
+				path,
+				JSON.stringify({ local_control_secret: "persisted-by-the-cli" }),
+			);
+			expect(server.getLocalControlSecret()).toBe("persisted-by-the-cli");
+
+			seed(path, TRAILING_COMMA);
+
+			expect(new Config(path).getLocalControlSecret()).toBe(
+				"persisted-by-the-cli",
+			);
+		});
+	});
+
 	/** Keyed by path. A memo keyed on anything coarser hands one file's secret to another. */
 	it("keeps the secrets of two different config paths apart", () => {
 		withFixture((dir) => {

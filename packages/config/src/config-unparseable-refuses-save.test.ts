@@ -310,6 +310,9 @@ describe("SB23-2469 — a config that cannot be read is not replaced", () => {
 			expect(refusal).toContain(path);
 			expect(refusal).toContain("running on defaults");
 			expect(refusal).toContain("local_control_secret is never written");
+			expect(refusal).toContain(
+				"keeps the one it already holds, or generates one",
+			);
 
 			const diagnosis = errors.find((msg) =>
 				msg.startsWith("Failed to parse config file:"),

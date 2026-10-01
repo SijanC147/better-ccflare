@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
+	chmodSync,
+	closeSync,
+	fchmodSync,
 	mkdtempSync,
+	openSync,
 	readFileSync,
 	rmSync,
 	statSync,
@@ -10,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { logBus } from "@better-ccflare/logger";
 import type { LogEvent } from "@better-ccflare/types";
-import { __setFchmodForTest } from "./chmod-seam";
+import { __setFchmodForTest, fchmodForConfig } from "./chmod-seam";
 import { Config } from "./index";
 
 /**
@@ -151,18 +155,86 @@ describe.skipIf(skipOnWindows)(
 			});
 		});
 
-		/** The seam refuses outside a test run, the same as __setChmodForTest. */
-		it("refuses to swap the fchmod when NODE_ENV is not test", () => {
-			const previous = process.env.NODE_ENV;
-			process.env.NODE_ENV = "production";
-			try {
-				expect(() => __setFchmodForTest(() => {})).toThrow(
-					"__setFchmodForTest is available only while NODE_ENV=test",
+		/**
+		 * A mount presenting 0644 is the realistic bind-mount case, and the one the
+		 * 0400 fixture above cannot reach: it takes the other exposure branch, and a
+		 * read-back that only checks the owner bits would accept it silently.
+		 */
+		it("names the exposure when the save lands a mode other users can read", () => {
+			withFixture((dir) => {
+				const path = join(dir, "better-ccflare.json");
+				writeFileSync(path, `{"lb_strategy":"session"}`, { mode: 0o600 });
+				const config = new Config(path);
+
+				__setFchmodForTest((fd) => fchmodSync(fd, 0o644));
+				let events: LogEvent[];
+				try {
+					events = captureLogs(() => {
+						config.set("lb_strategy", "round-robin");
+					});
+				} finally {
+					__setFchmodForTest(null);
+				}
+
+				const warnings = events.filter((event) =>
+					event.msg.startsWith("fchmod to 0600"),
 				);
+				expect(warnings).toHaveLength(1);
+				expect(warnings[0]?.msg).toBe(
+					`fchmod to 0600 on the config being saved to ${path} did not take: the new file reads 0644. Other local users may be able to read the credentials in it. Filesystems without Unix modes behave this way, including Docker bind mounts from a macOS or Windows host and FAT or exFAT volumes. The save goes ahead, because the file it replaces sits on the same filesystem and refusing would lose the setting without changing its mode. Move the config onto a filesystem that enforces modes, or mount it so only this user can read it. This line does not repeat for this path in this process.`,
+				);
+				expect(statSync(path).mode & 0o777).toBe(0o644);
+			});
+		});
+
+		/**
+		 * The seam refuses outside a test run, the same as __setChmodForTest, for
+		 * NODE_ENV set to something else AND unset, which is how a compiled binary
+		 * usually runs. Restoring is allowed either way.
+		 */
+		it("refuses to swap the fchmod when NODE_ENV is not test", () => {
+			const saved = process.env.NODE_ENV;
+			try {
+				for (const value of ["production", undefined]) {
+					if (value === undefined) delete process.env.NODE_ENV;
+					else process.env.NODE_ENV = value;
+					expect(() => __setFchmodForTest(() => {})).toThrow(
+						"__setFchmodForTest is available only while NODE_ENV=test. " +
+							"Swapping the fchmod this package calls outside a test run would " +
+							"silently disarm the mode every save sets on the config file, which " +
+							"holds local_control_secret, pg_password and upstream_maintainer_token.",
+					);
+					expect(() => __setFchmodForTest(null)).not.toThrow();
+				}
 			} finally {
-				process.env.NODE_ENV = previous;
-				__setFchmodForTest(null);
+				if (saved === undefined) delete process.env.NODE_ENV;
+				else process.env.NODE_ENV = saved;
 			}
+			expect(process.env.NODE_ENV).toBe("test");
+		});
+
+		/** Without this, a restore that did nothing would pass here and fail only in a later file. */
+		it("restores the real fchmod when passed null", () => {
+			withFixture((dir) => {
+				const target = join(dir, "restore.txt");
+				writeFileSync(target, "x", { mode: 0o666 });
+				chmodSync(target, 0o666);
+
+				let stubbed = 0;
+				__setFchmodForTest(() => {
+					stubbed += 1;
+				});
+				__setFchmodForTest(null);
+
+				const fd = openSync(target, "r");
+				try {
+					fchmodForConfig(fd, 0o600);
+				} finally {
+					closeSync(fd);
+				}
+				expect(stubbed).toBe(0);
+				expect(statSync(target).mode & 0o777).toBe(0o600);
+			});
 		});
 	},
 );
