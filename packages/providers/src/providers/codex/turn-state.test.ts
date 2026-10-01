@@ -549,6 +549,46 @@ describe("CodexProvider pending derived turns", () => {
 		).toBe("fresh");
 	});
 
+	it("keys the turn on the authenticated caller the proxy forwards", async () => {
+		const provider = new CodexProvider();
+		const pending = (
+			provider as unknown as {
+				messagesTurnByRequest: Map<string, { lookup: { match: string } }>;
+			}
+		).messagesTurnByRequest;
+		const account = {
+			id: "acc-caller",
+			name: "c",
+			provider: "codex",
+		} as Account;
+		const send = (requestId: string, caller: string) =>
+			provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": requestId,
+						"x-better-ccflare-authenticated-caller": caller,
+					},
+					body: JSON.stringify({
+						model: "gpt-5.5",
+						max_tokens: 16,
+						metadata: {
+							user_id: JSON.stringify({
+								session_id: "5e550000-0000-4000-8000-0000000000cc",
+							}),
+						},
+						messages: [{ role: "user", content: "hi" }],
+					}),
+				}),
+				account,
+			);
+		await send("from-a", "a".repeat(64));
+		await send("from-b", "b".repeat(64));
+		// One caller's unanswered opening would make the other's read "other".
+		expect(pending.get("from-b\0acc-caller")?.lookup.match).toBe("fresh");
+	});
+
 	it("strips the internal-replay marker on the passthrough branch too", async () => {
 		const out = await new CodexProvider().transformRequestBody(
 			new Request("https://chatgpt.com/backend-api/codex/responses", {
