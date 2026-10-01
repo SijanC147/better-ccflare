@@ -143,6 +143,21 @@ function codexAccount(prefix: string): Account {
 	} as Account;
 }
 
+/** A third-party OpenAI-compatible account on the same stub. */
+function openAiCompatibleAccount(): Account {
+	return {
+		...codexAccount("oc"),
+		id: "acc-oc",
+		name: "OC",
+		provider: "openai-compatible",
+		api_key: "oc-test-key",
+		refresh_token: null,
+		access_token: null,
+		expires_at: null,
+		custom_endpoint: `http://127.0.0.1:${server.port}/oc`,
+	} as Account;
+}
+
 /** The order the strategy hands accounts to the proxy, set per request. */
 let route: string[] = ["a", "b"];
 
@@ -155,7 +170,11 @@ function makeCtx(): ProxyContext {
 					.filter((acc): acc is Account => acc !== undefined),
 		},
 		dbOps: {
-			getAllAccounts: mock(async () => [codexAccount("a"), codexAccount("b")]),
+			getAllAccounts: mock(async () => [
+				codexAccount("a"),
+				codexAccount("b"),
+				openAiCompatibleAccount(),
+			]),
 			getActiveComboForFamily: mock(async () => null),
 			markAccountRateLimited: mock(async () => ({
 				consecutiveRateLimits: 1,
@@ -332,6 +351,22 @@ describe("x-codex-turn-state on the native /v1/responses path (SB23-2370)", () =
 			["a", null],
 			["a", tokenA],
 			["b", null],
+		]);
+	});
+});
+
+describe("x-codex-turn-state never reaches a non-Codex upstream (SB23-2370)", () => {
+	it("is stripped when a Codex turn moves to an OpenAI-compatible account", async () => {
+		const turnId = newTurn();
+		route = ["a"];
+		const first = await codexCli({ turnId });
+		const tokenA = first.headers.get(TURN_STATE);
+		expect(tokenA).toMatch(/^ts-a-\d+$/);
+		route = ["oc"];
+		await codexCli({ turnId, token: tokenA ?? undefined });
+		expect(seen.map((s) => [s.account, s.turnState])).toEqual([
+			["a", null],
+			["oc", null],
 		]);
 	});
 });

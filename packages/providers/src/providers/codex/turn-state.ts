@@ -77,13 +77,22 @@ export class CodexTurnStateStore {
 		return this.entries.size;
 	}
 
+	/**
+	 * A token key. With a `turn_id` the key carries it, so a value upstream
+	 * happened to issue in an earlier turn cannot pull that turn's entry into
+	 * this one.
+	 */
+	private tokenKey(turnId: string | null, token: string): string {
+		return digest("token", turnId ? `${turnId}\0${token}` : token);
+	}
+
 	/** Lookup keys, most specific first, for a client request's headers. */
 	private requestKeys(headers: Headers | undefined): string[] {
 		const keys: string[] = [];
 		const turnId = codexTurnId(headers);
 		if (turnId) keys.push(digest("turn", turnId));
 		const presented = headers?.get(CODEX_TURN_STATE_HEADER);
-		if (presented) keys.push(digest("token", presented));
+		if (presented) keys.push(this.tokenKey(turnId, presented));
 		return keys;
 	}
 
@@ -133,7 +142,10 @@ export class CodexTurnStateStore {
 		issued: string | null,
 	): void {
 		if (!accountId || !issued || issued.length > MAX_TOKEN_LENGTH) return;
-		const keys = [...this.requestKeys(clientHeaders), digest("token", issued)];
+		const keys = [
+			...this.requestKeys(clientHeaders),
+			this.tokenKey(codexTurnId(clientHeaders), issued),
+		];
 		for (const key of keys) {
 			const slot = this.slot(accountId, key);
 			if (this.read(slot) !== null) continue;

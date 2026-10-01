@@ -81,7 +81,21 @@ describe("CodexTurnStateStore", () => {
 		const store = new CodexTurnStateStore();
 		store.record(client({ turnId: "t1" }), "acc-a", "ts-a");
 		expect(store.resolve(client({ turnId: "t1" }), "acc-a")).toBe("ts-a");
-		expect(store.resolve(client({ token: "ts-a" }), "acc-a")).toBe("ts-a");
+		store.record(client(), "acc-a", "ts-x");
+		expect(store.resolve(client({ token: "ts-x" }), "acc-a")).toBe("ts-x");
+	});
+
+	it("does not pull an earlier turn's entry into a new turn when upstream re-issues the same value", () => {
+		const store = new CodexTurnStateStore();
+		store.record(client({ turnId: "t1" }), "acc-a", "same");
+		store.record(client({ turnId: "t1", token: "same" }), "acc-b", "ts-b1");
+		expect(
+			store.resolve(client({ turnId: "t1", token: "same" }), "acc-b"),
+		).toBe("ts-b1");
+		// Turn t2: A issued "same" again; B has not answered in t2 yet.
+		expect(
+			store.resolve(client({ turnId: "t2", token: "same" }), "acc-b"),
+		).toBeNull();
 	});
 
 	it("never replays one account's token to another", () => {

@@ -1095,8 +1095,9 @@ export class CodexProvider extends BaseProvider {
 		drainAbort?: AbortController,
 	): Promise<Response> {
 		// Filed against the account that answered, under the keys the client's
-		// next request in this turn will carry (SB23-2370). An in-place retry
-		// calls this again and cannot rotate the value: the first one is kept.
+		// next request in this turn will carry (SB23-2370). The first value per
+		// key is kept, as the client's OnceLock keeps it: a later 2xx in the
+		// same turn that re-issues a different value cannot rotate it.
 		if (response.ok) {
 			this.turnState.record(
 				_requestHeaders,

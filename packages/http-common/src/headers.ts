@@ -49,6 +49,20 @@ const CREDENTIAL_HEADER_SUFFIX = /-(token|secret|key|password)$/;
  */
 const ROUTING_STATE_HEADER_NAMES = new Set(["x-codex-turn-state"]);
 
+/** Whether a header carries another upstream's opaque routing state. */
+export function isRoutingStateHeaderName(name: string): boolean {
+	return ROUTING_STATE_HEADER_NAMES.has(name.toLowerCase());
+}
+
+/**
+ * Removes every routing-state header in place. A non-Codex upstream has no
+ * use for Codex's turn token, and only the Codex provider may decide which
+ * Codex account receives one (SB23-2370).
+ */
+export function stripRoutingStateHeaders(headers: Headers): void {
+	for (const name of ROUTING_STATE_HEADER_NAMES) headers.delete(name);
+}
+
 /** Prefix of this proxy's own control headers (routing, probes, local control). */
 const CONTROL_HEADER_PREFIX = "x-better-ccflare-";
 
