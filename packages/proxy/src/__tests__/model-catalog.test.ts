@@ -85,7 +85,32 @@ function makeCtx(
 	};
 }
 
-const TEST_CACHE_DIR = join(tmpdir(), "better-ccflare-test-model-catalog");
+// One directory per process. `tmpdir()` is per user, not per checkout, so a
+// fixed name was shared by every worktree's suite: two of them running this
+// file at once read and deleted each other's cache files (SB23-3567, 4 of 210
+// failed with two concurrent runs and no other load).
+const TEST_CACHE_DIR = join(
+	tmpdir(),
+	`better-ccflare-test-model-catalog-${process.pid}`,
+);
+
+/**
+ * Polls `condition` until it holds. The refresh scheduler runs on real timers
+ * and real file reads, so a fixed sleep raced it on a loaded machine
+ * (SB23-3567); the deadline only bounds a refresh that never comes.
+ */
+async function waitUntil(
+	condition: () => boolean | Promise<boolean>,
+	timeoutMs = 3_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!(await condition())) {
+		if (Date.now() > deadline) {
+			throw new Error(`waitUntil: condition not met within ${timeoutMs} ms`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}
 
 async function cleanCacheDir() {
 	await fs.rm(TEST_CACHE_DIR, { recursive: true, force: true });
@@ -582,7 +607,11 @@ describe("model-catalog", () => {
 
 			const ctx = makeCtx([makeAccount()]);
 			const unregister = initModelCatalogRefresh(ctx, { initialDelayMs: 5 });
-			await new Promise((resolve) => setTimeout(resolve, 30));
+			await waitUntil(
+				async () =>
+					fetchMock.mock.calls.length > 0 &&
+					(await getModelCatalog()).source === "live",
+			);
 			unregister();
 
 			expect(fetchMock).toHaveBeenCalled();
@@ -649,7 +678,11 @@ describe("model-catalog", () => {
 
 			const ctx = makeCtx([makeAccount()]);
 			const unregister = initModelCatalogRefresh(ctx, { initialDelayMs: 5 });
-			await new Promise((resolve) => setTimeout(resolve, 40));
+			await waitUntil(
+				async () =>
+					fetchMock.mock.calls.length > 0 &&
+					(await getModelCatalog()).models[0]?.id === "claude-sonnet-5",
+			);
 			unregister();
 
 			expect(fetchMock).toHaveBeenCalled();
@@ -719,7 +752,7 @@ describe("model-catalog", () => {
 
 			const ctx = makeCtx([makeAccount()]);
 			const unregister = initModelCatalogRefresh(ctx, { initialDelayMs: 5 });
-			await new Promise((resolve) => setTimeout(resolve, 40));
+			await waitUntil(() => fetchMock.mock.calls.length > 0);
 			unregister();
 
 			expect(fetchMock).toHaveBeenCalled();
@@ -745,6 +778,9 @@ describe("model-catalog", () => {
 
 			// Several heartbeat ticks elapse while the first fetch is still
 			// pending; none of them should start a second overlapping refresh.
+			// The wait starts at the first fetch, not at registration, so a slow
+			// start cannot leave it reading 0.
+			await waitUntil(() => fetchCallCount > 0);
 			await new Promise((resolve) => setTimeout(resolve, 80));
 			expect(fetchCallCount).toBe(1);
 
@@ -757,7 +793,7 @@ describe("model-catalog", () => {
 					{ status: 200 },
 				),
 			);
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			await waitUntil(async () => (await getModelCatalog()).source === "live");
 			unregister();
 
 			expect((await getModelCatalog()).source).toBe("live");
@@ -784,20 +820,33 @@ describe("model-catalog", () => {
 			global.fetch = fetchMock as unknown as typeof fetch;
 
 			const ctx = makeCtx(accounts);
+			let accountLookups = 0;
+			const getAllAccounts = ctx.dbOps.getAllAccounts.bind(ctx.dbOps);
+			ctx.dbOps.getAllAccounts = async () => {
+				const found = await getAllAccounts();
+				accountLookups++;
+				return found;
+			};
 			const unregister = initModelCatalogRefresh(ctx, {
 				initialDelayMs: 5,
 				tickSeconds: 0.03,
 			});
 
 			// First tick: no eligible account, refresh fails; fetch never runs.
-			await new Promise((resolve) => setTimeout(resolve, 30));
+			// Waiting for the lookup, not a fixed time, guarantees the first
+			// attempt saw the empty list before the account is added.
+			await waitUntil(() => accountLookups > 0);
 			expect(fetchMock).not.toHaveBeenCalled();
 			expect((await getModelCatalog()).source).toBe("fallback");
 
 			// A console account becomes available; a later tick should pick it
 			// up rather than waiting out the (already tiny) nominal interval.
 			accounts.push(makeAccount());
-			await new Promise((resolve) => setTimeout(resolve, 100));
+			await waitUntil(
+				async () =>
+					fetchMock.mock.calls.length > 0 &&
+					(await getModelCatalog()).source === "live",
+			);
 			unregister();
 
 			expect(fetchMock).toHaveBeenCalled();
