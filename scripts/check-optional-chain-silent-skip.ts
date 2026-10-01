@@ -27,7 +27,13 @@
  *   3. where short-circuiting the chain skips a CALL, including one further up the chain
  *      as in `x?.foo.bar()`, and
  *   4. and NOTHING DOWNSTREAM CAN REJECT `undefined`, which is true in two ways:
- *        a. the value is discarded (statement position, or `void`), or
+ *        a. the value is discarded: a statement, `void`, a comma's left operand, a `for`
+ *           initialiser or incrementor, or a position that passes the value on to one of
+ *           those (the right operand of `&&` / `||` / `??` / comma, a branch of `?:`, a
+ *           template literal). A callback's expression body or `return` counts when the
+ *           callee is known to ignore the callback's value (`forEach`, timers, the test
+ *           runner, a `Promise` executor) or builds its own value from it (`then`, `map`,
+ *           `filter` and so on) and that value is itself discarded, or
  *        b. it is handed to an `expect(...)` whose matcher PASSES on `undefined`, such as
  *           `toBeUndefined()`, `toBeFalsy()` or `not.toBe(...)`.
  *
@@ -55,20 +61,27 @@
  * `undefined`, so it REJECTS a skip and must not be reported. A rule reading "or starts
  * with not." would have had that exactly backwards.
  *
- * KNOWN MISSES, deferred rather than hidden. Callback and operator positions also discard
- * the call and are NOT reported: `xs.forEach((k) => sink?.write(k))`,
- * `ok && sink?.flush()`, `(sink?.flush(), n++)`, and `setTimeout(() => cb?.(), 0)`. The
- * last of those is SB23-2460's own founding instance with the stub on the other side, so
- * this gate cannot see the example it was written for. Widening `isResultDiscarded` to
- * treat an expression-bodied arrow in argument position, and the right operand of
- * `&&`/`||`/`??`/comma at statement level, as discarded is the fix. Zero instances of any
- * of them on this tree, which is why it is deferred rather than urgent.
+ * CALLBACK AND OPERATOR POSITIONS (SB23-2499) are reported. Before it only an
+ * `ExpressionStatement` or `void` counted as discarding, so `xs.forEach((k) => sink?.write(k))`,
+ * `ok && sink?.flush()`, `(sink?.flush(), n++)` and `setTimeout(() => cb?.(), 0)` were all
+ * silent, and the last of those is SB23-2460's own founding instance with the stub on the
+ * other side. Measured at 435041b6: 0 offences before the widening and 0 after, across 492
+ * test files, so it shipped with no cleanup.
  *
- * Four more, all probed by PR #226's reviewer and all absent from this tree:
- * `for (x?.f(); ; ) {}` (a for-initialiser is not an ExpressionStatement), a bare
- * template-literal statement, `cond ? s?.a() : s?.b();`, and `return x?.f()` whose caller
- * ignores the value, which needs flow analysis. Caught correctly, for contrast:
- * `try { s?.close(); } catch {}` and the last statement of a block-bodied arrow.
+ * KNOWN MISSES that remain, deferred rather than hidden:
+ *   - `return x?.f()` from a function whose caller is not one of the known callees, which
+ *     needs flow analysis. A callback handed to an unknown function counts as read, which
+ *     is the direction that cannot fail a correct build.
+ *   - `on`, `once` and `addListener` are not treated as ignoring their callback's value,
+ *     because Hono's `app.on(method, path, handler)` returns the handler's value as the
+ *     response. See IGNORES_CALLBACK_RESULT.
+ *   - the LEFT operand of `&&` / `||` / `??`, whose value is read as a condition.
+ *   - a statement inside ANY function `expect(...)` holds is never reported, including
+ *     `expect(() => { s?.f(); }).not.toThrow()`, where the skip is in fact silent. The
+ *     exemption exists for `toThrow` and `rejects`, and narrowing it to those matchers is
+ *     possible but was not measured here.
+ * Caught correctly, for contrast: `try { s?.close(); } catch {}` and the last statement of a
+ * block-bodied arrow.
  *
  * WHERE IT IS DELIBERATELY CONSERVATIVE. `sink?.write("a"); expect(buf).toEqual(["a"]);`
  * IS reported, although the effect is asserted on the very next line. The gate cannot see
@@ -251,24 +264,10 @@ function isCalleeOfCall(node: ts.Node): boolean {
 }
 
 /**
- * True when the value of the expression containing this optional chain is thrown away, so
- * nothing downstream can notice that the chain short-circuited.
- *
- * This is the discriminator, and it was arrived at by being wrong first. Gating every
- * skipped call reported nine sites of the shape
- * `expect(col?.type.toUpperCase()).toBe("TEXT")`. Those are not silent: short-circuiting
- * makes the whole expression `undefined`, `expect(undefined).toBe("TEXT")` fails, and the
- * test goes red with a legible message. Reporting them would have been the gate failing a
- * build over code that already catches its own defect.
- *
- * The two genuinely dangerous sites on this tree were the ones whose result nobody reads:
- * `reader?.cancel("client disconnected")` and, in PR #217's former shape,
- * `timeoutCallback?.()`. A call made for its effect, skipped, observed by nothing.
- */
-/**
  * Climbs out of the chain and out of anything that passes the value along unchanged,
- * returning the first parent that actually does something with it. Shared by the two
- * silence tests below so they cannot disagree about where the expression ends.
+ * returning the first parent that actually does something with it. Used by condition 4b
+ * only. Condition 4a has its own wider climb in isValueDiscarded, which also passes through
+ * operators, conditionals and callbacks; sharing it would have widened 4b silently.
  */
 function climbOutOfExpression(node: ts.Node): { current: ts.Node; parent: ts.Node | undefined } {
 	let current: ts.Node = node;
@@ -345,11 +344,147 @@ function isConsumedByUndefinedTolerantMatcher(node: ts.Node): boolean {
 	return false;
 }
 
-function isResultDiscarded(node: ts.Node): boolean {
+/**
+ * Callees that throw away whatever the callback handed to them returns, so a skipped call in
+ * that callback's expression body, or in its `return`, is observed by nothing.
+ *
+ * Matched by name, which is the weak part and is why the list is short. `on`, `once` and
+ * `addListener` are deliberately ABSENT: an EventEmitter ignores a listener's value, but
+ * Hono's `app.on(method, path, handler)` returns the handler's value as the response, and a
+ * required gate cannot tell the two apart by spelling. An unknown callee is treated as
+ * consuming the value, which is the direction that cannot fail a correct build.
+ */
+const IGNORES_CALLBACK_RESULT = new Set([
+	"forEach",
+	"setTimeout",
+	"setInterval",
+	"setImmediate",
+	"queueMicrotask",
+	"nextTick",
+	"requestAnimationFrame",
+	"addEventListener",
+	// The test runner awaits a returned promise and otherwise ignores the value.
+	"test",
+	"it",
+	"describe",
+	"beforeEach",
+	"afterEach",
+	"beforeAll",
+	"afterAll",
+]);
+
+/**
+ * Callees whose RESULT is built from the callback's value, so the callback's value is
+ * discarded exactly when the call's own value is. `p.then(() => s?.close())` as a statement
+ * is silent; `expect(await p.then(() => s?.read())).toBe(1)` is not. `sort` is absent because
+ * it mutates its receiver, so a discarded `sort` result still has an effect someone can read.
+ */
+const CALLBACK_RESULT_FLOWS_INTO_CALL = new Set([
+	"then",
+	"catch",
+	"finally",
+	"map",
+	"flatMap",
+	"filter",
+	"find",
+	"findIndex",
+	"findLast",
+	"findLastIndex",
+	"some",
+	"every",
+	"reduce",
+	"reduceRight",
+]);
+
+const TEST_RUNNER_ROOTS = new Set(["test", "it", "describe"]);
+
+/**
+ * The name a callee is known by: `forEach` for `xs.forEach`, `setTimeout` for both
+ * `setTimeout` and `globalThis.setTimeout`, and `test` for `test.skip` or `it.only`, whose
+ * last segment is a modifier rather than a different function.
+ */
+function calleeName(callee: ts.Expression): string | undefined {
+	if (ts.isIdentifier(callee)) return callee.text;
+	if (!ts.isPropertyAccessExpression(callee)) return undefined;
+	let root: ts.Expression = callee;
+	while (ts.isPropertyAccessExpression(root)) root = root.expression;
+	if (ts.isIdentifier(root) && TEST_RUNNER_ROOTS.has(root.text)) return root.text;
+	return callee.name.text;
+}
+
+function isFunctionLike(node: ts.Node): boolean {
+	return (
+		ts.isFunctionDeclaration(node) ||
+		ts.isFunctionExpression(node) ||
+		ts.isArrowFunction(node) ||
+		ts.isMethodDeclaration(node) ||
+		ts.isGetAccessorDeclaration(node) ||
+		ts.isSetAccessorDeclaration(node) ||
+		ts.isConstructorDeclaration(node)
+	);
+}
+
+function isExpectCall(node: ts.Node): boolean {
+	return (
+		ts.isCallExpression(node) &&
+		ts.isIdentifier(node.expression) &&
+		node.expression.text === "expect"
+	);
+}
+
+/**
+ * True when nobody reads what this function returns, decided by where the function itself
+ * is handed. Anything not positively known to ignore the value counts as reading it.
+ */
+function isReturnValueDiscarded(fn: ts.Node): boolean {
+	if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return false;
+	let current: ts.Node = fn;
+	let parent = current.parent;
+	while (
+		parent !== undefined &&
+		(ts.isParenthesizedExpression(parent) ||
+			ts.isAsExpression(parent) ||
+			ts.isSatisfiesExpression(parent))
+	) {
+		current = parent;
+		parent = current.parent;
+	}
+	if (parent === undefined) return false;
+	if (ts.isNewExpression(parent)) {
+		// A Promise executor's return value goes nowhere.
+		return (
+			ts.isIdentifier(parent.expression) &&
+			parent.expression.text === "Promise" &&
+			parent.arguments?.[0] === current
+		);
+	}
+	if (!ts.isCallExpression(parent)) return false;
+	// `expect(() => ...)` needs no case of its own: `expect` is in neither list, so the
+	// function counts as read, and isHeldByExpect covers statements inside it.
+	if (!parent.arguments.includes(current as ts.Expression)) return false;
+	const name = calleeName(parent.expression);
+	if (name === undefined) return false;
+	if (IGNORES_CALLBACK_RESULT.has(name)) return true;
+	if (CALLBACK_RESULT_FLOWS_INTO_CALL.has(name)) return isValueDiscarded(parent);
+	return false;
+}
+
+/**
+ * True when the value of this expression goes nowhere, climbing through every position that
+ * passes a value along: the chain itself, parentheses, `await`, `!`, `as`, `satisfies`, the
+ * right operand of `&&` / `||` / `??`, either branch of `?:`, the right operand of a comma,
+ * and a template literal. It stops at a position that throws the value away (a statement,
+ * `void`, a comma's left operand, a `for` initialiser or incrementor) or that hands it to a
+ * function's caller (an arrow's expression body, a `return`), where the question becomes
+ * whether that caller reads it.
+ *
+ * Kept separate from climbOutOfExpression on purpose. That climb is shared with condition
+ * 4b, and widening it would change which matchers count as receiving the chain's value,
+ * which neither SB23-2499 nor any measurement asked for.
+ */
+function isValueDiscarded(node: ts.Node): boolean {
 	let current: ts.Node = node;
 	let parent = current.parent;
-	// Climb out of the chain itself and out of anything that merely passes the value along
-	// unchanged, so `await (x?.close())` is judged on where the `await` sits.
 	while (parent !== undefined) {
 		const passesValueThrough =
 			((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
@@ -359,44 +494,104 @@ function isResultDiscarded(node: ts.Node): boolean {
 			ts.isAwaitExpression(parent) ||
 			ts.isNonNullExpression(parent) ||
 			ts.isAsExpression(parent) ||
-			ts.isSatisfiesExpression(parent);
+			ts.isSatisfiesExpression(parent) ||
+			(ts.isBinaryExpression(parent) &&
+				parent.right === current &&
+				(parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+					parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+					parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+					parent.operatorToken.kind === ts.SyntaxKind.CommaToken)) ||
+			(ts.isConditionalExpression(parent) &&
+				(parent.whenTrue === current || parent.whenFalse === current)) ||
+			(ts.isTemplateSpan(parent) && parent.expression === current) ||
+			(ts.isTemplateExpression(parent) && ts.isTemplateSpan(current));
 		if (!passesValueThrough) break;
 		current = parent;
 		parent = current.parent;
 	}
 	if (parent === undefined) return false;
-	// A statement is the only place a value goes nowhere. `void x?.f()` says so explicitly.
-	if (ts.isVoidExpression(parent)) return true;
-	if (!ts.isExpressionStatement(parent)) return false;
+	// A statement is where a value goes nowhere. `void x?.f()` says so explicitly.
+	if (ts.isExpressionStatement(parent) || ts.isVoidExpression(parent)) return true;
+	// `(x?.f(), n++)` evaluates the left operand for its effect and drops its value.
+	if (
+		ts.isBinaryExpression(parent) &&
+		parent.operatorToken.kind === ts.SyntaxKind.CommaToken &&
+		parent.left === current
+	) {
+		return true;
+	}
+	if (
+		ts.isForStatement(parent) &&
+		(parent.initializer === current || parent.incrementor === current)
+	) {
+		return true;
+	}
+	// The value becomes the function's return value, so it is discarded when the caller
+	// ignores what the function returns: `xs.forEach((k) => s?.write(k))`.
+	if (ts.isArrowFunction(parent) && parent.body === current) {
+		return isReturnValueDiscarded(parent);
+	}
+	if (ts.isReturnStatement(parent) && parent.expression === current) {
+		let fn: ts.Node | undefined = parent.parent;
+		while (fn !== undefined && !isFunctionLike(fn)) fn = fn.parent;
+		return fn !== undefined && isReturnValueDiscarded(fn);
+	}
+	return false;
+}
 
-	// ...unless the statement is inside a function that `expect(...)` is holding, in which
-	// case the skip IS observed. `expect(() => { h?.dispatch("x"); }).toThrow(/bad/)` fails
-	// when `h` is null, because nothing throws. Reporting it would fail a correct build,
-	// which is the one failure mode a required gate cannot survive, and the reviewer notes
-	// it is the first shape a test author hits. Zero instances on this tree today.
-	let scope: ts.Node | undefined = parent;
+/**
+ * True when ANY function enclosing this node is held by `expect(...)`, in which case a skip
+ * IS observed: `expect(() => { h?.dispatch("x"); }).toThrow(/bad/)` fails when `h` is null,
+ * because nothing throws. Reporting it would fail a correct build, which is the one failure
+ * mode a required gate cannot survive.
+ *
+ * Every enclosing function, not only the nearest. Before SB23-2499 only the nearest was
+ * checked, so `expect(() => { xs.forEach((k) => { s?.f(k); }); }).toThrow()` was reported
+ * although a skip there is exactly as observed. That is a deliberate narrowing, made in the
+ * same change that widened the callback positions, because the widening is what makes
+ * nested callbacks common.
+ */
+function isHeldByExpect(node: ts.Node): boolean {
+	let scope: ts.Node | undefined = node.parent;
 	while (scope !== undefined) {
-		if (
-			ts.isFunctionDeclaration(scope) ||
-			ts.isFunctionExpression(scope) ||
-			ts.isArrowFunction(scope) ||
-			ts.isMethodDeclaration(scope)
-		) {
-			const holder = scope.parent;
+		if (isFunctionLike(scope)) {
+			let holder: ts.Node | undefined = scope.parent;
+			let held: ts.Node = scope;
+			while (holder !== undefined && ts.isParenthesizedExpression(holder)) {
+				held = holder;
+				holder = holder.parent;
+			}
 			if (
 				holder !== undefined &&
 				ts.isCallExpression(holder) &&
-				ts.isIdentifier(holder.expression) &&
-				holder.expression.text === "expect" &&
-				holder.arguments.includes(scope as ts.Expression)
+				isExpectCall(holder) &&
+				holder.arguments.includes(held as ts.Expression)
 			) {
-				return false;
+				return true;
 			}
-			break;
 		}
 		scope = scope.parent;
 	}
-	return true;
+	return false;
+}
+
+/**
+ * True when the value of the expression containing this optional chain is thrown away, so
+ * nothing downstream can notice that the chain short-circuited.
+ *
+ * This is the discriminator, and it was arrived at by being wrong first. Gating every
+ * skipped call reported nine sites of the shape
+ * `expect(col?.type.toUpperCase()).toBe("TEXT")`. Those are not silent: short-circuiting
+ * makes the whole expression `undefined`, `expect(undefined).toBe("TEXT")` fails, and the
+ * test goes red with a legible message. Reporting them would have been the gate failing a
+ * build over code that already catches its own defect.
+ *
+ * The two genuinely dangerous sites on this tree were the ones whose result nobody reads:
+ * `reader?.cancel("client disconnected")` and, in PR #217's former shape,
+ * `timeoutCallback?.()`. A call made for its effect, skipped, observed by nothing.
+ */
+function isResultDiscarded(node: ts.Node): boolean {
+	return isValueDiscarded(node) && !isHeldByExpect(node);
 }
 
 /**

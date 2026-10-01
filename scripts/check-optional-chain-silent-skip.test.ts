@@ -485,6 +485,92 @@ describe("check-optional-chain-silent-skip", () => {
 		expect(stderr).not.toContain("theirs.test.ts");
 	});
 
+	/**
+	 * SB23-2499. Positions where a call's value is thrown away without the call being an
+	 * `ExpressionStatement`. Every positive has a near-miss of the same shape in which the
+	 * value IS read, because widening a discard rule is only safe if the rule can still say
+	 * "read" for the same syntax.
+	 *
+	 * The fixture header declares the subjects and guards both of them, so the body is the
+	 * only variable. The offence is always on the first body line, `BODY_LINE`.
+	 */
+	const SB23_2499_HEADER = [
+		'import { expect, test } from "bun:test";',
+		'test("callback and operator positions", async () => {',
+		"\tconst sink: { write(k: string): number; close(): Promise<number>; flush(): number; read(): number; label(): string; open(): void } | null = null as never;",
+		"\tconst cb: (() => number) | null = null as never;",
+		'\tconst xs = ["a"];',
+		"\tconst p = Promise.resolve();",
+		"\tconst ok = true;",
+		"\tlet n = 0;",
+		"\texpect(sink).not.toBeNull();",
+		"\texpect(cb).not.toBeNull();",
+	];
+	const BODY_LINE = SB23_2499_HEADER.length + 1;
+
+	function sb23_2499Fixture(body: string[]): string {
+		return makeFixture([...SB23_2499_HEADER, ...body.map((l) => `\t${l}`), "});"].join("\n"));
+	}
+
+	const reportedPositions: Array<[string, string[]]> = [
+		// The five shapes the issue names.
+		["an expression-bodied arrow handed to forEach", ["xs.forEach((k) => sink?.write(k));"]],
+		["an expression-bodied arrow in an awaited then", ["await p.then(() => sink?.close());"]],
+		// SB23-2460's own founding instance, with the stub on the other side of the seam.
+		["an expression-bodied arrow handed to setTimeout", ["setTimeout(() => cb?.(), 0);"]],
+		["the right operand of && at statement level", ["ok && sink?.flush();"]],
+		["the left operand of a comma", ["(sink?.flush(), n++);"]],
+		// Folded in because the same climb covers them.
+		["the right operand of a comma at statement level", ["(n++, sink?.flush());"]],
+		["the right operand of ?? at statement level", ["n ?? sink?.flush();"]],
+		["the right operand of || at statement level", ["n || sink?.flush();"]],
+		["either branch of a conditional at statement level", ["ok ? sink?.flush() : n++;"]],
+		["a for initialiser", ["for (sink?.open(); n < 1; n++) {}"]],
+		["a for incrementor", ["for (; n < 1; sink?.open()) n++;"]],
+		["a template literal statement", ["`${sink?.label()}`;"]],
+		["a return from a callback handed to forEach", ["xs.forEach((k) => {", "\treturn sink?.write(k);", "});"]],
+		["a map whose result is discarded", ["xs.map((k) => sink?.write(k));"]],
+		["a Promise executor", ["new Promise(() => cb?.());"]],
+		["a test registered with test.skip", ['test.skip("inner", () => sink?.flush());']],
+	];
+
+	for (const [position, body] of reportedPositions) {
+		test(`reports a guarded skipped call in ${position}`, () => {
+			const { exitCode, stderr } = runGate(sb23_2499Fixture(body));
+			expect(exitCode).toBe(1);
+			// The offence is on the body line holding the `?.`, which is the first one except
+			// in the `return` case.
+			const offset = body.findIndex((line) => line.includes("?."));
+			expect(stderr).toContain(`subject.test.ts:${BODY_LINE + offset}:`);
+		});
+	}
+
+	const unreportedPositions: Array<[string, string[]]> = [
+		// The issue's two named negatives.
+		["a statement inside a function expect holds for toThrow", ["expect(() => {", '\tsink?.write("x");', "}).toThrow(/bad/);"]],
+		["an awaited call inside an async function expect holds for rejects", ["await expect(async () => {", "\tawait sink?.close();", "}).rejects.toThrow();"]],
+		// One near-miss per shape: the same syntax, with the value read.
+		["a forEach nested inside a function expect holds", ["expect(() => xs.forEach((k) => sink?.write(k))).toThrow();"]],
+		["a map whose result is asserted", ["expect(xs.map((k) => sink?.write(k))).toEqual([1]);"]],
+		["a then whose result is asserted", ["expect(await p.then(() => sink?.read())).toBe(1);"]],
+		["an arrow handed to a callee not known to ignore it", ['app.on("GET", "/", () => cb?.());']],
+		["an arrow that is stored rather than handed over", ["const later = () => sink?.flush();", "later();"]],
+		["the right operand of && whose value is asserted", ["expect(ok && sink?.flush()).toBe(1);"]],
+		["the right operand of a comma whose value is asserted", ["expect((n++, sink?.read())).toBe(1);"]],
+		["a conditional whose value is asserted", ["expect(ok ? sink?.read() : 0).toBe(1);"]],
+		["a template literal whose value is asserted", ['expect(`${sink?.label()}`).toBe("x");']],
+		["a return from a function nobody is known to discard", ["function f() {", "\treturn sink?.read();", "}", "expect(f()).toBe(1);"]],
+		["a sort comparator, whose call mutates its receiver", ["xs.sort(() => sink?.read() ?? 0);"]],
+	];
+
+	for (const [position, body] of unreportedPositions) {
+		test(`does not report ${position}`, () => {
+			const { exitCode, stderr } = runGate(sb23_2499Fixture(body));
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+		});
+	}
+
 	test("reads zero offences on the repository as it stands", () => {
 		// Explicit timeout: this spawns the gate over the whole tree, about 1.7 s at
 		// load 100. Bun's 5 s default timed it out at load 163 in a full suite
