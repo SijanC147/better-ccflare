@@ -1146,6 +1146,11 @@ export class UsageCollector {
 			originalModel: startMessage.originalModel || undefined,
 			appliedModel: startMessage.appliedModel || undefined,
 			comboName: startMessage.comboName || undefined,
+			// The REST list derives this from the persisted status_code
+			// (http-api handlers/requests.ts); this is the status handed to
+			// saveRequest above, so the live row and a later fetch agree on the
+			// Rate Limited badge (SB23-3995).
+			rateLimited: startMessage.responseStatus === 429,
 			projectAttributionSource: state.projectAttributionSource ?? undefined,
 			agentAttributionSource: state.agentAttributionSource ?? undefined,
 			clientSessionId: startMessage.clientSessionId ?? undefined,

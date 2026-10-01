@@ -240,9 +240,12 @@ export function useRequestStream(limit = 200) {
 										...newRequests[requestIndex].meta,
 										pending: false,
 										success: evt.payload.success,
-										...(evt.payload.rateLimited !== undefined
-											? { rateLimited: evt.payload.rateLimited }
-											: {}),
+										// The collector sends the flag as of SB23-3995; derive it
+										// from the final status the same way when it is absent,
+										// so a missing key can never leave the placeholder's
+										// start-time `false` standing on a 429.
+										rateLimited:
+											evt.payload.rateLimited ?? evt.payload.statusCode === 429,
 										bodiesOmitted: true,
 									},
 								};
