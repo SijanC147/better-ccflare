@@ -40,7 +40,7 @@ function memoryStorage(
 	};
 }
 
-function fakeEnv(permission: string, answer = "granted") {
+function fakeEnv(permission: string, answer = "granted", gate?: Promise<void>) {
 	const created: string[] = [];
 	let requests = 0;
 	let current = permission;
@@ -51,10 +51,12 @@ function fakeEnv(permission: string, answer = "granted") {
 	} as unknown as NotificationApi;
 	Object.defineProperty(Fake, "permission", { get: () => current });
 	(Fake as unknown as { requestPermission: unknown }).requestPermission =
-		() => {
+		async () => {
 			requests += 1;
+			// A gate holds the browser prompt open until the test releases it.
+			if (gate) await gate;
 			current = answer;
-			return Promise.resolve(answer);
+			return answer;
 		};
 	const env: NotificationEnv = { Notification: Fake, isSecureContext: true };
 	return {
@@ -62,6 +64,9 @@ function fakeEnv(permission: string, answer = "granted") {
 		created,
 		get requests() {
 			return requests;
+		},
+		setPermission(next: string) {
+			current = next;
 		},
 	};
 }
@@ -364,6 +369,169 @@ describe("NotificationWatcher", () => {
 		);
 		try {
 			expect(qc.getQueryCache().getAll()).toHaveLength(0);
+		} finally {
+			await view.unmount();
+		}
+	});
+});
+
+describe("provider", () => {
+	test("a switch flipped while the permission prompt is open is not overwritten", async () => {
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const fake = fakeEnv("default", "granted", gate);
+		const storage = memoryStorage();
+		const view = await mount(
+			<NotificationsProvider env={fake.env} storage={storage}>
+				<NotificationsTab />
+			</NotificationsProvider>,
+		);
+		try {
+			await click(byText(view.host, "button", "Enable notifications")[0]);
+			const rate = view.host.querySelector(
+				"#notification-category-rateLimit",
+			) as HTMLButtonElement;
+			await click(rate);
+			await act(async () => {
+				release();
+				await gate;
+				await new Promise((resolve) => setTimeout(resolve, 0));
+			});
+			const saved = JSON.parse(storage.map.get(PREFS_STORAGE_KEY) ?? "{}");
+			expect(saved.enabled).toBe(true);
+			expect(saved.categories.rateLimit).toBe(false);
+		} finally {
+			await view.unmount();
+		}
+	});
+
+	test("permission granted again in site settings starts from fresh baselines", async () => {
+		const fake = fakeEnv("denied");
+		const storage = memoryStorage({
+			[PREFS_STORAGE_KEY]: { ...DEFAULT_NOTIFICATION_PREFS, enabled: true },
+			[baselineStorageKey("serviceOutage")]: {
+				at: Date.now(),
+				entries: { claude: { state: "outage", label: "Claude" } },
+			},
+		});
+		const view = await mount(
+			<NotificationsProvider env={fake.env} storage={storage}>
+				<NotificationsTab />
+			</NotificationsProvider>,
+		);
+		try {
+			// A focus with nothing changed keeps the baseline.
+			await act(async () => {
+				window.dispatchEvent(new Event("focus"));
+			});
+			expect(storage.map.has(baselineStorageKey("serviceOutage"))).toBe(true);
+			fake.setPermission("granted");
+			await act(async () => {
+				window.dispatchEvent(new Event("focus"));
+			});
+			expect(storage.map.has(baselineStorageKey("serviceOutage"))).toBe(false);
+			expect(
+				view.host.querySelector('[data-testid="notification-status"]')
+					?.textContent,
+			).toBe("On");
+		} finally {
+			await view.unmount();
+		}
+	});
+
+	test("a preference changed in another tab reaches this one", async () => {
+		const fake = fakeEnv("granted");
+		const storage = memoryStorage({
+			[PREFS_STORAGE_KEY]: { ...DEFAULT_NOTIFICATION_PREFS, enabled: true },
+		});
+		const view = await mount(
+			<NotificationsProvider env={fake.env} storage={storage}>
+				<NotificationsTab />
+			</NotificationsProvider>,
+		);
+		try {
+			const rate = () =>
+				view.host
+					.querySelector("#notification-category-rateLimit")
+					?.getAttribute("aria-checked");
+			expect(rate()).toBe("true");
+			storage.setItem(
+				PREFS_STORAGE_KEY,
+				JSON.stringify({
+					enabled: true,
+					categories: {
+						...DEFAULT_NOTIFICATION_PREFS.categories,
+						rateLimit: false,
+					},
+				}),
+			);
+			// An unrelated key changes nothing.
+			await act(async () => {
+				window.dispatchEvent(
+					new StorageEvent("storage", { key: "something-else" }),
+				);
+			});
+			expect(rate()).toBe("true");
+			await act(async () => {
+				window.dispatchEvent(
+					new StorageEvent("storage", { key: PREFS_STORAGE_KEY }),
+				);
+			});
+			expect(rate()).toBe("false");
+		} finally {
+			await view.unmount();
+		}
+	});
+});
+
+describe("keeping sources fresh", () => {
+	const realFetch = globalThis.fetch;
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+	});
+
+	test("the watcher re-fetches a source once its reading is a cadence old, with no page polling it", async () => {
+		const requested: string[] = [];
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			const url = String(input instanceof Request ? input.url : input);
+			requested.push(url);
+			return new Response("[]", {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as typeof fetch;
+		const fake = fakeEnv("granted");
+		const storage = memoryStorage({
+			[PREFS_STORAGE_KEY]: {
+				enabled: true,
+				categories: {
+					serviceOutage: false,
+					rateLimit: false,
+					accountHealth: true,
+					errorBurst: false,
+				},
+			},
+		});
+		const qc = client();
+		qc.setQueryData(queryKeys.accounts(), [account({})]);
+		const view = await mount(
+			<QueryClientProvider client={qc}>
+				<NotificationsProvider env={fake.env} storage={storage}>
+					<NotificationWatcher cadenceMs={60} />
+				</NotificationsProvider>
+			</QueryClientProvider>,
+		);
+		try {
+			// Fresh at mount, so nothing is fetched straight away.
+			expect(requested).toEqual([]);
+			for (let i = 0; i < 40 && requested.length === 0; i++) {
+				await act(async () => {
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				});
+			}
+			expect(requested.some((u) => u.includes("/api/accounts"))).toBe(true);
 		} finally {
 			await view.unmount();
 		}

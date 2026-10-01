@@ -106,7 +106,9 @@ export function NotificationsTab() {
 					<CardDescription>
 						Desktop notifications while this dashboard is open in a tab, even a
 						background one. Nothing is sent when the tab is closed. Only changes
-						are notified: opening or reloading the page sends nothing.
+						seen while a tab is watching are notified: reloading sends nothing,
+						and opening the page after it was closed starts from what it reads
+						then rather than catching up on what changed meanwhile.
 					</CardDescription>
 				</CardHeader>
 				<CardContent className="space-y-4">

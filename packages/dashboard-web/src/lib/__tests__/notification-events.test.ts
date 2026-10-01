@@ -3,7 +3,10 @@ import type { AccountResponse, AlertEvent } from "@better-ccflare/types";
 import type { ServiceStatusResponse } from "../../api";
 import {
 	accountHealthState,
+	BASELINE_MAX_AGE_MS,
 	buildErrorBurstMessages,
+	clearBaseline,
+	diffObservation,
 	evaluateCategory,
 	formatClock,
 	MESSAGE_BUILDERS,
@@ -50,11 +53,16 @@ function harness(
 	prefs: NotificationPrefs = ON,
 ) {
 	const sent: NotificationMessage[] = [];
-	const run = (observation: Observation, p: NotificationPrefs = prefs) =>
+	const run = (
+		observation: Observation,
+		p: NotificationPrefs = prefs,
+		now?: number,
+	) =>
 		evaluateCategory({
 			category,
 			observation,
 			prefs: p,
+			now,
 			storage,
 			notify: (message) => {
 				sent.push(message);
@@ -156,18 +164,81 @@ describe("dispatcher transitions", () => {
 		expect(h.sent.map((m) => m.title)).toEqual(["Claude service recovered"]);
 	});
 
-	test("a disabled category sends nothing and clears its baseline", () => {
+	test("a disabled category sends nothing and leaves the baseline another tab may need", () => {
 		const h = harness("serviceOutage");
 		const off: NotificationPrefs = {
 			enabled: true,
 			categories: { ...ON.categories, serviceOutage: false },
 		};
 		h.run(observeServiceStatus(status("operational")));
+		const before = h.storage.map.get(baselineStorageKey("serviceOutage"));
 		expect(h.run(observeServiceStatus(status("outage")), off)).toEqual([]);
 		expect(h.sent).toEqual([]);
-		expect(h.storage.map.has(baselineStorageKey("serviceOutage"))).toBe(false);
-		// Switched back on mid-outage: a fresh baseline, not a replay.
+		expect(h.storage.map.get(baselineStorageKey("serviceOutage"))).toBe(before);
+		// A tab with the category on still sees the transition.
 		h.run(observeServiceStatus(status("outage")));
+		expect(h.sent.map((m) => m.title)).toEqual([
+			"Claude service outage reported",
+		]);
+	});
+
+	test("switching a category back on mid-incident is a fresh baseline, not a replay", () => {
+		const h = harness("serviceOutage");
+		h.run(observeServiceStatus(status("operational")));
+		// What the provider's toggle does.
+		clearBaseline(h.storage, "serviceOutage");
+		h.run(observeServiceStatus(status("outage")));
+		expect(h.sent).toEqual([]);
+	});
+
+	test("a baseline older than the bound is ignored: opening a closed page does not catch up", () => {
+		const h = harness("serviceOutage");
+		const t0 = Date.UTC(2026, 9, 1, 0, 0, 0);
+		h.run(observeServiceStatus(status("outage")), ON, t0);
+		// Every tab closed; the outage ended overnight.
+		h.run(
+			observeServiceStatus(status("operational")),
+			ON,
+			t0 + BASELINE_MAX_AGE_MS + 1,
+		);
+		expect(h.sent).toEqual([]);
+		// Inside the bound, the same change is a transition.
+		const g = harness("serviceOutage");
+		g.run(observeServiceStatus(status("outage")), ON, t0);
+		g.run(
+			observeServiceStatus(status("operational")),
+			ON,
+			t0 + BASELINE_MAX_AGE_MS,
+		);
+		expect(g.sent.map((m) => m.title)).toEqual(["Claude service recovered"]);
+	});
+
+	test("a gap in readings keeps the baseline alive while a tab is watching", () => {
+		const h = harness("serviceOutage");
+		const t0 = Date.UTC(2026, 9, 1, 0, 0, 0);
+		h.run(observeServiceStatus(status("outage")), ON, t0);
+		for (let i = 1; i <= 3; i++) {
+			h.run(
+				observeServiceStatus(status("unknown")),
+				ON,
+				t0 + (i * BASELINE_MAX_AGE_MS) / 2,
+			);
+		}
+		h.run(
+			observeServiceStatus(status("operational")),
+			ON,
+			t0 + 2 * BASELINE_MAX_AGE_MS,
+		);
+		expect(h.sent.map((m) => m.title)).toEqual(["Claude service recovered"]);
+	});
+
+	test("a baseline in the pre-release shape, without an age, is ignored", () => {
+		const h = harness("serviceOutage");
+		h.storage.setItem(
+			baselineStorageKey("serviceOutage"),
+			JSON.stringify({ claude: { state: "outage", label: "Claude" } }),
+		);
+		h.run(observeServiceStatus(status("operational")));
 		expect(h.sent).toEqual([]);
 	});
 
@@ -264,6 +335,58 @@ describe("account classification", () => {
 		expect(rateLimitState(a, NOW)).toBe("rate_limited");
 	});
 
+	test("a hard-limit status stops counting once it has lapsed", () => {
+		// The status column outlives the limit until the account next serves.
+		expect(
+			rateLimitState(
+				account({ rateLimitStatus: "rate_limited", rateLimitedUntil: NOW - 1 }),
+				NOW,
+			),
+		).toBeNull();
+		expect(
+			rateLimitState(
+				account({
+					rateLimitStatus: "rate_limited",
+					rateLimitReset: new Date(NOW - 60_000).toISOString(),
+				}),
+				NOW,
+			),
+		).toBeNull();
+		expect(
+			rateLimitState(
+				account({
+					rateLimitStatus: "rate_limited",
+					rateLimitReset: new Date(NOW + 60_000).toISOString(),
+				}),
+				NOW,
+			),
+		).toBe("rate_limited");
+	});
+
+	test("an expired lock never prints a past reset time", () => {
+		const obs = observeRateLimits(
+			[
+				account({
+					rateLimitStatus: "rate_limited",
+					rateLimitReset: new Date(NOW + 60_000).toISOString(),
+					rateLimitedUntil: null,
+				}),
+			],
+			NOW,
+		);
+		expect(obs?.["acc-1"]?.detail).toBeUndefined();
+		const live = observeRateLimits(
+			[
+				account({
+					rateLimitedUntil: NOW + 60_000,
+					rateLimitedReason: "upstream_429_with_reset",
+				}),
+			],
+			NOW,
+		);
+		expect(live?.["acc-1"]?.detail).toBe(`until ${formatClock(NOW + 60_000)}`);
+	});
+
 	test("a hard-limit status counts even without a lock", () => {
 		expect(
 			rateLimitState(account({ rateLimitStatus: "rate_limited" }), NOW),
@@ -335,6 +458,19 @@ describe("rate-limit pool", () => {
 			NOW,
 		);
 		expect(obs && Object.keys(obs).sort()).toEqual([POOL_KEY, "a", "b"]);
+	});
+
+	test("proactive throttling counts toward the pool but does not notify per account", () => {
+		const obs = observeRateLimits(
+			[limited("a"), account({ id: "b", usageThrottledUntil: NOW + 60_000 })],
+			NOW,
+		);
+		expect(obs && Object.keys(obs).sort()).toEqual([POOL_KEY, "a"]);
+		const lapsed = observeRateLimits(
+			[limited("a"), account({ id: "b", usageThrottledUntil: NOW - 1 })],
+			NOW,
+		);
+		expect(lapsed && POOL_KEY in lapsed).toBe(false);
 	});
 
 	test("one routable account with capacity keeps the pool key away", () => {
@@ -471,6 +607,27 @@ describe("error bursts", () => {
 });
 
 describe("message details", () => {
+	test("different transitions carry different tags", () => {
+		const tags = MESSAGE_BUILDERS.serviceOutage(
+			diffObservation({}, { claude: { state: "degraded", label: "Claude" } }),
+		)
+			.concat(
+				MESSAGE_BUILDERS.serviceOutage(
+					diffObservation({}, { claude: { state: "outage", label: "Claude" } }),
+				),
+			)
+			.concat(
+				MESSAGE_BUILDERS.rateLimit(
+					diffObservation({}, { a: { state: "rate_limited", label: "a" } }),
+				),
+				MESSAGE_BUILDERS.rateLimit(
+					diffObservation({}, { b: { state: "rate_limited", label: "b" } }),
+				),
+			)
+			.map((m) => m.tag);
+		expect(new Set(tags).size).toBe(4);
+	});
+
 	test("tags are deterministic for one transition, so two tabs collapse to one notification", () => {
 		const a = harness("serviceOutage");
 		const b = harness("serviceOutage");

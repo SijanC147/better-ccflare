@@ -40,16 +40,28 @@ import type { NotificationCategory } from "../../lib/notifications";
  * the cached reading is older than the cadence fetches nothing extra while a
  * page keeps it fresh, and keeps it fresh itself when nothing else does.
  */
-export function NotificationWatcher() {
+interface WatcherProps {
+	/**
+	 * Replaces every source's own cadence. Tests only: it lets the refresh
+	 * timer be observed without waiting a real minute.
+	 */
+	cadenceMs?: number;
+}
+
+export function NotificationWatcher({ cadenceMs }: WatcherProps = {}) {
 	const { active, prefs } = useNotifications();
 	if (!active) return null;
 	const watchAccounts =
 		prefs.categories.rateLimit || prefs.categories.accountHealth;
 	return (
 		<>
-			{prefs.categories.serviceOutage ? <ServiceStatusSource /> : null}
-			{watchAccounts ? <AccountsSource /> : null}
-			{prefs.categories.errorBurst ? <AlertsSource /> : null}
+			{prefs.categories.serviceOutage ? (
+				<ServiceStatusSource cadenceMs={cadenceMs} />
+			) : null}
+			{watchAccounts ? <AccountsSource cadenceMs={cadenceMs} /> : null}
+			{prefs.categories.errorBurst ? (
+				<AlertsSource cadenceMs={cadenceMs} />
+			) : null}
 		</>
 	);
 }
@@ -95,7 +107,7 @@ function useKeepFresh(options: RefreshableOptions, cadenceMs: number) {
 		const tick = () => {
 			void refreshIfStale(queryClient, optionsRef.current, cadenceMs);
 		};
-		const id = setInterval(tick, Math.max(1_000, Math.round(cadenceMs / 2)));
+		const id = setInterval(tick, Math.max(25, Math.round(cadenceMs / 2)));
 		return () => clearInterval(id);
 	}, [queryClient, cadenceMs]);
 }
@@ -126,26 +138,26 @@ function useEvaluate(
 	}, [dataUpdatedAt, prefs, storage, notify]);
 }
 
-function ServiceStatusSource() {
+function ServiceStatusSource({ cadenceMs }: WatcherProps) {
 	const options = serviceStatusQueryOptions();
 	const { data, dataUpdatedAt } = useQuery({
 		...options,
 		refetchInterval: false,
 	});
-	useKeepFresh(options, options.refetchInterval);
+	useKeepFresh(options, cadenceMs ?? options.refetchInterval);
 	useEvaluate(dataUpdatedAt, () => [
 		["serviceOutage", observeServiceStatus(data)],
 	]);
 	return null;
 }
 
-function AccountsSource() {
+function AccountsSource({ cadenceMs }: WatcherProps) {
 	const options = accountsQueryOptions();
 	const { data, dataUpdatedAt } = useQuery({
 		...options,
 		refetchInterval: false,
 	});
-	useKeepFresh(options, options.refetchInterval);
+	useKeepFresh(options, cadenceMs ?? options.refetchInterval);
 	useEvaluate(dataUpdatedAt, () => {
 		const now = Date.now();
 		return [
@@ -156,13 +168,13 @@ function AccountsSource() {
 	return null;
 }
 
-function AlertsSource() {
+function AlertsSource({ cadenceMs }: WatcherProps) {
 	const options = alertsQueryOptions();
 	const { data, dataUpdatedAt } = useQuery({
 		...options,
 		refetchInterval: false,
 	});
-	useKeepFresh(options, options.refetchInterval);
+	useKeepFresh(options, cadenceMs ?? options.refetchInterval);
 	useEvaluate(dataUpdatedAt, () => [
 		["errorBurst", observeErrorBursts(data?.alerts)],
 	]);

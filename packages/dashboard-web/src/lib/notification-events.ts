@@ -46,16 +46,48 @@ export type Observation = Record<string, ObservedEntry> | null;
 
 export type Baseline = Record<string, { state: string; label: string }>;
 
+/**
+ * How old a stored baseline may be and still count. A baseline is rewritten on
+ * every evaluation, so one older than this means no tab was watching: the
+ * page was closed, or notifications could not run. Diffing a fresh reading
+ * against it would announce, on page load, whatever changed while nobody was
+ * looking, such as an outage that ended overnight. Ten minutes is several
+ * cadences of the slowest source (2 minutes) with room for a hidden tab's
+ * timers being throttled to once a minute.
+ */
+export const BASELINE_MAX_AGE_MS = 10 * 60_000;
+
+interface StoredBaseline {
+	at: number;
+	entries: Baseline;
+}
+
+/**
+ * The stored baseline, or undefined when there is none, it is unreadable, or
+ * it is older than `BASELINE_MAX_AGE_MS` at `now`.
+ */
 export function loadBaseline(
 	storage: KeyValueStorage | null,
 	category: NotificationCategory,
+	now: number = Date.now(),
 ): Baseline | undefined {
 	const stored = readJson(storage, baselineStorageKey(category));
 	if (typeof stored !== "object" || stored === null || Array.isArray(stored)) {
 		return undefined;
 	}
+	const { at, entries } = stored as Partial<StoredBaseline>;
+	if (typeof at !== "number" || now - at > BASELINE_MAX_AGE_MS) {
+		return undefined;
+	}
+	if (
+		typeof entries !== "object" ||
+		entries === null ||
+		Array.isArray(entries)
+	) {
+		return undefined;
+	}
 	const baseline: Baseline = {};
-	for (const [key, value] of Object.entries(stored)) {
+	for (const [key, value] of Object.entries(entries)) {
 		if (
 			typeof value === "object" &&
 			value !== null &&
@@ -146,6 +178,8 @@ export interface EvaluateOptions {
 	storage: KeyValueStorage | null;
 	notify: Notifier;
 	build: MessageBuilder;
+	/** Defaults to `Date.now()`; passed by tests that age a baseline. */
+	now?: number;
 }
 
 /**
@@ -153,11 +187,15 @@ export interface EvaluateOptions {
  * and store the observation as the new baseline. Returns the messages sent.
  *
  * - The category off, or the master switch off: nothing is sent and the
- *   baseline is cleared, so turning it back on starts from a fresh reading
- *   rather than replaying whatever happened while it was off.
- * - No usable reading: nothing is sent and the baseline is kept.
- * - No stored baseline: this reading becomes the baseline and nothing is
- *   sent, which is what keeps a first page load quiet.
+ *   baseline is left alone. It is NOT cleared here: another tab may have the
+ *   category on and depend on it. Clearing happens at the toggle, in the
+ *   provider, which is what makes switching back on start from a fresh
+ *   reading rather than replaying whatever happened while it was off.
+ * - No usable reading: nothing is sent and the baseline's entries are kept,
+ *   with its age refreshed, because a tab was watching and saw a gap.
+ * - No stored baseline, or one older than `BASELINE_MAX_AGE_MS`: this
+ *   reading becomes the baseline and nothing is sent, which is what keeps a
+ *   page load quiet, including after the page was closed for hours.
  *
  * The baseline is read from storage on every call rather than held in memory,
  * so a reload resumes from it and two open tabs share it.
@@ -166,17 +204,22 @@ export function evaluateCategory(
 	options: EvaluateOptions,
 ): NotificationMessage[] {
 	const { category, observation, prefs, storage, notify, build } = options;
-	if (!prefs.enabled || !prefs.categories[category]) {
-		clearBaseline(storage, category);
+	const now = options.now ?? Date.now();
+	if (!prefs.enabled || !prefs.categories[category]) return [];
+	const previous = loadBaseline(storage, category, now);
+	if (observation === null) {
+		if (previous !== undefined) {
+			const kept: StoredBaseline = { at: now, entries: previous };
+			writeJson(storage, baselineStorageKey(category), kept);
+		}
 		return [];
 	}
-	if (observation === null) return [];
-	const previous = loadBaseline(storage, category);
 	const nextBaseline: Baseline = {};
 	for (const [key, entry] of Object.entries(observation)) {
 		nextBaseline[key] = { state: entry.state, label: entry.label };
 	}
-	writeJson(storage, baselineStorageKey(category), nextBaseline);
+	const stored: StoredBaseline = { at: now, entries: nextBaseline };
+	writeJson(storage, baselineStorageKey(category), stored);
 	if (previous === undefined) return [];
 	const messages = build(diffObservation(previous, observation));
 	for (const message of messages) notify(message);
@@ -338,9 +381,11 @@ type AccountForNotifications = Pick<
 	| "pauseReason"
 	| "requiresReauth"
 	| "rateLimitStatus"
+	| "rateLimitReset"
 	| "rateLimitedUntil"
 	| "rateLimitedReason"
 	| "usageUtilization"
+	| "usageThrottledUntil"
 >;
 
 function lockKind(
@@ -357,13 +402,40 @@ function lockKind(
 	return RATE_LIMIT_REASON_KIND[account.rateLimitedReason] ?? "quota";
 }
 
-function isHardLimited(account: AccountForNotifications): boolean {
+/**
+ * A hard-limit `rateLimitStatus`, while it is still current.
+ *
+ * The server copies the status column verbatim, and that column changes only
+ * on the account's next upstream response. An account limited and then not
+ * routed to keeps `rate_limited` long after its limit lifted, which would
+ * hold back the recovery notification until it next served a request. So the
+ * status counts only while nothing says it has lapsed: not after its own
+ * `rateLimitReset`, and not after the lock that came with it expired.
+ */
+function isHardLimited(account: AccountForNotifications, now: number): boolean {
 	const status = (account.rateLimitStatus ?? "").toLowerCase();
-	return HARD_LIMIT_PREFIXES.some((prefix) => status.startsWith(prefix));
+	if (!HARD_LIMIT_PREFIXES.some((prefix) => status.startsWith(prefix))) {
+		return false;
+	}
+	if (account.rateLimitReset) {
+		const reset = Date.parse(account.rateLimitReset);
+		if (Number.isFinite(reset) && reset <= now) return false;
+	}
+	if (
+		typeof account.rateLimitedUntil === "number" &&
+		account.rateLimitedUntil <= now
+	) {
+		return false;
+	}
+	return true;
 }
 
-function untilDetail(account: AccountForNotifications): string | undefined {
-	return typeof account.rateLimitedUntil === "number"
+function untilDetail(
+	account: AccountForNotifications,
+	now: number,
+): string | undefined {
+	return typeof account.rateLimitedUntil === "number" &&
+		account.rateLimitedUntil > now
 		? `until ${formatClock(account.rateLimitedUntil)}`
 		: undefined;
 }
@@ -377,7 +449,7 @@ export function rateLimitState(
 		return "quota_paused";
 	}
 	if (account.paused || account.requiresReauth) return null;
-	if (lockKind(account, now) === "quota" || isHardLimited(account)) {
+	if (lockKind(account, now) === "quota" || isHardLimited(account, now)) {
 		return "rate_limited";
 	}
 	if (
@@ -426,12 +498,19 @@ export function observeRateLimits(
 			(!account.paused || quotaPaused) &&
 			lockKind(account, now) !== "bench";
 		if (inPool) considered += 1;
+		// Proactive usage throttling is pacing, not exhaustion, so it does not
+		// notify per account. But the selector skips a throttled account, and a
+		// pool where every account is throttled answers the client with a 529,
+		// so it counts toward the pool being exhausted.
+		const throttled =
+			typeof account.usageThrottledUntil === "number" &&
+			account.usageThrottledUntil > now;
+		if (inPool && (state !== null || throttled)) limited += 1;
 		if (state === null) continue;
-		if (inPool) limited += 1;
 		observation[account.id] = {
 			state,
 			label: account.name,
-			detail: state === "rate_limited" ? untilDetail(account) : undefined,
+			detail: state === "rate_limited" ? untilDetail(account, now) : undefined,
 		};
 	}
 	if (considered > 0 && limited === considered) {
@@ -455,7 +534,7 @@ export function observeAccountHealth(
 		observation[account.id] = {
 			state,
 			label: account.name,
-			detail: state === "benched" ? untilDetail(account) : undefined,
+			detail: state === "benched" ? untilDetail(account, now) : undefined,
 		};
 	}
 	return observation;
