@@ -1,0 +1,13 @@
+{
+	"extends": "../tsconfig.json",
+	// The root `include` is `packages/*/src/**/*` and `apps/*/src/**/*`, so no
+	// file under scripts/ was in any program, including four test files and the
+	// network guard every test run preloads (SB23-2304). This brings in every
+	// script, not only the tests, because the tests import the scripts they
+	// test and a script outside the program is the same gap one import away.
+	"include": ["**/*.ts"],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's test-file exclusions. Wired into the root
+	// `typecheck:tests` chain; without that entry the gate never runs.
+	"exclude": ["node_modules"]
+}

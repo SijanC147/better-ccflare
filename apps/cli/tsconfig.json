@@ -1,0 +1,23 @@
+{
+	"extends": "../../tsconfig.json",
+	// `src/` is already in the root program. This file exists for what the root
+	// `include` cannot reach: `__tests__/` and the top-level build scripts sit
+	// outside `src/`, so `hextap-targets.test.ts` and `__tests__/cli.test.ts`
+	// were typechecked by nothing (SB23-2304).
+	//
+	// The two declaration files are listed for the reason
+	// `apps/server/tsconfig.json` gives: an ambient `declare module` enters a
+	// program only through `include` or `files`, and `cli.test.ts` imports the
+	// server, which imports the generated dashboard bundle and `MERGELOG.md`.
+	"include": [
+		"src/**/*",
+		"__tests__/**/*",
+		"*.ts",
+		"../../packages/dashboard-web/src/embedded.d.ts",
+		"../../packages/http-api/src/mergelog.d.ts"
+	],
+	// `exclude` REPLACES the inherited value rather than merging, so stating it
+	// here overrides the root config's test-file exclusions. Wired into the root
+	// `typecheck:tests` chain; without that entry the gate never runs.
+	"exclude": ["node_modules", "dist"]
+}
