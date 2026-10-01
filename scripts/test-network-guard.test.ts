@@ -13,6 +13,7 @@
  * (measured: it reports the test as failed).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import { dirname } from "node:path";
@@ -66,32 +67,44 @@ describe("network guard: installed by bunfig.toml", () => {
 	// when the fetch alone was blocked. The guard's global afterEach must fail
 	// the test anyway, so the fixture's test, which catches the rejection and
 	// asserts that it did, has to fail.
-	test("an attempt the code swallows still fails its test", async () => {
-		const child = Bun.spawn(
-			[
-				process.execPath,
-				"test",
-				"./scripts/fixtures/network-guard-swallowed.ts",
-			],
-			{
-				cwd: REPO_ROOT,
-				stdout: "pipe",
-				stderr: "pipe",
-				timeout: 60_000,
-			},
-		);
+	async function runChild(fixture: string) {
+		const child = Bun.spawn([process.execPath, "test", `./${fixture}`], {
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 60_000,
+		});
 		const [exitCode, stdout, stderr] = await Promise.all([
 			child.exited,
 			new Response(child.stdout).text(),
 			new Response(child.stderr).text(),
 		]);
-		const output = stdout + stderr;
+		return { exitCode, output: stdout + stderr };
+	}
+
+	test("an attempt the code swallows still fails its test", async () => {
+		const fixture = "scripts/fixtures/network-guard-swallowed.ts";
+		const { exitCode, output } = await runChild(fixture);
 
 		expect(output).toContain(
-			"network-guard: a test in scripts/fixtures/network-guard-swallowed.ts tried to reach https://api.anthropic.com/v1/messages via fetch, ",
+			`network-guard: a test in ${fixture} tried to reach https://api.anthropic.com/v1/messages via fetch, `,
 		);
 		expect(output).toContain("(fail) an attempt the code swallows");
 		expect(output).toContain(" 0 pass\n 1 fail\n");
+		expect(exitCode).toBe(1);
+	});
+
+	// An attempt made in a file-level afterAll lands after the last test's
+	// afterEach, so only the guard's global afterAll can charge it. Without
+	// this case, deleting that hook survived the whole file (PR #260 review).
+	test("an attempt swallowed in a file-level afterAll still fails the run", async () => {
+		const fixture = "scripts/fixtures/network-guard-swallowed-in-afterall.ts";
+		const { exitCode, output } = await runChild(fixture);
+
+		expect(output).toContain(
+			`network-guard: a test in ${fixture} tried to reach https://api.anthropic.com/v1/models via fetch, `,
+		);
+		expect(output).toContain(" 1 pass\n 1 fail\n");
 		expect(exitCode).toBe(1);
 	});
 });
@@ -135,6 +148,7 @@ describe("network guard: what counts as loopback", () => {
 		"[::1]",
 		"0.0.0.0",
 		"localhost.",
+		"[::ffff:7f00:1]",
 	])("%s is loopback", (host) => {
 		expect(handle().isLoopbackHost(host)).toBe(true);
 	});
@@ -147,6 +161,7 @@ describe("network guard: what counts as loopback", () => {
 		"10.0.0.1",
 		"192.168.1.10",
 		"[::2]",
+		"[::ffff:a00:1]",
 	])("%s is not loopback", (host) => {
 		expect(handle().isLoopbackHost(host)).toBe(false);
 	});
@@ -159,6 +174,9 @@ describe("network guard: which fetch targets are refused", () => {
 		expect(blockedFetchTarget(url)).toBe(url);
 		expect(blockedFetchTarget(new URL(url))).toBe(url);
 		expect(blockedFetchTarget(new Request(url))).toBe(url);
+		// Bun's fetch also sends a bare object carrying `url`, the shape of a
+		// Request from another realm or library (PR #260 review, must-fix 1).
+		expect(blockedFetchTarget({ url })).toBe(url);
 	});
 
 	test("an IPv4 loopback spelled another way is normalised and allowed", () => {
@@ -206,6 +224,20 @@ describe("network guard: the non-fetch clients", () => {
 	test("node:https get with an options object", () => {
 		const refused = refusedVia("node:https get", () =>
 			https.get({ hostname: "api.anthropic.com", path: "/" }),
+		);
+		expect(refused).toHaveLength(1);
+	});
+
+	test("node:http request to a bare ::1 host keeps the address whole", () => {
+		const request = http.request({ host: "::1", port: 9 });
+		request.on("error", () => {});
+		request.destroy();
+		expect(handle().takeRefused()).toEqual([]);
+	});
+
+	test("node:net Socket#connect on a socket built directly", () => {
+		const refused = refusedVia("node:net Socket#connect", () =>
+			new net.Socket().connect(443, "api.anthropic.com"),
 		);
 		expect(refused).toHaveLength(1);
 	});

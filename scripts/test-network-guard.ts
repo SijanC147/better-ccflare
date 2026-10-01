@@ -30,14 +30,21 @@
  *
  * WHAT IS GUARDED. `globalThis.fetch` (and `fetch.preconnect`), `WebSocket`,
  * `node:http` and `node:https` `request`/`get`, `node:net` and `node:tls`
- * `connect`/`createConnection`, and `Bun.connect`. Every one is patched on the
- * shared object, so code that captured the function at import time after this
- * preload ran gets the guarded one. Known gaps, named rather than handled: a
- * named import of a node builtin's function bound before this file ran, a
- * redirect that a loopback server issues to an external host (Bun follows it
- * inside the original fetch), and happy-dom's own `XMLHttpRequest`, which
- * `packages/dashboard-web/src/test/dom.ts` does not restore to Bun's. Nothing
- * in the tree uses any of them today.
+ * `connect`/`createConnection`, `net.Socket.prototype.connect`, and
+ * `Bun.connect`. Every one is patched on the shared object, so code that
+ * captured the function at import time after this preload ran gets the
+ * guarded one; a named `import { request } from "node:https"` in a test is
+ * still refused, one layer down at `node:tls connect` (measured by the PR #260
+ * review).
+ *
+ * Known gaps, named rather than handled, and used nowhere in the tree today:
+ * - `Bun.fetch` is a second entry to the real fetch and cannot be wrapped: its
+ *   property descriptor is `{ writable: false, configurable: false }` and
+ *   assignment throws (measured on Bun 1.4.2).
+ * - A redirect that a loopback server issues to an external host: Bun follows
+ *   it inside the original fetch.
+ * - happy-dom's own `XMLHttpRequest`, which
+ *   `packages/dashboard-web/src/test/dom.ts` does not restore to Bun's.
  *
  * WHAT IS ALLOWED. `localhost` and `*.localhost`, `127.0.0.0/8`, `::1`, and
  * `0.0.0.0` / `::` (Bun.serve's default bind address). A fetch with a
@@ -62,9 +69,9 @@
  * that touches a cost fetches live pricing, which this guard would then fail.
  * A test that exercises the pricing fetch path unsets it and stubs `fetch`.
  *
- * Scope: only a root `bun test` loads this file. Running `bun test` from
- * inside `packages/dashboard-web` reads that package's own `bunfig.toml`
- * instead, and is unguarded.
+ * Scope: only a root `bun test` loads this file. Bun reads `bunfig.toml` from
+ * the working directory alone, so `bun test` run from any subdirectory, such
+ * as `packages/proxy` or `packages/dashboard-web`, is unguarded.
  */
 import { afterAll, afterEach } from "bun:test";
 import http from "node:http";
@@ -94,7 +101,9 @@ export function isLoopbackHost(host: string): boolean {
 	const h = host.trim().toLowerCase().replace(/\.$/, "");
 	if (LOOPBACK_NAMES.has(h)) return true;
 	if (h.endsWith(".localhost")) return true;
-	return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+	if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+	// IPv4-mapped 127.0.0.0/8, as URL normalises it: [::ffff:7f00:1].
+	return /^\[?::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]?$/.test(h);
 }
 
 const NETWORK_SCHEMES = new Set(["http:", "https:", "ws:", "wss:"]);
@@ -120,7 +129,13 @@ export function blockedFetchTarget(
 				? input.href
 				: input instanceof Request
 					? input.url
-					: String(input);
+					: typeof input === "object" &&
+							input !== null &&
+							typeof (input as { url?: unknown }).url === "string"
+						? // Bun's fetch also sends a bare object carrying `url`, which
+							// is the shape of a Request from another realm or library.
+							(input as { url: string }).url
+						: String(input);
 	let url: URL;
 	try {
 		url = new URL(raw);
@@ -262,7 +277,12 @@ function nodeRequestHost(args: unknown[]): {
 	}
 	const options = (first ?? {}) as RequestOptionsLike;
 	if (options.socketPath) return { host: null, label: options.socketPath };
-	const host = options.hostname ?? options.host?.replace(/:\d+$/, "");
+	// `host` may carry a port, except an unbracketed IPv6 literal such as `::1`.
+	const host =
+		options.hostname ??
+		(options.host && (options.host.match(/:/g) ?? []).length > 1
+			? options.host
+			: options.host?.replace(/:\d+$/, ""));
 	const resolved = host || "localhost";
 	return { host: resolved, label: resolved };
 }
@@ -295,6 +315,8 @@ interface ConnectOptionsLike {
 /** Host a node `connect` call would reach, or null for an IPC path. */
 function nodeConnectHost(args: unknown[]): string | null {
 	const [first, second] = args;
+	// node's own net.connect hands Socket#connect its normalised [options, cb].
+	if (Array.isArray(first)) return nodeConnectHost(first);
 	if (typeof first === "object" && first !== null) {
 		const options = first as ConnectOptionsLike;
 		if (options.path) return null;
@@ -321,6 +343,18 @@ for (const [name, mod] of [
 		};
 	}
 }
+
+// A socket built with `new net.Socket()` connects through its prototype, which
+// the module-level patch above does not reach.
+const socketPrototype = net.Socket.prototype as unknown as { connect: AnyFn };
+const realSocketConnect = socketPrototype.connect;
+socketPrototype.connect = function (this: unknown, ...args: unknown[]) {
+	const host = nodeConnectHost(args);
+	if (host !== null && !isLoopbackHost(host)) {
+		throw refuse("node:net Socket#connect", host);
+	}
+	return realSocketConnect.apply(this, args);
+};
 
 // Bun.connect -----------------------------------------------------------------
 
