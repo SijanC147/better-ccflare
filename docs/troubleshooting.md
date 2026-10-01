@@ -755,7 +755,7 @@ grep "\[Server\]" /tmp/better-ccflare-logs/app.log
 **Common Causes**:
 - Account doesn't have required permissions
 - OAuth app restrictions
-- From better-ccflare itself: a valid API key without admin access asked for a dashboard path (`/api/*`). Use an admin key (`better-ccflare --generate-api-key <name> --admin`). Releases up to v3.36.0 answered this with 401
+- From better-ccflare itself: a valid API key without admin access asked for a dashboard path (`/api/*`). Use an admin key (`better-ccflare --generate-api-key <name> --admin`). Releases up to v3.37.0 answered this with 401
 
 #### 429 Too Many Requests
 **Common Causes**:
