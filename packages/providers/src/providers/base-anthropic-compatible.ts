@@ -14,8 +14,8 @@ import { drainReader } from "../utils/stream-drain";
 
 // Configuration interface for Anthropic-compatible providers
 export interface AnthropicCompatibleConfig {
-	name?: string;
-	baseUrl?: string;
+	name?: string | undefined;
+	baseUrl?: string | undefined;
 	authHeader?: string; // "x-api-key", "authorization", etc.
 	authType?: "bearer" | "direct"; // Whether to add "Bearer " prefix for authorization header
 	modelMappings?: Record<string, string>; // Model name mappings
@@ -252,15 +252,15 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 	}
 
 	async extractUsageInfo(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		costUsd?: number | undefined;
+		inputTokens?: number | undefined;
+		cacheReadInputTokens?: number | undefined;
+		cacheCreationInputTokens?: number | undefined;
+		outputTokens?: number | undefined;
 	} | null> {
 		try {
 			const clone = response.clone();
@@ -330,15 +330,15 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 		clone: Response,
 		_originalHeaders: Headers,
 	): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		costUsd?: number | undefined;
+		inputTokens?: number | undefined;
+		cacheReadInputTokens?: number | undefined;
+		cacheCreationInputTokens?: number | undefined;
+		outputTokens?: number | undefined;
 	} | null> {
 		const reader = clone.body?.getReader();
 		if (!reader) return null;
@@ -351,17 +351,17 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 
 		// Track usage from both message_start and message_delta
 		let messageStartUsage: {
-			input_tokens?: number;
-			output_tokens?: number;
-			cache_creation_input_tokens?: number;
-			cache_read_input_tokens?: number;
-			model?: string;
+			input_tokens?: number | undefined;
+			output_tokens?: number | undefined;
+			cache_creation_input_tokens?: number | undefined;
+			cache_read_input_tokens?: number | undefined;
+			model?: string | undefined;
 		} | null = null;
 
 		let messageDeltaUsage: {
-			input_tokens?: number;
-			output_tokens?: number;
-			cache_read_input_tokens?: number;
+			input_tokens?: number | undefined;
+			output_tokens?: number | undefined;
+			cache_read_input_tokens?: number | undefined;
 		} | null = null;
 
 		try {

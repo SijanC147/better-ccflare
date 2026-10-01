@@ -27,7 +27,7 @@ export type CacheObservationContext = {
 	path?: "legacy" | "native";
 	headers?: Headers;
 	endpoint?: string;
-	source?: { input?: unknown; instructions?: unknown; tools?: unknown };
+	source?: { input?: unknown; instructions?: unknown; tools?: unknown } | undefined;
 };
 
 function hash(value: unknown): string {

@@ -8,9 +8,9 @@ export interface TokenRefreshResult {
 
 export interface RateLimitInfo {
 	isRateLimited: boolean;
-	resetTime?: number;
-	statusHeader?: string;
-	remaining?: number;
+	resetTime?: number | undefined;
+	statusHeader?: string | undefined;
+	remaining?: number | undefined;
 }
 
 export interface ProviderResponseContext {
@@ -101,15 +101,15 @@ export interface Provider {
 	 * Extract usage information from response if available
 	 */
 	extractUsageInfo?(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		costUsd?: number | undefined;
+		inputTokens?: number | undefined;
+		cacheReadInputTokens?: number | undefined;
+		cacheCreationInputTokens?: number | undefined;
+		outputTokens?: number | undefined;
 	} | null>;
 
 	/**
@@ -118,15 +118,15 @@ export interface Provider {
 	 * Falls back to extractUsageInfo for non-streaming responses
 	 */
 	parseUsage?(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
+		model?: string | undefined;
+		promptTokens?: number | undefined;
+		completionTokens?: number | undefined;
+		totalTokens?: number | undefined;
+		costUsd?: number | undefined;
+		inputTokens?: number | undefined;
+		cacheReadInputTokens?: number | undefined;
+		cacheCreationInputTokens?: number | undefined;
+		outputTokens?: number | undefined;
 	} | null>;
 
 	/**
