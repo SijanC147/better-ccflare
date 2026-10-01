@@ -124,6 +124,16 @@ export {
 } from "./throttle-utils";
 export { TtlCache } from "./ttl-cache";
 export {
+	collectAnthropicLimitRows,
+	collectAnthropicUsageRows,
+	displayLabel,
+	formatWindowName,
+	isUsageWindow,
+	isWeeklyWindow,
+	severityColor,
+	type UsageDisplay,
+} from "./usage-rows";
+export {
 	effectiveMinResetRemainingMs,
 	effectiveThreshold,
 	evaluateUsagePause,
