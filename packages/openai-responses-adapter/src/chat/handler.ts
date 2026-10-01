@@ -3,6 +3,7 @@ import { Logger } from "@better-ccflare/logger";
 import {
 	type OpenAIGateways,
 	REPORT_UPSTREAM_MODEL_HEADER,
+	UPSTREAM_CONTENT_TYPE_HEADER,
 } from "@better-ccflare/types";
 import {
 	applyGatewayExclusions,
@@ -117,11 +118,16 @@ async function upstreamAsOpenAIError(upstream: Response): Promise<Response> {
 	} catch {
 		// Not JSON; pass the text through.
 	}
+	const kept: Record<string, string> = {};
 	const retryAfter = upstream.headers.get("retry-after");
+	if (retryAfter) kept["retry-after"] = retryAfter;
+	// Set by handleProxy when it wrapped an upstream error page (SB23-3494).
+	const upstreamType = upstream.headers.get(UPSTREAM_CONTENT_TYPE_HEADER);
+	if (upstreamType) kept[UPSTREAM_CONTENT_TYPE_HEADER] = upstreamType;
 	return jsonResponse(
 		upstream.status,
 		toOpenAIError(upstream.status, parsed),
-		retryAfter ? { "retry-after": retryAfter } : undefined,
+		Object.keys(kept).length > 0 ? kept : undefined,
 	);
 }
 

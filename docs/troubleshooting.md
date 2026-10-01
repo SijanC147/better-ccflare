@@ -177,6 +177,12 @@ bun start
 export NO_PROXY=localhost,127.0.0.1
 ```
 
+### An `upstream_error` with HTML text in the message
+
+**Symptom**: a client on a `/v1` path gets an error of type `upstream_error` whose message reads `Upstream returned HTTP 400 with a non-JSON body (text/html): 400 Bad Request ... cloudflare`, or the same for a 502, 520 or 524.
+
+An edge in front of the upstream (Cloudflare, a load balancer, a gateway) answered with a page meant for a browser. better-ccflare does not relay that page verbatim on `/v1`, because the Anthropic and OpenAI SDKs then report raw markup. When the upstream status is 400 or above and the body is HTML, plain text, XML or carries no content type, the client receives the same status with `Content-Type: application/json` and the body `{"type":"error","error":{"type":"upstream_error","message":"..."}}`. The message holds the page's text with tags stripped, whitespace collapsed, and at most 2048 characters. The header `x-better-ccflare-upstream-content-type` names the type the upstream sent, or `none`. The OpenAI paths (`/v1/chat/completions`, `/v1/responses` and the named gateways) return the same text in OpenAI's `{"error":{"message","type","code"}}` shape, with `type` set to `upstream_error`. JSON error bodies, event streams and successful responses are relayed unchanged, and paths outside `/v1` are never rewritten. The request log records the original status and upstream headers, and the original page itself when payload storage is on. The upstream headers, such as `server` and `cf-ray`, also reach the client.
+
 ## Performance Issues
 
 ### Slow Responses
