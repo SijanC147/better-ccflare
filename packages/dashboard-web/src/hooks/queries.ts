@@ -2,6 +2,7 @@ import { getModelDisplayName } from "@better-ccflare/core";
 import type {
 	AgentUpdatePayload,
 	ClaudeCodeEndpointConfig,
+	OpenAIGatewayConfig,
 	Project,
 	WorktreeRule,
 } from "@better-ccflare/types";
@@ -628,6 +629,39 @@ export const useDeleteClaudeCodeEndpoint = () => {
 		mutationFn: (name: string) => api.deleteClaudeCodeEndpoint(name),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["claude-code-endpoints"] });
+		},
+	});
+};
+
+export const useOpenAIGateways = () => {
+	return useQuery({
+		queryKey: ["openai-gateways"],
+		queryFn: () => api.getOpenAIGateways(),
+	});
+};
+
+export const useSaveOpenAIGateway = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			name,
+			config,
+		}: {
+			name: string;
+			config: OpenAIGatewayConfig;
+		}) => api.putOpenAIGateway(name, config),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["openai-gateways"] });
+		},
+	});
+};
+
+export const useDeleteOpenAIGateway = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (name: string) => api.deleteOpenAIGateway(name),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["openai-gateways"] });
 		},
 	});
 };

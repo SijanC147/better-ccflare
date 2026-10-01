@@ -21,6 +21,8 @@ import type {
 	LogEvent,
 	ModelCatalogRefreshResponse,
 	ModelCatalogResponse,
+	OpenAIGatewayConfig,
+	OpenAIGatewayListing,
 	Project,
 	RequestPayload,
 	RequestResponse,
@@ -293,6 +295,13 @@ export interface ReauthNeededResponse {
 export interface ClaudeCodeEndpointsResponse {
 	endpoints: ClaudeCodeEndpointListing[];
 	/** Config entries the server skipped, each with the reason. */
+	errors: string[];
+}
+
+/** What `GET /api/openai-gateways` returns. */
+export interface OpenAIGatewaysResponse {
+	gateways: OpenAIGatewayListing[];
+	/** Stored entries the server skipped, each with the reason. */
 	errors: string[];
 }
 
@@ -3147,6 +3156,30 @@ class API extends HttpClient {
 
 	async deleteClaudeCodeEndpoint(name: string): Promise<void> {
 		const url = `/api/claude-code-endpoints/${encodeURIComponent(name)}`;
+		this.logger.debug(`→ DELETE ${url}`);
+		await this.delete(url);
+	}
+
+	// Named OpenAI-compatible gateways, each its own base URL with its own
+	// provider exclusions and model set.
+	async getOpenAIGateways(): Promise<OpenAIGatewaysResponse> {
+		const url = "/api/openai-gateways";
+		this.logger.debug(`→ GET ${url}`);
+		return await this.get<OpenAIGatewaysResponse>(url);
+	}
+
+	/** Creates the gateway, or replaces the one with this name. */
+	async putOpenAIGateway(
+		name: string,
+		config: OpenAIGatewayConfig,
+	): Promise<OpenAIGatewayListing> {
+		const url = `/api/openai-gateways/${encodeURIComponent(name)}`;
+		this.logger.debug(`→ PUT ${url}`);
+		return await this.put<OpenAIGatewayListing>(url, config);
+	}
+
+	async deleteOpenAIGateway(name: string): Promise<void> {
+		const url = `/api/openai-gateways/${encodeURIComponent(name)}`;
 		this.logger.debug(`→ DELETE ${url}`);
 		await this.delete(url);
 	}
