@@ -616,27 +616,27 @@ The database can be managed through CLI commands:
 
 ### Account Management
 ```bash
-# Add a new account
-bun cli add <name> [--mode <max|console>] [--priority <0-100>]
+# Add a new account (run `bun run cli --help` for every --mode value)
+bun run cli --add-account <name> [--mode <claude-oauth|console|...>] [--priority <number>]
 
 # List all accounts with status
-bun cli list
+bun run cli --list
 
 # Remove an account
-bun cli remove <name>
+bun run cli --remove <name>
 
 # Pause/resume an account
-bun cli pause <name>
-bun cli resume <name>
+bun run cli --pause <name>
+bun run cli --resume <name>
 ```
 
 ### Database Maintenance
 ```bash
 # Reset all usage statistics
-bun cli reset-stats
+bun run cli --reset-stats
 
 # Clear all request history
-bun cli clear-history
+bun run cli --clear-history
 ```
 
 These commands directly interact with the database through the `DatabaseOperations` class.
@@ -668,13 +668,13 @@ The following maintenance operations are available through the CLI:
 1. **Reset Statistics**:
 ```bash
 # Resets request_count, session_start, and session_request_count for all accounts
-bun cli reset-stats
+bun run cli --reset-stats
 ```
 
 2. **Clear History**:
 ```bash
 # Removes all entries from the requests table
-bun cli clear-history
+bun run cli --clear-history
 ```
 
 3. **Manual Cleanup** (via SQL):

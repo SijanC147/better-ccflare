@@ -274,7 +274,7 @@ COPY tsconfig.json ./
 RUN bun install --frozen-lockfile
 RUN bun run build
 RUN cd apps/server && bun build src/server.ts --compile --outfile dist/better-ccflare-server
-RUN cd apps/cli && bun build src/cli.ts --compile --outfile dist/better-ccflare-cli
+RUN cd apps/cli && bun build src/main.ts --compile --outfile dist/better-ccflare-cli
 
 # Runtime stage
 FROM debian:bookworm-slim
