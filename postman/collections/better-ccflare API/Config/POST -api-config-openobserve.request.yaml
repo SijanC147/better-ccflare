@@ -6,7 +6,7 @@ description: |-
   Body: Carries openobserve_token. The playground never logs a request body — see the PR body.
 method: POST
 url: '{{baseUrl}}/api/config/openobserve'
-order: 36000
+order: 40000
 headers:
   - key: 'Content-Type'
     value: 'application/json'

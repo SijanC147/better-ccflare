@@ -4,7 +4,7 @@ description: |-
   Enable or disable combos.
 method: POST
 url: '{{baseUrl}}/api/config/combos-enabled'
-order: 27000
+order: 31000
 headers:
   - key: 'Content-Type'
     value: 'application/json'

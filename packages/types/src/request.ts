@@ -8,6 +8,27 @@
  * rather than the barrel.
  */
 
+/**
+ * What a request's `request_payloads` row carries, from the two switches that
+ * decide it. `store_payloads` governs bodies; headers-only mode strips bodies
+ * and keeps headers whether or not `store_payloads` is on.
+ *
+ * - `"full"`: headers, bodies and metadata (`store_payloads` on, headers-only off)
+ * - `"headers"`: headers and metadata, no bodies (headers-only on)
+ * - `"none"`: no row (both off)
+ *
+ * OpenObserve payload shipping is separate and not part of this value.
+ */
+export type PayloadPersistence = "full" | "headers" | "none";
+
+export function resolvePayloadPersistence(
+	storePayloads: boolean,
+	headersOnly: boolean,
+): PayloadPersistence {
+	if (headersOnly) return "headers";
+	return storePayloads ? "full" : "none";
+}
+
 export const PROJECT_ATTRIBUTION_SOURCES = [
 	"header_project",
 	"path_project",
@@ -292,6 +313,10 @@ export interface RequestPayload {
 		// without request/response bodies. Consumers that need bodies must
 		// re-fetch via GET /api/requests/payload/:id.
 		bodiesOmitted?: boolean;
+		// True when a memory bound dropped captured body bytes while the request
+		// was still active; the headers and metadata were kept and written.
+		// Absent on a headers-only row, which never held a body.
+		bodiesReleased?: boolean;
 		// Mirror of RequestResponse.rateLimited so the list view can render
 		// the "Rate Limited" badge from a summary-only payload (no body
 		// hydration required).

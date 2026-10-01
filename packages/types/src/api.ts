@@ -1,6 +1,7 @@
 import type { AllowedModel } from "./agent";
 import type {
 	AgentAttributionSource,
+	PayloadPersistence,
 	ProjectAttributionSource,
 } from "./request";
 
@@ -66,7 +67,12 @@ export interface RetentionSetRequest {
 }
 
 export interface RequestStorageGetResponse {
+	/** The headers-only switch as configured. */
 	headersOnly: boolean;
+	/** The `store_payloads` switch as configured. */
+	storePayloads: boolean;
+	/** What is actually written per request, from the two switches above. */
+	persists: PayloadPersistence;
 }
 
 export interface RequestStorageSetRequest {

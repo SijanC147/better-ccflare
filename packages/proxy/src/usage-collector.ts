@@ -4,6 +4,7 @@ import {
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import { AsyncDbWriter, DatabaseOperations } from "@better-ccflare/database";
+import { redactRequestHeadersForStorage } from "@better-ccflare/http-common";
 import {
 	Logger,
 	openObserveEnabled,
@@ -18,7 +19,11 @@ import {
 } from "@better-ccflare/types";
 // Cycle-free subpath (see packages/types/src/request.ts header) — same guard
 // the REST handler uses, so both write surfaces narrow identically.
-import { toStreamTerminalState } from "@better-ccflare/types/request";
+import {
+	type PayloadPersistence,
+	resolvePayloadPersistence,
+	toStreamTerminalState,
+} from "@better-ccflare/types/request";
 import { formatCost } from "@better-ccflare/ui-common";
 import { cacheBodyStore } from "./cache-body-store";
 import {
@@ -68,12 +73,34 @@ interface RequestState {
 	shouldSkipLogging?: boolean;
 	currentEvent?: string; // Track SSE event type across chunks
 	payloadReleased: boolean;
+	/**
+	 * Bodies were dropped to bound memory while the header set was kept, so the
+	 * row is still written, headers-only. Distinct from payloadReleased, which
+	 * drops the header set too and writes no row.
+	 */
+	bodiesReleased: boolean;
+	/**
+	 * A memory bound dropped body bytes that had been captured, or refused ones
+	 * about to be. Drives meta.bodiesReleased, so a headers-only row, which
+	 * never held a body, does not claim one was dropped.
+	 */
+	bodiesDropped: boolean;
 	retainedPayloadBytes: number;
 }
 
 interface PreparedPayload {
-	json: string;
+	/** The `request_payloads` row, or null when this request persists nothing. */
+	json: string | null;
+	/** Bytes of `json`, reserved against the finalizer and writer bounds. */
 	bytes: number;
+	/**
+	 * The copy the OpenObserve exporter decodes, when it has to differ from
+	 * `json`: bodies are shipped but not persisted. Null when `json` serves both
+	 * or when nothing is shipped.
+	 */
+	shipJson: string | null;
+	/** Bytes of `shipJson`, reserved alongside `bytes` until it is shipped. */
+	shipBytes: number;
 }
 
 const log = new Logger("UsageCollector");
@@ -87,8 +114,9 @@ const log = new Logger("UsageCollector");
  * nested objects: OpenObserve flattens nested JSON into columns, and a
  * conversation's `messages[]` array would explode the stream's schema.
  *
- * Request headers were already stripped of authorization, x-api-key and cookie
- * by sanitizeRequestHeaders before they reached the collector.
+ * Request headers arrive already passed through redactRequestHeadersForStorage
+ * by preparePayloadForFinalization, so credential and x-better-ccflare-* values
+ * read "[redacted]" here.
  */
 function decodePayloadForShipping(
 	payloadJson: string,
@@ -428,16 +456,21 @@ function processStreamChunk(
 	}
 }
 
-/** Release payload-only fields while retaining the stream parser/token state. */
-function releasePayloadState(state: RequestState): void {
+/** Release the captured bodies while keeping the header set for the row. */
+function releaseBodyState(state: RequestState): void {
 	state.chunks.length = 0;
 	state.chunksBytes = 0;
 	state.chunksTruncated = true;
-	state.payloadReleased = true;
-	// Release request body and headers held in startMessage.
+	state.bodiesReleased = true;
 	// Without this, orphaned requests retain full request bodies until the
 	// inactivity cleanup configured by CF_STREAM_TIMEOUT_MS runs. See #67.
 	state.startMessage.requestBody = null;
+}
+
+/** Release payload-only fields while retaining the stream parser/token state. */
+function releasePayloadState(state: RequestState): void {
+	releaseBodyState(state);
+	state.payloadReleased = true;
 	state.startMessage.requestHeaders = {};
 	state.startMessage.responseHeaders = {};
 }
@@ -475,7 +508,8 @@ export class UsageCollector {
 		private readonly getStorePayloads: () => boolean,
 		private readonly onSummary: (summary: RequestResponse) => void,
 		// Fork feature: when true, payloads are persisted with request/response
-		// bodies stripped (headers + metadata only). Sub-mode of getStorePayloads.
+		// bodies stripped (headers + metadata only), whether or not
+		// getStorePayloads is on. See persistsHeaders / persistsBodies.
 		private readonly getHeadersOnly: () => boolean = () => false,
 	) {
 		this.maxBufferSize =
@@ -549,6 +583,8 @@ export class UsageCollector {
 			gatewayHint: extractGatewayHintHeadersFromParts(msg.requestHeaders),
 			shouldSkipLogging: shouldSkip,
 			payloadReleased: false,
+			bodiesReleased: false,
+			bodiesDropped: false,
 			retainedPayloadBytes: 0,
 		};
 
@@ -632,7 +668,14 @@ export class UsageCollector {
 			state.billingType = planProviders.has(msg.providerName) ? "plan" : "api";
 		}
 
-		if (this.shouldRetainPayload()) {
+		if (!this.shouldRetainPayload()) {
+			this.releaseRequestPayload(state);
+		} else if (!this.retainsBodies()) {
+			// Headers-only: the header set is kept for the payload row, the body is
+			// not needed by anything past this point (project attribution above has
+			// already read it), so it is not held for the request's lifetime.
+			state.startMessage.requestBody = null;
+		} else {
 			const requestBodyBytes = msg.requestBody
 				? Buffer.byteLength(msg.requestBody)
 				: 0;
@@ -644,13 +687,11 @@ export class UsageCollector {
 				log.warn(
 					`Active payload budget exceeded; disabling payload capture for ${msg.requestId} (request_bytes=${requestBodyBytes}, active_payload_bytes=${this.activePayloadBytes})`,
 				);
-				this.releaseRequestPayload(state);
+				this.releaseRetainedBodies(state, true);
 			} else {
 				state.retainedPayloadBytes = requestBodyBytes;
 				this.activePayloadBytes += requestBodyBytes;
 			}
-		} else {
-			this.releaseRequestPayload(state);
 		}
 
 		this.requests.set(msg.requestId, state);
@@ -677,13 +718,17 @@ export class UsageCollector {
 			return;
 		}
 
-		const storePayloads = this.shouldRetainPayload();
-		if (!storePayloads && !state.payloadReleased) {
+		if (!this.shouldRetainPayload() && !state.payloadReleased) {
 			this.releaseRequestPayload(state);
 		}
 
-		// Store chunk for later payload saving (capped at MAX_RESPONSE_BODY_BYTES)
-		if (storePayloads && !state.payloadReleased && !state.chunksTruncated) {
+		// Store chunk for later payload saving (capped at MAX_RESPONSE_BODY_BYTES).
+		// Headers-only storage never needs the response body, so nothing is held.
+		if (
+			this.retainsBodies() &&
+			!state.payloadReleased &&
+			!state.chunksTruncated
+		) {
 			const remaining = MAX_RESPONSE_BODY_BYTES - state.chunksBytes;
 			const bytesToCapture = Math.min(data.byteLength, Math.max(0, remaining));
 			if (this.activePayloadBytes + bytesToCapture > MAX_ACTIVE_PAYLOAD_BYTES) {
@@ -693,7 +738,7 @@ export class UsageCollector {
 				log.warn(
 					`Active payload budget exceeded; disabling payload capture for ${requestId} (incoming_bytes=${bytesToCapture}, request_payload_bytes=${state.retainedPayloadBytes}, active_payload_bytes=${this.activePayloadBytes})`,
 				);
-				this.releaseRequestPayload(state);
+				this.releaseRetainedBodies(state, true);
 			} else {
 				if (bytesToCapture > 0) {
 					// Always copy: an incoming view can cover only a few bytes of a much
@@ -1009,9 +1054,10 @@ export class UsageCollector {
 		let shippedBodies: Record<string, unknown> | null = null;
 		if (preparedPayload) {
 			if (openObserveShipsPayloads()) {
-				shippedBodies = decodePayloadForShipping(preparedPayload.json);
+				const shipSource = preparedPayload.shipJson ?? preparedPayload.json;
+				if (shipSource) shippedBodies = decodePayloadForShipping(shipSource);
 			}
-			if (this.getStorePayloads()) {
+			if (preparedPayload.json !== null) {
 				this.enqueuePreparedPayload(requestId, preparedPayload);
 			} else {
 				this.releasePreparedPayload(preparedPayload);
@@ -1109,14 +1155,42 @@ export class UsageCollector {
 	}
 
 	/**
-	 * Whether the request/response bodies must be kept in memory to the end of
-	 * the lifecycle. Local persistence is one reason; shipping them to
-	 * OpenObserve is the other, and it is independent — with store_payloads off
-	 * and shipping on, the bodies are held only long enough to be posted and
-	 * are never written to the database.
+	 * Whether a `request_payloads` row is written at all. Headers-only storage
+	 * writes one (headers and metadata, no bodies) even with store_payloads off:
+	 * store_payloads governs bodies, and the headers-only switch promises
+	 * headers. SB23-2572: before this, headers-only was a sub-mode of
+	 * store_payloads and silently wrote nothing when store_payloads was off.
+	 */
+	private persistsHeaders(): boolean {
+		return this.payloadPersistence() !== "none";
+	}
+
+	/** Whether that row carries the request and response bodies. */
+	private persistsBodies(): boolean {
+		return this.payloadPersistence() === "full";
+	}
+
+	private payloadPersistence(): PayloadPersistence {
+		return resolvePayloadPersistence(
+			this.getStorePayloads(),
+			this.getHeadersOnly(),
+		);
+	}
+
+	/**
+	 * Whether the payload snapshot (headers, and bodies when retainsBodies) must
+	 * be kept in memory to the end of the lifecycle. Local persistence is one
+	 * reason; shipping bodies to OpenObserve is the other, and it is
+	 * independent: with nothing persisted and shipping on, the bodies are held
+	 * only long enough to be posted and are never written to the database.
 	 */
 	private shouldRetainPayload(): boolean {
-		return this.getStorePayloads() || openObserveShipsPayloads();
+		return this.persistsHeaders() || openObserveShipsPayloads();
+	}
+
+	/** Whether the request and response bodies are needed at finalization. */
+	private retainsBodies(): boolean {
+		return this.persistsBodies() || openObserveShipsPayloads();
 	}
 
 	private releaseRequestPayload(state: RequestState): void {
@@ -1126,6 +1200,39 @@ export class UsageCollector {
 		);
 		state.retainedPayloadBytes = 0;
 		releasePayloadState(state);
+	}
+
+	/**
+	 * Drop what a memory bound says must go. Bodies always; the header set only
+	 * when no row will be written, because it is a few KB and it is the part of
+	 * the row headers-only storage exists to keep. Before SB23-2572 a long
+	 * stream lost its header set here and wrote no row at all.
+	 *
+	 * `dropped` says whether body bytes are actually being lost, which is what
+	 * meta.bodiesReleased reports; the release itself runs either way, because
+	 * it also stops any later capture on the request.
+	 */
+	private releaseRetainedBodies(state: RequestState, dropped: boolean): void {
+		if (!this.persistsHeaders()) {
+			this.releaseRequestPayload(state);
+			return;
+		}
+		if (dropped) state.bodiesDropped = true;
+		this.activePayloadBytes = Math.max(
+			0,
+			this.activePayloadBytes - state.retainedPayloadBytes,
+		);
+		state.retainedPayloadBytes = 0;
+		releaseBodyState(state);
+	}
+
+	/** Whether the state holds any body bytes a release would drop. */
+	private holdsBodies(state: RequestState): boolean {
+		return (
+			state.retainedPayloadBytes > 0 ||
+			state.chunks.length > 0 ||
+			state.startMessage.requestBody !== null
+		);
 	}
 
 	private freeRequestState(state: RequestState): void {
@@ -1140,26 +1247,30 @@ export class UsageCollector {
 		if (!this.shouldRetainPayload() || state.payloadReleased) return null;
 
 		const { startMessage } = state;
-		// Fork feature: headers-only storage strips request/response bodies but
-		// still persists headers + metadata for the request-detail view. Both
-		// bodies are dropped, so they contribute nothing to the size estimates.
-		//
-		// It is a sub-mode of store_payloads, so it must not strip bodies when
-		// the only reason this payload exists is that OpenObserve shipping asked
-		// for it.
-		const headersOnly = this.getStorePayloads() && this.getHeadersOnly();
-		const estimatedRequestBytes = headersOnly
-			? 0
-			: (startMessage.requestBody?.length ?? 0);
+		// Three independent decisions. The row is written when headers are
+		// persisted; it carries bodies only when store_payloads is on and
+		// headers-only is off; OpenObserve gets bodies whenever it ships them,
+		// which is why a headers-only row can need a second, full copy.
+		const persistHeaders = this.persistsHeaders();
+		const persistBodies = this.persistsBodies();
+		const shipBodies = openObserveShipsPayloads();
+		const needBodies = persistBodies || shipBodies;
+		const separateShipCopy = shipBodies && !persistBodies;
+		const estimatedRequestBytes = needBodies
+			? (startMessage.requestBody?.length ?? 0)
+			: 0;
 		// msg.responseBody is already a text string (no inflation needed), but
 		// state.chunksBytes is raw bytes that get base64-encoded before storage
 		// (see combineChunks(...).toString("base64") below), which inflates
 		// size by ~33% — scale the estimate accordingly for the streaming case.
-		const estimatedResponseBytes = headersOnly
-			? 0
-			: (msg.responseBody?.length ?? Math.ceil((state.chunksBytes * 4) / 3));
+		const estimatedResponseBytes = needBodies
+			? (msg.responseBody?.length ?? Math.ceil((state.chunksBytes * 4) / 3))
+			: 0;
 		const estimatedPayloadBytes =
-			estimatedRequestBytes + estimatedResponseBytes + 2048;
+			estimatedRequestBytes +
+			estimatedResponseBytes +
+			2048 +
+			(separateShipCopy && persistHeaders ? 2048 : 0);
 		const estimatedPendingBytes =
 			this.pendingPayloadBytes + estimatedPayloadBytes;
 
@@ -1177,7 +1288,7 @@ export class UsageCollector {
 
 		let responseBody: string | null = null;
 		let requestBody: string | null = null;
-		if (!headersOnly) {
+		if (needBodies) {
 			if (msg.responseBody) {
 				responseBody = msg.responseBody;
 			} else if (state.chunks.length > 0) {
@@ -1196,58 +1307,81 @@ export class UsageCollector {
 			}
 		}
 
-		const payloadJson = JSON.stringify({
-			request: {
-				headers: startMessage.requestHeaders,
-				body: requestBody,
-			},
-			response: {
-				status: startMessage.responseStatus,
-				headers: startMessage.responseHeaders,
-				body: responseBody,
-			},
-			meta: {
-				accountId: startMessage.accountId || NO_ACCOUNT_ID,
-				timestamp: startMessage.timestamp,
-				success: msg.success,
-				isStream: startMessage.isStream,
-				retry: startMessage.retryAttempt,
-				project: state.project ?? undefined,
-				projectAttributionSource: state.projectAttributionSource ?? undefined,
-				agentAttributionSource: state.agentAttributionSource ?? undefined,
-			},
-		});
+		// Redacted here, at the one point every producer's header set passes on
+		// its way to the database or OpenObserve, and not only at the producer:
+		// the refusal and pool-exhausted paths in proxy.ts stage raw req.headers.
+		const requestHeaders = redactRequestHeadersForStorage(
+			startMessage.requestHeaders,
+		);
+		const meta = {
+			accountId: startMessage.accountId || NO_ACCOUNT_ID,
+			timestamp: startMessage.timestamp,
+			success: msg.success,
+			isStream: startMessage.isStream,
+			retry: startMessage.retryAttempt,
+			project: state.project ?? undefined,
+			projectAttributionSource: state.projectAttributionSource ?? undefined,
+			agentAttributionSource: state.agentAttributionSource ?? undefined,
+			// A memory bound dropped the bodies before the request finished, so a
+			// null body here means "not kept", not "empty".
+			bodiesReleased: state.bodiesDropped || undefined,
+		};
+		const serialize = (withBodies: boolean): string =>
+			JSON.stringify({
+				request: {
+					headers: requestHeaders,
+					body: withBodies ? requestBody : null,
+				},
+				response: {
+					status: startMessage.responseStatus,
+					headers: startMessage.responseHeaders,
+					body: withBodies ? responseBody : null,
+				},
+				meta,
+			});
+		const payloadJson = persistHeaders ? serialize(persistBodies) : null;
+		const shipJson = separateShipCopy ? serialize(true) : null;
 		responseBody = null;
+		requestBody = null;
 
-		const payloadBytes = Buffer.byteLength(payloadJson);
-		const totalPendingBytes = this.pendingPayloadBytes + payloadBytes;
+		const payloadBytes = payloadJson ? Buffer.byteLength(payloadJson) : 0;
+		const shipBytes = shipJson ? Buffer.byteLength(shipJson) : 0;
+		const totalPendingBytes =
+			this.pendingPayloadBytes + payloadBytes + shipBytes;
 		if (
 			totalPendingBytes > MAX_PENDING_PAYLOAD_BYTES ||
 			!this.asyncWriter.canAcceptPayload(totalPendingBytes)
 		) {
-			this.asyncWriter.recordPayloadDrop(payloadBytes);
+			this.asyncWriter.recordPayloadDrop(payloadBytes + shipBytes);
 			log.warn(
-				`Backpressure: skipping payload persistence for ${startMessage.requestId} after serialization (bytes=${payloadBytes}, pending_finalizer_bytes=${this.pendingPayloadBytes})`,
+				`Backpressure: skipping payload persistence for ${startMessage.requestId} after serialization (bytes=${payloadBytes + shipBytes}, pending_finalizer_bytes=${this.pendingPayloadBytes})`,
 			);
 			return null;
 		}
 
 		this.pendingPayloadBytes = totalPendingBytes;
 		this.pendingPayloadCount++;
-		return { json: payloadJson, bytes: payloadBytes };
+		return { json: payloadJson, bytes: payloadBytes, shipJson, shipBytes };
 	}
 
 	private enqueuePreparedPayload(
 		requestId: string,
 		payload: PreparedPayload,
 	): void {
+		// Both reservations return in the finally below; from there the writer's
+		// own enqueuePayload accounting covers the row.
+		const json = payload.json;
+		if (json === null) {
+			this.releasePreparedPayload(payload);
+			return;
+		}
 		try {
 			const accepted = this.asyncWriter.enqueuePayload(
 				requestId,
 				payload.bytes,
 				async () => {
 					try {
-						await this.dbOps.saveRequestPayloadRaw(requestId, payload.json);
+						await this.dbOps.saveRequestPayloadRaw(requestId, json);
 					} catch (error) {
 						log.error(`Failed to save payload for ${requestId}:`, error);
 					}
@@ -1263,7 +1397,18 @@ export class UsageCollector {
 		}
 	}
 
+	private releaseShipCopy(payload: PreparedPayload): void {
+		if (payload.shipBytes === 0 && payload.shipJson === null) return;
+		this.pendingPayloadBytes = Math.max(
+			0,
+			this.pendingPayloadBytes - payload.shipBytes,
+		);
+		payload.shipBytes = 0;
+		payload.shipJson = null;
+	}
+
 	private releasePreparedPayload(payload: PreparedPayload): void {
+		this.releaseShipCopy(payload);
 		this.pendingPayloadBytes = Math.max(
 			0,
 			this.pendingPayloadBytes - payload.bytes,
@@ -1280,11 +1425,20 @@ export class UsageCollector {
 		// request bodies and captured response chunks alive indefinitely.
 		for (const [id, state] of this.requests) {
 			const age = now - state.createdAt;
-			if (!state.payloadReleased && age > REQUEST_PAYLOAD_RETENTION_MS) {
-				log.warn(
-					`Request ${id} is still active after ${Math.round(age / 1000)}s; releasing retained payload fields`,
-				);
-				this.releaseRequestPayload(state);
+			if (
+				!state.payloadReleased &&
+				!state.bodiesReleased &&
+				age > REQUEST_PAYLOAD_RETENTION_MS
+			) {
+				// A headers-only request never held a body, so there is nothing to
+				// warn about; the release still runs to stop any later capture.
+				const held = this.holdsBodies(state);
+				if (held) {
+					log.warn(
+						`Request ${id} is still active after ${Math.round(age / 1000)}s; releasing retained payload fields`,
+					);
+				}
+				this.releaseRetainedBodies(state, held);
 			}
 		}
 

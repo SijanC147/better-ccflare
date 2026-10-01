@@ -1,7 +1,7 @@
 $kind: http-request
 name: 'GET /api/config/request-storage'
 description: |-
-  Whether request and response payloads are stored.
+  The headers-only and store_payloads switches, and what each request's payload row persists as a result.
 method: GET
 url: '{{baseUrl}}/api/config/request-storage'
 order: 9000

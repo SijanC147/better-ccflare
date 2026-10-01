@@ -4,7 +4,7 @@ description: |-
   Set retry_attempts, retry_delay_ms and retry_backoff. Out-of-range values are rejected.
 method: POST
 url: '{{baseUrl}}/api/config/retry'
-order: 38000
+order: 42000
 headers:
   - key: 'Content-Type'
     value: 'application/json'
