@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
 	OPENOBSERVE_LOG_MIN_LEVELS,
+	type OpenObserveConfig,
+	type OpenObserveConfigUpdate,
 	type OpenObserveLogMinLevel,
 } from "../../api";
 import {
@@ -25,6 +27,116 @@ import {
 } from "../ui/select";
 import { Switch } from "../ui/switch";
 
+/** Every field the card edits except the token, which is handled apart. */
+export interface OpenObserveFormState {
+	url: string;
+	org: string;
+	user: string;
+	logStream: string;
+	requestStream: string;
+	metricsStream: string;
+	shipPayloads: boolean;
+	// Empty means "not read from the server yet", not a level. The default level
+	// lives in the config layer; repeating it here would be a second source of
+	// truth. An empty value is omitted from the save, which leaves the stored
+	// level alone.
+	logMinLevel: OpenObserveLogMinLevel | "";
+}
+
+/** What the card shows before the server's values have been read. */
+export const INITIAL_OPENOBSERVE_FORM: OpenObserveFormState = {
+	url: "",
+	org: "default",
+	user: "",
+	logStream: "better_ccflare_logs",
+	requestStream: "better_ccflare_requests",
+	metricsStream: "better_ccflare_exporter_metrics",
+	shipPayloads: false,
+	logMinLevel: "",
+};
+
+/** The form seeded from a server read. The token is never pre-filled: the server never returns it. */
+export function formFromConfig(data: OpenObserveConfig): OpenObserveFormState {
+	return {
+		url: data.url,
+		org: data.org,
+		user: data.user,
+		logStream: data.logStream,
+		requestStream: data.requestStream,
+		metricsStream: data.metricsStream,
+		shipPayloads: data.shipPayloads,
+		logMinLevel: data.logMinLevel,
+	};
+}
+
+/**
+ * Every save posts the whole card, so the level has to travel with it: an
+ * absent logMinLevel leaves the stored one alone rather than resetting it.
+ *
+ * `loaded` is whether the server's values have been read. The metrics stream
+ * is sent only once they have, so a save made before the read lands cannot
+ * overwrite a configured stream with the placeholder. Once read, an emptied
+ * field is sent as empty, which the server reads as the default, the same as
+ * the two streams above it.
+ */
+export function buildOpenObserveUpdate(
+	form: OpenObserveFormState,
+	loaded: boolean,
+): OpenObserveConfigUpdate {
+	const body: OpenObserveConfigUpdate = {
+		url: form.url,
+		org: form.org,
+		user: form.user,
+		logStream: form.logStream,
+		requestStream: form.requestStream,
+		shipPayloads: form.shipPayloads,
+	};
+	if (form.logMinLevel !== "") body.logMinLevel = form.logMinLevel;
+	if (loaded) body.metricsStream = form.metricsStream;
+	return body;
+}
+
+/**
+ * The Save button's body. An absent token leaves the stored one alone, so an
+ * empty field must stay absent: sending an empty string here would clear the
+ * token on every unrelated save.
+ */
+export function buildOpenObserveSave(
+	form: OpenObserveFormState,
+	loaded: boolean,
+	token: string,
+): OpenObserveConfigUpdate {
+	const body = buildOpenObserveUpdate(form, loaded);
+	if (token.length > 0) body.token = token;
+	return body;
+}
+
+/** The "Clear stored token" button's body: the whole card, plus an empty token. */
+export function buildOpenObserveClearToken(
+	form: OpenObserveFormState,
+	loaded: boolean,
+): OpenObserveConfigUpdate {
+	return { ...buildOpenObserveUpdate(form, loaded), token: "" };
+}
+
+export interface OpenObserveCardViewProps {
+	/** The server's read, or undefined until it lands. */
+	data: OpenObserveConfig | undefined;
+	form: OpenObserveFormState;
+	token: string;
+	/** Loading or saving: every control is disabled. */
+	busy: boolean;
+	/** The last save failed. */
+	isError: boolean;
+	onFieldChange: <K extends keyof OpenObserveFormState>(
+		field: K,
+		value: OpenObserveFormState[K],
+	) => void;
+	onTokenChange: (token: string) => void;
+	onSave: () => void;
+	onClearToken: () => void;
+}
+
 /**
  * OpenObserve shipping.
  *
@@ -36,70 +148,61 @@ export function OpenObserveCard() {
 	const { data, isLoading } = useOpenObserveConfig();
 	const setConfig = useSetOpenObserveConfig();
 
-	const [url, setUrl] = useState("");
-	const [org, setOrg] = useState("default");
-	const [user, setUser] = useState("");
+	const [form, setForm] = useState<OpenObserveFormState>(
+		INITIAL_OPENOBSERVE_FORM,
+	);
 	const [token, setToken] = useState("");
-	const [logStream, setLogStream] = useState("better_ccflare_logs");
-	const [requestStream, setRequestStream] = useState("better_ccflare_requests");
-	const [metricsStream, setMetricsStream] = useState(
-		"better_ccflare_exporter_metrics",
-	);
-	const [shipPayloads, setShipPayloads] = useState(false);
-	// Empty means "not read from the server yet", not a level. The default level
-	// lives in the config layer; repeating it here would be a second source of
-	// truth. An empty value is omitted from the save, which leaves the stored
-	// level alone.
-	const [logMinLevel, setLogMinLevel] = useState<OpenObserveLogMinLevel | "">(
-		"",
-	);
 
 	useEffect(() => {
 		if (!data) return;
-		setUrl(data.url);
-		setOrg(data.org);
-		setUser(data.user);
-		setLogStream(data.logStream);
-		setRequestStream(data.requestStream);
-		setMetricsStream(data.metricsStream);
-		setShipPayloads(data.shipPayloads);
-		setLogMinLevel(data.logMinLevel);
-		// The token is never pre-filled — the server never returns it.
+		setForm(formFromConfig(data));
 	}, [data]);
 
-	const busy = isLoading || setConfig.isPending;
+	const loaded = data !== undefined;
+
+	return (
+		<OpenObserveCardView
+			data={data}
+			form={form}
+			token={token}
+			busy={isLoading || setConfig.isPending}
+			isError={setConfig.isError}
+			onFieldChange={(field, value) =>
+				setForm((current) => {
+					const next = { ...current };
+					next[field] = value;
+					return next;
+				})
+			}
+			onTokenChange={setToken}
+			onSave={() =>
+				setConfig.mutate(buildOpenObserveSave(form, loaded, token), {
+					onSuccess: () => setToken(""),
+				})
+			}
+			onClearToken={() =>
+				setConfig.mutate(buildOpenObserveClearToken(form, loaded))
+			}
+		/>
+	);
+}
+
+/** The card itself, with no hooks, so every state renders in a test. */
+export function OpenObserveCardView({
+	data,
+	form,
+	token,
+	busy,
+	isError,
+	onFieldChange,
+	onTokenChange,
+	onSave,
+	onClearToken,
+}: OpenObserveCardViewProps) {
 	// The environment wins over the stored value, so saving here would look like
 	// a no-op. Say so rather than letting the operator wonder.
 	const tokenOverridden = data?.tokenFromEnvironment ?? false;
 	const endpointOverridden = data?.endpointFromEnvironment ?? false;
-
-	// Every save posts the whole card, so the level has to travel with it: an
-	// absent logMinLevel leaves the stored one alone rather than resetting it.
-	function currentState(): Parameters<typeof setConfig.mutate>[0] {
-		const body: Parameters<typeof setConfig.mutate>[0] = {
-			url,
-			org,
-			user,
-			logStream,
-			requestStream,
-			shipPayloads,
-		};
-		if (logMinLevel !== "") body.logMinLevel = logMinLevel;
-		// Sent only once the server's value has been read, so a save made before
-		// the read lands cannot overwrite a configured stream with the
-		// placeholder. Once read, an emptied field is sent as empty, which the
-		// server reads as the default, the same as the two streams above.
-		if (data) body.metricsStream = metricsStream;
-		return body;
-	}
-
-	function handleSave() {
-		const body = currentState();
-		// Absent leaves the stored token alone. Sending an empty string here would
-		// clear it on every unrelated save.
-		if (token.length > 0) body.token = token;
-		setConfig.mutate(body, { onSuccess: () => setToken("") });
-	}
 
 	return (
 		<Card className="card-hover">
@@ -138,9 +241,9 @@ export function OpenObserveCard() {
 					</label>
 					<Input
 						id="oo-url"
-						value={url}
+						value={form.url}
 						disabled={busy}
-						onChange={(e) => setUrl(e.target.value)}
+						onChange={(e) => onFieldChange("url", e.target.value)}
 						placeholder="http://host:5080"
 					/>
 				</div>
@@ -152,9 +255,9 @@ export function OpenObserveCard() {
 						</label>
 						<Input
 							id="oo-org"
-							value={org}
+							value={form.org}
 							disabled={busy}
-							onChange={(e) => setOrg(e.target.value)}
+							onChange={(e) => onFieldChange("org", e.target.value)}
 							placeholder="default"
 						/>
 					</div>
@@ -166,9 +269,9 @@ export function OpenObserveCard() {
 						<Input
 							id="oo-user"
 							autoComplete="off"
-							value={user}
+							value={form.user}
 							disabled={busy}
-							onChange={(e) => setUser(e.target.value)}
+							onChange={(e) => onFieldChange("user", e.target.value)}
 							placeholder="optional"
 						/>
 					</div>
@@ -179,9 +282,9 @@ export function OpenObserveCard() {
 						</label>
 						<Input
 							id="oo-log-stream"
-							value={logStream}
+							value={form.logStream}
 							disabled={busy}
-							onChange={(e) => setLogStream(e.target.value)}
+							onChange={(e) => onFieldChange("logStream", e.target.value)}
 							placeholder="better_ccflare_logs"
 						/>
 					</div>
@@ -192,9 +295,9 @@ export function OpenObserveCard() {
 						</label>
 						<Input
 							id="oo-request-stream"
-							value={requestStream}
+							value={form.requestStream}
 							disabled={busy}
-							onChange={(e) => setRequestStream(e.target.value)}
+							onChange={(e) => onFieldChange("requestStream", e.target.value)}
 							placeholder="better_ccflare_requests"
 						/>
 					</div>
@@ -205,9 +308,9 @@ export function OpenObserveCard() {
 						</label>
 						<Input
 							id="oo-metrics-stream"
-							value={metricsStream}
+							value={form.metricsStream}
 							disabled={busy}
-							onChange={(e) => setMetricsStream(e.target.value)}
+							onChange={(e) => onFieldChange("metricsStream", e.target.value)}
 							placeholder="better_ccflare_exporter_metrics"
 						/>
 						<p className="text-xs text-muted-foreground">
@@ -228,7 +331,7 @@ export function OpenObserveCard() {
 						placeholder={data?.tokenSet ? "Replace token" : "Not configured"}
 						value={token}
 						disabled={busy}
-						onChange={(e) => setToken(e.target.value)}
+						onChange={(e) => onTokenChange(e.target.value)}
 					/>
 					<p className="text-xs text-muted-foreground">
 						{data?.tokenSet ? "Token configured" : "No token configured"}. Left
@@ -241,9 +344,11 @@ export function OpenObserveCard() {
 						Minimum log level
 					</label>
 					<Select
-						value={logMinLevel}
+						value={form.logMinLevel}
 						disabled={busy}
-						onValueChange={(v) => setLogMinLevel(v as OpenObserveLogMinLevel)}
+						onValueChange={(v) =>
+							onFieldChange("logMinLevel", v as OpenObserveLogMinLevel)
+						}
 					>
 						<SelectTrigger id="oo-log-min-level">
 							<SelectValue placeholder="Loading" />
@@ -274,14 +379,16 @@ export function OpenObserveCard() {
 						</p>
 					</div>
 					<Switch
-						checked={shipPayloads}
+						checked={form.shipPayloads}
 						disabled={busy}
-						onCheckedChange={setShipPayloads}
+						onCheckedChange={(checked) =>
+							onFieldChange("shipPayloads", checked)
+						}
 					/>
 				</div>
 
 				<div className="flex gap-2">
-					<Button disabled={busy} onClick={handleSave}>
+					<Button disabled={busy} onClick={onSave}>
 						Save
 					</Button>
 					{data?.tokenSet && (
@@ -289,7 +396,7 @@ export function OpenObserveCard() {
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onClick={() => setConfig.mutate({ ...currentState(), token: "" })}
+							onClick={onClearToken}
 						>
 							Clear stored token
 						</Button>
@@ -311,7 +418,7 @@ export function OpenObserveCard() {
 					</p>
 				)}
 
-				{setConfig.isError && (
+				{isError && (
 					<p className="text-xs text-destructive">
 						Failed to save — check server logs.
 					</p>
