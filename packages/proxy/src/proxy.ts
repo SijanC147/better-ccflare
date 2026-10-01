@@ -63,6 +63,7 @@ import {
 	buildSessionRejectResponse,
 	recordSessionRequest,
 } from "./session-governor";
+import { wrapNonJsonUpstreamError } from "./upstream-error-envelope";
 import {
 	getUsageCollector,
 	initUsageCollector,
@@ -238,7 +239,12 @@ export function handleProxy(
 	const result = isInternalProbe(req.headers, ctx)
 		? runForceAccountModelExempt(run)
 		: run();
-	if (!observation) return result;
+	// The last step before the client, after every classification, retry,
+	// failover and analytics capture has seen the raw upstream response
+	// (SB23-3494).
+	const toClient = (response: Response) =>
+		wrapNonJsonUpstreamError(response, url.pathname);
+	if (!observation) return result.then(toClient);
 	return result.then(
 		(response) => {
 			try {
@@ -246,7 +252,7 @@ export function handleProxy(
 			} catch {
 				log.warn("Request observation failed", { capture_gap: true });
 			}
-			return response;
+			return toClient(response);
 		},
 		(error) => {
 			try {

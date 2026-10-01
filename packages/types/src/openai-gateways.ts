@@ -330,6 +330,14 @@ export const REPORT_UPSTREAM_MODEL_HEADER =
 	"x-better-ccflare-report-upstream-model";
 
 /**
+ * Response header naming the content type an upstream error page was sent
+ * in, set when `handleProxy` rewraps that page as a JSON error (SB23-3494).
+ * The Chat Completions handler carries it onto its OpenAI-shaped error.
+ */
+export const UPSTREAM_CONTENT_TYPE_HEADER =
+	"x-better-ccflare-upstream-content-type";
+
+/**
  * Internal: names the combo whose slots are the fallback ladder for this
  * request. Set only by the gateway handler from its own config, stripped from
  * any client request on the gateway path, and removed before the request goes
