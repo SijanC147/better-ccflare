@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { Account } from "@better-ccflare/types";
+import { CodexProvider } from "./provider";
 import {
 	CODEX_TURN_METADATA_HEADER,
 	CODEX_TURN_STATE_HEADER,
@@ -401,5 +403,45 @@ describe("CodexTurnStateStore messages turns", () => {
 			"x".repeat(4097),
 		);
 		expect(store.lookupMessagesTurn(turn(1), "B").match).toBe("fresh");
+	});
+});
+
+describe("CodexProvider pending derived turns", () => {
+	it("holds at most 5000 lookups awaiting a response, dropping the oldest", async () => {
+		const provider = new CodexProvider();
+		const pending = (
+			provider as unknown as { messagesTurnByRequest: Map<string, unknown> }
+		).messagesTurnByRequest;
+		const account = {
+			id: "acc-cap",
+			name: "cap",
+			provider: "codex",
+		} as Account;
+		const body = JSON.stringify({
+			model: "gpt-5.5",
+			max_tokens: 16,
+			metadata: {
+				user_id: JSON.stringify({
+					session_id: "5e550000-0000-4000-8000-0000000000ca",
+				}),
+			},
+			messages: [{ role: "user", content: "hi" }],
+		});
+		for (let i = 0; i <= 5000; i++) {
+			await provider.transformRequestBody(
+				new Request("https://chatgpt.com/backend-api/codex/responses", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-better-ccflare-request-id": `req-${i}`,
+					},
+					body,
+				}),
+				account,
+			);
+		}
+		expect(pending.size).toBe(5000);
+		expect(pending.has("req-0\0acc-cap")).toBe(false);
+		expect(pending.has("req-5000\0acc-cap")).toBe(true);
 	});
 });
