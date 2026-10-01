@@ -3,6 +3,7 @@ import type { AccountResponse } from "@better-ccflare/types";
 import { parseTuiArgs, runTui, type TuiDeps } from "../tui";
 import {
 	ENTER_SCREEN,
+	formatClock,
 	LEAVE_SCREEN,
 	type LoopIO,
 	type LoopSignal,
@@ -174,8 +175,10 @@ describe("runOverviewLoop", () => {
 		await f.fireInterval();
 		const frame = f.writes[f.writes.length - 1];
 		expect(frame).toContain("alpha");
+		// The clock is the viewer's local time, so the expected value is built
+		// the same way: a literal would pass in one zone and fail in UTC CI.
 		expect(frame).toContain(
-			"! server not running on http://127.0.0.1:65532; showing data from 10:00:00",
+			`! server not running on http://127.0.0.1:65532; showing data from ${formatClock(new Date(Date.parse("2026-10-01T08:00:00Z")))}`,
 		);
 		expect(f.timers().some((t) => t.ms === 5000)).toBe(true);
 		f.key("q");

@@ -5,6 +5,7 @@ import {
 	buildOverviewAccount,
 	type FetchLike,
 	fetchOverview,
+	formatClock,
 	formatResetIn,
 	renderOverview,
 } from "../tui-overview";
@@ -212,6 +213,14 @@ describe("renderOverview", () => {
 
 	it("names an empty pool", () => {
 		expect(renderOverview([], options)).toContain("No accounts.");
+	});
+});
+
+describe("formatClock", () => {
+	it("prints local time on the 24-hour clock in any zone", () => {
+		// Built from local components, so the expectation holds in every zone.
+		expect(formatClock(new Date(2026, 9, 1, 15, 4, 5))).toBe("15:04:05");
+		expect(formatClock(new Date(2026, 9, 1, 0, 0, 0))).toBe("00:00:00");
 	});
 });
 
