@@ -147,6 +147,49 @@ const writableAtFirstRead = new Map<string, boolean>();
 const strippedFieldsReported = new Set<string>();
 
 /**
+ * The local_control_secret this process has handed out for each config path,
+ * so every Config in the process returns one value for one file, even while
+ * nothing can be written (SB23-2489).
+ *
+ * Before this the secret was per INSTANCE whenever a save was refused: stable on
+ * one Config, different on the next one built in the same process, because the
+ * generated value could not reach the file and nothing else held it.
+ * packages/http-api/src/handlers/oauth.ts builds a Config per request, so a
+ * long-lived server under a refusal held as many secrets as it had instances.
+ * Traced at 880e0797 and found latent rather than live: the one comparison,
+ * AuthService#isLocalControlRequest, holds the value apps/server read once at
+ * startup, and the per-request instances never ask for the secret. This makes
+ * the property hold rather than leaving it to that accident.
+ *
+ * Consulted only where getLocalControlSecret() would otherwise mint a fresh
+ * value, after this.data and after the disk re-read. A secret in either still
+ * wins, which keeps the #379 race intact: a CLI racing the server's first boot
+ * persists its own secret after an instance was constructed.
+ *
+ * Recorded on every value getLocalControlSecret() returns, first one wins, not
+ * only on the ones it generates. Recording only at generation leaves one gap: a
+ * file that held the secret at startup and breaks later makes the next instance
+ * mint a fresh value while AuthService holds the startup one. Nothing an
+ * attacker wrote can enter this way, because this.data and the disk re-read
+ * both sit behind the strip that drops local_control_secret from a file other
+ * users can write.
+ *
+ * Keyed on this.configPath, the validated configured path, rather than on
+ * writeTarget()'s resolved target, because the untrusted-path refusal has no
+ * target at all and it is one of the three refusals this exists for. Two
+ * configured paths that are links to one file get two entries; each writes to
+ * that file whenever it can save, so they converge through the disk re-read.
+ *
+ * Module-scoped and never cleared, beside writableAtFirstRead and for a related
+ * reason: AuthService keeps the value it read for the life of the process, so
+ * the process has to keep agreeing with it. What this cannot do is reach
+ * another process. The CLI reads the secret from the file, which a refused save
+ * never writes, so it still cannot learn the server's value while the refusal
+ * holds, and the refusal messages say so.
+ */
+const localControlSecretsByPath = new Map<string, string>();
+
+/**
  * Whole families that are an endpoint or a credential, stripped from a config
  * another local user can write (SB23-2351).
  *
@@ -1835,7 +1878,7 @@ export class Config extends EventEmitter {
 		// deduplicated either.
 		if (this.strippedFields.size > 0) {
 			log.error(
-				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
+				`Config not saved: ${this.strippedFrom} was loaded from a file other local users can write, with ${this.strippedFields.size} credential or endpoint field(s) ignored, and writing it back would delete them from disk. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process generates one and keeps it until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process, and neither can a client holding an earlier secret. Make the file writable only by its owner, or move it to a directory no other local user can write, then restart.`,
 			);
 			return;
 		}
@@ -1864,7 +1907,7 @@ export class Config extends EventEmitter {
 		// as readily as at boot.
 		if (this.unparseableFrom !== undefined) {
 			log.error(
-				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. local_control_secret is regenerated on every boot while this lasts and is never written, so local control clients holding an earlier secret fail to authenticate. Fix the file, or move it aside so a fresh one is created, then restart.`,
+				`Config not saved: ${this.unparseableFrom} could not be read as config data, reported above, so this process is running on defaults and writing them back would replace that file's contents with them. The setting is held in memory for this process only. While this lasts local_control_secret is never written: this process generates one and keeps it until it exits, so the CLI, a separate process that reads the secret from this file, cannot authenticate against this process, and neither can a client holding an earlier secret. Fix the file, or move it aside so a fresh one is created, then restart.`,
 			);
 			return;
 		}
@@ -2453,11 +2496,15 @@ export class Config extends EventEmitter {
 	 * to the identical value, so the CLI can authorize its own notify calls
 	 * to its own locally-running server without ever handling a real API
 	 * key (issue #216).
+	 *
+	 * While a save is refused the value cannot reach the file, so it is shared
+	 * within this process only: every Config here returns the same one, and a
+	 * CLI process cannot learn it (SB23-2489, localControlSecretsByPath).
 	 */
 	getLocalControlSecret(): string {
 		const existing = this.data.local_control_secret;
 		if (typeof existing === "string" && existing.length > 0) {
-			return existing;
+			return this.rememberLocalControlSecret(existing);
 		}
 
 		// Re-check the on-disk file before generating a new secret: another
@@ -2470,11 +2517,34 @@ export class Config extends EventEmitter {
 		const fromDisk = this.readLocalControlSecretFromDisk();
 		if (typeof fromDisk === "string" && fromDisk.length > 0) {
 			this.data.local_control_secret = fromDisk;
-			return fromDisk;
+			return this.rememberLocalControlSecret(fromDisk);
 		}
 
-		const secret = randomUUID();
+		// The value another Config in this process already handed out, which is
+		// the one AuthService holds when this file cannot be written (SB23-2489).
+		// Through set() like a generated one, so an instance that CAN save persists
+		// what it returns instead of leaving the file without a secret for as long
+		// as the memo keeps answering.
+		const remembered = localControlSecretsByPath.get(this.configPath);
+		if (remembered !== undefined) {
+			this.set("local_control_secret", remembered);
+			return remembered;
+		}
+
+		const secret = this.rememberLocalControlSecret(randomUUID());
 		this.set("local_control_secret", secret);
+		return secret;
+	}
+
+	/**
+	 * Record the first local_control_secret this process returns for this path,
+	 * and return the value given. See localControlSecretsByPath for why every
+	 * return records and why a later value never replaces an earlier one.
+	 */
+	private rememberLocalControlSecret(secret: string): string {
+		if (!localControlSecretsByPath.has(this.configPath)) {
+			localControlSecretsByPath.set(this.configPath, secret);
+		}
 		return secret;
 	}
 
