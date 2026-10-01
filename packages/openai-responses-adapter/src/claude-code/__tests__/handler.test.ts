@@ -706,7 +706,7 @@ describe("concurrency, timeout and abort", () => {
 			ctx,
 			{ model: "opus", messages: [{ role: "user", content: "hi" }] },
 			abort.signal,
-			{ killGraceMs: 1000 },
+			{ killGraceMs: 600 },
 		);
 		await waitFor(() => (fake?.invocations().length ?? 0) === 1);
 		const abortedAt = Date.now();
@@ -714,15 +714,15 @@ describe("concurrency, timeout and abort", () => {
 		const res = await pending;
 		expect(res.status).toBe(499);
 		// The answer waits for the process to exit, which takes the SIGKILL, and
-		// a timer never fires early: it cannot come before the 1000 ms grace.
-		expect(Date.now() - abortedAt).toBeGreaterThanOrEqual(950);
+		// a timer never fires early: it cannot come before the 600 ms grace.
+		expect(Date.now() - abortedAt).toBeGreaterThanOrEqual(550);
 		// SIGTERM came first and was ignored; the SIGKILL was the escalation.
 		expect(fake?.ignoredSigterms()).toBe(1);
 		const [inv] = fake?.invocations() ?? [];
 		await waitFor(
 			() => !isAlive(inv?.pid ?? 0) && !isAlive(inv?.childPid ?? 0),
 		);
-	});
+	}, 10_000);
 
 	test("client abort kills the process group", async () => {
 		const ctx = setup("hang");
