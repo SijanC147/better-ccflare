@@ -1,0 +1,28 @@
+$kind: http-request
+description: |-
+  Routes to a real account on a real server.
+method: POST
+url: '{{baseUrl}}/v1/completions'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {
+      "model": "{{model}}",
+      "prompt": "Reply with the single word: pong",
+      "max_tokens": 16,
+      "stream": true
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("status is 200", () => pm.response.to.have.status(200));
+      pm.test("text_completion chunks ending in [DONE]", () => {
+        const text = pm.response.text();
+        pm.expect(text).to.include('"object":"text_completion"');
+        pm.expect(text.trim().endsWith("data: [DONE]")).to.be.true;
+      });

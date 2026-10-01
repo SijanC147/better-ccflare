@@ -11,9 +11,11 @@ export function inboundLabel(
 	const api =
 		format === "openai-chat"
 			? "OpenAI chat"
-			: format === "openai-responses"
-				? "OpenAI responses"
-				: null;
+			: format === "openai-completions"
+				? "OpenAI completions"
+				: format === "openai-responses"
+					? "OpenAI responses"
+					: null;
 	if (api === null) return null;
 	return gateway ? `${api} · ${gateway}` : api;
 }
@@ -30,9 +32,11 @@ export function inboundPath(
 	const rest =
 		format === "openai-chat"
 			? "/chat/completions"
-			: format === "openai-responses"
-				? "/responses"
-				: null;
+			: format === "openai-completions"
+				? "/completions"
+				: format === "openai-responses"
+					? "/responses"
+					: null;
 	if (rest === null) return null;
 	if (format === "openai-responses") {
 		const base = gateway ? `/v1/gateways/${gateway}` : "/v1";

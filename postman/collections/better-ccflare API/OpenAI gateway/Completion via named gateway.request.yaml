@@ -1,0 +1,28 @@
+$kind: http-request
+description: |-
+  Set `gateway` to a name from `GET /api/openai-gateways`. The gateway's `exclude_providers` and model set apply.
+method: POST
+url: '{{baseUrl}}/v1/gateways/{{gateway}}/completions'
+order: 8000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {
+      "model": "{{model}}",
+      "prompt": "Reply with the single word: pong",
+      "max_tokens": 16
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("status is 200", () => pm.response.to.have.status(200));
+      pm.test("text_completion with choices[].text", () => {
+        const body = pm.response.json();
+        pm.expect(body.object).to.eql("text_completion");
+        pm.expect(body.choices[0].text).to.be.a("string").and.not.empty;
+        pm.expect(body.choices[0]).to.not.have.property("message");
+      });

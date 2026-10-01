@@ -384,11 +384,16 @@ export const GATEWAY_REQUIRE_MODEL_HEADER =
 	"x-better-ccflare-gateway-require-model";
 
 /**
- * The OpenAI-shaped API a request arrived on. Both are translated into a
+ * The OpenAI-shaped API a request arrived on. Each is translated into a
  * synthetic `POST /v1/messages` before routing, so the history row's path
  * cannot tell them apart from Claude Code traffic (SB23-2727).
+ * `openai-completions` is the legacy `/v1/completions` (SB23-1970).
  */
-export const INBOUND_FORMATS = ["openai-chat", "openai-responses"] as const;
+export const INBOUND_FORMATS = [
+	"openai-chat",
+	"openai-completions",
+	"openai-responses",
+] as const;
 export type InboundFormat = (typeof INBOUND_FORMATS)[number];
 
 export function isInboundFormat(value: unknown): value is InboundFormat {

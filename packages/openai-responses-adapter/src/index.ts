@@ -10,6 +10,10 @@ export {
 	handleClaudeCodeEndpointRequest,
 	resetClaudeCodeRunnerStateForTests,
 } from "./claude-code";
+export {
+	handleCompletionsRequest,
+	isOpenAICompletionsRequest,
+} from "./completions/handler";
 export { dropClientGatewayHeaders, type OpenAIGatewayOptions } from "./gateway";
 export { handleResponsesRequest } from "./handler";
 export type {

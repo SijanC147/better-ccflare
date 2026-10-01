@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import { Logger } from "@better-ccflare/logger";
 import {
+	type InboundFormat,
 	type OpenAIGateways,
 	REPORT_UPSTREAM_MODEL_HEADER,
 	UPSTREAM_CONTENT_TYPE_HEADER,
 } from "@better-ccflare/types";
+import { handleCompletionsRequest } from "../completions/handler";
 import {
 	applyGatewayExclusions,
 	type OpenAIGatewayOptions,
@@ -245,8 +247,28 @@ export async function handleChatCompletionsRequest(
 	apiKeyName?: string | null,
 	options?: OpenAIGatewayOptions,
 ): Promise<Response> {
-	// 1. Parse the body.
-	let body: ChatCompletionRequest;
+	const parsed = await readJsonObject(req);
+	if (parsed instanceof Response) return parsed;
+	return runChatCompletion(
+		parsed as ChatCompletionRequest,
+		req,
+		url,
+		handleProxy,
+		ctx,
+		apiKeyId,
+		apiKeyName,
+		options,
+		CHAT_COMPLETIONS_SHAPE,
+	);
+}
+
+/**
+ * The request body as a JSON object, or the OpenAI-shaped 400 that refuses
+ * it. Shared by every inbound OpenAI handler that reads a JSON body.
+ */
+export async function readJsonObject(
+	req: Request,
+): Promise<Record<string, unknown> | Response> {
 	try {
 		const parsed: unknown = await req.json();
 		if (
@@ -256,11 +278,44 @@ export async function handleChatCompletionsRequest(
 		) {
 			return invalidRequest(400, "Request body must be a JSON object.");
 		}
-		body = parsed as ChatCompletionRequest;
+		return parsed as Record<string, unknown>;
 	} catch {
 		return invalidRequest(400, "Request body is not valid JSON.");
 	}
+}
 
+/**
+ * What differs between the APIs served through the chat core: the label on
+ * the request's history row and the prefix of the completion id.
+ */
+export interface ChatCoreShape {
+	format: InboundFormat;
+	idPrefix: string;
+}
+
+const CHAT_COMPLETIONS_SHAPE: ChatCoreShape = {
+	format: "openai-chat",
+	idPrefix: "chatcmpl-",
+};
+
+/**
+ * The Chat Completions pipeline from an already-parsed body: model set,
+ * translation, the synthetic `/v1/messages` request through `handleProxy`,
+ * and the answer in the Chat Completions shape. The legacy Completions
+ * handler (SB23-1970) runs this same core and reshapes what it returns, so
+ * the Anthropic translation exists once.
+ */
+export async function runChatCompletion(
+	body: ChatCompletionRequest,
+	req: Request,
+	url: URL,
+	handleProxy: HandleProxyFn,
+	ctx: unknown,
+	apiKeyId: string | null | undefined,
+	apiKeyName: string | null | undefined,
+	options: OpenAIGatewayOptions | undefined,
+	shape: ChatCoreShape,
+): Promise<Response> {
 	// 2. Resolve the gateway's model set, then translate, or refuse before
 	// anything is sent upstream. The client's name is kept for the response
 	// id; the answering model is reported separately (SB23-2781).
@@ -290,7 +345,7 @@ export async function handleChatCompletionsRequest(
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
 	applyGatewayExclusions(syntheticHeaders, options);
-	setInboundMarker(syntheticHeaders, "openai-chat", options);
+	setInboundMarker(syntheticHeaders, shape.format, options);
 	// Report the model that answered, not the requested name (SB23-2781).
 	syntheticHeaders.set(REPORT_UPSTREAM_MODEL_HEADER, "1");
 	const syntheticReq = new Request(messagesUrl.toString(), {
@@ -302,7 +357,7 @@ export async function handleChatCompletionsRequest(
 	});
 
 	const translationCtx: ResponseTranslationContext = {
-		id: `chatcmpl-${crypto.randomBytes(12).toString("hex")}`,
+		id: `${shape.idPrefix}${crypto.randomBytes(12).toString("hex")}`,
 		created: Math.floor(Date.now() / 1000),
 		model: requestedModel ?? anthropicBody.model,
 	};
@@ -544,6 +599,17 @@ export async function dispatchOpenAIGatewayRequest(
 			options,
 		);
 	}
+	if (req.method === "POST" && match.rest === "/completions") {
+		return handleCompletionsRequest(
+			req,
+			url,
+			handleProxy,
+			ctx,
+			apiKeyId,
+			apiKeyName,
+			options,
+		);
+	}
 	if (req.method === "POST" && match.rest === "/chat/completions") {
 		return handleChatCompletionsRequest(
 			req,
@@ -567,7 +633,7 @@ export async function dispatchOpenAIGatewayRequest(
 		);
 	}
 	return notFound(
-		`${req.method} ${match.rest || "/"} is not served by gateway "${match.name}". Use POST /chat/completions, POST /responses, POST /responses/compact or GET /models.`,
+		`${req.method} ${match.rest || "/"} is not served by gateway "${match.name}". Use POST /chat/completions, POST /completions, POST /responses, POST /responses/compact or GET /models.`,
 		"unknown_endpoint",
 	);
 }
