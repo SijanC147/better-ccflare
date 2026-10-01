@@ -12,6 +12,12 @@ import {
 	setInboundMarker,
 } from "../gateway";
 import { handleResponsesRequest } from "../handler";
+import {
+	anthropicMessageStartModel,
+	modelSubstitution,
+	peekSseModel,
+	substitutionHeaders,
+} from "../model-substitution";
 import type { HandleProxyFn } from "../types";
 import { translateChatRequestToAnthropic } from "./request-translator";
 import {
@@ -323,15 +329,32 @@ export async function handleChatCompletionsRequest(
 
 	const upstreamType = upstream.headers.get("content-type") ?? "";
 
+	// A different model answering is reported in a header as well as in the
+	// body's `model`, so a client sees it before the first chunk (SB23-2781).
+	// `anthropicBody.model` is the id the gateway's model set routed to.
+	const substitution = (answered: unknown) =>
+		substitutionHeaders(
+			modelSubstitution(requestedModel, anthropicBody.model, answered),
+		);
+
 	// 6. Streaming.
 	if (wantsStream) {
 		if (upstreamType.includes("text/event-stream") && upstream.body) {
+			// `message_start` comes first, so the peek costs no more than the
+			// wait for the first event the client would have had anyway.
+			const peeked = await peekSseModel(
+				upstream.body,
+				anthropicMessageStartModel,
+			);
 			return new Response(
-				translateAnthropicStreamToChat(upstream.body, {
+				translateAnthropicStreamToChat(peeked.body, {
 					...translationCtx,
 					includeUsage,
 				}),
-				{ status: 200, headers: SSE_HEADERS },
+				{
+					status: 200,
+					headers: { ...SSE_HEADERS, ...substitution(peeked.model) },
+				},
 			);
 		}
 		const message = await readAnthropicMessage(upstream);
@@ -341,7 +364,10 @@ export async function handleChatCompletionsRequest(
 				translateAnthropicMessageToChat(message, translationCtx),
 				includeUsage,
 			),
-			{ status: 200, headers: SSE_HEADERS },
+			{
+				status: 200,
+				headers: { ...SSE_HEADERS, ...substitution(message.model) },
+			},
 		);
 	}
 
@@ -351,6 +377,7 @@ export async function handleChatCompletionsRequest(
 	return jsonResponse(
 		200,
 		translateAnthropicMessageToChat(message, translationCtx),
+		substitution(message.model),
 	);
 }
 

@@ -330,6 +330,17 @@ export const REPORT_UPSTREAM_MODEL_HEADER =
 	"x-better-ccflare-report-upstream-model";
 
 /**
+ * Response header on an OpenAI-shaped answer when a different model answered
+ * than the client asked for: `<requested> -> <answered>`, for example
+ * `claude-opus-5-5 -> gpt-5.6-sol` after a failover to Codex (SB23-2781).
+ * Absent when the answer came from the requested model, a dated snapshot of
+ * it, or the model a gateway's model set maps the requested name to. The
+ * arrow carries spaces, unlike the proxy's own `x-better-ccflare-model-rewrite`
+ * (`a->b`), which reports an agent-preference rewrite rather than an answer.
+ */
+export const MODEL_SUBSTITUTED_HEADER = "x-better-ccflare-model-substituted";
+
+/**
  * Response header naming the content type an upstream error page was sent
  * in, set when `handleProxy` rewraps that page as a JSON error (SB23-3494).
  * The Chat Completions handler carries it onto its OpenAI-shaped error.
