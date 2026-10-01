@@ -12,6 +12,7 @@ import {
 } from "../handlers";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * SB23-2570. `POST /v1/chat/completions` is forwarded verbatim to
@@ -157,7 +158,7 @@ function makeContext(
 	accounts: Account[],
 	providerOverrides: Partial<Provider> = {},
 ): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: (accs: Account[]) =>
 				accs.filter(
@@ -165,26 +166,32 @@ function makeContext(
 						!acc.paused &&
 						(!acc.rate_limited_until || acc.rate_limited_until <= Date.now()),
 				),
-		} as never,
+		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
 		provider: {
 			name: "anthropic",
 			canHandle: () => true,
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+			prepareRequest: undefined,
 			...providerOverrides,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 const CHAT_URL = "https://proxy.local/v1/chat/completions";

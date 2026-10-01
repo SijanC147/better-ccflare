@@ -4,6 +4,7 @@ import type { Account } from "@better-ccflare/types";
 import * as modelCatalogModule from "../model-catalog";
 import { forwardToClient } from "../response-handler";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 /**
  * `ResponseHandlerOptions.requestBody` is `ArrayBuffer | null`, and production
@@ -60,10 +61,7 @@ describe("forwardToClient usage-collector protocol", () => {
 	}
 
 	function createCtx(storePayloads = true) {
-		return {
-			strategy: {},
-			dbOps: {},
-			runtime: { port: 8080, tlsEnabled: false },
+		return makeProxyContext({
 			config: {
 				getStorePayloads: () => storePayloads,
 			},
@@ -71,9 +69,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				name: "anthropic",
 				isStreamingResponse: () => false,
 			},
-			refreshInFlight: new Map<string, Promise<string>>(),
-			asyncWriter: {},
-		} as unknown as import("../handlers").ProxyContext;
+		});
 	}
 
 	it("aliases the client model without changing accounting bytes", async () => {
@@ -691,18 +687,13 @@ describe("forwardToClient passive model-catalog capture", () => {
 	}
 
 	function createCtx() {
-		return {
-			strategy: {},
-			dbOps: {},
-			runtime: { port: 8080, tlsEnabled: false },
+		return makeProxyContext({
 			config: { getStorePayloads: () => true },
 			provider: {
 				name: "anthropic",
 				isStreamingResponse: () => false,
 			},
-			refreshInFlight: new Map<string, Promise<string>>(),
-			asyncWriter: {},
-		} as unknown as import("../handlers").ProxyContext;
+		});
 	}
 
 	it("captures a GET /v1/models 200 response with an account present", async () => {

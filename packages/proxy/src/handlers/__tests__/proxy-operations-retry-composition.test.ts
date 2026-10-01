@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { RETRY_DEFAULTS, type RetrySettings } from "@better-ccflare/core";
+import { RETRY_DEFAULTS } from "@better-ccflare/core";
 import { logBus } from "@better-ccflare/logger";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -118,9 +119,8 @@ function makeRequestBody() {
  * test of the fallback. The values are the documented defaults: attempts 3,
  * meaning two retries per loop.
  */
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
@@ -130,30 +130,26 @@ function makeProxyContext(): ProxyContext {
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
+			// Absent on the old literal; the attribution read sits in a try, so undefined takes its catch as before.
+			resolverManager: undefined,
+		},
 		runtime: {
-			port: 8080,
 			clientId: "test",
 			retry: { ...RETRY_DEFAULTS },
-		} as never,
+		},
 		// Only `name` is supplied. proxyWithAccount resolves
 		// `getProvider(account.provider) || ctx.provider`, and every account here
 		// names a provider the registry knows, so a method stubbed on this object
 		// never runs (SB23-2536). Drive the real provider through what it reads.
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
+		provider: { name: "anthropic" },
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -339,7 +335,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		];
 		const counters = installScriptedFetch(script);
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const { result, forwarded } = await runProxy(account, ctx);
 
@@ -379,7 +375,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		];
 		const counters = installScriptedFetch(script);
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount({ provider: "zai", name: "zai-test" });
 		await runProxy(account, ctx);
 
@@ -398,7 +394,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		];
 		const counters = installScriptedFetch(script);
 
-		const { result } = await runProxy(makeAccount(), makeProxyContext());
+		const { result } = await runProxy(makeAccount(), makeContext());
 
 		expect(counters.fetches()).toBe(3);
 		expect(counters.responses()).toBe(3);
@@ -420,7 +416,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		];
 		const counters = installScriptedFetch([...perAccount, ...perAccount]);
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const first = await runProxy(makeAccount({ id: "acc-1" }), ctx);
 		expect(counters.fetches()).toBe(3);
 
@@ -476,7 +472,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 				"claude-sonnet-4-5": ["glm-5.2", "glm-4.7"],
 			}),
 		});
-		await runProxy(account, makeProxyContext());
+		await runProxy(account, makeContext());
 
 		expect(counters.fetches()).toBe(4);
 	});
@@ -551,7 +547,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 			const counters = installScriptedFetch(c.script);
 			const warnings = captureWarnings();
 			try {
-				await runProxy(c.account, makeProxyContext());
+				await runProxy(c.account, makeContext());
 			} finally {
 				warnings.stop();
 			}
@@ -588,7 +584,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 			}),
 		});
 		try {
-			await runProxy(account, makeProxyContext());
+			await runProxy(account, makeContext());
 		} finally {
 			warnings.stop();
 		}
@@ -623,7 +619,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		try {
 			await runProxy(
 				makeAccount({ provider: "zai", name: "zai-off" }),
-				makeProxyContext(),
+				makeContext(),
 			);
 		} finally {
 			warnings.stop();
@@ -650,7 +646,7 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 		]);
 		const warnings = captureWarnings();
 		try {
-			await runProxy(makeAccount({ name: "acc-off" }), makeProxyContext());
+			await runProxy(makeAccount({ name: "acc-off" }), makeContext());
 		} finally {
 			warnings.stop();
 		}
@@ -671,8 +667,8 @@ describe("proxyWithAccount — composed in-place retry budgets", () => {
 			() => jsonResponse(500, serverErrorBody),
 		]);
 
-		const ctx = makeProxyContext();
-		(ctx.runtime as unknown as { retry: RetrySettings }).retry = {
+		const ctx = makeContext();
+		ctx.runtime.retry = {
 			attempts,
 			delayMs: 0,
 			backoff: 2,

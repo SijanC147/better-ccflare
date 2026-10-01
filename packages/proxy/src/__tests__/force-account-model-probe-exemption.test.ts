@@ -24,6 +24,7 @@ import {
 import type { ProxyContext } from "../handlers";
 import { INTERNAL_PROBE_SECRET_HEADER } from "../handlers/proxy-types";
 import { handleProxy } from "../proxy";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 const SECRET = "probe-secret";
 
@@ -33,31 +34,35 @@ const SECRET = "probe-secret";
  * mapping — observes too.
  */
 function makeContext(observed: boolean[]): ProxyContext {
-	return {
-		strategy: { select: () => [] } as never,
+	return makeProxyContext({
+		strategy: { select: () => [] },
 		dbOps: {
 			getAllAccounts: mock(async () => []),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
 			getForceAccountModel: () => true,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
 		provider: {
 			name: "codex",
 			canHandle: () => {
 				observed.push(isForceAccountModelEnabled());
 				return true;
 			},
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
 		internalProbeSecret: SECRET,
-	};
+	});
 }
 
 function makeRequest(headers: Record<string, string>): Request {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -87,30 +88,26 @@ function makeRequestBody(model = "claude-sonnet-4-5") {
  * @param transformRequestBody - lets a test inject a signal-dropping transform,
  *   mirroring what the real providers do (`new Request(request.url, …)`).
  */
-function makeProxyContext(
-	transformRequestBody:
-		| ((req: Request, account: Account) => Promise<Request>)
-		| null = null,
+function makeContext(
+	transformRequestBody?: (req: Request, account?: Account) => Promise<Request>,
 ): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 			),
 			saveRequest: mock(() => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		provider: {
 			name: "stub-signal-dropping",
 			canHandle: () => true,
 			buildUrl: () => "https://openrouter.ai/api/v1/messages",
 			prepareHeaders: () => new Headers(),
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			prepareRequest: undefined,
+			observeUpstream: undefined,
 			transformRequestBody,
 			processResponse: async (r: Response) => r,
 			parseRateLimit: () => ({
@@ -120,12 +117,11 @@ function makeProxyContext(
 				remaining: undefined,
 			}),
 			isStreamingResponse: () => false,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => false } as never,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+		config: { getStorePayloads: () => false },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 /** A transform that rebuilds from the URL — the real signal-dropping shape. */
@@ -206,7 +202,7 @@ describe("proxyWithAccount: client abort signal reaches the upstream fetch", () 
 			signal: controller.signal,
 		});
 
-		await runProxy(req, makeProxyContext());
+		await runProxy(req, makeContext());
 
 		expect(captured.calls).toBeGreaterThan(0);
 		expect(captured.signal).toBeDefined();
@@ -228,7 +224,7 @@ describe("proxyWithAccount: client abort signal reaches the upstream fetch", () 
 			signal: controller.signal,
 		});
 
-		await runProxy(req, makeProxyContext(signalDroppingTransform));
+		await runProxy(req, makeContext(signalDroppingTransform));
 
 		expect(captured.signal).toBeDefined();
 		expect(captured.signal?.aborted).toBe(false);
@@ -245,7 +241,7 @@ describe("proxyWithAccount: client abort signal reaches the upstream fetch", () 
 			headers: { "Content-Type": "application/json" },
 		});
 
-		await runProxy(req, makeProxyContext());
+		await runProxy(req, makeContext());
 
 		expect(captured.calls).toBeGreaterThan(0);
 		expect(captured.signal?.aborted).toBe(false);
@@ -261,7 +257,7 @@ describe("proxyWithAccount: client abort signal reaches the upstream fetch", () 
 			headers: { "Content-Type": "application/json" },
 		});
 
-		await runProxy(req, makeProxyContext(signalDroppingTransform));
+		await runProxy(req, makeContext(signalDroppingTransform));
 
 		expect(captured.calls).toBeGreaterThan(0);
 	});
@@ -295,7 +291,7 @@ describe("proxyWithAccount: a client disconnect must not look like an account fa
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeContext(),
 		);
 	}
 

@@ -14,6 +14,7 @@ import type { ProxyContext } from "../handlers";
 import { INTERNAL_PROBE_SECRET_HEADER } from "../handlers/proxy-types";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 function stubUsageCollector() {
 	return spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue({
@@ -76,7 +77,7 @@ function makeContext(
 	accounts: Account[],
 	providerOverrides: Partial<Provider> = {},
 ): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: (accs: Account[]) => {
 				// Mock filtering: only return accounts that are NOT paused and NOT rate-limited
@@ -87,26 +88,34 @@ function makeContext(
 						(!acc.rate_limited_until || acc.rate_limited_until <= now),
 				);
 			},
-		} as never,
+		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+			getStorePayloads: undefined,
+		},
 		provider: {
 			name: "codex",
 			canHandle: () => true,
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+			isStreamingResponse: undefined,
+			observeUpstream: undefined,
 			...providerOverrides,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 function makeRequest(): Request {
@@ -358,9 +367,7 @@ describe("pool exhausted — CCFLARE_PASSTHROUGH_ON_EMPTY_POOL=1 escape hatch", 
 		process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL = "1";
 
 		const ctx = makeContext([]);
-		(
-			ctx as ProxyContext & { internalProbeSecret?: string }
-		).internalProbeSecret = "test-secret";
+		ctx.internalProbeSecret = "test-secret";
 
 		const request = makeRequest();
 		request.headers.set("x-better-ccflare-auto-refresh", "true");
@@ -478,8 +485,7 @@ it("records a joined local refusal without inventing an upstream attempt", async
 	logBus.on("log", listener);
 	process.env.CCFLARE_CODEX_CACHE_DIAGNOSTICS = "1";
 	try {
-		const ctx = makeContext([]);
-		ctx.provider = { name: "anthropic", canHandle: () => true } as never;
+		const ctx = makeContext([], { name: "anthropic" });
 		const request = makeRequest();
 		request.headers.set(
 			"x-better-ccflare-gateway-request-digest",

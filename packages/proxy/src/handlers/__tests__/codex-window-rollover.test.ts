@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import type { BunSqlAdapter } from "@better-ccflare/database";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
-import type { ProxyContext } from "../proxy-types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { updateAccountMetadata } from "../response-processor";
 
 const PREVIOUS_FIVE_HOUR_RESET = "2026-07-21T00:00:00.000Z";
@@ -97,7 +98,7 @@ function makeCtx(fiveHourWindowEnabled?: boolean) {
 		runs: [] as Array<{ sql: string; params: unknown[] | undefined }>,
 	};
 	const pendingJobs: Promise<unknown>[] = [];
-	const ctx = {
+	const ctx = makeProxyContext({
 		provider: {
 			name: "codex",
 			parseRateLimit: () => ({
@@ -116,11 +117,14 @@ function makeCtx(fiveHourWindowEnabled?: boolean) {
 			resetAccountSession: async (accountId: string, now: number) => {
 				calls.resetAccountSession.push({ accountId, now });
 			},
-			getAdapter: () => ({
-				run: async (sql: string, params?: unknown[]) => {
-					calls.runs.push({ sql, params });
-				},
-			}),
+			// A partial adapter: this path calls only run(), and a BunSqlAdapter
+			// cannot be built without a database.
+			getAdapter: () =>
+				({
+					run: async (sql: string, params?: unknown[]) => {
+						calls.runs.push({ sql, params });
+					},
+				}) as BunSqlAdapter,
 		},
 		asyncWriter: {
 			enqueue: (job: () => void | Promise<void>) => {
@@ -128,7 +132,7 @@ function makeCtx(fiveHourWindowEnabled?: boolean) {
 				pendingJobs.push(result);
 			},
 		},
-	} as unknown as ProxyContext;
+	});
 
 	return {
 		ctx,

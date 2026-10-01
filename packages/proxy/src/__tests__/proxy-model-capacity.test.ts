@@ -5,6 +5,7 @@ import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
 import { fetchSlot } from "./fetch-slot";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 const originalFetch = globalThis.fetch;
 
@@ -61,15 +62,15 @@ function makeContext(
 	account: Account,
 	opts: { capacityRoutingMode?: "off" | "exhausted" } = {},
 ): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: (accounts: Account[]) => accounts,
-		} as never,
+		},
 		dbOps: {
 			getAllAccounts: mock(async () => [account]),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
@@ -77,14 +78,18 @@ function makeContext(
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () =>
 				opts.capacityRoutingMode ?? "exhausted",
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+		},
 		provider: {
 			name: "anthropic",
 			canHandle: () => true,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 afterEach(() => {
@@ -211,8 +216,8 @@ function makeComboContext(
 	accounts: Account[],
 	combo: ComboWithSlots,
 ): ProxyContext {
-	return {
-		strategy: { select: mock((accs: Account[]) => accs) } as never,
+	return makeProxyContext({
+		strategy: { select: mock((accs: Account[]) => accs) },
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => combo),
@@ -221,12 +226,8 @@ function makeComboContext(
 			),
 			saveRequest: mock(() => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
@@ -234,18 +235,23 @@ function makeComboContext(
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () => "exhausted",
 			getStorePayloads: () => true,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getComboSessionFallback: undefined,
+		},
 		provider: {
 			name: "anthropic",
 			canHandle: () => true,
-		} as never,
-		refreshInFlight: new Map(),
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+		},
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-	};
+		},
+	});
 }
 
 function makeComboAccount(overrides: Partial<Account> = {}): Account {

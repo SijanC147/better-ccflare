@@ -7,8 +7,8 @@ import {
 } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
-import type { ProxyContext } from "../proxy-types";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -79,29 +79,6 @@ function makeRequestBody(): ArrayBuffer {
 	).buffer;
 }
 
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
-		dbOps: {
-			markAccountRateLimited: mock(() =>
-				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
-			),
-			saveRequest: mock(() => Promise.resolve()),
-			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
-		provider: { name: "unused-context-provider" } as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => true } as never,
-		internalProbeSecret: "test-secret",
-	};
-}
-
 function makeRequest(body: ArrayBuffer): Request {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
@@ -137,7 +114,20 @@ async function runProxy(account: Account, body: ArrayBuffer): Promise<void> {
 			body,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeProxyContext({
+				dbOps: {
+					markAccountRateLimited: mock(() =>
+						Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
+					),
+					saveRequest: mock(() => Promise.resolve()),
+					updateAccountUsage: mock(() => Promise.resolve()),
+				},
+				runtime: { port: 8080, clientId: "test" },
+				provider: { name: "unused-context-provider" },
+				asyncWriter: { enqueue: mock(() => {}) },
+				config: { getStorePayloads: () => true },
+				internalProbeSecret: "test-secret",
+			}),
 		);
 	} catch (error) {
 		if (

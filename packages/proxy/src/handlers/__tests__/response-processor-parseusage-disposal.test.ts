@@ -21,7 +21,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
-import type { ProxyContext } from "../proxy-types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { processProxyResponse } from "../response-processor";
 
 function makeAccount(): Account {
@@ -93,7 +93,7 @@ function makeCtx(opts: {
 		updateRequestUsageCalls: [] as Array<unknown>,
 	};
 
-	const ctx = {
+	const ctx = makeProxyContext({
 		provider: {
 			name: "anthropic",
 			isStreamingResponse: () => true,
@@ -126,13 +126,7 @@ function makeCtx(opts: {
 			},
 		},
 		dbOps: {
-			markAccountRateLimited: () => {},
-			updateAccountUsage: () => {},
-			updateAccountRateLimitMeta: () => {},
-			getAdapter: () => ({
-				get: async () => ({ rate_limited_until: null }),
-				run: async () => {},
-			}),
+			updateAccountUsage: async () => {},
 			updateRequestUsage: async (_id: string, usage: unknown) => {
 				calls.updateRequestUsageCalls.push(usage);
 			},
@@ -142,7 +136,7 @@ function makeCtx(opts: {
 				void job();
 			},
 		},
-	} as unknown as ProxyContext;
+	});
 
 	return { ctx, calls };
 }

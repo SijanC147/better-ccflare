@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import type { Provider } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { type FetchImpl, fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -82,27 +84,30 @@ function makeRequestBody() {
 	return new TextEncoder().encode(body).buffer;
 }
 
-function makeProxyContext(provider: object): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(provider: Partial<Provider>): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
-		provider: provider as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => true } as never,
+			// Absent on the old literal; the attribution read sits in a try, so undefined takes its catch as before.
+			resolverManager: undefined,
+		},
+		runtime: { clientId: "test" },
+		provider: {
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			transformRequestBody: undefined,
+			prepareRequest: undefined,
+			observeUpstream: undefined,
+			extractUsageInfo: undefined,
+			...provider,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function error529() {
@@ -131,7 +136,7 @@ function ok200() {
 }
 
 async function run(
-	provider: object,
+	provider: Partial<Provider>,
 	// The call signature alone, matching `fetchSlot`. `typeof globalThis.fetch`
 	// carries Bun's `preconnect`, which no test double implements and which
 	// nothing on this path calls. Narrowing here also retires the `as never`
@@ -155,7 +160,7 @@ async function run(
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(provider),
+			makeContext(provider),
 		);
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);

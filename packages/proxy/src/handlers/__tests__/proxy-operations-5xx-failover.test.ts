@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import type { RuntimeConfig } from "@better-ccflare/config";
 import { RETRY_DEFAULTS } from "@better-ccflare/core";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import * as responseHandlerModule from "../../response-handler";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -87,9 +89,8 @@ function makeRequestBody(stream = false) {
 	return new TextEncoder().encode(body).buffer;
 }
 
-function makeProxyContext(): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(
 				(_accountId: string, _until: number, _reason: string) =>
@@ -100,33 +101,30 @@ function makeProxyContext(): ProxyContext {
 			updateAccountRateLimitMeta: mock((..._args: unknown[]) =>
 				Promise.resolve(),
 			),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
+			// Absent on the old literal, which answered undefined for both.
+			resolverManager: undefined,
+			updateRequestUsage: undefined,
+		},
 		// The fork reads the in-place retry budget from ctx.runtime.retry rather
 		// than from a hardcoded 2. Pinned to upstream's documented numbers so the
 		// attempt arithmetic below holds unchanged; delayMs 0 keeps the loop fast.
 		runtime: {
-			port: 8080,
 			clientId: "test",
 			retry: { attempts: 2, delayMs: 0, backoff: 2 },
-		} as never,
+		},
 		// Only `name` is supplied. proxyWithAccount resolves
 		// `getProvider(account.provider) || ctx.provider`, and every account here
 		// names a provider the registry knows, so a method stubbed on this object
 		// never runs (SB23-2536). Drive the real provider through what it reads.
-		provider: { name: "anthropic" } as never,
-		refreshInFlight: new Map(),
+		provider: { name: "anthropic" },
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 function makeRequest(body: ArrayBuffer, headers: Record<string, string> = {}) {
@@ -275,7 +273,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			});
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { forwarded } = await runProxy(
@@ -300,7 +298,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(status);
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const before = Date.now();
@@ -340,15 +338,11 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(503);
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		// What a default install's runtime carries: Config.getRuntime() always
 		// emits `retry`, equal to RETRY_DEFAULTS when none of the three keys is
 		// set. The absent-runtime fallback is the separate case below.
-		ctx.runtime = {
-			port: 8080,
-			clientId: "test",
-			retry: { ...RETRY_DEFAULTS },
-		} as never;
+		ctx.runtime.retry = { ...RETRY_DEFAULTS };
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -375,8 +369,10 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(503);
 		});
 
-		const ctx = makeProxyContext();
-		ctx.runtime = { port: 8080, clientId: "test" } as never;
+		const ctx = makeContext();
+		// A RuntimeConfig with no `retry` is invalid by type, and building one is
+		// this test's whole point, so this one value keeps a cast.
+		ctx.runtime = { port: 8080, clientId: "test" } as RuntimeConfig;
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -398,12 +394,8 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(503);
 		});
 
-		const ctx = makeProxyContext();
-		ctx.runtime = {
-			port: 8080,
-			clientId: "test",
-			retry: { attempts: 0, delayMs: 0, backoff: 2 },
-		} as never;
+		const ctx = makeContext();
+		ctx.runtime.retry = { attempts: 0, delayMs: 0, backoff: 2 };
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -426,7 +418,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		// failover_attempts=1 with no trace of what it failed over from.
 		fetchSlot.fetch = mock(async () => serverErrorResponse(500));
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result } = await runProxy(
@@ -458,7 +450,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 	it("records no audit row for a synthetic probe's 5xx", async () => {
 		fetchSlot.fetch = mock(async () => serverErrorResponse(500));
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const probeReq = makeRequest(bodyBuffer, {
@@ -475,7 +467,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			serverErrorResponse(503, { "retry-after": "5" }),
 		);
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const before = Date.now();
@@ -500,7 +492,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			serverErrorResponse(503, { "retry-after": "3600" }),
 		);
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const before = Date.now();
@@ -530,7 +522,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(500, { "x-should-retry": "false" });
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result } = await runProxy(
@@ -558,7 +550,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 				: serverErrorResponse(500, { "x-should-retry": "false" });
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -580,7 +572,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			serverErrorResponse(503, { "retry-after": until }),
 		);
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result } = await runProxy(
@@ -618,7 +610,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 					);
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -646,7 +638,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(502);
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result, forwarded } = await runProxy(
@@ -671,7 +663,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		});
 
 		process.env.CCFLARE_SERVER_ERROR_RETRY_ENABLED = "false";
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { forwarded } = await runProxy(
@@ -695,7 +687,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		});
 		captureForwardedResponse();
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const { result } = await runProxy(
@@ -754,7 +746,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		});
 		captureForwardedResponse();
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const before = Date.now();
@@ -833,7 +825,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			});
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody(true);
 		const { forwarded } = await runProxy(
@@ -855,7 +847,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			return serverErrorResponse(500);
 		});
 
-		const ctx = makeProxyContext();
+		const ctx = makeContext();
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const probeReq = makeRequest(bodyBuffer, {

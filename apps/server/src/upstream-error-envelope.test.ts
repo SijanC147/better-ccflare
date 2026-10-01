@@ -8,6 +8,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import { ResolverManager } from "@better-ccflare/core";
 import {
 	dispatchOpenAIGatewayRequest,
 	type HandleProxyFn,
@@ -20,6 +21,7 @@ import {
 	parseOpenAIGateways,
 	UPSTREAM_CONTENT_TYPE_HEADER,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../../packages/proxy/src/__tests__/proxy-context-fixture";
 // The module record proxy.ts and response-handler.ts import from; the package
 // entry re-exports nothing that would let a spy reach it.
 import * as usageCollectorModule from "../../../packages/proxy/src/usage-collector";
@@ -153,7 +155,7 @@ function makeHarness(accounts: Account[]): Harness {
 		consecutiveRateLimits: 1,
 		applied: true,
 	}));
-	const ctx = {
+	const ctx = makeProxyContext({
 		strategy: {
 			select: (accs: Account[]) => {
 				const now = Date.now();
@@ -168,11 +170,9 @@ function makeHarness(accounts: Account[]): Harness {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
 			markAccountRateLimited,
-			resolverManager: {
-				current: () => ({
-					resolve: () => ({ projectId: null, worktreePath: null }),
-				}),
-			},
+			// A real, empty resolver: resolve() answers all-null, which is what the
+			// hand-built one returned, minus the two fields it left out.
+			resolverManager: new ResolverManager(),
 		},
 		// One attempt, so a 5xx is not retried in place at a 1000ms base.
 		runtime: {
@@ -186,12 +186,21 @@ function makeHarness(accounts: Account[]): Harness {
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getModelScopedCapacityRouting: undefined,
+			getCombosEnabled: undefined,
 			getStorePayloads: () => true,
 		},
-		provider: { name: "anthropic", canHandle: () => true },
-		refreshInFlight: new Map(),
+		provider: {
+			name: "anthropic",
+			canHandle: () => true,
+			// Absent here sends proxy.ts to the codex observer, the path the
+			// old literal took; undefined keeps it.
+			observeRequest: undefined,
+		},
 		asyncWriter: { enqueue: mock(() => {}) },
-	} as unknown as ProxyContext;
+	});
 	return { ctx };
 }
 

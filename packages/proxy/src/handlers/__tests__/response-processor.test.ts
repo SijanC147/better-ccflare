@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { BunSqlAdapter } from "@better-ccflare/database";
 import type { Account } from "@better-ccflare/types";
-import type { ProxyContext } from "../proxy-types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	handleRateLimitResponse,
 	processProxyResponse,
@@ -71,7 +72,7 @@ function makeCtx(opts: {
 		enqueueCount: 0,
 	};
 
-	const ctx = {
+	const ctx = makeProxyContext({
 		provider: {
 			name: "anthropic",
 			// Not read by processProxyResponse today, measured (SB23-2536). Kept on
@@ -95,12 +96,14 @@ function makeCtx(opts: {
 				calls.markRateLimited.push({ accountId, resetTime });
 				return Promise.resolve({ consecutiveRateLimits: 1, applied: true });
 			},
-			updateAccountUsage: () => {},
-			updateAccountRateLimitMeta: () => {},
-			getAdapter: () => ({
-				get: async () => ({ rate_limited_until: null }),
-				run: async () => {},
-			}),
+			updateAccountUsage: async () => {},
+			updateAccountRateLimitMeta: async () => {},
+			// A partial adapter: every getAdapter() caller in the proxy calls only
+			// run(), and a BunSqlAdapter cannot be built without a database.
+			getAdapter: () =>
+				({
+					run: async (_sql: string, _params?: unknown[]) => {},
+				}) as BunSqlAdapter,
 			updateRequestUsage: async () => {},
 		},
 		asyncWriter: {
@@ -113,7 +116,7 @@ function makeCtx(opts: {
 				void job();
 			},
 		},
-	} as unknown as ProxyContext;
+	});
 
 	return { ctx, calls };
 }
@@ -133,7 +136,7 @@ function makeCtxWithReason(opts: {
 		enqueueCount: 0,
 	};
 
-	const ctx = {
+	const ctx = makeProxyContext({
 		provider: {
 			name: "anthropic",
 			// Not read by processProxyResponse today, measured (SB23-2536). Kept on
@@ -157,12 +160,8 @@ function makeCtxWithReason(opts: {
 				calls.markRateLimited.push({ accountId, resetTime, reason });
 				return Promise.resolve({ consecutiveRateLimits: 1, applied: true });
 			},
-			updateAccountUsage: () => {},
-			updateAccountRateLimitMeta: () => {},
-			getAdapter: () => ({
-				get: async () => ({ rate_limited_until: null }),
-				run: async () => {},
-			}),
+			updateAccountUsage: async () => {},
+			updateAccountRateLimitMeta: async () => {},
 			updateRequestUsage: async () => {},
 		},
 		asyncWriter: {
@@ -172,7 +171,7 @@ function makeCtxWithReason(opts: {
 			},
 		},
 		internalProbeSecret: "test-secret",
-	} as unknown as ProxyContext;
+	});
 
 	return { ctx, calls };
 }

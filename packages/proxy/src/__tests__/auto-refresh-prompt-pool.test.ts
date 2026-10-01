@@ -20,6 +20,7 @@ import {
 	resetAutoRefreshPromptPoolForTests,
 } from "../auto-refresh-prompt-pool";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { makeProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -79,15 +80,13 @@ async function makeScheduler(
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
-		{
-			runtime: { port: 8080, clientId: "test-client" },
-			refreshInFlight: new Map(),
+		makeProxyContext({
 			internalProbeSecret: "secret",
 			// A successful Anthropic probe goes on to record a usage snapshot, so
 			// the real context always has this. Leaving it out turns the success
 			// path into an exception and hides it as a counted failure.
 			dbOps: { recordUsageSnapshot: mock(async () => {}) },
-		} as never,
+		}),
 	) as unknown as TestableScheduler;
 }
 
@@ -373,6 +372,8 @@ describe("AutoRefreshScheduler.sendDummyMessage — returning what it did not sp
 		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 		// No runtime on the context: building the endpoint URL throws, which lands
 		// in the catch without a single byte having left the process.
+		// Kept as a literal on purpose: makeProxyContext() always supplies a
+		// complete runtime, and this test needs the context to have none.
 		const scheduler = new AutoRefreshScheduler(
 			makeDb() as never,
 			{

@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import { type AuthFailureEvt, authFailureEvents } from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	extractAuthFailureReason,
 	isDefinitiveAuthFailure,
@@ -59,7 +60,7 @@ function makeContext(refreshError: Error) {
 	const queuedJobs: Array<() => Promise<void>> = [];
 	const setRequiresReauth = mock(async () => {});
 	return {
-		ctx: {
+		ctx: makeProxyContext({
 			provider: {
 				name: "fake-refresh-provider",
 				refreshToken: mock(async () => {
@@ -73,11 +74,10 @@ function makeContext(refreshError: Error) {
 				flagRequiresReauthIfTokenMatches: mock(async () => true),
 			},
 			runtime: { clientId: "test-client" },
-			refreshInFlight: new Map(),
 			asyncWriter: {
 				enqueue: mock((job: () => Promise<void>) => queuedJobs.push(job)),
 			},
-		},
+		}),
 		queuedJobs,
 		setRequiresReauth,
 	};
@@ -157,7 +157,7 @@ describe("refreshAccessTokenSafe requires_reauth detection", () => {
 		authFailureEvents.once("event", (event) => emitted.push(event));
 
 		await expect(
-			refreshAccessTokenSafe(makeAccount("invalid-grant"), ctx as never),
+			refreshAccessTokenSafe(makeAccount("invalid-grant"), ctx),
 		).rejects.toThrow("Failed to refresh access token");
 
 		expect(ctx.dbOps.flagRequiresReauthIfTokenMatches).toHaveBeenCalledWith(
@@ -182,7 +182,7 @@ describe("refreshAccessTokenSafe requires_reauth detection", () => {
 		);
 
 		await expect(
-			refreshAccessTokenSafe(makeAccount("network-error"), ctx as never),
+			refreshAccessTokenSafe(makeAccount("network-error"), ctx),
 		).rejects.toThrow("Failed to refresh access token");
 
 		expect(queuedJobs).toHaveLength(0);
@@ -200,7 +200,7 @@ describe("refreshAccessTokenSafe requires_reauth detection", () => {
 		await expect(
 			refreshAccessTokenSafe(
 				makeAccount("name-false-positive", "test_invalid_grant"),
-				ctx as never,
+				ctx,
 			),
 		).rejects.toThrow("Failed to refresh access token");
 

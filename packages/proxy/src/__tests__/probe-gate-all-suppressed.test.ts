@@ -19,6 +19,7 @@ import {
 } from "../handlers/rate-limit-cooldown";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 function stubUsageCollector() {
 	return spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue({
@@ -87,19 +88,24 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 }
 
 function makeContext(account: Account): ProxyContext {
-	return {
-		strategy: { select: (accounts: Account[]) => accounts } as never,
+	return makeProxyContext({
+		strategy: { select: (accounts: Account[]) => accounts },
 		dbOps: {
 			getAllAccounts: mock(async () => [account]),
 			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getModelScopedCapacityRouting: undefined,
+			getStorePayloads: undefined,
+		},
 		provider: {
 			name: "test-provider",
 			canHandle: () => true,
@@ -114,10 +120,14 @@ function makeContext(account: Account): ProxyContext {
 				remaining: undefined,
 			}),
 			isStreamingResponse: () => false,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-	};
+			// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+			observeRequest: undefined,
+			extractUsageInfo: undefined,
+			observeUpstream: undefined,
+			prepareRequest: undefined,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+	});
 }
 
 function makeRequest(): Request {
@@ -235,19 +245,24 @@ describe("handleProxy — multi-account all-suppressed pool forwards a terminal 
 		) as unknown as typeof fetch;
 
 		try {
-			const ctx: ProxyContext = {
-				strategy: { select: (accounts: Account[]) => accounts } as never,
+			const ctx: ProxyContext = makeProxyContext({
+				strategy: { select: (accounts: Account[]) => accounts },
 				dbOps: {
 					getAllAccounts: mock(async () => [accountOne, accountTwo]),
 					getActiveComboForFamily: mock(async () => null),
-				} as never,
-				runtime: { port: 8080, clientId: "test" } as never,
+				},
+				runtime: { clientId: "test" },
 				config: {
 					getUsageThrottlingFiveHourEnabled: () => false,
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
 					getAgentFrontmatterModelFallback: () => false,
-				} as never,
+					// Absent in production means the default; undefined keeps the path the old literal took.
+					getForceAccountModel: undefined,
+					getCombosEnabled: undefined,
+					getModelScopedCapacityRouting: undefined,
+					getStorePayloads: undefined,
+				},
 				provider: {
 					name: "test-provider",
 					canHandle: () => true,
@@ -266,10 +281,14 @@ describe("handleProxy — multi-account all-suppressed pool forwards a terminal 
 						remaining: undefined,
 					}),
 					isStreamingResponse: () => false,
-				} as never,
-				refreshInFlight: new Map(),
-				asyncWriter: { enqueue: mock(() => {}) } as never,
-			};
+					// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+					observeRequest: undefined,
+					extractUsageInfo: undefined,
+					observeUpstream: undefined,
+					prepareRequest: undefined,
+				},
+				asyncWriter: { enqueue: mock(() => {}) },
+			});
 
 			// "Request C": both candidates are probe-gate suppressed. The main
 			// loop's ungated retry (proxy.ts:506-534) attacks accountOne
@@ -386,8 +405,8 @@ describe("handleProxy — combo-fallback pool all-suppressed retries ungated (de
 			// 10's skipCombo re-selection (must return fallbackAccount as the
 			// only candidate).
 			let getAllAccountsCallCount = 0;
-			const ctx: ProxyContext = {
-				strategy: { select: (accounts: Account[]) => accounts } as never,
+			const ctx: ProxyContext = makeProxyContext({
+				strategy: { select: (accounts: Account[]) => accounts },
 				dbOps: {
 					getAllAccounts: mock(async () => {
 						getAllAccountsCallCount++;
@@ -396,14 +415,20 @@ describe("handleProxy — combo-fallback pool all-suppressed retries ungated (de
 							: [fallbackAccount];
 					}),
 					getActiveComboForFamily: mock(async () => combo),
-				} as never,
-				runtime: { port: 8080, clientId: "test" } as never,
+				},
+				runtime: { clientId: "test" },
 				config: {
 					getUsageThrottlingFiveHourEnabled: () => false,
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
 					getAgentFrontmatterModelFallback: () => false,
-				} as never,
+					// Absent in production means the default; undefined keeps the path the old literal took.
+					getForceAccountModel: undefined,
+					getCombosEnabled: undefined,
+					getComboSessionFallback: undefined,
+					getModelScopedCapacityRouting: undefined,
+					getStorePayloads: undefined,
+				},
 				provider: {
 					name: "test-provider",
 					canHandle: () => true,
@@ -418,10 +443,14 @@ describe("handleProxy — combo-fallback pool all-suppressed retries ungated (de
 						remaining: undefined,
 					}),
 					isStreamingResponse: () => false,
-				} as never,
-				refreshInFlight: new Map(),
-				asyncWriter: { enqueue: mock(() => {}) } as never,
-			};
+					// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+					observeRequest: undefined,
+					extractUsageInfo: undefined,
+					observeUpstream: undefined,
+					prepareRequest: undefined,
+				},
+				asyncWriter: { enqueue: mock(() => {}) },
+			});
 
 			const response = await handleProxy(
 				makeRequest(),
@@ -505,19 +534,24 @@ describe("handleProxy — front candidate attempted, later candidate suppressed 
 		}) as unknown as typeof fetch;
 
 		try {
-			const ctx: ProxyContext = {
-				strategy: { select: (accounts: Account[]) => accounts } as never,
+			const ctx: ProxyContext = makeProxyContext({
+				strategy: { select: (accounts: Account[]) => accounts },
 				dbOps: {
 					getAllAccounts: mock(async () => [accountA, accountB]),
 					getActiveComboForFamily: mock(async () => null),
-				} as never,
-				runtime: { port: 8080, clientId: "test" } as never,
+				},
+				runtime: { clientId: "test" },
 				config: {
 					getUsageThrottlingFiveHourEnabled: () => false,
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
 					getAgentFrontmatterModelFallback: () => false,
-				} as never,
+					// Absent in production means the default; undefined keeps the path the old literal took.
+					getForceAccountModel: undefined,
+					getCombosEnabled: undefined,
+					getModelScopedCapacityRouting: undefined,
+					getStorePayloads: undefined,
+				},
 				provider: {
 					name: "test-provider",
 					canHandle: () => true,
@@ -532,10 +566,14 @@ describe("handleProxy — front candidate attempted, later candidate suppressed 
 						remaining: undefined,
 					}),
 					isStreamingResponse: () => false,
-				} as never,
-				refreshInFlight: new Map(),
-				asyncWriter: { enqueue: mock(() => {}) } as never,
-			};
+					// Absent in production means the default (for observeRequest, the codex observer); undefined keeps the path the old literal took.
+					observeRequest: undefined,
+					extractUsageInfo: undefined,
+					observeUpstream: undefined,
+					prepareRequest: undefined,
+				},
+				asyncWriter: { enqueue: mock(() => {}) },
+			});
 
 			const response = await handleProxy(
 				makeRequest(),

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -93,26 +94,27 @@ interface SeenHeaders {
 	status: number;
 }
 
-function makeProxyContext(seen: SeenHeaders[]): ProxyContext {
-	return {
-		strategy: { getNextAccount: () => null } as never,
+function makeContext(seen: SeenHeaders[]): ProxyContext {
+	return makeProxyContext({
 		dbOps: {
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+			// Absent on the old literal; the attribution read sits in a try, so undefined takes its catch as before.
+			resolverManager: undefined,
+		},
+		runtime: { clientId: "test" },
 		provider: {
 			name: "openai-compatible",
 			canHandle: () => true,
 			buildUrl: () => "https://upstream.local/v1/messages",
 			prepareHeaders: () => new Headers(),
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			prepareRequest: undefined,
+			observeUpstream: undefined,
+			extractUsageInfo: undefined,
 			// Mirror the codex provider: stamp internal metadata headers onto the
 			// transformed request so proxy-operations can tag responses from them.
 			transformRequestBody: async (request: Request) => {
@@ -145,12 +147,11 @@ function makeProxyContext(seen: SeenHeaders[]): ProxyContext {
 				remaining: undefined,
 			}),
 			isStreamingResponse: () => false,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: { enqueue: mock(() => {}) } as never,
-		config: { getStorePayloads: () => true } as never,
+		},
+		asyncWriter: { enqueue: mock(() => {}) },
+		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
-	};
+	});
 }
 
 describe("proxyWithAccount — 529 in-place retry response tagging", () => {
@@ -226,7 +227,7 @@ describe("proxyWithAccount — 529 in-place retry response tagging", () => {
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(seen),
+				makeContext(seen),
 			);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -254,7 +255,7 @@ describe("proxyWithAccount — 529 in-place retry response tagging", () => {
 						headers: { "content-type": "application/json" },
 					}),
 			);
-			const ctx = makeProxyContext([]);
+			const ctx = makeContext([]);
 			ctx.provider.name = "codex";
 			ctx.provider.prepareHeaders = () =>
 				new Headers({ "x-better-ccflare-authenticated-caller": "forged" });

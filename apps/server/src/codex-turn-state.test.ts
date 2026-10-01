@@ -9,12 +9,14 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import { ResolverManager } from "@better-ccflare/core";
 import {
 	type HandleProxyFn,
 	handleResponsesRequest,
 } from "@better-ccflare/openai-responses-adapter";
 import { handleProxy, type ProxyContext } from "@better-ccflare/proxy";
 import type { Account } from "@better-ccflare/types";
+import { makeProxyContext } from "../../../packages/proxy/src/__tests__/proxy-context-fixture";
 // The module record proxy.ts and response-handler.ts import from; the package
 // entry re-exports nothing that would let a spy reach it.
 import * as usageCollectorModule from "../../../packages/proxy/src/usage-collector";
@@ -165,7 +167,7 @@ function openAiCompatibleAccount(): Account {
 let route: string[] = ["a", "b"];
 
 function makeCtx(): ProxyContext {
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: (accs: Account[]) =>
 				route
@@ -183,11 +185,9 @@ function makeCtx(): ProxyContext {
 				consecutiveRateLimits: 1,
 				applied: true,
 			})),
-			resolverManager: {
-				current: () => ({
-					resolve: () => ({ projectId: null, worktreePath: null }),
-				}),
-			},
+			// A real, empty resolver: resolve() answers all-null, which is what the
+			// hand-built one returned, minus the two fields it left out.
+			resolverManager: new ResolverManager(),
 		},
 		// One attempt, so nothing is retried in place.
 		runtime: {
@@ -201,12 +201,21 @@ function makeCtx(): ProxyContext {
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
 			getAgentFrontmatterModelFallback: () => false,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getModelScopedCapacityRouting: undefined,
+			getCombosEnabled: undefined,
 			getStorePayloads: () => false,
 		},
-		provider: { name: "anthropic", canHandle: () => true },
-		refreshInFlight: new Map(),
+		provider: {
+			name: "anthropic",
+			canHandle: () => true,
+			// Absent here sends proxy.ts to the codex observer, the path the
+			// old literal took; undefined keeps it.
+			observeRequest: undefined,
+		},
 		asyncWriter: { enqueue: mock(() => {}) },
-	} as unknown as ProxyContext;
+	});
 }
 
 let collector: ReturnType<typeof spyOn> | null = null;
@@ -522,8 +531,11 @@ describe("x-codex-turn-state replayed on turns derived from /v1/messages bodies 
 				messages,
 			}),
 		});
-		const ctx = { ...makeCtx(), internalProbeSecret: PROBE_SECRET };
-		const res = await handleProxy(req, new URL(req.url), ctx as ProxyContext);
+		const ctx: ProxyContext = {
+			...makeCtx(),
+			internalProbeSecret: PROBE_SECRET,
+		};
+		const res = await handleProxy(req, new URL(req.url), ctx);
 		await res.text();
 		expect(res.status).toBe(200);
 		return res;

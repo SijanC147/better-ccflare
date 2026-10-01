@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
 	computeRateLimitBackoffMs,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
-import type { ProxyContext } from "../proxy-types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
@@ -57,7 +57,7 @@ function makeCtx() {
 			incrementStreak?: boolean;
 		}>,
 	};
-	const ctx = {
+	const ctx = makeProxyContext({
 		// No provider methods: applyRateLimitCooldown and the probe gate never
 		// read ctx.provider, so a stubbed parseRateLimit here never ran and the
 		// `rateLimited` option it read changed nothing (SB23-2536). Each case
@@ -73,14 +73,11 @@ function makeCtx() {
 				calls.markRateLimited.push({ until, reason, incrementStreak });
 				return { consecutiveRateLimits: 9, applied: true };
 			},
-			updateAccountUsage: mock(() => {}),
-			updateAccountRateLimitMeta: mock(() => {}),
-			getAdapter: () => ({ run: async () => {} }),
 		},
 		asyncWriter: {
 			enqueue: (job: () => void | Promise<void>) => void job(),
 		},
-	} as unknown as ProxyContext;
+	});
 	return { ctx, calls };
 }
 

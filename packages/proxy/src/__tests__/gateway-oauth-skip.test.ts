@@ -36,6 +36,7 @@ import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldow
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
 import { fetchSlot } from "./fetch-slot";
+import { makeProxyContext } from "./proxy-context-fixture";
 
 const originalFetch = globalThis.fetch;
 const MODEL = "claude-opus-5-5";
@@ -149,8 +150,8 @@ function makeContext(
 	accounts: Account[],
 	combo: ComboWithSlots | null,
 ): ProxyContext {
-	return {
-		strategy: { select: mock((accs: Account[]) => accs) } as never,
+	return makeProxyContext({
+		strategy: { select: mock((accs: Account[]) => accs) },
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => combo),
@@ -159,12 +160,8 @@ function makeContext(
 			),
 			saveRequest: mock(() => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
-			getAdapter: mock(() => ({
-				run: mock(() => Promise.resolve()),
-				get: mock(() => Promise.resolve(null)),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
+		},
+		runtime: { clientId: "test" },
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
@@ -172,17 +169,20 @@ function makeContext(
 			getAgentFrontmatterModelFallback: () => false,
 			getModelScopedCapacityRouting: () => "off",
 			getStorePayloads: () => false,
-		} as never,
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getForceAccountModel: undefined,
+			getCombosEnabled: undefined,
+			getComboSessionFallback: undefined,
+		},
 		// A `claude-console-api` row is not a registered provider name, so it
 		// resolves to `ctx.provider`, which the server sets to Anthropic.
 		provider: new AnthropicProvider(),
-		refreshInFlight: new Map(),
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
 				await job();
 			}),
-		} as never,
-	};
+		},
+	});
 }
 
 /** The windowless 429 captured from Anthropic (issue #301). */

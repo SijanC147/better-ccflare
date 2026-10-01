@@ -26,6 +26,7 @@ import { logBus } from "@better-ccflare/logger";
 import { usageCache } from "@better-ccflare/providers";
 import type { LogEvent } from "@better-ccflare/types";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { makeProxyContext } from "./proxy-context-fixture";
 import type { PublicSurface } from "./public-surface";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -73,11 +74,7 @@ async function makeScheduler(
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
-		{
-			runtime: { port: 8080, clientId: "test-client" },
-			refreshInFlight: new Map(),
-			internalProbeSecret: "secret",
-		} as never,
+		makeProxyContext({ internalProbeSecret: "secret" }),
 	) as unknown as TestableScheduler;
 }
 

@@ -4,6 +4,7 @@ import type {
 	ComboWithSlots,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
 	getXaiConvId,
 	recordXaiAffinitySuccess,
@@ -100,7 +101,7 @@ function makeCtx(
 	opts: { accounts?: Account[]; activeCombo?: ComboWithSlots | null } = {},
 ): ProxyContext {
 	const accounts = opts.accounts ?? [makeAccount()];
-	return {
+	return makeProxyContext({
 		strategy: {
 			select: mock((_all: Account[], _meta: RequestMeta) => accounts),
 		},
@@ -108,9 +109,14 @@ function makeCtx(
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => opts.activeCombo ?? null),
 		},
-		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
-	} as unknown as ProxyContext;
+		config: {
+			// Absent in production means the default; undefined keeps the path the old literal took.
+			getCombosEnabled: undefined,
+			getForceAccountModel: undefined,
+			getModelScopedCapacityRouting: undefined,
+		},
+	});
 }
 
 // ── setXaiConvId / getXaiConvId ────────────────────────────────────────────
