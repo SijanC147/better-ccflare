@@ -23,6 +23,7 @@ function settings(
 		token: "token",
 		logStream: "better_ccflare_logs",
 		requestStream: "better_ccflare_requests",
+		metricsStream: "better_ccflare_exporter_metrics",
 		shipPayloads: true,
 		logMinLevel: "INFO",
 		...overrides,

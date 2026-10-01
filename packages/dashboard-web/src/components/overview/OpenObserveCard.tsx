@@ -42,6 +42,9 @@ export function OpenObserveCard() {
 	const [token, setToken] = useState("");
 	const [logStream, setLogStream] = useState("better_ccflare_logs");
 	const [requestStream, setRequestStream] = useState("better_ccflare_requests");
+	const [metricsStream, setMetricsStream] = useState(
+		"better_ccflare_exporter_metrics",
+	);
 	const [shipPayloads, setShipPayloads] = useState(false);
 	// Empty means "not read from the server yet", not a level. The default level
 	// lives in the config layer; repeating it here would be a second source of
@@ -58,6 +61,7 @@ export function OpenObserveCard() {
 		setUser(data.user);
 		setLogStream(data.logStream);
 		setRequestStream(data.requestStream);
+		setMetricsStream(data.metricsStream);
 		setShipPayloads(data.shipPayloads);
 		setLogMinLevel(data.logMinLevel);
 		// The token is never pre-filled — the server never returns it.
@@ -81,6 +85,11 @@ export function OpenObserveCard() {
 			shipPayloads,
 		};
 		if (logMinLevel !== "") body.logMinLevel = logMinLevel;
+		// Sent only once the server's value has been read, so a save made before
+		// the read lands cannot overwrite a configured stream with the
+		// placeholder. Once read, an emptied field is sent as empty, which the
+		// server reads as the default, the same as the two streams above.
+		if (data) body.metricsStream = metricsStream;
 		return body;
 	}
 
@@ -188,6 +197,23 @@ export function OpenObserveCard() {
 							onChange={(e) => setRequestStream(e.target.value)}
 							placeholder="better_ccflare_requests"
 						/>
+					</div>
+
+					<div className="space-y-1">
+						<label className="text-sm font-medium" htmlFor="oo-metrics-stream">
+							Metrics stream
+						</label>
+						<Input
+							id="oo-metrics-stream"
+							value={metricsStream}
+							disabled={busy}
+							onChange={(e) => setMetricsStream(e.target.value)}
+							placeholder="better_ccflare_exporter_metrics"
+						/>
+						<p className="text-xs text-muted-foreground">
+							The exporter's own counters, posted once a minute: records shipped,
+							deferred for retry, evicted and dropped, per stream.
+						</p>
 					</div>
 				</div>
 

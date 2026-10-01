@@ -95,6 +95,8 @@ function settings(): OpenObserveSettings {
 		token: "not-a-real-token",
 		logStream: "better_ccflare_logs",
 		requestStream: REQUEST_STREAM,
+		// Off: this file pins the request record, not the exporter's counters.
+		metricsStream: "",
 		shipPayloads: false,
 		logMinLevel: "INFO",
 	};

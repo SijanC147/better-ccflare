@@ -673,6 +673,10 @@ export interface ConfigData {
 	openobserve_token?: string;
 	openobserve_log_stream?: string;
 	openobserve_request_stream?: string;
+	// Receives the exporter's own counters, one snapshot a minute. Defaulted
+	// like the other two streams, so an upgraded install starts reporting with
+	// no setting changed.
+	openobserve_metrics_stream?: string;
 	openobserve_ship_payloads?: boolean;
 	// Lowest level shipped to the log stream, by name. Defaults to INFO: the
 	// exporter's buffers drop the oldest under pressure, so a DEBUG burst
@@ -3309,6 +3313,13 @@ export class Config extends EventEmitter {
 					: "") ||
 				"better_ccflare_requests"
 			).trim(),
+			metricsStream: (
+				process.env.BETTER_CCFLARE_OPENOBSERVE_METRICS_STREAM ||
+				(typeof this.data.openobserve_metrics_stream === "string"
+					? this.data.openobserve_metrics_stream
+					: "") ||
+				"better_ccflare_exporter_metrics"
+			).trim(),
 			shipPayloads,
 			// Passed through unvalidated on purpose. The exporter parses it,
 			// because the exporter is the only place that can report a bad value
@@ -3358,6 +3369,7 @@ export class Config extends EventEmitter {
 		user: string;
 		logStream: string;
 		requestStream: string;
+		metricsStream: string;
 		shipPayloads: boolean;
 		logMinLevel: string;
 	}): void {
@@ -3366,6 +3378,7 @@ export class Config extends EventEmitter {
 		this.set("openobserve_user", settings.user);
 		this.set("openobserve_log_stream", settings.logStream);
 		this.set("openobserve_request_stream", settings.requestStream);
+		this.set("openobserve_metrics_stream", settings.metricsStream);
 		this.set("openobserve_ship_payloads", settings.shipPayloads);
 		this.set("openobserve_log_min_level", settings.logMinLevel);
 	}
