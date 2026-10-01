@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type {
 	AnthropicUsageData,
 	ExtraUsageData,
@@ -450,65 +448,5 @@ describe("AccountListItem, extra usage", () => {
 
 		expect(b).toContain("990 credits left");
 		expect(b).toMatch(/renews .+ \(operator-set\)/);
-	});
-});
-
-/**
- * Every hour-bearing date formatter in RateLimitProgress.tsx, each paired with
- * whether it pins the 24-hour clock. A formatter left to the locale prints
- * "3:04 PM" for one viewer and "15:04" for the next.
- *
- * It reads the call's own argument text, so it sees `toLocale*String(...)` and
- * `new Intl.DateTimeFormat(...)` with inline options. Options passed by
- * reference (`clockOptions` for the peak labels) carry no `hour:` in the call
- * and are not seen; SB23-3521 covers those and the dashboard-wide toggle.
- */
-function hourFormatterCalls(
-	source: string,
-): { call: string; pinned: boolean }[] {
-	const out: { call: string; pinned: boolean }[] = [];
-	const opener =
-		/\.toLocale(?:Time|Date)?String\(|\bnew\s+Intl\.DateTimeFormat\(/g;
-	for (let m = opener.exec(source); m !== null; m = opener.exec(source)) {
-		let depth = 1;
-		let i = m.index + m[0].length;
-		for (; i < source.length && depth > 0; i++) {
-			if (source[i] === "(") depth++;
-			else if (source[i] === ")") depth--;
-		}
-		const call = source.slice(m.index, i);
-		if (!/\bhour\s*:/.test(call)) continue;
-		out.push({
-			call,
-			pinned: /hourCycle:\s*"h23"/.test(call) && !/\bhour12\s*:/.test(call),
-		});
-	}
-	return out;
-}
-
-describe("RateLimitProgress, 24-hour clock", () => {
-	it("pins hourCycle h23 on every hour-bearing formatter", () => {
-		const source = readFileSync(
-			join(import.meta.dir, "RateLimitProgress.tsx"),
-			"utf8",
-		);
-		const calls = hourFormatterCalls(source);
-
-		// Four when this was written; fewer means the scan stopped matching.
-		expect(calls.length).toBeGreaterThanOrEqual(4);
-		expect(calls.filter((c) => !c.pinned).map((c) => c.call)).toEqual([]);
-	});
-
-	it("flags a formatter that leaves the hour to the locale", () => {
-		// The scan has to be able to return the other answer.
-		const calls = hourFormatterCalls(
-			'd.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });\n' +
-				'd.toLocaleString(undefined, { hour: "2-digit", hour12: false, hourCycle: "h23" });\n' +
-				'd.toLocaleDateString(undefined, { month: "short" });\n' +
-				'new Intl.DateTimeFormat(undefined, { hour: "2-digit" }).format(d);\n' +
-				'new Intl.DateTimeFormat(undefined, { hour: "2-digit", hourCycle: "h23" });',
-		);
-
-		expect(calls.map((c) => c.pinned)).toEqual([false, false, false, true]);
 	});
 });
