@@ -36,6 +36,8 @@ export const PANEL_COLUMNS = 60;
 /** On a top or bottom edge the table needs height instead. */
 export const PANEL_LINES = 20;
 export const PANEL_START_TIMEOUT_MS = 5000;
+/** Set in the panel child's environment to its own socket path. */
+export const IN_PANEL_ENV = "BETTER_CCFLARE_TUI_PANEL_SOCKET";
 
 /** `auto` tries the panel when detection passes; `force` fails without it. */
 export type PanelMode = "auto" | "force" | "off";
@@ -222,6 +224,8 @@ export async function launchInPanel(
 	// The key travels in the environment, never in argv, where `ps` shows it.
 	const childEnv: Record<string, string | undefined> = { ...env };
 	if (apiKey) childEnv.BETTER_CCFLARE_API_KEY = apiKey;
+	// Tells the child its footer cannot say "q": a panel never gets the keyboard.
+	childEnv[IN_PANEL_ENV] = socket;
 	const child = deps.spawnDetached(argv, childEnv);
 
 	const step = 100;

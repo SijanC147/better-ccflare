@@ -526,7 +526,8 @@ export function runOverviewLoop(options: LoopOptions): Promise<number> {
 			}
 			footer.push(options.quitHint);
 			const frame = renderOverview(accounts, {
-				width: io.stdout.columns ?? 80,
+				// A pty with no size reports 0 columns; treat it as unknown.
+				width: io.stdout.columns || 80,
 				color: options.color,
 				now: io.now(),
 				baseUrl: options.baseUrl,

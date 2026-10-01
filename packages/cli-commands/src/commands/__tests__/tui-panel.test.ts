@@ -222,6 +222,9 @@ describe("launchInPanel", () => {
 		expect(f.spawned[0].argv).toContain("--no-panel");
 		expect(f.spawned[0].argv.join(" ")).not.toContain("k-secret");
 		expect(f.spawned[0].env.BETTER_CCFLARE_API_KEY).toBe("k-secret");
+		expect(f.spawned[0].env.BETTER_CCFLARE_TUI_PANEL_SOCKET).toBe(
+			"/var/folders/ab/T/better-ccflare-tui-501.sock",
+		);
 	});
 
 	it("does not open a second panel when one already answers on the socket", async () => {

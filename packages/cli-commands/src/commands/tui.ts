@@ -17,6 +17,7 @@ import {
 import {
 	defaultPanelDeps,
 	detectKittyPanelHost,
+	IN_PANEL_ENV,
 	launchInPanel,
 	type PanelDeps,
 	resolvePanelEdge,
@@ -412,7 +413,9 @@ export async function runTui(
 			color: useColor(deps.stdout, deps.env),
 			initial: result.accounts,
 			fetchOnce,
-			quitHint: `q or Ctrl-C to quit; refreshes every ${options.intervalSeconds}s`,
+			quitHint: deps.env[IN_PANEL_ENV]
+				? `refreshes every ${options.intervalSeconds}s; close: kitten @ --to unix:${deps.env[IN_PANEL_ENV]} close-window`
+				: `q or Ctrl-C to quit; refreshes every ${options.intervalSeconds}s`,
 			io: {
 				...deps.loop,
 				stdout: deps.stdout,
