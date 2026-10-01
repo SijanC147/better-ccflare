@@ -996,7 +996,10 @@ describe("handleResponsesRequest", () => {
 		const requestDiagnostic = diagnosticEvents.find(
 			(event) => event.msg === "Codex cache request diagnostics",
 		);
-		expect(requestDiagnostic?.data).toMatchObject({
+		if (!requestDiagnostic) {
+			throw new Error("no Codex cache request diagnostics event was logged");
+		}
+		expect(requestDiagnostic.data).toMatchObject({
 			transportRequested: "sse",
 			previousResponseRequested: false,
 			cacheMode: "implicit",
@@ -1004,7 +1007,7 @@ describe("handleResponsesRequest", () => {
 			breakpointCount: 0,
 			comparisonResponseIdPresent: false,
 		});
-		expect(requestDiagnostic?.data).not.toHaveProperty("continuationUsed");
+		expect(requestDiagnostic.data).not.toHaveProperty("continuationUsed");
 	});
 
 	test("non-streaming custom-tool-call response returns the native Responses JSON instead of a 502", async () => {

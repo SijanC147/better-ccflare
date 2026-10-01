@@ -485,6 +485,283 @@ describe("check-optional-chain-silent-skip", () => {
 		expect(stderr).not.toContain("theirs.test.ts");
 	});
 
+	/**
+	 * SB23-2499. Positions where a call's value is thrown away without the call being an
+	 * `ExpressionStatement`. Every positive has a near-miss of the same shape in which the
+	 * value IS read, because widening a discard rule is only safe if the rule can still say
+	 * "read" for the same syntax.
+	 *
+	 * The fixture header declares the subjects and guards both of them, so the body is the
+	 * only variable. The offence is always on the first body line, `BODY_LINE`.
+	 */
+	const SB23_2499_HEADER = [
+		'import { expect, test } from "bun:test";',
+		'test("callback and operator positions", async () => {',
+		"\tconst sink: { write(k: string): number; close(): Promise<number>; flush(): number; read(): number; label(): string; open(): void } | null = null as never;",
+		"\tconst cb: (() => number) | null = null as never;",
+		'\tconst xs = ["a"];',
+		"\tconst p = Promise.resolve();",
+		"\tconst ok = true;",
+		"\tlet n = 0;",
+		"\texpect(sink).not.toBeNull();",
+		"\texpect(cb).not.toBeNull();",
+	];
+	const BODY_LINE = SB23_2499_HEADER.length + 1;
+
+	function sb23_2499Fixture(body: string[]): string {
+		return makeFixture([...SB23_2499_HEADER, ...body.map((l) => `\t${l}`), "});"].join("\n"));
+	}
+
+	const reportedPositions: Array<[string, string[]]> = [
+		// The five shapes the issue names.
+		["an expression-bodied arrow handed to forEach", ["xs.forEach((k) => sink?.write(k));"]],
+		["an expression-bodied arrow in an awaited then", ["await p.then(() => sink?.close());"]],
+		// SB23-2460's own founding instance, with the stub on the other side of the seam.
+		["an expression-bodied arrow handed to setTimeout", ["setTimeout(() => cb?.(), 0);"]],
+		["the right operand of && at statement level", ["ok && sink?.flush();"]],
+		["the left operand of a comma", ["(sink?.flush(), n++);"]],
+		// Folded in because the same climb covers them.
+		["the right operand of a comma at statement level", ["(n++, sink?.flush());"]],
+		["the right operand of ?? at statement level", ["n ?? sink?.flush();"]],
+		["the right operand of || at statement level", ["n || sink?.flush();"]],
+		["either branch of a conditional at statement level", ["ok ? sink?.flush() : n++;"]],
+		["a for initialiser", ["for (sink?.open(); n < 1; n++) {}"]],
+		["a for incrementor", ["for (; n < 1; sink?.open()) n++;"]],
+		["a template literal statement", ["`${sink?.label()}`;"]],
+		["a return from a callback handed to forEach", ["xs.forEach((k) => {", "\treturn sink?.write(k);", "});"]],
+		["a map whose result is discarded", ["xs.map((k) => sink?.write(k));"]],
+		["a Promise executor", ["new Promise(() => cb?.());"]],
+		["a test registered with test.skip", ['test.skip("inner", () => sink?.flush());']],
+		["a void expression", ["void sink?.flush();"]],
+		// `finally` ignores its callback's value, so reading the call's result proves nothing.
+		["a finally callback whose call's result is asserted", ["expect(await p.finally(() => sink?.read())).toBe(undefined);"]],
+	];
+
+	for (const [position, body] of reportedPositions) {
+		test(`reports a guarded skipped call in ${position}`, () => {
+			const { exitCode, stderr } = runGate(sb23_2499Fixture(body));
+			expect(exitCode).toBe(1);
+			// The offence is on the body line holding the `?.`, which is the first one except
+			// in the `return` case.
+			const offset = body.findIndex((line) => line.includes("?."));
+			expect(stderr).toContain(`subject.test.ts:${BODY_LINE + offset}:`);
+		});
+	}
+
+	const unreportedPositions: Array<[string, string[]]> = [
+		// The issue's two named negatives.
+		["a statement inside a function expect holds for toThrow", ["expect(() => {", '\tsink?.write("x");', "}).toThrow(/bad/);"]],
+		["an awaited call inside an async function expect holds for rejects", ["await expect(async () => {", "\tawait sink?.close();", "}).rejects.toThrow();"]],
+		// One near-miss per shape: the same syntax, with the value read.
+		["a forEach nested inside a function expect holds", ["expect(() => xs.forEach((k) => sink?.write(k))).toThrow();"]],
+		["a map whose result is asserted", ["expect(xs.map((k) => sink?.write(k))).toEqual([1]);"]],
+		["a then whose result is asserted", ["expect(await p.then(() => sink?.read())).toBe(1);"]],
+		["an arrow handed to a callee not known to ignore it", ['app.on("GET", "/", () => cb?.());']],
+		["an arrow that is stored rather than handed over", ["const later = () => sink?.flush();", "later();"]],
+		["the right operand of && whose value is asserted", ["expect(ok && sink?.flush()).toBe(1);"]],
+		["the right operand of a comma whose value is asserted", ["expect((n++, sink?.read())).toBe(1);"]],
+		["a conditional whose value is asserted", ["expect(ok ? sink?.read() : 0).toBe(1);"]],
+		["a template literal whose value is asserted", ['expect(`${sink?.label()}`).toBe("x");']],
+		["a return from a function nobody is known to discard", ["function f() {", "\treturn sink?.read();", "}", "expect(f()).toBe(1);"]],
+		["a sort comparator, whose call mutates its receiver", ["xs.sort(() => sink?.read() ?? 0);"]],
+		// PR #288's reviewer, S1: the flowing call's result is read by the next link.
+		["a then whose result feeds another then", ["await p.then(() => sink?.read()).then((v) => expect(v).toBe(1));"]],
+		["a map whose result feeds a forEach", ["xs.map((k) => sink?.write(k)).forEach((v) => expect(v).toBe(1));"]],
+	];
+
+	for (const [position, body] of unreportedPositions) {
+		test(`does not report ${position}`, () => {
+			const { exitCode, stderr } = runGate(sb23_2499Fixture(body));
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+		});
+	}
+
+	/**
+	 * SB23-2498. A guard spelled differently from the chain it licenses. Each case is a
+	 * guard line then a discarded skipped call, inside one test body; the offence is on the
+	 * last body line. Every axis has near-misses that must stay silent, because a widened
+	 * condition 2 is only shippable if it can still say "different value".
+	 */
+	function sb23_2498Fixture(body: string[]): { dir: string; line: number } {
+		const lines = [
+			'import { expect, test } from "bun:test";',
+			'test("a guard spelled differently", () => {',
+			...body.map((l) => `\t${l}`),
+			"});",
+		];
+		return { dir: makeFixture(lines.join("\n")), line: 2 + body.length };
+	}
+
+	const differentlySpelled: Array<[string, string[]]> = [
+		// spelling
+		["a non-null assertion in the guard", ["expect(res!.body).not.toBeNull();", "res.body?.flush();"]],
+		["an `as` cast in the guard", ["expect(cb as () => void).not.toBeNull();", "cb?.();"]],
+		["parentheses in the guard", ["expect((cb)).not.toBeNull();", "cb?.();"]],
+		["a string-literal element access in the guard", ['expect(handlers["flush"]).toBeDefined();', "handlers.flush?.();"]],
+		["an optional link in a guard that rejects undefined", ["expect(res?.body).toBeDefined();", "res.body?.flush();"]],
+		// alias
+		["a const alias of the guarded value", ["const handler = holder.cb;", "expect(holder.cb).not.toBeNull();", "handler?.();"]],
+		["a guard on the const alias", ["const handler = holder.cb;", "expect(handler).not.toBeNull();", "holder.cb?.();"]],
+		// prefix
+		["a receiver the guard's evaluation proves present", ["expect(conn.stream.id).not.toBeNull();", "conn?.close();"]],
+		["a receiver past an optional link under a matcher rejecting undefined", ["expect(conn?.stream).toBeDefined();", "conn?.close();"]],
+		["the receiver of a call in the guard", ['expect(store.get("k")).toBeDefined();', "store?.clear();"]],
+		// matcher
+		["toBeInstanceOf", ["expect(res).toBeInstanceOf(Response);", "res?.text();"]],
+		["toHaveProperty", ['expect(obj).toHaveProperty("x");', "obj?.flush();"]],
+		["toHaveLength", ["expect(obj).toHaveLength(1);", "obj?.flush();"]],
+		["toMatchObject", ["expect(obj).toMatchObject({});", "obj?.flush();"]],
+		["toContain", ['expect(obj).toContain("x");', "obj?.flush();"]],
+		["toContainEqual", ["expect(obj).toContainEqual(1);", "obj?.flush();"]],
+		["toBeFunction", ["expect(cb).toBeFunction();", "cb?.();"]],
+		["toBeArray", ["expect(obj).toBeArray();", "obj?.flush();"]],
+		["toBeString", ["expect(obj).toBeString();", "obj?.flush();"]],
+		["toBeNumber", ["expect(obj).toBeNumber();", "obj?.flush();"]],
+		["toBeBoolean", ["expect(obj).toBeBoolean();", "obj?.flush();"]],
+		["toBeTypeOf a present type", ['expect(cb).toBeTypeOf("function");', "cb?.();"]],
+		["typeof compared to a present type", ['expect(typeof cb).toBe("function");', "cb?.();"]],
+		["typeof compared away from undefined", ['expect(typeof cb).not.toBe("undefined");', "cb?.();"]],
+		["a loose comparison with null", ["expect(cb != null).toBe(true);", "cb?.();"]],
+		["a strict comparison with undefined", ["expect(cb !== undefined).toBeTruthy();", "cb?.();"]],
+		["a comparison with null on the left", ["expect(null !== cb).toBe(true);", "cb?.();"]],
+		["a double negation", ["expect(!!cb).toBe(true);", "cb?.();"]],
+		["Boolean()", ["expect(Boolean(cb)).toBeTruthy();", "cb?.();"]],
+		["not.toBe(null)", ["expect(cb).not.toBe(null);", "cb?.();"]],
+		["not.toEqual(undefined)", ["expect(cb).not.toEqual(undefined);", "cb?.();"]],
+		["not.toBeFalsy", ["expect(cb).not.toBeFalsy();", "cb?.();"]],
+		["toEqual(expect.any())", ["expect(cb).toEqual(expect.any(Function));", "cb?.();"]],
+		["toStrictEqual(expect.anything())", ["expect(cb).toStrictEqual(expect.anything());", "cb?.();"]],
+		["toEqual(expect.objectContaining())", ["expect(obj).toEqual(expect.objectContaining({}));", "obj?.flush();"]],
+		["toEqual(expect.arrayContaining())", ["expect(obj).toEqual(expect.arrayContaining([]));", "obj?.flush();"]],
+		// Condition 4b: `not.toHaveProperty` passes on undefined, measured.
+		["a value handed to not.toHaveProperty", ["expect(row).toBeInstanceOf(Object);", 'expect(row?.data).not.toHaveProperty("x");']],
+		// Condition 4b reads the equality argument: `toBe(undefined)` passes on undefined.
+		["a value handed to toBe(undefined)", ["expect(row).toBeDefined();", "expect(row?.state).toBe(undefined);"]],
+		["a value handed to toBeEmpty", ["expect(row).toBeDefined();", "expect(row?.state).toBeEmpty();"]],
+		["an element access handed to toBeUndefined", ["expect(row).toBeDefined();", 'expect(row?.["state"]).toBeUndefined();']],
+	];
+
+	for (const [spelling, body] of differentlySpelled) {
+		test(`reports a skipped call under a guard spelled as ${spelling}`, () => {
+			const { dir, line } = sb23_2498Fixture(body);
+			const { exitCode, stderr } = runGate(dir);
+			expect(exitCode).toBe(1);
+			expect(stderr).toContain(`subject.test.ts:${line}:`);
+		});
+	}
+
+	const differentValues: Array<[string, string[]]> = [
+		// The issue's own example: `res.body` and `res.data` are two values, not two spellings.
+		["a guard on a sibling property", ["expect(res.body).not.toBeNull();", "res.data?.flush();"]],
+		["a guard on the receiver of the chain's subject", ["expect(conn).not.toBeNull();", "conn.stream?.close();"]],
+		["a receiver past an optional link under not.toBeNull", ["expect(conn?.stream).not.toBeNull();", "conn?.close();"]],
+		["a receiver inside an optional link under not.toBeNull", ["expect(a?.b.c).not.toBeNull();", "a.b?.flush();"]],
+		["a let, which can be reassigned", ["let handler = holder.cb;", "expect(holder.cb).not.toBeNull();", "handler?.();"]],
+		["a const holding a call's result", ["const handler = make();", "expect(make()).not.toBeNull();", "handler?.();"]],
+		["a parameter shadowing a const alias", ["const handler = holder.cb;", "expect(holder.cb).not.toBeNull();", "[1].forEach((handler) => handler?.());"]],
+		["typeof compared to object, which null also is", ['expect(typeof cb).toBe("object");', "cb?.();"]],
+		["toBeTypeOf object", ['expect(cb).toBeTypeOf("object");', "cb?.();"]],
+		["not.toBe a value", ["expect(cb).not.toBe(5);", "cb?.();"]],
+		["toEqual a literal", ["expect(cb).toEqual(5);", "cb?.();"]],
+		["not.toBeInstanceOf", ["expect(cb).not.toBeInstanceOf(Function);", "cb?.();"]],
+		["a comparison asserted false", ["expect(cb !== null).toBe(false);", "cb?.();"]],
+		["a double negation asserted false", ["expect(!!cb).toBe(false);", "cb?.();"]],
+		// Condition 4b correction: `not.toContain` FAILS on undefined in Bun, measured, so
+		// the skip is observed. This was a false positive the widening surfaced on the tree.
+		["a value handed to not.toContain", ["expect(row).toBeInstanceOf(Object);", 'expect(row?.argv).not.toContain("x");']],
+		// PR #288's reviewer, S3: `not.toBe(undefined)` FAILS on undefined.
+		["a value handed to not.toBe(undefined)", ["expect(row).toBeDefined();", "expect(row?.state).not.toBe(undefined);"]],
+		// S4: `expect(null).toEqual(expect.any(Object))` passes.
+		["a guard of toEqual(expect.any(Object))", ["expect(x).toEqual(expect.any(Object));", "x?.close();"]],
+		// S2: an inner binding of the guard's name is a different value.
+		["a callback parameter named like the guarded value", ["expect(h).not.toBeNull();", "hs.forEach((h) => h?.());"]],
+		["an inner const named like the guarded value", ["expect(h).not.toBeNull();", "{", "\tconst h = make();", "\th?.();", "}"]],
+	];
+
+	for (const [difference, body] of differentValues) {
+		test(`does not report ${difference}`, () => {
+			const { dir } = sb23_2498Fixture(body);
+			const { exitCode, stderr } = runGate(dir);
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+		});
+	}
+
+	test("every matcher that fails on undefined under .not keeps a chain it receives silent", () => {
+		// One fixture per name would cost a gate run each, so one file holds them all and the
+		// guarded count proves each line was examined: drop any name from the gate's set and
+		// that line is reported. Mirrors REJECTS_UNDEFINED_EVEN_NEGATED, measured on Bun 1.4.
+		const names = [
+			"toContain",
+			"toContainEqual",
+			"toContainKey",
+			"toHaveLength",
+			"toMatch",
+			"toMatchObject",
+			"toBeEmpty",
+			"toBeCloseTo",
+			"toBeGreaterThan",
+			"toBeGreaterThanOrEqual",
+			"toBeLessThan",
+			"toBeLessThanOrEqual",
+			"toHaveBeenCalled",
+			"toHaveBeenCalledWith",
+			"toHaveBeenCalledTimes",
+			"toHaveBeenLastCalledWith",
+			"toHaveBeenNthCalledWith",
+			"toThrow",
+			"toThrowError",
+			"toContainAllKeys",
+			"toContainValues",
+			"toIncludeRepeated",
+			"toHaveReturned",
+			"toHaveReturnedTimes",
+			"toHaveReturnedWith",
+			"toHaveLastReturnedWith",
+			"toHaveNthReturnedWith",
+		];
+		const { dir } = sb23_2498Fixture([
+			"expect(row).toBeDefined();",
+			...names.map((name) => `expect(row?.x).not.${name}(1);`),
+		]);
+		const { exitCode, stdout, stderr } = runGate(dir);
+		expect(stderr).toBe("");
+		expect(stdout).toContain(`${names.length} guarded optional chains, 0 offences`);
+		expect(exitCode).toBe(0);
+	});
+
+	test("labels a chain with the best guard when two cover it", () => {
+		// The baseline guard wins over a widened one, so the report names the line an author
+		// recognises and the survey does not count it as a widening. Kills K32 from PR #288's
+		// ledger, which survived until this fixture existed.
+		const { dir } = sb23_2498Fixture([
+			"expect(res).toBeInstanceOf(Response);",
+			"expect(res).not.toBeNull();",
+			"res?.text();",
+		]);
+		const { exitCode, stderr } = runGate(dir);
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("`expect(...).not.toBeNull` on line 4");
+		const survey = runGate(dir, "--survey");
+		expect(survey.stdout).not.toContain("widened by");
+	});
+
+	test("--survey dates its count with the head and splits the widening by axis", () => {
+		const { dir } = sb23_2498Fixture(["expect(res!.body).not.toBeNull();", "res.body?.flush();"]);
+		const { exitCode, stdout } = runGate(dir, "--survey");
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("widened by spelling: 1 guarded optional chains, 1 of which skip a call");
+		// A short sha, optionally marked dirty; never the bare count with no head beside it.
+		expect(stdout).toMatch(/survey at [0-9a-f]{8}(\+dirty)?: 1 guarded optional chains in 1 files/);
+		// The same text under a widened matcher is the matcher axis ALONE. Tagging it as a
+		// spelling too would credit the survey's spelling count with matches it did not make.
+		const matcherOnly = sb23_2498Fixture(["expect(res).toBeInstanceOf(Response);", "res?.text();"]);
+		const second = runGate(matcherOnly.dir, "--survey");
+		expect(second.stdout).toContain("widened by matcher: 1 guarded optional chains");
+		expect(second.stdout).not.toContain("spelling");
+	});
+
 	test("reads zero offences on the repository as it stands", () => {
 		// Explicit timeout: this spawns the gate over the whole tree, about 1.7 s at
 		// load 100. Bun's 5 s default timed it out at load 163 in a full suite
