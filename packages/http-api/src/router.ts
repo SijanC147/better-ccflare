@@ -1084,9 +1084,7 @@ export class APIRouter {
 				// changes the answer (SB23-3746).
 				if (authResult.role !== "admin") {
 					return errorResponse(
-						Forbidden(
-							"Only admin keys can update API key roles. Your key has api-only access.",
-						),
+						Forbidden("Only admin keys can update API key roles."),
 					);
 				}
 				const updateRoleHandler = createApiKeyUpdateRoleHandler(

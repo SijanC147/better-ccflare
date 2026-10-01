@@ -166,8 +166,7 @@ describe("APIRouter — refusal status", () => {
 		).toEqual({
 			status: 403,
 			body: {
-				error:
-					"Only admin keys can update API key roles. Your key has api-only access.",
+				error: "Only admin keys can update API key roles.",
 			},
 		});
 	});

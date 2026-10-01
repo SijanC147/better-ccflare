@@ -656,7 +656,14 @@ describe("CLI Integration Tests", () => {
 			);
 			const { port } = probe.address() as AddressInfo;
 			await new Promise<void>((resolve) => probe.close(() => resolve()));
+			// HOME and the log directory too, so a regressed server would not
+			// scan the operator's ~/.claude/projects or append to the shared
+			// $TMPDIR/better-ccflare-logs/app.log before the harness kills it.
+			const home = mkdtempSync(join(tmpdir(), "better-ccflare-cli-home-"));
+			createdConfigHomes.add(home);
 			serverEnv = {
+				HOME: home,
+				BETTER_CCFLARE_LOG_DIR: join(home, "logs"),
 				PORT: String(port),
 				BETTER_CCFLARE_SERVICE_STATUS_REFRESH_SECONDS: "0",
 				CF_PRICING_OFFLINE: "1",

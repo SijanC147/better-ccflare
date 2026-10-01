@@ -678,7 +678,7 @@ export class AutoRefreshScheduler {
 					`🚫 Auto-refresh has been DISABLED for account "${accountRow.name}" until reauthentication is completed`,
 				);
 				log.error(
-					`💡 Re-enable auto-refresh after reauthentication with: bun run cli --auto-refresh "${accountRow.name}"`,
+					`💡 Re-enable auto-refresh after reauthentication from the dashboard, or with: POST /api/accounts/${accountRow.id}/auto-refresh`,
 				);
 
 				return false;
