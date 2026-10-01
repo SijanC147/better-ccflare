@@ -27,9 +27,20 @@ import {
 	ensureSchema,
 	runMigrations,
 } from "@better-ccflare/database";
+import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import { makeProxyContext } from "./proxy-context-fixture";
+import type { PublicSurface } from "./public-surface";
 
 type QueryCall = { sql: string; params: unknown[] };
+
+// `checkAndRefresh` is private. `PublicSurface` drops the private declarations
+// so the intersection does not reduce to `never`; see public-surface.ts and
+// token-refresh-hierarchy.test.ts, which reach the same scheduler this way.
+// The import above is type-only, so the runtime import stays the dynamic one
+// in `makeScheduler`.
+type SchedulerProbe = PublicSurface<AutoRefreshScheduler> & {
+	checkAndRefresh(): Promise<void>;
+};
 
 function makeDb(queryResult: unknown[] = []) {
 	const queryCalls: QueryCall[] = [];
@@ -63,9 +74,7 @@ async function makeScheduler(db: ReturnType<typeof makeDb>) {
 async function captureEligibilityQuery(): Promise<QueryCall> {
 	const db = makeDb([]);
 	const scheduler = await makeScheduler(db);
-	await (
-		scheduler as never as { checkAndRefresh(): Promise<void> }
-	).checkAndRefresh();
+	await (scheduler as unknown as SchedulerProbe).checkAndRefresh();
 
 	const mainQuery = db.queryCalls.find(
 		(c) =>
