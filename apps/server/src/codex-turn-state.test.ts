@@ -627,6 +627,27 @@ describe("x-codex-turn-state replayed on turns derived from /v1/messages bodies 
 		]);
 	});
 
+	it("never replays to a fork that grows past the answered request without extending it", async () => {
+		route = ["a"];
+		const s = newSession();
+		const first = await claudeCode(s, [fresh("list files")]);
+		const token = first.headers.get(TURN_STATE);
+		await claudeCode(s, [older("list files"), toolUse("t1"), toolResult("t1")]);
+		// Same prompt, longer, but a different history: not this turn's next step.
+		await claudeCode(s, [
+			older("list files"),
+			toolUse("t8"),
+			toolResult("t8"),
+			toolUse("t9"),
+			toolResult("t9"),
+		]);
+		expect(sent()).toEqual([
+			["a", null],
+			["a", token],
+			["a", null],
+		]);
+	});
+
 	it("never hands one account's token to another, and gives each its own", async () => {
 		const s = newSession();
 		route = ["a"];

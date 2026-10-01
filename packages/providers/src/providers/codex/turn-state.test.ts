@@ -314,6 +314,22 @@ describe("CodexTurnStateStore messages turns", () => {
 		expect(store.lookupMessagesTurn(turn(3), "A").match).toBe("poisoned");
 	});
 
+	it("does not replay to a longer body that does not extend the answered one", () => {
+		const store = new CodexTurnStateStore();
+		store.recordMessagesTurn(
+			store.lookupMessagesTurn(turn(1), "A"),
+			"A",
+			"tok",
+		);
+		const fork = { ...turn(3), prefixes: [...turn(3).prefixes] };
+		// Index 2 is the chain digest over the three messages A answered.
+		fork.prefixes[2] = "not-the-answered-history";
+		expect(store.lookupMessagesTurn(fork, "A")).toMatchObject({
+			match: "other",
+			token: null,
+		});
+	});
+
 	it("keeps accounts apart", () => {
 		const store = new CodexTurnStateStore();
 		store.recordMessagesTurn(
