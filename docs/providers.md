@@ -247,7 +247,7 @@ sequenceDiagram
     participant AuthServer as Anthropic Auth
     participant API as Anthropic API
     
-    User->>CLI: bun cli add <account>
+    User->>CLI: bun run cli --add-account <account>
     CLI->>CLI: Generate PKCE verifier & challenge
     CLI->>Browser: Open auth URL with challenge
     Browser->>AuthServer: Authorization request

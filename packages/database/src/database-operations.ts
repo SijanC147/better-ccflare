@@ -10,6 +10,7 @@ import {
 	type ResolverRuleInput,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
+import { Logger } from "@better-ccflare/logger";
 import type {
 	Account,
 	AgentAttributionSource,
@@ -59,8 +60,13 @@ import {
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { UsageHistoryRepository } from "./repositories/usage-history.repository";
-import { WorktreeRuleRepository } from "./repositories/worktree-rule.repository";
+import {
+	compileCheck,
+	WorktreeRuleRepository,
+} from "./repositories/worktree-rule.repository";
 import { withDatabaseRetry } from "./retry";
+
+const log = new Logger("DatabaseOperations");
 
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
@@ -2671,15 +2677,48 @@ OAuth tokens will need to be re-authenticated.
 			parentProjectId: p.parent_project_id,
 		}));
 
-		const ruleInputs: ResolverRuleInput[] = rules.map((r) => ({
-			id: r.id,
-			kind: r.kind,
-			pattern: r.pattern,
-			parentProjectId: r.parent_project_id,
-			priority: r.priority,
-			enabled: r.enabled,
-			compileError: r.compile_error ?? null,
-		}));
+		// Re-check every row that carries no diagnosis (SB23-2377). `create` and
+		// `update` already refuse a bad pattern on the way in, so the rows this
+		// catches are ones that reached the table another way: a direct database
+		// edit, a restored or imported database, or a diagnosis cleared by hand.
+		// Without it, a relative `directory` pattern compiles through
+		// `path.resolve` against the proxy's own working directory, and an invalid
+		// regex is dropped by `compileRule` with no log line and no error on the
+		// row. The check lives here rather than in the resolver because the
+		// resolver is pure and cannot record what it finds; this is the one
+		// place every stored rule passes through on its way to being compiled,
+		// and it holds the database the diagnosis has to be written to.
+		const ruleInputs: ResolverRuleInput[] = [];
+		for (const r of rules) {
+			let compileError = r.compile_error ?? null;
+			let enabled = r.enabled;
+			if (compileError === null) {
+				const check = compileCheck(r.kind, r.pattern);
+				if (!check.ok) {
+					compileError = check.error;
+					enabled = false;
+					const wrote = await this.worktreeRules.recordCompileError(
+						r.id,
+						{ kind: r.kind, pattern: r.pattern },
+						check.error,
+					);
+					if (wrote) {
+						log.warn(
+							`Worktree rule ${r.id} (${r.kind}) cannot compile and has been disabled: ${check.error}`,
+						);
+					}
+				}
+			}
+			ruleInputs.push({
+				id: r.id,
+				kind: r.kind,
+				pattern: r.pattern,
+				parentProjectId: r.parent_project_id,
+				priority: r.priority,
+				enabled,
+				compileError,
+			});
+		}
 
 		this.resolverManager.rebuild(projectInputs, ruleInputs);
 	}

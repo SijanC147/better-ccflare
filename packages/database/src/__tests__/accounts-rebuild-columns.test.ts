@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 import { runMigrations } from "../migrations";
+import { AccountRepository } from "../repositories/account.repository";
 
 /**
  * SB23-2073. `runMigrations` rebuilds the `accounts` table in two places, each
@@ -346,6 +348,123 @@ describe("accounts rebuild: renewal_day (SB23-2055)", () => {
 
 		expect(columnNames(db)).toContain("renewal_day");
 		expect(readAccount(db).renewal_day).toBeNull();
+		db.close();
+	});
+});
+
+describe("accounts rebuild: rate_limit_reset_at (SB23-2531)", () => {
+	/**
+	 * The write-time of `rate_limit_reset`, stamped by the running server and
+	 * read by `clearStaleRateLimitReset`'s guard. Its ALTER runs above both
+	 * rebuild branches and it was in neither column list, so a rebuild dropped
+	 * it. Seeded non-NULL, because NULL is exactly what the dropped column
+	 * reads back as.
+	 */
+	const RESET = 1_757_100_000_000;
+	const RESET_AT = 1_757_000_123_456;
+
+	function seedWithResetAt(opts: {
+		refreshTokenNotNull: boolean;
+		withAccountTier: boolean;
+	}): string {
+		const path = freshDbPath();
+		const seed = new Database(path);
+		seed.run(legacyAccountsTable(opts));
+		seedAccount(seed);
+		seed.run("ALTER TABLE accounts ADD COLUMN rate_limit_reset INTEGER");
+		seed.run("ALTER TABLE accounts ADD COLUMN rate_limit_reset_at INTEGER");
+		seed.run(
+			`UPDATE accounts SET rate_limit_reset = ${RESET}, rate_limit_reset_at = ${RESET_AT} WHERE id = 'acc-1'`,
+		);
+		seed.close();
+		return path;
+	}
+
+	function readResetAt(db: Database): number | null {
+		return (
+			db
+				.query("SELECT rate_limit_reset_at FROM accounts WHERE id = 'acc-1'")
+				.get() as { rate_limit_reset_at: number | null }
+		).rate_limit_reset_at;
+	}
+
+	it("survives the refresh_token NOT NULL rebuild with its value intact", () => {
+		const db = new Database(
+			seedWithResetAt({ refreshTokenNotNull: true, withAccountTier: false }),
+		);
+		runMigrations(db);
+
+		expect(columnNames(db)).toContain("rate_limit_reset_at");
+		expect(readResetAt(db)).toBe(RESET_AT);
+		db.close();
+	});
+
+	it("survives the account_tier removal rebuild with its value intact", () => {
+		const db = new Database(
+			seedWithResetAt({ refreshTokenNotNull: false, withAccountTier: true }),
+		);
+		runMigrations(db);
+
+		expect(columnNames(db)).not.toContain("account_tier");
+		expect(columnNames(db)).toContain("rate_limit_reset_at");
+		expect(readResetAt(db)).toBe(RESET_AT);
+		db.close();
+	});
+
+	it("does not silently reset the write-time to NULL", () => {
+		// NULL is what a dropped column reads as, and it is also the value
+		// clearStaleRateLimitReset treats as "eligible to clear", so a NULL here
+		// would let a stale poll clear a genuine rate limit.
+		const db = new Database(
+			seedWithResetAt({ refreshTokenNotNull: true, withAccountTier: false }),
+		);
+		runMigrations(db);
+
+		expect(readResetAt(db)).not.toBeNull();
+		db.close();
+	});
+
+	it("leaves the repository's rate-limit write working after the rebuild", async () => {
+		// The live consequence the issue measured, and the reason this is more
+		// than a data-loss question. On the real upgrade shape (a NOT NULL
+		// refresh_token database that has never seen the column) the ALTER adds
+		// it empty and the rebuild then dropped it, and because the ALTER is
+		// guarded on a PRAGMA read before the transaction it did not come back.
+		// The repository's own statement then failed for the rest of that server
+		// lifetime with "no such column: rate_limit_reset_at". Driven through
+		// the real repository rather than a copied SQL string, so the test
+		// follows the statement if it changes.
+		const path = freshDbPath();
+		const seed = new Database(path);
+		seed.run(
+			legacyAccountsTable({
+				refreshTokenNotNull: true,
+				withAccountTier: false,
+			}),
+		);
+		seedAccount(seed);
+		seed.close();
+
+		const db = new Database(path);
+		runMigrations(db);
+		const repo = new AccountRepository(new BunSqlAdapter(db));
+
+		await repo.updateRateLimitMeta("acc-1", "rate_limited", RESET, 3);
+
+		const row = db
+			.query(
+				"SELECT rate_limit_status, rate_limit_reset, rate_limit_reset_at, rate_limit_remaining FROM accounts WHERE id = 'acc-1'",
+			)
+			.get() as {
+			rate_limit_status: string;
+			rate_limit_reset: number;
+			rate_limit_reset_at: number | null;
+			rate_limit_remaining: number;
+		};
+		expect(row.rate_limit_status).toBe("rate_limited");
+		expect(row.rate_limit_reset).toBe(RESET);
+		expect(row.rate_limit_reset_at).not.toBeNull();
+		expect(row.rate_limit_remaining).toBe(3);
 		db.close();
 	});
 });

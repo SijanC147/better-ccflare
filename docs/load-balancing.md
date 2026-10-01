@@ -198,7 +198,7 @@ Priorities can be set when adding an account or updated later:
 better-ccflare --add-account myaccount --mode claude-oauth --priority 10
 
 # Update account priority
-better-ccflare set-priority myaccount 20
+better-ccflare --set-priority myaccount 20
 ```
 
 ### Priority in Load Balancing

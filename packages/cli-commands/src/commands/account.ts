@@ -30,11 +30,7 @@ import {
 	pollForToken as pollQwenForToken,
 } from "@better-ccflare/providers/qwen";
 import { type AccountListItem, MS_PER_HOUR } from "@better-ccflare/types";
-import {
-	type PromptAdapter,
-	promptAccountRemovalConfirmation,
-	stdPromptAdapter,
-} from "../prompts/index";
+import { type PromptAdapter, stdPromptAdapter } from "../prompts/index";
 import { openBrowser } from "../utils/browser";
 
 // Extended type for CLI-specific options that includes adapter functionality
@@ -2011,59 +2007,6 @@ export async function removeAccount(
 	}
 
 	return removeAccountById(dbOps, matches[0].id);
-}
-
-/**
- * Remove an account by name with confirmation prompt (for CLI)
- *
- * Same ambiguity guard as `removeAccount`: refuses to proceed if more
- * than one row matches the supplied name. The CLI surface cannot
- * disambiguate with a typed confirmation string when the name is shared,
- * so we surface a clear error and let the caller re-run by id.
- */
-export async function removeAccountWithConfirmation(
-	dbOps: DatabaseOperations,
-	name: string,
-	force?: boolean,
-): Promise<{ success: boolean; message: string }> {
-	const adapter = dbOps.getAdapter();
-	const matches = await adapter.query<{ id: string; name: string }>(
-		"SELECT id, name FROM accounts WHERE name = ?",
-		[name],
-	);
-
-	if (matches.length === 0) {
-		return {
-			success: false,
-			message: `Account '${name}' not found`,
-		};
-	}
-
-	if (matches.length > 1) {
-		return {
-			success: false,
-			message: `Multiple accounts named '${name}' exist; remove by id to avoid deleting the wrong account`,
-		};
-	}
-
-	// Skip confirmation if force flag is set
-	if (!force) {
-		const confirmed = await promptAccountRemovalConfirmation(name);
-		if (!confirmed) {
-			return {
-				success: false,
-				message: "Account removal cancelled",
-			};
-		}
-	}
-
-	const result = await removeAccountById(dbOps, matches[0].id);
-	// Hide the id-keyed "not found" race window from confirmation-prompt callers
-	// by remapping to the by-name phrasing they expect.
-	if (!result.success) {
-		return { success: false, message: `Account '${name}' not found` };
-	}
-	return { success: result.success, message: result.message };
 }
 
 /**

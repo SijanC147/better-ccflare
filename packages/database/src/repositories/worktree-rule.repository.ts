@@ -7,10 +7,17 @@ import {
 } from "@better-ccflare/types";
 import { BaseRepository } from "./base.repository";
 
-function compileCheck(
+/**
+ * Whether a stored rule can compile, and the operator-facing reason when it
+ * cannot. The single definition of a usable rule: `create` and `update` apply
+ * it on the way into the table, and `DatabaseOperations.rebuildResolver`
+ * applies it again on the way out, so a row that reached the table without
+ * passing through here is held to the same test (SB23-2377).
+ */
+export function compileCheck(
 	kind: WorktreeRuleKind,
 	pattern: string,
-): { ok: boolean; error: string | null } {
+): { ok: true; error: null } | { ok: false; error: string } {
 	if (kind === "regex") {
 		try {
 			new RegExp(pattern);
@@ -32,9 +39,10 @@ function compileCheck(
 		// Attempt to use picomatch if it happens to be resolvable at runtime
 		try {
 			// eslint-disable-next-line @typescript-eslint/no-require-imports
-			const picomatch = require("picomatch") as {
-				(pattern: string, options?: object): (str: string) => boolean;
-			};
+			const picomatch = require("picomatch") as (
+				pattern: string,
+				options?: object,
+			) => (str: string) => boolean;
 			picomatch(pattern);
 		} catch {
 			// Either picomatch is not installed (acceptable) or the pattern is invalid.
@@ -195,5 +203,32 @@ export class WorktreeRuleRepository extends BaseRepository<WorktreeRule> {
 
 	async delete(id: string): Promise<void> {
 		await this.run(`DELETE FROM worktree_rules WHERE id = ?`, [id]);
+	}
+
+	/**
+	 * Record a compile failure found on a row already in the table, with the
+	 * same outcome `create` gives a bad pattern: disabled, `compile_error`
+	 * set, shown on the rule in the dashboard. Never overwrites an existing
+	 * diagnosis, so concurrent rebuilds write it once. Returns whether this
+	 * call wrote it.
+	 *
+	 * Keyed on the `kind` and `pattern` that were diagnosed as well as the id.
+	 * A rebuild reads the row, checks it, then writes; a PATCH that fixes the
+	 * pattern in that window clears `compile_error` and re-enables the rule,
+	 * and an id-only write would land on the fixed row and disable it with a
+	 * diagnosis of a pattern it no longer has. A kind-only PATCH recompiles
+	 * too, so both halves are in the key.
+	 */
+	async recordCompileError(
+		id: string,
+		diagnosed: { kind: WorktreeRuleKind; pattern: string },
+		error: string,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE worktree_rules SET enabled = 0, compile_error = ?
+			 WHERE id = ? AND compile_error IS NULL AND kind = ? AND pattern = ?`,
+			[error, id, diagnosed.kind, diagnosed.pattern],
+		);
+		return changes > 0;
 	}
 }

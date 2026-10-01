@@ -666,7 +666,7 @@ The SQLite database follows the same directory structure:
 1. Add more accounts to the pool
 2. Increase session duration for less frequent switching
 3. Implement request throttling in client code
-4. Monitor usage with `bun cli list`
+4. Monitor usage with `bun run cli --list`
 
 #### Database Errors
 
