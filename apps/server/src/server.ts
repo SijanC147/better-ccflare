@@ -1096,10 +1096,10 @@ function startUsagePollingWithRefresh(
 let serverLifecycleOwned = false;
 
 export default async function startServer(options?: {
-	port?: number;
+	port?: number | undefined;
 	withDashboard?: boolean;
-	sslKeyPath?: string;
-	sslCertPath?: string;
+	sslKeyPath?: string | undefined;
+	sslCertPath?: string | undefined;
 }) {
 	// From here on, this process owns a server lifecycle: the module-scope
 	// signal handlers below act, and the CLI's own handlers stand down.

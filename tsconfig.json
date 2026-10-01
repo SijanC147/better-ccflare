@@ -8,6 +8,14 @@
 		"allowImportingTsExtensions": true,
 		"noEmit": true,
 		"strict": true,
+		// `exactOptionalPropertyTypes` rejects an explicit `undefined` on an optional
+		// member, which closes the `Partial<T>` hole in fixture factories such as
+		// `makeAccount` and `makeZaiUsage` (SB23-2456). Every typecheck target
+		// extends this file, so a new package inherits it; do not restate it per
+		// package. Where `undefined` really is assigned, widen the owned member to
+		// `?: T | undefined`; never widen a member of a type a `Partial<T>` fixture
+		// factory wraps, which reopens the hole (SB23-3983, SB23-3984).
+		"exactOptionalPropertyTypes": true,
 		"skipLibCheck": true,
 		"allowSyntheticDefaultImports": true,
 		"forceConsistentCasingInFileNames": true,

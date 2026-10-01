@@ -245,8 +245,8 @@ function newTurn(): string {
 }
 
 async function codexCli(opts: {
-	turnId?: string;
-	token?: string | null;
+	turnId?: string | undefined;
+	token?: string | null | undefined;
 	stream?: boolean;
 }): Promise<Response> {
 	const headers: Record<string, string> = {
