@@ -43,12 +43,13 @@ export function formatNumber(value: number): string {
 }
 
 /**
- * Format timestamp to locale string
+ * Format timestamp to locale string, always on the 24-hour clock: the locale
+ * picks the date order and separators, never the hour cycle (SB23-3521).
  */
 export function formatTimestamp(timestamp: number | string): string {
 	const date =
 		typeof timestamp === "string" ? new Date(timestamp) : new Date(timestamp);
-	return date.toLocaleString();
+	return date.toLocaleString(undefined, { hourCycle: "h23" });
 }
 
 /**

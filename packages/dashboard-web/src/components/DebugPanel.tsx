@@ -157,7 +157,9 @@ export function DebugPanel() {
 						logs.map((log) => (
 							<div key={log.id} className="flex gap-2">
 								<span className="text-muted-foreground">
-									{new Date(log.timestamp).toLocaleTimeString()}
+									{new Date(log.timestamp).toLocaleTimeString(undefined, {
+										hourCycle: "h23",
+									})}
 								</span>
 								<Badge
 									variant="outline"

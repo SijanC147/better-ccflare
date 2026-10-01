@@ -800,7 +800,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		account.rate_limited_until && account.rate_limited_until > Date.now();
 	const rateLimitStatus =
 		isRateLimited && account.rate_limited_until
-			? `Rate limited until ${new Date(account.rate_limited_until).toLocaleString()}`
+			? `Rate limited until ${new Date(account.rate_limited_until).toLocaleString(undefined, { hourCycle: "h23" })}`
 			: "OK";
 
 	const sessionInfo = account.session_start
@@ -925,7 +925,7 @@ export function toAccountDisplay(account: Account): AccountDisplay {
 		account.rate_limited_until && account.rate_limited_until > Date.now();
 	const rateLimitStatus =
 		isRateLimited && account.rate_limited_until
-			? `Rate limited until ${new Date(account.rate_limited_until).toLocaleString()}`
+			? `Rate limited until ${new Date(account.rate_limited_until).toLocaleString(undefined, { hourCycle: "h23" })}`
 			: "OK";
 
 	const sessionInfo = account.session_start

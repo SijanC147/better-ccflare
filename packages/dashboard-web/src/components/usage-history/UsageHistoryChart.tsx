@@ -53,7 +53,9 @@ function UsageHistoryTooltip({
 			className="p-2 rounded-md shadow-lg text-xs"
 			style={getTooltipStyles("default")}
 		>
-			<p className="font-medium mb-1">{new Date(t).toLocaleString()}</p>
+			<p className="font-medium mb-1">
+				{new Date(t).toLocaleString(undefined, { hourCycle: "h23" })}
+			</p>
 			<div className="space-y-0.5">
 				{entries.map((entry, index) => (
 					<div
@@ -186,7 +188,9 @@ export function UsageHistoryChart({
 			showLegend
 			yAxisDomain={[0, yMax]}
 			emptyState={emptyState}
-			xAxisTickFormatter={(v) => new Date(Number(v)).toLocaleString()}
+			xAxisTickFormatter={(v) =>
+				new Date(Number(v)).toLocaleString(undefined, { hourCycle: "h23" })
+			}
 			tooltipContent={<UsageHistoryTooltip latestActualT={latestActualT} />}
 		/>
 	);

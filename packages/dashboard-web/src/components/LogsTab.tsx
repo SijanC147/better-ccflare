@@ -178,7 +178,7 @@ export function LogsTab() {
 	};
 
 	const formatTimestamp = (ts: number) => {
-		return new Date(ts).toLocaleTimeString();
+		return new Date(ts).toLocaleTimeString(undefined, { hourCycle: "h23" });
 	};
 
 	return (

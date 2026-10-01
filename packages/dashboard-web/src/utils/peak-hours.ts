@@ -189,15 +189,14 @@ export interface PeakLabelOptions {
 	timeZone?: string;
 	/** BCP-47 locale. Defaults to the resolved local locale. */
 	locale?: string;
-	/** Force a 12- or 24-hour clock. Defaults to the locale's own convention. */
-	hour12?: boolean;
 }
 
 function timeFormatter(options: PeakLabelOptions): Intl.DateTimeFormat {
 	return new Intl.DateTimeFormat(options.locale, {
 		hour: "numeric",
 		minute: "2-digit",
-		hour12: options.hour12,
+		// Always the 24-hour clock, whatever the locale (SB23-3521).
+		hourCycle: "h23",
 		timeZone: options.timeZone,
 	});
 }
@@ -217,8 +216,8 @@ function sameLocalDay(
 }
 
 /**
- * Format an occurrence's clock range in the viewer's timezone, for example
- * `3:00–9:00 PM` becomes `15:00–21:00` on a 24-hour locale.
+ * Format an occurrence's clock range in the viewer's timezone on the 24-hour
+ * clock, for example `15:00–21:00`.
  */
 export function formatPeakRange(
 	occurrence: PeakOccurrence,
@@ -295,16 +294,4 @@ export function peakHoursLabel(
 		countdown,
 		title: `${text} · ${countdown}`,
 	};
-}
-
-/** Read the dashboard's shared 24-hour clock preference, if one is stored. */
-export function prefersTwentyFourHourClock(): boolean | undefined {
-	try {
-		return localStorage.getItem("ccflare-24h-time") === "true"
-			? true
-			: undefined;
-	} catch {
-		// Private browsing and SSR both throw here; fall back to the locale.
-		return undefined;
-	}
 }

@@ -59,8 +59,12 @@ const CONTRIBUTOR_KIND_VARIANTS: Record<
 };
 
 function formatSessionLabel(session: ContextGrowthSession): string {
-	const start = new Date(session.startTimestamp).toLocaleString();
-	const end = new Date(session.endTimestamp).toLocaleTimeString();
+	const start = new Date(session.startTimestamp).toLocaleString(undefined, {
+		hourCycle: "h23",
+	});
+	const end = new Date(session.endTimestamp).toLocaleTimeString(undefined, {
+		hourCycle: "h23",
+	});
 	return `${session.project ?? "Unknown"} — ${start} – ${end} (${session.requestCount} reqs)`;
 }
 
@@ -197,7 +201,9 @@ function PerRequestTable({ rows }: PerRequestTableProps) {
 						return (
 							<tr key={row.id} className="border-t">
 								<td className="px-3 py-2 whitespace-nowrap">
-									{new Date(row.timestamp).toLocaleString()}
+									{new Date(row.timestamp).toLocaleString(undefined, {
+										hourCycle: "h23",
+									})}
 								</td>
 								<td className="px-3 py-2">
 									<span className="text-muted-foreground break-all">
@@ -256,7 +262,9 @@ export const ContextCompositionView = React.memo(
 		const growthData = useMemo(
 			() =>
 				(activeSession?.points ?? []).map((point) => ({
-					time: new Date(point.timestamp).toLocaleTimeString(),
+					time: new Date(point.timestamp).toLocaleTimeString(undefined, {
+						hourCycle: "h23",
+					}),
 					contextTokens: point.contextTokens,
 					outputTokens: point.outputTokens,
 				})),

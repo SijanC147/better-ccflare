@@ -115,6 +115,7 @@ export function MainMetricsChart({
 									: new Date(point.ts).toLocaleTimeString([], {
 											hour: "2-digit",
 											minute: "2-digit",
+											hourCycle: "h23",
 										});
 							timePoints.add(time);
 							timeToTimestamp.set(time, point.ts);
@@ -151,6 +152,7 @@ export function MainMetricsChart({
 									: new Date(point.ts).toLocaleTimeString([], {
 											hour: "2-digit",
 											minute: "2-digit",
+											hourCycle: "h23",
 										});
 
 							// Map the metric value
@@ -448,6 +450,7 @@ export function PerformanceIndicatorsChart({
 									: new Date(point.ts).toLocaleTimeString([], {
 											hour: "2-digit",
 											minute: "2-digit",
+											hourCycle: "h23",
 										});
 							timeToTimestamp.set(time, point.ts);
 						}
@@ -481,6 +484,7 @@ export function PerformanceIndicatorsChart({
 									: new Date(point.ts).toLocaleTimeString([], {
 											hour: "2-digit",
 											minute: "2-digit",
+											hourCycle: "h23",
 										});
 
 							// Map the metric value
