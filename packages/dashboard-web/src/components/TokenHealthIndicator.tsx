@@ -11,15 +11,15 @@ type TokenHealthStatus =
 	| "loading";
 
 interface TokenHealthIndicatorProps {
-	accountName?: string;
-	showDetails?: boolean;
-	className?: string;
+	accountName?: string | undefined;
+	showDetails?: boolean | undefined;
+	className?: string | undefined;
 }
 
 interface TokenHealthData {
 	status: TokenHealthStatus;
 	message: string;
-	daysUntilExpiration?: number;
+	daysUntilExpiration?: number | undefined;
 	requiresReauth: boolean;
 }
 

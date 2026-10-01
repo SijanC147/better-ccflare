@@ -45,7 +45,7 @@ interface WatcherProps {
 	 * Replaces every source's own cadence. Tests only: it lets the refresh
 	 * timer be observed without waiting a real minute.
 	 */
-	cadenceMs?: number;
+	cadenceMs?: number | undefined;
 }
 
 export function NotificationWatcher({ cadenceMs }: WatcherProps = {}) {

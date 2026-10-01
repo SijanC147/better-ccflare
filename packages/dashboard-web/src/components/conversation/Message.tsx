@@ -17,9 +17,9 @@ import { ToolUsageBlock } from "./ToolUsageBlock";
 interface MessageProps {
 	role: Role;
 	content: string;
-	contentBlocks?: ContentBlock[];
-	tools?: ToolUse[];
-	toolResults?: ToolResult[];
+	contentBlocks?: ContentBlock[] | undefined;
+	tools?: ToolUse[] | undefined;
+	toolResults?: ToolResult[] | undefined;
 	cleanLineNumbers: (content: string) => string;
 }
 

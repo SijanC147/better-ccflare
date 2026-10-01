@@ -23,7 +23,7 @@ export interface ProviderModel {
 	 * provider has announced the deprecation — picking a model on its way out
 	 * is a decision someone has to undo later.
 	 */
-	supersededBy?: string | null;
+	supersededBy?: string | null | undefined;
 	/**
 	 * "builtin"/"catalog": ccflare knows this model for the provider.
 	 * "reference": it exists in the provider public catalog — which is NOT a

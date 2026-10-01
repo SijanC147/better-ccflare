@@ -72,7 +72,7 @@ function relativeTime(ms: number | null): string {
 interface ProjectDialogProps {
 	open: boolean;
 	onClose: () => void;
-	project?: Project | null;
+	project?: Project | null | undefined;
 	allProjects: Project[];
 }
 
@@ -104,7 +104,7 @@ function ProjectDialog({
 				await updateProject.mutateAsync({
 					id: project.id,
 					body: {
-						display_name: displayName.trim() || undefined,
+						...(displayName.trim() ? { display_name: displayName.trim() } : {}),
 						parent_project_id: parentId === "__none__" ? null : parentId,
 					},
 				});
@@ -115,7 +115,7 @@ function ProjectDialog({
 				}
 				await createProject.mutateAsync({
 					canonical_path: canonicalPath.trim(),
-					display_name: displayName.trim() || undefined,
+					...(displayName.trim() ? { display_name: displayName.trim() } : {}),
 					parent_project_id: parentId === "__none__" ? null : parentId,
 				});
 			}
@@ -196,7 +196,7 @@ function ProjectDialog({
 interface RuleDialogProps {
 	open: boolean;
 	onClose: () => void;
-	rule?: WorktreeRule | null;
+	rule?: WorktreeRule | null | undefined;
 	allProjects: Project[];
 }
 
@@ -220,7 +220,7 @@ function WorktreeRuleDialog({
 	const [testResults, setTestResults] = useState<Array<{
 		path: string;
 		matched: boolean;
-		error?: string;
+		error?: string | undefined;
 	}> | null>(null);
 	const [error, setError] = useState<string | null>(null);
 
@@ -630,11 +630,11 @@ export function ProjectsTab() {
 	const [search, setSearch] = useState("");
 	const [projectDialog, setProjectDialog] = useState<{
 		open: boolean;
-		project?: Project | null;
+		project?: Project | null | undefined;
 	}>({ open: false });
 	const [ruleDialog, setRuleDialog] = useState<{
 		open: boolean;
-		rule?: WorktreeRule | null;
+		rule?: WorktreeRule | null | undefined;
 	}>({ open: false });
 	const [discoverResult, setDiscoverResult] = useState<string | null>(null);
 

@@ -32,7 +32,7 @@ export interface PoolUsageRowProps {
 	// recomputed here). May be absent from this pool's segments entirely (the
 	// primary account can belong to a different family/window pool), in which
 	// case the "next" badge simply never renders.
-	primaryAccountName?: string | null;
+	primaryAccountName?: string | null | undefined;
 	// Current time (ms), refreshed periodically by the caller -- drives each
 	// segment's relative reset time.
 	now: number;

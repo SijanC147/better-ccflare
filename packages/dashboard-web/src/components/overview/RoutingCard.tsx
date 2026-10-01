@@ -44,7 +44,7 @@ const STRATEGY_OPTIONS: ReadonlyArray<{ label: string; value: string }> = [
 export interface StrategySelectItem {
 	label: string;
 	value: string;
-	disabled?: boolean;
+	disabled?: boolean | undefined;
 }
 
 /**
@@ -155,7 +155,9 @@ export function RoutingCardView({
 									<SelectItem
 										key={opt.value}
 										value={opt.value}
-										disabled={opt.disabled}
+										{...(opt.disabled !== undefined
+											? { disabled: opt.disabled }
+											: {})}
 									>
 										{opt.label}
 									</SelectItem>

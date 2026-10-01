@@ -4,12 +4,12 @@ import { CHART_HEIGHTS } from "../../constants";
 
 interface ChartContainerProps {
 	children: ReactNode;
-	loading?: boolean;
-	height?: keyof typeof CHART_HEIGHTS | number;
-	className?: string;
-	error?: Error | null;
-	emptyState?: ReactNode;
-	isEmpty?: boolean;
+	loading?: boolean | undefined;
+	height?: keyof typeof CHART_HEIGHTS | number | undefined;
+	className?: string | undefined;
+	error?: Error | null | undefined;
+	emptyState?: ReactNode | undefined;
+	isEmpty?: boolean | undefined;
 }
 
 export function ChartContainer({

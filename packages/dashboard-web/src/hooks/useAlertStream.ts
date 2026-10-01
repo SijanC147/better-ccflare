@@ -20,8 +20,8 @@ export interface AlertStreamEvent {
 }
 
 interface UseAlertStreamOptions {
-	enabled?: boolean;
-	onAlert?: (event: AlertStreamEvent) => void;
+	enabled?: boolean | undefined;
+	onAlert?: ((event: AlertStreamEvent) => void) | undefined;
 }
 
 export function useAlertStream(options: UseAlertStreamOptions = {}) {

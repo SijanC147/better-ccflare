@@ -99,7 +99,10 @@ export function useRequestStream(limit = 200) {
 							accountId: string | null;
 							statusCode: number;
 							agentUsed: string | null;
-							agentAttributionSource?: AgentAttributionSource | null;
+							agentAttributionSource?:
+								| AgentAttributionSource
+								| null
+								| undefined;
 					  }
 					| { type: "summary"; payload: RequestResponse };
 
@@ -160,13 +163,18 @@ export function useRequestStream(limit = 200) {
 									timestamp: evt.timestamp,
 									path: evt.path,
 									method: evt.method,
-									accountId: evt.accountId || undefined,
-									accountName: account?.name,
+									...(evt.accountId ? { accountId: evt.accountId } : {}),
+									...(account?.name !== undefined
+										? { accountName: account.name }
+										: {}),
 									success: false,
 									pending: true,
-									agentUsed: evt.agentUsed || undefined,
-									agentAttributionSource:
-										evt.agentAttributionSource || undefined,
+									...(evt.agentUsed ? { agentUsed: evt.agentUsed } : {}),
+									...(evt.agentAttributionSource
+										? {
+												agentAttributionSource: evt.agentAttributionSource,
+											}
+										: {}),
 									rateLimited: evt.statusCode === 429,
 									bodiesOmitted: true,
 								},
@@ -232,7 +240,9 @@ export function useRequestStream(limit = 200) {
 										...newRequests[requestIndex].meta,
 										pending: false,
 										success: evt.payload.success,
-										rateLimited: evt.payload.rateLimited,
+										...(evt.payload.rateLimited !== undefined
+											? { rateLimited: evt.payload.rateLimited }
+											: {}),
 										bodiesOmitted: true,
 									},
 								};

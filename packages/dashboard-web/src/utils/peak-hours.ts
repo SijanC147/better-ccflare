@@ -186,9 +186,9 @@ export function formatCountdown(ms: number): string {
 /** Options for rendering a window label. Defaults match the viewer's browser. */
 export interface PeakLabelOptions {
 	/** IANA zone, e.g. `Europe/Malta`. Defaults to the resolved local zone. */
-	timeZone?: string;
+	timeZone?: string | undefined;
 	/** BCP-47 locale. Defaults to the resolved local locale. */
-	locale?: string;
+	locale?: string | undefined;
 }
 
 function timeFormatter(options: PeakLabelOptions): Intl.DateTimeFormat {

@@ -12,9 +12,9 @@ export function InboundBadge({
 	gateway,
 	className = "text-xs",
 }: {
-	format?: string | null;
-	gateway?: string | null;
-	className?: string;
+	format?: string | null | undefined;
+	gateway?: string | null | undefined;
+	className?: string | undefined;
 }) {
 	const label = inboundLabel(format, gateway);
 	if (label === null) return null;

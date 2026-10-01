@@ -9,7 +9,7 @@
 export interface AccountLike {
 	id: string;
 	name: string;
-	paused?: boolean | number | null;
+	paused?: boolean | number | null | undefined;
 }
 
 /** First non-paused account's id; else the first account's id; else undefined. */
