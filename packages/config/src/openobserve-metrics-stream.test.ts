@@ -84,6 +84,29 @@ describe("openobserve metrics stream", () => {
 		);
 	});
 
+	it("reads a whitespace-only environment value as unset, not as an empty stream", () => {
+		// An empty stream name turns the snapshot off, so trimming after the
+		// fallback chain silently disabled it.
+		process.env.BETTER_CCFLARE_OPENOBSERVE_METRICS_STREAM = "   ";
+		const { config } = configWith({
+			...URL_ONLY,
+			openobserve_metrics_stream: "file_metrics",
+		});
+		expect(config.getOpenObserveSettings()?.metricsStream).toBe("file_metrics");
+	});
+
+	it("applies the same rule to the log and request streams", () => {
+		// For these two an empty name makes the exporter discard every record.
+		const { config } = configWith({
+			...URL_ONLY,
+			openobserve_log_stream: "  ",
+			openobserve_request_stream: "\t",
+		});
+		const settings = config.getOpenObserveSettings();
+		expect(settings?.logStream).toBe("better_ccflare_logs");
+		expect(settings?.requestStream).toBe("better_ccflare_requests");
+	});
+
 	it("is persisted by setOpenObserveEndpoint", () => {
 		const { config, path } = configWith(URL_ONLY);
 		config.setOpenObserveEndpoint({

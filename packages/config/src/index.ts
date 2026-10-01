@@ -226,6 +226,20 @@ const unenforceableSaveModes = new Set<string>();
  */
 const UNTRUSTED_FIELD_PREFIXES = ["pg_", "openobserve_"] as const;
 
+/**
+ * The first candidate that is a string with something in it once trimmed,
+ * trimmed; empty when none is. A config file value of another type is skipped
+ * rather than coerced.
+ */
+function firstNonBlank(...candidates: unknown[]): string {
+	for (const candidate of candidates) {
+		if (typeof candidate !== "string") continue;
+		const trimmed = candidate.trim();
+		if (trimmed) return trimmed;
+	}
+	return "";
+}
+
 /** Individually named endpoints and credentials that no prefix or suffix catches. */
 const UNTRUSTED_FIELDS = new Set([
 	"alert_webhook_url",
@@ -3299,27 +3313,25 @@ export class Config extends EventEmitter {
 				(typeof this.data.openobserve_token === "string"
 					? this.data.openobserve_token
 					: ""),
-			logStream: (
-				process.env.BETTER_CCFLARE_OPENOBSERVE_LOG_STREAM ||
-				(typeof this.data.openobserve_log_stream === "string"
-					? this.data.openobserve_log_stream
-					: "") ||
-				"better_ccflare_logs"
-			).trim(),
-			requestStream: (
-				process.env.BETTER_CCFLARE_OPENOBSERVE_REQUEST_STREAM ||
-				(typeof this.data.openobserve_request_stream === "string"
-					? this.data.openobserve_request_stream
-					: "") ||
-				"better_ccflare_requests"
-			).trim(),
-			metricsStream: (
-				process.env.BETTER_CCFLARE_OPENOBSERVE_METRICS_STREAM ||
-				(typeof this.data.openobserve_metrics_stream === "string"
-					? this.data.openobserve_metrics_stream
-					: "") ||
-				"better_ccflare_exporter_metrics"
-			).trim(),
+			// Each source is trimmed before it is tried, so a whitespace-only value
+			// counts as unset and falls through to the next one. Trimming after
+			// the fallback chain instead turned "  " into an empty stream name,
+			// which the exporter reads as "discard this stream".
+			logStream: firstNonBlank(
+				process.env.BETTER_CCFLARE_OPENOBSERVE_LOG_STREAM,
+				this.data.openobserve_log_stream,
+				"better_ccflare_logs",
+			),
+			requestStream: firstNonBlank(
+				process.env.BETTER_CCFLARE_OPENOBSERVE_REQUEST_STREAM,
+				this.data.openobserve_request_stream,
+				"better_ccflare_requests",
+			),
+			metricsStream: firstNonBlank(
+				process.env.BETTER_CCFLARE_OPENOBSERVE_METRICS_STREAM,
+				this.data.openobserve_metrics_stream,
+				"better_ccflare_exporter_metrics",
+			),
 			shipPayloads,
 			// Passed through unvalidated on purpose. The exporter parses it,
 			// because the exporter is the only place that can report a bad value

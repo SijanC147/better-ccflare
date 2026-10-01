@@ -1144,6 +1144,16 @@ describe("openobserve metrics", () => {
 			}
 		});
 
+		// Sampled between a failed post and the next success, the one window
+		// where a gauge left set by the failure would count the same records as
+		// both in flight and dropped. The snapshot itself goes to the 503 stub
+		// and is lost, so it is read from the capture rather than the endpoint.
+		await withSilencedWarnings(() => shipMetricsSnapshot());
+		const afterFailures = kind(metricsPosts(captures)[0], "requests");
+		expect(afterFailures.in_flight_records).toBe(0);
+		expect(afterFailures.exhausted_records).toBe(3);
+		expect(balances(afterFailures)).toBe(true);
+
 		// Two refused outright by a non-retryable status.
 		captureFetch(captures, 400);
 		for (let i = 0; i < 2; i++) shipRequestRecord({ id: `bad-${i}` });
@@ -1162,7 +1172,9 @@ describe("openobserve metrics", () => {
 		shipRequestRecord({ id: "unserializable", n: 1n });
 
 		await shipMetricsSnapshot();
-		const requests = kind(metricsPosts(captures)[0], "requests");
+		const final = metricsPosts(captures).at(-1);
+		if (!final) throw new Error("no final snapshot captured");
+		const requests = kind(final, "requests");
 		expect(requests.deferred_records).toBe(15);
 		expect(requests.exhausted_records).toBe(3);
 		expect(requests.failed_records).toBe(2);
@@ -1203,6 +1215,32 @@ describe("openobserve metrics", () => {
 		expect(during.buffered_records).toBe(0);
 		expect(during.shipped_records).toBe(0);
 		expect(balances(during)).toBe(true);
+	});
+
+	test("a second snapshot does not join one still waiting on the endpoint", async () => {
+		resetMetricsForTests();
+		let metricsCalls = 0;
+		let release: (() => void) | undefined;
+		globalThis.fetch = (async () => {
+			metricsCalls++;
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return new Response("{}", { status: 200 });
+		}) as unknown as typeof fetch;
+		configureOpenObserve(() => settings());
+
+		const first = shipMetricsSnapshot();
+		await shipMetricsSnapshot();
+		expect(metricsCalls).toBe(1);
+
+		release?.();
+		await first;
+		// Once it settles, the next snapshot goes out.
+		const third = shipMetricsSnapshot();
+		release?.();
+		await third;
+		expect(metricsCalls).toBe(2);
 	});
 
 	test("an empty metrics stream sends no snapshot", async () => {
@@ -1257,7 +1295,13 @@ describe("openobserve metrics", () => {
 			jest.advanceTimersByTime(60_000);
 			expect(metricsPosts(captures)).toHaveLength(2);
 
+			// Turning the exporter off clears the interval itself. Counting posts
+			// alone cannot see a leaked interval: its callback returns early once
+			// the getter is gone. A drop of exactly one, because the last post's
+			// request timeout is a pending timer on the same fake clock.
+			const timersBefore = jest.getTimerCount();
 			configureOpenObserve(null);
+			expect(jest.getTimerCount()).toBe(timersBefore - 1);
 			jest.advanceTimersByTime(180_000);
 			expect(metricsPosts(captures)).toHaveLength(2);
 		} finally {

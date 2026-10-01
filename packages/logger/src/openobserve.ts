@@ -317,7 +317,9 @@ let metricsInFlight = false;
 let metricsFailures = 0;
 // The metrics post keeps its own warning window. Sharing warnThrottled's would
 // let a once-a-minute snapshot failure take the window the record streams use
-// to report losses.
+// to report losses. On the timer alone it never suppresses anything, because
+// METRICS_INTERVAL_MS equals WARN_THROTTLE_MS and every tick that fails warns;
+// it only bites when a caller snapshots between ticks.
 let lastMetricsWarnAt = 0;
 
 /**
@@ -526,7 +528,8 @@ function handleFailedBatch(
 	const lost = buffer.dropped;
 	// "lost", not "evicted": buffer.dropped also counts the unserializable and
 	// oversized records enqueue rejected outright, which were never in the
-	// buffer to be evicted from it.
+	// buffer to be evicted from it, and an exhausted batch whose own warning
+	// was throttled.
 	const losses = lost > 0 ? `; ${lost} older record(s) lost` : "";
 	const emitted = warnThrottled(
 		`deferring ${batch.length} record(s) for stream ${stream}: ${reason}; next attempt in ${Math.round(wait / 1000)}s${losses}`,
