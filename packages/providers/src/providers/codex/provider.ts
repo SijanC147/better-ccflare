@@ -35,6 +35,11 @@ import {
 	CodexStreamLiveness,
 	type CodexStreamLivenessOptions,
 } from "./stream-liveness";
+import {
+	CODEX_TURN_METADATA_HEADER,
+	CODEX_TURN_STATE_HEADER,
+	CodexTurnStateStore,
+} from "./turn-state";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const log = new Logger("CodexProvider");
@@ -559,6 +564,7 @@ export class CodexProvider extends BaseProvider {
 	private readonly continuationTtlMs: number;
 	private readonly continuationMaxLanes: number;
 	private readonly now: () => number;
+	private readonly turnState: CodexTurnStateStore;
 	private readonly continuationByLane = new Map<string, ContinuationState>();
 	private continuationGeneration = 0;
 	private readonly messagesContinuationRejected = new Map<string, number>();
@@ -582,6 +588,7 @@ export class CodexProvider extends BaseProvider {
 		this.continuationMaxLanes =
 			options.continuationMaxLanes ?? CODEX_CONTINUATION_MAX_LANES;
 		this.now = options.now ?? Date.now;
+		this.turnState = new CodexTurnStateStore(undefined, undefined, this.now);
 	}
 	// Fallback map: proxy-operations.ts injects x-better-ccflare-request-id and
 	// x-better-ccflare-request-stream into the upstream response before calling
@@ -808,6 +815,27 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	async transformRequestBody(
+		request: Request,
+		account?: Account,
+	): Promise<Request> {
+		// Read before the transform: these are the client's own values, which
+		// the outbound copy is about to be rewritten from (SB23-2370).
+		const clientTurnHeaders = new Headers();
+		for (const name of [CODEX_TURN_STATE_HEADER, CODEX_TURN_METADATA_HEADER]) {
+			const value = request.headers.get(name);
+			if (value !== null) clientTurnHeaders.set(name, value);
+		}
+		const transformed = await this.transformRequestBodyForAccount(
+			request,
+			account,
+		);
+		// Every branch, the untouched passthroughs included: a turn-state token
+		// goes upstream only to the account that issued it.
+		this.turnState.scope(transformed.headers, clientTurnHeaders, account?.id);
+		return transformed;
+	}
+
+	private async transformRequestBodyForAccount(
 		request: Request,
 		account?: Account,
 	): Promise<Request> {
@@ -1066,6 +1094,18 @@ export class CodexProvider extends BaseProvider {
 		_requestHeaders?: Headers,
 		drainAbort?: AbortController,
 	): Promise<Response> {
+		// Filed against the account that answered, under the keys the client's
+		// next request in this turn will carry (SB23-2370). The first value per
+		// key is kept, as the client's OnceLock keeps it: a later 2xx in the
+		// same turn that re-issues a different value cannot rotate it.
+		if (response.ok) {
+			this.turnState.record(
+				_requestHeaders,
+				_account?.id,
+				response.headers.get(CODEX_TURN_STATE_HEADER),
+			);
+		}
+
 		// /v1/models responses: translate Codex format → OpenAI /v1/models format
 		// with full capability fields preserved for the CLI.
 		const requestPath = response.headers.get("x-better-ccflare-request-path");

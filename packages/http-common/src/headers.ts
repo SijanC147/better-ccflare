@@ -42,6 +42,27 @@ const CREDENTIAL_HEADER_NAMES = new Set([
 
 const CREDENTIAL_HEADER_SUFFIX = /-(token|secret|key|password)$/;
 
+/**
+ * Opaque per-account routing state that is not a credential but must not be
+ * kept either: Codex's sticky-routing token, which this proxy scopes to the
+ * account that issued it (SB23-2370). Redacted on both sides at persistence.
+ */
+const ROUTING_STATE_HEADER_NAMES = new Set(["x-codex-turn-state"]);
+
+/** Whether a header carries another upstream's opaque routing state. */
+export function isRoutingStateHeaderName(name: string): boolean {
+	return ROUTING_STATE_HEADER_NAMES.has(name.toLowerCase());
+}
+
+/**
+ * Removes every routing-state header in place. A non-Codex upstream has no
+ * use for Codex's turn token, and only the Codex provider may decide which
+ * Codex account receives one (SB23-2370).
+ */
+export function stripRoutingStateHeaders(headers: Headers): void {
+	for (const name of ROUTING_STATE_HEADER_NAMES) headers.delete(name);
+}
+
 /** Prefix of this proxy's own control headers (routing, probes, local control). */
 const CONTROL_HEADER_PREFIX = "x-better-ccflare-";
 
@@ -60,15 +81,17 @@ export function isCredentialHeaderName(name: string): boolean {
 
 /**
  * Whether a request header's value must never be persisted: every credential
- * header, plus every `x-better-ccflare-*` control header. The control headers
+ * header, `x-codex-turn-state`, plus every `x-better-ccflare-*` control header. The control headers
  * include `x-better-ccflare-internal-probe-secret` and
  * `x-better-ccflare-local-control-secret`, and a prefix rule covers the next
  * one somebody adds without anyone having to remember this list.
  */
 export function isStorageRedactedHeaderName(name: string): boolean {
+	const lower = name.toLowerCase();
 	return (
-		isCredentialHeaderName(name) ||
-		name.toLowerCase().startsWith(CONTROL_HEADER_PREFIX)
+		isCredentialHeaderName(lower) ||
+		ROUTING_STATE_HEADER_NAMES.has(lower) ||
+		lower.startsWith(CONTROL_HEADER_PREFIX)
 	);
 }
 
@@ -137,14 +160,18 @@ const RESPONSE_SECRET_HEADERS = new Set([
  * the box is a wider exposure than keeping it in the local payload table.
  *
  * Removes: set-cookie, authorization, proxy-authenticate, www-authenticate
+ * Redacts (value becomes `REDACTED_HEADER_VALUE`): `x-codex-turn-state`
  */
 export function sanitizeResponseHeaders(
 	original: Record<string, string>,
 ): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const [key, value] of Object.entries(original)) {
-		if (RESPONSE_SECRET_HEADERS.has(key.toLowerCase())) continue;
-		out[key] = value;
+		const lower = key.toLowerCase();
+		if (RESPONSE_SECRET_HEADERS.has(lower)) continue;
+		out[key] = ROUTING_STATE_HEADER_NAMES.has(lower)
+			? REDACTED_HEADER_VALUE
+			: value;
 	}
 	return out;
 }

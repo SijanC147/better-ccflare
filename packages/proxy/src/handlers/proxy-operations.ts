@@ -12,7 +12,11 @@ import {
 	retryDelayMs,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
-import { withSanitizedProxyHeaders } from "@better-ccflare/http-common";
+import {
+	isRoutingStateHeaderName,
+	stripRoutingStateHeaders,
+	withSanitizedProxyHeaders,
+} from "@better-ccflare/http-common";
 import { Logger } from "@better-ccflare/logger";
 import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-formats";
 import {
@@ -803,6 +807,7 @@ export async function proxyUnauthenticated(
 		undefined,
 		undefined,
 	);
+	if (ctx.provider.name !== "codex") stripRoutingStateHeaders(headers);
 
 	try {
 		// Dedicated controller so a stuck-upstream drain deadline (see
@@ -1073,6 +1078,10 @@ export async function proxyWithAccount(
 			accessToken,
 			account.api_key || undefined,
 		);
+		// Every other provider copies client headers wholesale, so a Codex
+		// turn token would reach a third-party upstream on failover. The Codex
+		// provider scopes its own copy per account (SB23-2370).
+		if (provider.name !== "codex") stripRoutingStateHeaders(headers);
 		// Codex continuation is prepared while transformRequestBody still has the
 		// native input. Make the proxy-owned correlation ID available at that seam;
 		// the provider consumes and strips it before the request leaves ccflare.
@@ -1958,6 +1967,7 @@ export async function proxyWithAccount(
 				const rlHeaders: Record<string, string> = {};
 				rawResponse.headers.forEach((v, k) => {
 					const lk = k.toLowerCase();
+					if (isRoutingStateHeaderName(lk)) return;
 					if (
 						lk.includes("rate") ||
 						lk.includes("retry") ||
