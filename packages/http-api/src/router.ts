@@ -3,7 +3,7 @@ import {
 	getVersionSync,
 	validateNumber,
 } from "@better-ccflare/core";
-import { BadRequest, Unauthorized } from "@better-ccflare/errors";
+import { BadRequest, Forbidden, Unauthorized } from "@better-ccflare/errors";
 import { API_ROUTES } from "@better-ccflare/types/api-catalog";
 import {
 	createAccountAddHandler,
@@ -775,7 +775,11 @@ export class APIRouter {
 			);
 		}
 
-		// Authorize the request based on API key role
+		// Authorize the request based on API key role. A refusal here is 403:
+		// the key is valid and re-authenticating cannot help, which is what a
+		// 401 would tell the client (RFC 9110). 401 stays for a missing or
+		// invalid key, above. The proxy path in apps/server already answers
+		// 403 for the same refusal (SB23-3746).
 		if (authResult.apiKey) {
 			const authzResult = await this.authService.authorizeEndpoint(
 				authResult.apiKey,
@@ -784,7 +788,7 @@ export class APIRouter {
 			);
 			if (!authzResult.authorized) {
 				return errorResponse(
-					Unauthorized(authzResult.reason || "Authorization failed"),
+					Forbidden(authzResult.reason || "Authorization failed"),
 				);
 			}
 		}
@@ -1075,10 +1079,12 @@ export class APIRouter {
 
 			// API key role update - Only admin keys can update roles
 			if (path.endsWith("/role") && method === "PATCH") {
-				// Check if the authenticated key is an admin key
+				// Check if the authenticated key is an admin key. 403, like the
+				// role refusal above: no credential the caller can present
+				// changes the answer (SB23-3746).
 				if (authResult.role !== "admin") {
 					return errorResponse(
-						Unauthorized(
+						Forbidden(
 							"Only admin keys can update API key roles. Your key has api-only access.",
 						),
 					);
