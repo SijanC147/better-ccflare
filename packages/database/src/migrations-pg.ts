@@ -155,7 +155,9 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			gateway_hint_agent_type TEXT,
 			gateway_hint_prev_tool_durations TEXT,
 			gateway_hint_compaction TEXT,
-			gateway_hint_context_compacted TEXT
+			gateway_hint_context_compacted TEXT,
+			inbound_format TEXT,
+			inbound_gateway TEXT
 		)
 	`);
 
@@ -987,6 +989,18 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "gateway_hint_context_compacted",
 			definition:
 				"ALTER TABLE requests ADD COLUMN gateway_hint_context_compacted TEXT",
+		},
+		// The OpenAI-shaped API and named gateway a translated request arrived
+		// through (SB23-2727). See packages/proxy/src/inbound-marker.ts.
+		{
+			table: "requests",
+			column: "inbound_format",
+			definition: "ALTER TABLE requests ADD COLUMN inbound_format TEXT",
+		},
+		{
+			table: "requests",
+			column: "inbound_gateway",
+			definition: "ALTER TABLE requests ADD COLUMN inbound_gateway TEXT",
 		},
 		{
 			table: "request_payloads",

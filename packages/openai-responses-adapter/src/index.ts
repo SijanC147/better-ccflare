@@ -10,7 +10,7 @@ export {
 	handleClaudeCodeEndpointRequest,
 	resetClaudeCodeRunnerStateForTests,
 } from "./claude-code";
-export type { OpenAIGatewayOptions } from "./gateway";
+export { dropClientGatewayHeaders, type OpenAIGatewayOptions } from "./gateway";
 export { handleResponsesRequest } from "./handler";
 export type {
 	HandleProxyFn,

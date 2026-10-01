@@ -471,6 +471,10 @@ Any client that accepts a custom OpenAI-compatible provider can send Chat Comple
 
 Translated: text, images (`image_url`, as a data URL or a plain URL), function tools and tool calls, streaming (including `stream_options.include_usage`), and token usage.
 
+A base64 data URL may carry parameters before `;base64` (`data:image/png;charset=binary;base64,...`) and a payload wrapped across lines; both are normalised before the image goes upstream. Tool calls and tool results in the history of a request that defines no `tools` are sent as text, because Anthropic refuses `tool_use` and `tool_result` blocks without tool definitions. The same two rules apply to `/v1/responses`.
+
+In the request history, a translated request is shown with its path as `/v1/messages`, the request actually routed, plus a badge naming the API it arrived on (**OpenAI chat** or **OpenAI responses**) and the named gateway, if any. The same values are on `GET /api/requests` as `inboundFormat` and `inboundGateway`.
+
 Refused with a 400, rather than silently dropped: `n` greater than 1, `logprobs`, tools whose type is not `function`, and audio or file content parts.
 
 `response_format` is best-effort, since Anthropic has no equivalent that guarantees the format. `reasoning_effort` is ignored.
@@ -535,7 +539,7 @@ supports_websockets = false
 
 Run `export CCFLARE_API_KEY=dummy` before starting Codex when API-key authentication is off, or set it to a better-ccflare API key when it is on. Keep `requires_openai_auth = false`: with `true`, Codex sends its own ChatGPT account id, which would then travel under a different account's token. A WebSocket upgrade on a gateway's `/responses` answers 503, as on the plain path. `model` must be a `name` from the gateway's set, and `GET /gpt/v1/models` lists exactly those names in the OpenAI list shape. Whether the Codex desktop app reads `model_providers`, and accepts that list in its model picker, has not been verified.
 
-Gateways are read from the config on every request, so an edit applies without a restart. An invalid entry is skipped with a warning in the log and does not disable the others. `GET /api/openai-gateways` lists the configured gateways.
+Gateways are read from the config on every request, so an edit applies without a restart. An invalid entry is skipped with a warning in the log and does not disable the others. Create, edit and delete gateways in the dashboard under **Settings → OpenAI gateways**, which shows both base URLs for each gateway with a copy control, offers the providers present in the pool as exclusions and the configured combos as ladders, and lists any stored entry that failed validation. The same operations are `GET /api/openai-gateways`, `PUT /api/openai-gateways/<name>` and `DELETE /api/openai-gateways/<name>`. A name already used by a Claude Code endpoint is refused with a 409.
 
 #### Claude Code project endpoints
 

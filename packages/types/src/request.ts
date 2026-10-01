@@ -171,6 +171,8 @@ export interface RequestRow {
 	gateway_hint_prev_tool_durations: string | null;
 	gateway_hint_compaction: string | null;
 	gateway_hint_context_compacted: string | null;
+	inbound_format: string | null;
+	inbound_gateway: string | null;
 }
 
 // Domain model
@@ -220,6 +222,14 @@ export interface Request {
 	gatewayHintPrevToolDurations?: string;
 	gatewayHintCompaction?: string;
 	gatewayHintContextCompacted?: string;
+	/**
+	 * The OpenAI-shaped API a translated request arrived on (`openai-chat` or
+	 * `openai-responses`) and the named gateway it came through. Both absent
+	 * for native Anthropic traffic, whose row path is the real one. See
+	 * packages/proxy/src/inbound-marker.ts for the producer (SB23-2727).
+	 */
+	inboundFormat?: string;
+	inboundGateway?: string;
 }
 
 // API response type
@@ -273,6 +283,9 @@ export interface RequestResponse {
 	gatewayHintPrevToolDurations?: string;
 	gatewayHintCompaction?: string;
 	gatewayHintContextCompacted?: string;
+	/** See the matching fields on `Request` above. */
+	inboundFormat?: string;
+	inboundGateway?: string;
 }
 
 // Detailed request with payload
@@ -387,6 +400,8 @@ export function toRequest(row: RequestRow): Request {
 		gatewayHintCompaction: row.gateway_hint_compaction || undefined,
 		gatewayHintContextCompacted:
 			row.gateway_hint_context_compacted || undefined,
+		inboundFormat: row.inbound_format || undefined,
+		inboundGateway: row.inbound_gateway || undefined,
 	};
 }
 
@@ -432,6 +447,8 @@ export function toRequestResponse(request: Request): RequestResponse {
 		gatewayHintPrevToolDurations: request.gatewayHintPrevToolDurations,
 		gatewayHintCompaction: request.gatewayHintCompaction,
 		gatewayHintContextCompacted: request.gatewayHintContextCompacted,
+		inboundFormat: request.inboundFormat,
+		inboundGateway: request.inboundGateway,
 	};
 }
 

@@ -31,6 +31,10 @@ import {
 	type GatewayHintHeaders,
 } from "./gateway-hint-headers";
 import {
+	extractInboundMarkerFromParts,
+	type InboundMarker,
+} from "./inbound-marker";
+import {
 	extractProjectAttributionFromParts,
 	sanitizeProjectName,
 } from "./project-attribution";
@@ -66,6 +70,7 @@ interface RequestState {
 	project?: string | null;
 	projectAttributionSource?: ProjectAttributionSource | null;
 	gatewayHint: GatewayHintHeaders;
+	inbound: InboundMarker;
 	billingType?: string;
 	firstTokenTimestamp?: number;
 	lastTokenTimestamp?: number;
@@ -581,6 +586,7 @@ export class UsageCollector {
 			// carries, regardless of which code path constructed it. Absent
 			// headers (the normal case) resolve to an all-null object.
 			gatewayHint: extractGatewayHintHeadersFromParts(msg.requestHeaders),
+			inbound: extractInboundMarkerFromParts(msg.requestHeaders),
 			shouldSkipLogging: shouldSkip,
 			payloadReleased: false,
 			bodiesReleased: false,
@@ -1037,6 +1043,8 @@ export class UsageCollector {
 					// prefix — see DatabaseOperations.saveRequest.
 					startMessage.projectId ?? null,
 					startMessage.worktreePath ?? null,
+					state.inbound.format,
+					state.inbound.gateway,
 				);
 			} catch (error) {
 				log.error(
@@ -1122,6 +1130,8 @@ export class UsageCollector {
 			gatewayHintCompaction: state.gatewayHint.compaction ?? undefined,
 			gatewayHintContextCompacted:
 				state.gatewayHint.contextCompacted ?? undefined,
+			inboundFormat: state.inbound.format ?? undefined,
+			inboundGateway: state.inbound.gateway ?? undefined,
 			// Same value handed to saveRequest above, so a dashboard does not have
 			// to reload before a request shows its terminal state. Note this is
 			// the value as REPORTED, not as persisted: the save is an

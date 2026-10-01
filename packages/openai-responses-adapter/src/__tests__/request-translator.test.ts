@@ -14,6 +14,15 @@ import type { ResponseItem, ResponsesRequest } from "../types";
  */
 type TranslatableRequest = ResponsesRequest & { input: ResponseItem[] };
 
+/**
+ * A request carrying tool history must also define tools, or the translator
+ * rewrites that history as text (SB23-2727 item 3). Fixtures that assert the
+ * tool_use and tool_result blocks themselves carry this.
+ */
+const HISTORY_TOOLS: ResponsesRequest["tools"] = [
+	{ type: "function", name: "lookup", parameters: {} },
+];
+
 describe("translateRequestToAnthropic", () => {
 	test("simple user message → single messages entry", () => {
 		const req: TranslatableRequest = {
@@ -62,6 +71,7 @@ describe("translateRequestToAnthropic", () => {
 	test("function_call item appended to assistant message", () => {
 		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
+			tools: HISTORY_TOOLS,
 			input: [
 				{
 					type: "message",
@@ -91,6 +101,7 @@ describe("translateRequestToAnthropic", () => {
 	test("function_call_output → new user message with tool_result", () => {
 		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
+			tools: HISTORY_TOOLS,
 			input: [
 				{
 					type: "function_call_output",
@@ -110,6 +121,7 @@ describe("translateRequestToAnthropic", () => {
 	test("mixed conversation: user, assistant+function_call, function_call_output, user", () => {
 		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
+			tools: HISTORY_TOOLS,
 			input: [
 				{
 					type: "message",
@@ -441,6 +453,7 @@ describe("translateRequestToAnthropic", () => {
 	test("function_call with invalid JSON arguments falls back to {}", () => {
 		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
+			tools: HISTORY_TOOLS,
 			input: [
 				{
 					type: "function_call",
@@ -463,6 +476,7 @@ describe("translateRequestToAnthropic", () => {
 			'*** Begin Patch\n*** Add File: hello.txt\n+"héllo"\n*** End Patch';
 		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
+			tools: HISTORY_TOOLS,
 			input: [
 				{
 					type: "custom_tool_call",
@@ -555,6 +569,7 @@ describe("translateRequestToAnthropic", () => {
 	test("custom_tool_call_output → user message with tool_result", () => {
 		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
+			tools: HISTORY_TOOLS,
 			input: [
 				{
 					type: "custom_tool_call_output",
@@ -578,6 +593,7 @@ describe("translateRequestToAnthropic", () => {
 		] as const) {
 			const result = translateRequestToAnthropic({
 				model: "gpt-6-astra",
+				tools: HISTORY_TOOLS,
 				input: [
 					{
 						type,

@@ -494,6 +494,8 @@ describe("proxyWithAccount — a retried response is classified like a first res
 				"x-claude-code-prev-tool-durations": "[12,34]",
 				"x-claude-code-compaction": "auto",
 				"x-claude-code-context-compacted": "true",
+				"x-better-ccflare-inbound-format": "openai-responses",
+				"x-better-ccflare-inbound-gateway": "gpt",
 			},
 		});
 
@@ -508,5 +510,8 @@ describe("proxyWithAccount — a retried response is classified like a first res
 		expect(args[24]).toBe("[12,34]");
 		expect(args[25]).toBe("auto");
 		expect(args[26]).toBe("true");
+		// The inbound marker (SB23-2727) rides the same audit row.
+		expect(args[29]).toBe("openai-responses");
+		expect(args[30]).toBe("gpt");
 	});
 });
