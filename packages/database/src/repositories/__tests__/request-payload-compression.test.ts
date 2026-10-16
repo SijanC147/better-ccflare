@@ -164,8 +164,8 @@ describe("RequestRepository payload compression", () => {
 
 		const listed = await repo.listPayloadsWithAccountNames(10);
 		const row = listed.find((r) => r.id === id);
-		expect(row).toBeDefined();
-		expect(row?.json).not.toBeNull();
-		expect(JSON.parse(row?.json as string)).toEqual(data);
+		if (!row) throw new Error("saved payload missing from the list");
+		expect(row.json).not.toBeNull();
+		expect(JSON.parse(row.json as string)).toEqual(data);
 	});
 });

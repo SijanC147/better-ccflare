@@ -81,6 +81,26 @@ Manifests kept at the fork's 3.42.0; `bun.lock` unchanged (upstream changed no d
 - **"Codex usage rendered as Grok credits"** (`a5668f16`): the fork's #154/#236 fix kept.
 - `debug_usage.ts` stays deleted; upstream workflow edits land in `*.yml.disabled` only.
 
+### Found by the first full suite, fixed in the PR
+
+- **Upstream's server-side `isAnthropicPeakHour`** was the fixed 13:00-19:00 UTC rule #93 replaced in
+  the dashboard, an hour late through PDT, and it now feeds `peakHours` on `/api/accounts`. It now
+  reads the window in `America/Los_Angeles` (SB23-8195), with PDT and PST edge tests; the PDT test
+  fails against upstream's rule.
+- `APIRouter` now subscribes its stats cache to `dbOps.onRequestsDeleted`; the fork's two router
+  test mocks (`router-auth-status`, `router-openai-gateways`) gained the method.
+- One upstream `?.` silent skip (`request-payload-compression.test.ts`) converted to a throw, so
+  `check:optional-chain-silent-skip` reads 0.
+- Upstream's "no logBus listeners" logger test depended on file order; it now clears and restores
+  the listeners itself.
+- **Security review (one round, APPROVE WITH FINDINGS at `78dde5f9`), the Medium fixed:** with
+  `use_extra_usage` on, upstream's `hasExtraUsageCapacity` treated Codex `has_credits || unlimited`
+  as capacity, admitting a zero, null or unparseable balance. It now calls the fork's
+  `codexCreditsCoverExhaustedWeekly`, so Codex has one credit rule on every path. The five Lows are
+  filed as follow-ups.
+- `outbound-proxy.test.ts` (pre-existing, fails at `a8a9c87a` too): Bun 1.4.3 throws
+  `ERR_PROXY_TUNNEL` where 1.3.14 returns the proxy's 502; the test reads either as the status.
+
 ### Typing upstream's tests
 
 Upstream's new tests were written without `exactOptionalPropertyTypes` and literal-union typing:

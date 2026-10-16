@@ -114,19 +114,38 @@ export function isDeepseekPeakHour(ts = Date.now()): boolean {
 }
 
 /**
- * Anthropic OAuth peak hours: weekdays 5am-11am PT (13:00-19:00 UTC). During
- * these windows 5-hour sessions consume a larger share of the weekly budget.
- * Informational only: not part of the peak-hours auto-pause.
- * Keep in sync with the dashboard copy in
- * packages/dashboard-web/src/utils/provider-utils.ts (used by RequestsTab for
- * historical request timestamps).
+ * Wall-clock weekday and hour in Los Angeles. `hourCycle: "h23"` so midnight
+ * reads 0, never 24.
+ */
+const LOS_ANGELES_CLOCK = new Intl.DateTimeFormat("en-US", {
+	timeZone: "America/Los_Angeles",
+	weekday: "short",
+	hour: "numeric",
+	minute: "numeric",
+	hourCycle: "h23",
+});
+
+/**
+ * Anthropic OAuth peak hours: weekdays 5am-11am in Los Angeles, the vendor's
+ * own timezone and its own weekend. That is 12:00-18:00 UTC while PDT is in
+ * effect and 13:00-19:00 UTC the rest of the year. During these windows 5-hour
+ * sessions consume a larger share of the weekly budget. Informational only:
+ * not part of the peak-hours auto-pause.
+ *
+ * Upstream states this as a fixed 13:00-19:00 UTC, which is an hour late
+ * through PDT; the fork fixed that in the dashboard in #93 (SB23-1867), and the
+ * 2026-10-16 sync brings the same rule here because this now feeds `peakHours`
+ * on /api/accounts (SB23-8195). Keep in sync with ANTHROPIC_PEAK_WINDOW in
+ * packages/dashboard-web/src/utils/provider-utils.ts.
  */
 export function isAnthropicPeakHour(ts = Date.now()): boolean {
-	const d = new Date(ts);
-	const day = d.getUTCDay();
-	if (day === 0 || day === 6) return false;
-	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
-	return utcHour >= 13 && utcHour < 19;
+	const parts = LOS_ANGELES_CLOCK.formatToParts(new Date(ts));
+	const part = (type: Intl.DateTimeFormatPartTypes) =>
+		parts.find((p) => p.type === type)?.value ?? "";
+	const weekday = part("weekday");
+	if (weekday === "Sat" || weekday === "Sun") return false;
+	const hour = Number(part("hour")) + Number(part("minute")) / 60;
+	return hour >= 5 && hour < 11;
 }
 
 const HOLIDAY_REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;

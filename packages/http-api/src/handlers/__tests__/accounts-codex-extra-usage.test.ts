@@ -145,6 +145,9 @@ describe("GET /api/accounts — Codex account on extra usage", () => {
 							),
 							"x-codex-credits-has-credits": "true",
 							"x-codex-credits-unlimited": "false",
+							// A positive balance: has_credits alone is not capacity
+							// under the fork's credit rule (PR #312 review).
+							"x-codex-credits-balance": "12",
 						},
 					},
 					meta: { timestamp },

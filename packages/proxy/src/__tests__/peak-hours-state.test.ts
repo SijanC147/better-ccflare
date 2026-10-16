@@ -12,15 +12,29 @@ import {
 import { resetChineseHolidayCache } from "../chinese-holidays";
 
 describe("isAnthropicPeakHour", () => {
-	it("is peak on weekdays 13:00-19:00 UTC, window end exclusive", () => {
-		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 13, 0))).toBe(true);
-		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 18, 59))).toBe(true);
-		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 19, 0))).toBe(false);
-		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 12, 59))).toBe(false);
+	// The window is 5am-11am in Los Angeles (SB23-1867, #93, SB23-8195), so
+	// its UTC edges move with daylight saving. Upstream's fixed 13:00-19:00 UTC
+	// is right only under PST; each PDT edge below fails it.
+	it("is peak 12:00-18:00 UTC on a PDT weekday, window end exclusive", () => {
+		// Wed 2026-09-23 is PDT (UTC-7).
+		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 12, 0))).toBe(true);
+		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 17, 59))).toBe(true);
+		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 18, 0))).toBe(false);
+		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 23, 11, 59))).toBe(false);
 	});
 
-	it("is off-peak on weekends", () => {
+	it("is peak 13:00-19:00 UTC on a PST weekday, window end exclusive", () => {
+		// Thu 2026-01-15 is PST (UTC-8).
+		expect(isAnthropicPeakHour(Date.UTC(2026, 0, 15, 13, 0))).toBe(true);
+		expect(isAnthropicPeakHour(Date.UTC(2026, 0, 15, 18, 59))).toBe(true);
+		expect(isAnthropicPeakHour(Date.UTC(2026, 0, 15, 19, 0))).toBe(false);
+		expect(isAnthropicPeakHour(Date.UTC(2026, 0, 15, 12, 59))).toBe(false);
+	});
+
+	it("is off-peak on weekends in Los Angeles", () => {
 		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 26, 15, 0))).toBe(false);
+		// Mon 2026-09-28 00:30 UTC is still Sunday 17:30 in Los Angeles.
+		expect(isAnthropicPeakHour(Date.UTC(2026, 8, 28, 0, 30))).toBe(false);
 	});
 });
 

@@ -29,6 +29,8 @@ afterEach(() => {
 });
 
 describe("hasExtraUsageCapacity — what each provider reports", () => {
+	// The fork's one Codex credit rule (SB23-2289, PR #312 review): has_credits
+	// AND (unlimited OR a positive parseable balance).
 	it("codex: purchased credits or an unlimited allowance", () => {
 		expect(
 			hasExtraUsageCapacity(
@@ -41,11 +43,24 @@ describe("hasExtraUsageCapacity — what each provider reports", () => {
 		expect(
 			hasExtraUsageCapacity(
 				spentWeekly({
-					credits: { has_credits: false, unlimited: true, balance: null },
+					credits: { has_credits: true, unlimited: true, balance: null },
 				}),
 				"codex",
 			),
 		).toBe(true);
+	});
+
+	it("codex: no capacity without a positive balance, unless unlimited with has_credits", () => {
+		for (const credits of [
+			{ has_credits: true, unlimited: false, balance: "0" },
+			{ has_credits: true, unlimited: false, balance: null },
+			{ has_credits: true, unlimited: false, balance: "lots" },
+			{ has_credits: false, unlimited: true, balance: null },
+		]) {
+			expect(hasExtraUsageCapacity(spentWeekly({ credits }), "codex")).toBe(
+				false,
+			);
+		}
 		expect(
 			hasExtraUsageCapacity(
 				spentWeekly({

@@ -243,6 +243,13 @@ describe("Logger — console formatting laziness", () => {
 	it("does not emit on logBus when there are no listeners and still logs to console when enabled", () => {
 		const l = new Logger("t", LogLevel.INFO);
 		const spy: string[] = [];
+		// "No listeners" must be true for this test, whatever an earlier file in
+		// the same process left subscribed (the OpenObserve exporter subscribes
+		// on configure); otherwise the assertion depends on file order.
+		const listeners = logBus.listeners("log") as Array<
+			(...a: unknown[]) => void
+		>;
+		logBus.removeAllListeners("log");
 		const emitSpy = spyOn(logBus, "emit");
 		const orig = console.log;
 		console.log = (m: string) => spy.push(m);
@@ -255,6 +262,7 @@ describe("Logger — console formatting laziness", () => {
 		}
 		const emitCalls = emitSpy.mock.calls.length;
 		emitSpy.mockRestore();
+		for (const listener of listeners) logBus.on("log", listener);
 		expect(emitCalls).toBe(0);
 		expect(spy.length).toBe(1);
 		expect(spy[0]).toContain("INFO: [t] hello");

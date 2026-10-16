@@ -964,7 +964,11 @@ export function hasExtraUsageCapacity(
 	if (!data || typeof data !== "object") return false;
 	const d = data as UsageData;
 	if (provider === "codex") {
-		return d.credits?.unlimited === true || d.credits?.has_credits === true;
+		// The fork's one credit predicate (SB23-2289): `has_credits` true AND
+		// either `unlimited` or a positive parseable balance. Upstream's looser
+		// `has_credits || unlimited` admitted a zero, null or unparseable balance
+		// once the switch was on (PR #312 security review, Medium).
+		return codexCreditsCoverExhaustedWeekly(d.credits);
 	}
 	if (provider === "anthropic") {
 		if (d.spend && typeof d.spend.enabled === "boolean") {
