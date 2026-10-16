@@ -194,10 +194,13 @@ List all configured accounts with their current status.
     "rateLimitReset": "2024-12-17T10:30:00.000Z",
     "rateLimitRemaining": 100,
     "sessionInfo": "Session: 25 requests",
-    "autoFallbackEnabled": false
+    "autoFallbackEnabled": false,
+    "peakHours": { "active": false }
   }
 ]
 ```
+
+`peakHours` is computed by the server on each request and is `null` for providers with no peak-hours concept. Currently `deepseek`, `zai` and `anthropic` report `{ "active": boolean }`. For DeepSeek and Zai it uses the same check as peak-hours auto-pause; Anthropic is informational only.
 
 **Example:**
 ```bash
@@ -908,6 +911,41 @@ With this on, a request whose model can't be served as-written by any account ge
 **Example:**
 ```bash
 curl -X POST http://localhost:8080/api/config/force-account-model \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+#### GET /api/config/use-extra-usage
+
+Whether an account whose plan window is spent stays in rotation while its provider reports billed capacity beyond the plan (Codex credits, Anthropic extra usage). Config-file setting, off by default; `CCFLARE_USE_EXTRA_USAGE` can only seed it once — see [Use Extra Usage](configuration.md#use-extra-usage) in configuration.md.
+
+**Response:**
+```json
+{ "enabled": false, "source": "default" }
+```
+
+**Example:**
+```bash
+curl http://localhost:8080/api/config/use-extra-usage
+```
+
+#### POST /api/config/use-extra-usage
+
+Enable or disable serving on extra usage. Takes effect immediately, no restart required.
+
+**Request:**
+```json
+{ "enabled": true }
+```
+
+**Response:**
+```json
+{ "success": true, "enabled": true, "source": "file", "effective": true }
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/config/use-extra-usage \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 ```

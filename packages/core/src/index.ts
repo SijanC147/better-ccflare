@@ -9,6 +9,7 @@ export {
 	getOverloadRetryConfig,
 	getRateLimitResetStabilityMs,
 	getServerErrorRetryEnabled,
+	getStreamReadTimeoutMs,
 	HTTP_STATUS,
 	isOverloadReason,
 	isRetryableUpstreamError,
@@ -47,6 +48,7 @@ export {
 	normalizeBuildCommit,
 	normalizeBuildVersion,
 } from "./build-identity";
+export * from "./extra-usage";
 export * from "./force-account-model";
 export {
 	type IntervalConfig,

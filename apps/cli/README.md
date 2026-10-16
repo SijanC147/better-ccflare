@@ -196,7 +196,7 @@ STORE_PAYLOADS=false                   # Disable storing request/response bodies
 - Never commit `.env` files containing sensitive values to version control
 - Use environment-specific configuration for production deployments
 
-📖 **See [docs/configuration.md](docs/configuration.md) for the complete list** — overload/rate-limit retry tuning, health endpoint detail, agent discovery, payload encryption at rest, model catalog refresh, PostgreSQL pooling, Codex prompt-cache keys, and more.
+📖 **See [docs/configuration.md](docs/configuration.md) for the complete list** — overload/rate-limit retry tuning, stream read timeout, health endpoint detail, agent discovery, payload encryption at rest, model catalog refresh, PostgreSQL pooling, Codex prompt-cache keys, and more.
 
 ### Using .env Files
 
@@ -818,7 +818,7 @@ Inspired by [snipeship/ccflare](https://github.com/snipeship/ccflare) - thanks f
 - [@aaapl](https://github.com/aaapl) — [#433](https://github.com/tombii/better-ccflare/pull/433)
 - [@mjonuschat](https://github.com/mjonuschat) — [#436](https://github.com/tombii/better-ccflare/pull/436)
 - [@anony253](https://github.com/anony253) — [#452](https://github.com/tombii/better-ccflare/pull/452), [#460](https://github.com/tombii/better-ccflare/pull/460)
-- [@valentinyanakiev](https://github.com/valentinyanakiev) — [#450](https://github.com/tombii/better-ccflare/pull/450), [#454](https://github.com/tombii/better-ccflare/pull/454), [#459](https://github.com/tombii/better-ccflare/pull/459)
+- [@valentinyanakiev](https://github.com/valentinyanakiev) — [#450](https://github.com/tombii/better-ccflare/pull/450), [#454](https://github.com/tombii/better-ccflare/pull/454), [#459](https://github.com/tombii/better-ccflare/pull/459), [#482](https://github.com/tombii/better-ccflare/pull/482)
 - [@flex-minhyeok](https://github.com/flex-minhyeok) — [#466](https://github.com/tombii/better-ccflare/pull/466)
 
 ## Contributing

@@ -1,5 +1,5 @@
 import { Logger } from "@better-ccflare/logger";
-import type { UsageData, UsageWindow } from "../../usage-fetcher";
+import type { CodexCredits, UsageData, UsageWindow } from "../../usage-fetcher";
 import { CODEX_USER_AGENT } from "./provider";
 import { parseCodexCreditsHeaders } from "./usage";
 
@@ -49,6 +49,11 @@ export interface CodexUsagePayload {
 		limit_reached?: boolean;
 		primary_window?: CodexUsageWindowPayload | null;
 		secondary_window?: CodexUsageWindowPayload | null;
+	} | null;
+	credits?: {
+		has_credits?: unknown;
+		unlimited?: unknown;
+		balance?: unknown;
 	} | null;
 }
 
@@ -140,7 +145,7 @@ export function parseCodexUsagePayload(
 	const rateLimit = (body as CodexUsagePayload).rate_limit;
 	if (typeof rateLimit !== "object" || rateLimit === null) return null;
 
-	const usage: Pick<UsageData, "five_hour" | "seven_day"> = {};
+	const usage: Pick<UsageData, "five_hour" | "seven_day" | "credits"> = {};
 	for (const raw of [rateLimit.primary_window, rateLimit.secondary_window]) {
 		if (typeof raw !== "object" || raw === null) continue;
 		const slot = slotFor(raw.limit_window_seconds);
@@ -149,7 +154,34 @@ export function parseCodexUsagePayload(
 		if (window) usage[slot] = window;
 	}
 
-	return usage.five_hour || usage.seven_day ? usage : null;
+	if (!usage.five_hour && !usage.seven_day) return null;
+	const credits = toCredits((body as CodexUsagePayload).credits);
+	if (credits) usage.credits = credits;
+	return usage;
+}
+
+/**
+ * The body's `credits` block, under the same rule the response headers follow
+ * (see parseCodexCreditsHeaders), so the cache's one `credits` field has one
+ * meaning whichever surface wrote it: gated on `has_credits` alone, an
+ * unreadable `unlimited` reads as bounded, and the balance is kept as a string
+ * whichever way the body encodes it. Upstream required both flags; the fork
+ * keeps its codex-rs rule (SB23-2289, kept on the 2026-10-16 sync, SB23-8189).
+ */
+function toCredits(raw: CodexUsagePayload["credits"]): CodexCredits | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	if (typeof raw.has_credits !== "boolean") return null;
+	const balance =
+		typeof raw.balance === "string" && raw.balance.trim() !== ""
+			? raw.balance.trim()
+			: isFiniteNumber(raw.balance)
+				? String(raw.balance)
+				: null;
+	return {
+		has_credits: raw.has_credits,
+		unlimited: raw.unlimited === true,
+		balance,
+	};
 }
 
 /**

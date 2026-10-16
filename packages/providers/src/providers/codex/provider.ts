@@ -122,7 +122,7 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.157.1";
+export const CODEX_VERSION = "0.163.0";
 /** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
 const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
@@ -586,6 +586,8 @@ export interface CodexProviderOptionsForTests {
 export const CODEX_STREAM_DRAIN_DEADLINE_MS = 30_000;
 const CODEX_CONTINUATION_TTL_MS = 30 * 60 * 1000;
 const CODEX_CONTINUATION_MAX_LANES = 2_048;
+const UUID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class CodexProvider extends BaseProvider {
 	name = "codex";
@@ -1643,11 +1645,7 @@ export class CodexProvider extends BaseProvider {
 		if (typeof raw !== "string") return null;
 		const normalized = raw.trim();
 		if (normalized.length === 0) return null;
-		return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-			normalized,
-		)
-			? normalized.toLowerCase()
-			: normalized;
+		return UUID_RE.test(normalized) ? normalized.toLowerCase() : normalized;
 	}
 
 	private sweepContinuationState(now: number): void {

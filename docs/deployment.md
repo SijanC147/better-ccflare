@@ -277,7 +277,7 @@ RUN cd apps/server && bun build src/server.ts --compile --outfile dist/better-cc
 RUN cd apps/cli && bun build src/main.ts --compile --outfile dist/better-ccflare-cli
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -805,9 +805,9 @@ PRAGMA cache_size = -20000;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 268435456;
 
--- Create indexes for common queries
-CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
-CREATE INDEX IF NOT EXISTS idx_requests_account ON requests(account_used);
+-- The requests indexes are created and maintained automatically by the
+-- migrations (see docs/database.md); do not add extra ones by hand, each one
+-- slows every write. Example of an account index:
 CREATE INDEX IF NOT EXISTS idx_accounts_active ON accounts(paused, expires_at);
 ```
 

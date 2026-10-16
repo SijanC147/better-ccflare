@@ -358,6 +358,80 @@ describe("usageCache polling for codex", () => {
 		expect(cached && "credits" in cached).toBe(false);
 	});
 
+	it("dates a balance the poll body reports as observed now, and only that one (SB23-8189)", async () => {
+		// The 2026-10-16 upstream sync added a second credits source: the
+		// wham/usage body's `credits` block, routed through the same rule as
+		// the headers. A body balance is a fresh observation, so it must be
+		// dated by this poll. A carried balance must keep its OWN stamp, or it
+		// becomes immortal (PR #236): the second poll below reports nothing,
+		// so the balance it serves can only be the body's, still inside its
+		// bound because this poll dated it.
+		const stale = { has_credits: true, unlimited: false, balance: "9.99" };
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits: stale,
+			} as UsageData,
+			Date.now() - CODEX_CREDITS_MAX_AGE_MS - 1,
+		);
+
+		const reported = { has_credits: true, unlimited: false, balance: "5.00" };
+		globalThis.fetch = mock(async () =>
+			okResponse({ ...payload(), credits: reported }),
+		) as unknown as typeof fetch;
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+		expect((usageCache.get(ACCOUNT_ID) as UsageData | null)?.credits).toEqual(
+			reported,
+		);
+
+		// A body without the block, or with one the rule refuses, writes nothing:
+		// the balance carried is the body's, on the stamp the first poll gave it.
+		globalThis.fetch = mock(async () =>
+			okResponse({ ...payload(), credits: { unlimited: true } }),
+		) as unknown as typeof fetch;
+		await usageCache.refreshNow(ACCOUNT_ID);
+		expect((usageCache.get(ACCOUNT_ID) as UsageData | null)?.credits).toEqual(
+			reported,
+		);
+	});
+
+	it("keeps a carried balance's stamp when the poll body reports no credits (SB23-8189)", async () => {
+		// The negative half: a balance observed just over the bound ago must
+		// still expire across a poll whose body says nothing about credits. A
+		// poll that re-dated carried credits would serve it here.
+		usageCache.set(
+			ACCOUNT_ID,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 100, resets_at: null },
+				credits: { has_credits: true, unlimited: false, balance: "9.99" },
+			} as UsageData,
+			Date.now() - CODEX_CREDITS_MAX_AGE_MS - 1,
+		);
+		globalThis.fetch = mock(async () =>
+			okResponse({ ...payload(), credits: null }),
+		) as unknown as typeof fetch;
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => TOKEN,
+			"codex",
+			ONE_HOUR_MS,
+		);
+		await usageCache.refreshNow(ACCOUNT_ID);
+
+		const cached = usageCache.get(ACCOUNT_ID) as UsageData | null;
+		expect(cached?.seven_day?.utilization).toBe(43);
+		expect(cached && "credits" in cached).toBe(false);
+	});
+
 	it("caches a weekly-only payload without a five_hour key", async () => {
 		const body = payload();
 		body.rate_limit.primary_window = null as never;

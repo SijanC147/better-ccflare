@@ -103,7 +103,9 @@ export function providerShowsWeeklyUsage(provider: string): boolean {
  * Check if a provider shows a credit balance (USD remaining) instead of utilization windows
  */
 export function providerShowsCreditsBalance(provider: string): boolean {
-	return provider === PROVIDER_NAMES.KILO;
+	return (
+		provider === PROVIDER_NAMES.KILO || provider === PROVIDER_NAMES.OPENROUTER
+	);
 }
 
 /**
@@ -195,6 +197,9 @@ export function isZaiPeakHour(ts?: number): boolean {
  * Peak hours are 5am–11am in Los Angeles, Monday–Friday there. That is 13:00–19:00
  * UTC while PDT is in effect and 14:00–20:00 UTC the rest of the year.
  * During these windows, 5-hour sessions consume a larger share of the weekly budget.
+ * Keep in sync with isAnthropicPeakHour in
+ * packages/proxy/src/auto-refresh-scheduler.ts. This copy exists for
+ * RequestsTab's historical timestamps; live state comes from /api/accounts.
  */
 export function isAnthropicPeakHour(ts?: number): boolean {
 	return isWithinPeakWindow(ANTHROPIC_PEAK_WINDOW, ts ?? Date.now());

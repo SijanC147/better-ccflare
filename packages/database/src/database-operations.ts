@@ -293,6 +293,9 @@ const INC_VAC_SKIP_ESCALATE_AT = 3;
  */
 const INC_VACUUM_WORKER_TIMEOUT_MS = 120_000;
 
+/** How long getTableRowCounts() results are cached. */
+const TABLE_ROW_COUNTS_TTL_MS = 60_000;
+
 /**
  * DatabaseOperations using Repository Pattern
  * Provides a clean, organized interface for database operations
@@ -319,6 +322,19 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private originalAutoVacuumMode?: number;
 	/** Prevents concurrent compact() calls from spawning multiple vacuum workers */
 	private compacting = false;
+	/** Short-TTL cache of getTableRowCounts (the payload SUM is a full scan). */
+	private tableCountsCache: {
+		at: number;
+		value: Array<{ name: string; rowCount: number; dataBytes?: number }>;
+	} | null = null;
+	private tableCountsInflight: Promise<
+		Array<{ name: string; rowCount: number; dataBytes?: number }>
+	> | null = null;
+	/** Bumped on invalidation so an in-flight load cannot repopulate stale data. */
+	private tableCountsGeneration = 0;
+	private readonly requestsDeletedListeners = new Set<() => void>();
+	/** Injectable clock (tests only). */
+	private tableCountsClock: () => number = () => Date.now();
 	/** Stop function returned by the multi-instance guard's heartbeat loop. */
 	private heartbeatStop: (() => Promise<void>) | null = null;
 	/**
@@ -1566,27 +1582,75 @@ OAuth tokens will need to be re-authenticated.
 		removedPayloads: number;
 	}> {
 		const now = Date.now();
-
-		// Pass 1 — payloads
-		const payloadCutoff = now - payloadRetentionMs;
-		const removedPayloadsByAge =
-			await this.requests.deletePayloadsOlderThan(payloadCutoff);
-		const removedOrphans = await this.requests.deleteOrphanedPayloads();
-
-		// Pass 2 — request metadata
+		let removedPayloads = 0;
 		let removedRequests = 0;
-		if (
-			typeof requestRetentionMs === "number" &&
-			Number.isFinite(requestRetentionMs)
-		) {
-			const requestCutoff = now - requestRetentionMs;
-			removedRequests = await this.requests.deleteOlderThan(requestCutoff);
+		// Set once pass 2 starts: a batched delete that throws midway may already
+		// have removed rows whose count is lost with the exception.
+		let requestPassStarted = false;
+		try {
+			// Pass 1 — payloads
+			const payloadCutoff = now - payloadRetentionMs;
+			const removedPayloadsByAge =
+				await this.requests.deletePayloadsOlderThan(payloadCutoff);
+			const removedOrphans = await this.requests.deleteOrphanedPayloads();
+			removedPayloads = removedPayloadsByAge + removedOrphans;
+			this.invalidateTableRowCounts();
+
+			// Pass 2 — request metadata
+			if (
+				typeof requestRetentionMs === "number" &&
+				Number.isFinite(requestRetentionMs)
+			) {
+				const requestCutoff = now - requestRetentionMs;
+				requestPassStarted = true;
+				removedRequests = await this.requests.deleteOlderThan(requestCutoff);
+				requestPassStarted = false;
+			}
+		} finally {
+			// Runs on success and on a throwing pass (original error still
+			// propagates). Drop counts cached before or during cleanup.
+			this.invalidateTableRowCounts();
+			// Only request rows feed /api/stats; payload-only deletions and no-op
+			// runs leave derived caches valid, so don't notify for them.
+			if (removedRequests > 0 || requestPassStarted) {
+				this.notifyRequestsDeleted();
+			}
 		}
 
-		return {
-			removedRequests,
-			removedPayloads: removedPayloadsByAge + removedOrphans,
+		return { removedRequests, removedPayloads };
+	}
+
+	/**
+	 * Subscribe to request-row deletions performed by cleanupOldRequests() on
+	 * THIS DatabaseOperations instance (scheduled retention, maintenance
+	 * endpoint). Fires only when request rows were (or may have been, if a pass
+	 * threw midway) deleted, not for no-op or payload-only runs.
+	 * In-process only: the CLI (`--clear-history`) cleans up from a separate
+	 * process, so it never triggers listeners in a running server; caches there
+	 * can stay stale until their own TTL expires.
+	 * Returns an unsubscribe function.
+	 */
+	onRequestsDeleted(listener: () => void): () => void {
+		this.requestsDeletedListeners.add(listener);
+		return () => {
+			this.requestsDeletedListeners.delete(listener);
 		};
+	}
+
+	private notifyRequestsDeleted(): void {
+		for (const listener of [...this.requestsDeletedListeners]) {
+			try {
+				listener();
+			} catch (error) {
+				console.warn("[cleanup] requests-deleted listener failed:", error);
+			}
+		}
+	}
+
+	private invalidateTableRowCounts(): void {
+		this.tableCountsCache = null;
+		this.tableCountsInflight = null;
+		this.tableCountsGeneration++;
 	}
 
 	async getTableRowCounts(): Promise<
@@ -1595,6 +1659,34 @@ OAuth tokens will need to be re-authenticated.
 		if (!this.adapter.isSQLite) {
 			return [];
 		}
+		const cached = this.tableCountsCache;
+		if (
+			cached &&
+			this.tableCountsClock() - cached.at < TABLE_ROW_COUNTS_TTL_MS
+		) {
+			return cached.value;
+		}
+		if (this.tableCountsInflight) {
+			return this.tableCountsInflight;
+		}
+		const generation = this.tableCountsGeneration;
+		const load = this.loadTableRowCounts().then((value) => {
+			if (generation === this.tableCountsGeneration) {
+				// Failures return [] — don't cache those.
+				if (value.length > 0) {
+					this.tableCountsCache = { at: this.tableCountsClock(), value };
+				}
+				this.tableCountsInflight = null;
+			}
+			return value;
+		});
+		this.tableCountsInflight = load;
+		return load;
+	}
+
+	private async loadTableRowCounts(): Promise<
+		Array<{ name: string; rowCount: number; dataBytes?: number }>
+	> {
 		try {
 			const tables = await this.adapter.query<{ name: string }>(
 				"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",

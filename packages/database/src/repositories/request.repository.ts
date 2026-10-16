@@ -4,7 +4,10 @@ import type {
 	ProjectAttributionSource,
 } from "@better-ccflare/types";
 import { getCleanupBatchSize } from "../adapters/bun-sql-adapter";
-import { decryptPayload, encryptPayload } from "../payload-encryption";
+import {
+	decodePayloadFromStorage,
+	encodePayloadForStorage,
+} from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 
 const log = new Logger("RequestRepository");
@@ -67,7 +70,7 @@ function agentRank(col: string): string {
 }
 
 /**
- * Decrypt a stored payload for a list endpoint, swallowing per-row errors
+ * Decode a stored payload for a list endpoint, swallowing per-row errors
  * so a single corrupted/tampered row cannot take down the whole list.
  *
  * The error is logged so misconfiguration is still observable, and a JSON
@@ -78,9 +81,9 @@ function agentRank(col: string): string {
  */
 async function decryptForList(id: string, json: string): Promise<string> {
 	try {
-		return await decryptPayload(json);
+		return await decodePayloadFromStorage(json);
 	} catch (err) {
-		log.error(`Failed to decrypt payload ${id}:`, err);
+		log.error(`Failed to decode payload ${id}:`, err);
 		return JSON.stringify({
 			error: "Payload could not be decrypted",
 			id,
@@ -359,7 +362,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	// Payload management
 	async savePayload(id: string, data: unknown): Promise<void> {
 		const json = JSON.stringify(data);
-		const stored = await encryptPayload(json);
+		const stored = await encodePayloadForStorage(json);
 		const ts = Date.now();
 		await this.run(
 			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)
@@ -369,7 +372,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	async savePayloadRaw(id: string, json: string): Promise<void> {
-		const stored = await encryptPayload(json);
+		const stored = await encodePayloadForStorage(json);
 		const ts = Date.now();
 		await this.run(
 			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)
@@ -386,11 +389,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 
 		if (!row) return null;
 
-		// Decryption errors must propagate — they indicate tampering, a wrong key,
-		// or a missing key for an encrypted row. Silently returning null would
-		// hide real misconfiguration. Only JSON parse errors are tolerated, since
-		// historical rows may contain malformed payloads.
-		const decoded = await decryptPayload(row.json);
+		// Decode errors must propagate — they indicate tampering, a wrong key,
+		// a missing key for an encrypted row, or a corrupt compressed body.
+		// Silently returning null would hide real misconfiguration. Only JSON
+		// parse errors are tolerated, since historical rows may contain
+		// malformed payloads.
+		const decoded = await decodePayloadFromStorage(row.json);
 		try {
 			return JSON.parse(decoded);
 		} catch {
@@ -716,7 +720,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	async deleteOlderThan(cutoffTs: number): Promise<number> {
-		// The covering index idx_requests_cleanup makes each batch faster.
+		// The timestamp-leading indexes (e.g. idx_requests_summary_covering, which
+		// also carries id) satisfy each batch's subquery from the index alone.
 		// Batch size is configurable via BETTER_CCFLARE_DB_CLEANUP_BATCH_SIZE
 		// (default 200) — lower it if rows are large and batches are timing
 		// out against statement_timeout (#412).

@@ -371,7 +371,8 @@ export interface AnthropicUsageData {
 	spend?: UsageSpend;
 	// Anthropic only. Gate on the provider before reading it, never on the key.
 	extra_usage?: ExtraUsageData;
-	// Codex only. Absent unless upstream reported a credit balance.
+	// Codex only. Absent unless upstream reported a credit balance; the account
+	// list keeps it so its labels match routing.
 	credits?: CodexCreditsData;
 }
 
@@ -436,6 +437,40 @@ export interface KiloUsageData {
 	utilizationPercent: number;
 }
 
+// Usage data types for OpenRouter accounts. Read from /api/v1/key, falling
+// back to /api/v1/credits for keys that carry no budget of their own.
+// This is the canonical shape — the fetcher imports it rather than declaring
+// its own copy, so the two cannot drift.
+export interface OpenRouterUsageData {
+	/** Usage counted against whatever `remainingUsd` was derived from, in USD */
+	usageUsd: number;
+	/** The key's own credit limit in USD; null when the key carries no budget */
+	limitUsd: number | null;
+	/** Remaining balance in USD, null when it could not be determined */
+	remainingUsd: number | null;
+	/**
+	 * Utilization of the key's current allowance, 0-100, or null when there is
+	 * none to report (a key with no budget of its own has no depletion window).
+	 * Derived from the current period only, never from lifetime usage.
+	 */
+	utilizationPercent: number | null;
+	/**
+	 * Where the balance came from:
+	 * - `key`     — the key's own credit limit (`/api/v1/key`)
+	 * - `account` — account-level credits, used for unlimited keys (`/api/v1/credits`)
+	 * - `unknown` — neither could be read
+	 */
+	balanceScope: "key" | "account" | "unknown";
+	/**
+	 * Named reset interval for the key's limit, e.g. "daily" | "weekly" |
+	 * "monthly". Null when the cap does not reset (a lifetime budget, or
+	 * account-level purchased credits).
+	 */
+	resetInterval: string | null;
+	/** ISO timestamp of the next limit reset; null when unknown or non-resetting. */
+	resetsAt: string | null;
+}
+
 // Usage data types for Alibaba Coding Plan accounts
 export interface AlibabaCodingPlanQuotaWindow {
 	used: number;
@@ -493,6 +528,7 @@ export type FullUsageData =
 	| NanoGPTUsageData
 	| ZaiUsageData
 	| KiloUsageData
+	| OpenRouterUsageData
 	| AlibabaCodingPlanUsageData
 	| XaiUsageData
 	| MinimaxUsageData;
@@ -644,6 +680,11 @@ export interface AccountResponse {
 	autoRefreshEnabled: boolean;
 	autoPauseOnOverageEnabled?: boolean;
 	peakHoursPauseEnabled?: boolean;
+	/**
+	 * Runtime-only, server-computed peak-hours state (not persisted). `null` for
+	 * providers without a peak concept.
+	 */
+	peakHours?: { active: boolean } | null;
 	usagePauseFiveHourThreshold: number | null; // Stored 5-hour percentage; null = never set
 	usagePauseWeeklyThreshold: number | null; // Stored weekly percentage; null = never set
 	usagePauseFiveHourEnabled: boolean; // Whether the 5-hour threshold is in force

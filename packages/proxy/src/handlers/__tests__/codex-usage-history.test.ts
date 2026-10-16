@@ -3,7 +3,10 @@ import type {
 	BunSqlAdapter,
 	DatabaseOperations,
 } from "@better-ccflare/database";
-import { usageCache } from "@better-ccflare/providers";
+import {
+	CODEX_CREDITS_MAX_AGE_MS,
+	usageCache,
+} from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import {
@@ -322,5 +325,92 @@ describe("earliestCodexResetMs", () => {
 			}),
 		).toBeNull();
 		expect(earliestCodexResetMs({})).toBeNull();
+	});
+});
+
+describe("updateAccountMetadata — Codex credits are not erased", () => {
+	beforeEach(() => {
+		resetCodexUsageHistoryThrottle();
+		usageCache.delete("codex-acct");
+	});
+
+	const known = { has_credits: true, unlimited: false, balance: "12" };
+
+	it("keeps known credits when a response reports windows but no credits", () => {
+		usageCache.set("codex-acct", {
+			seven_day: { utilization: 100, resets_at: null },
+			credits: known,
+		} as never);
+		const { ctx } = makeCodexCtx();
+
+		updateAccountMetadata(
+			makeCodexAccount(),
+			new Response("ok", { status: 200, headers: codexHeaders(20, 100) }),
+			ctx,
+		);
+
+		const cached = usageCache.get("codex-acct") as {
+			seven_day?: { utilization: number };
+			credits?: unknown;
+		};
+		expect(cached.seven_day?.utilization).toBe(100);
+		expect(cached.credits).toEqual(known);
+	});
+
+	it("carries a balance on its own stamp, so steady traffic cannot keep it alive (SB23-8189)", () => {
+		// Upstream's carry re-dated the balance on every response, so an account
+		// serving traffic kept a balance forever: the defect PR #236 fixed for
+		// the poller. The carry must keep the stamp the balance was observed at.
+		const realNow = Date.now;
+		const t0 = realNow();
+		try {
+			Date.now = () => t0;
+			usageCache.set(
+				"codex-acct",
+				{
+					seven_day: { utilization: 100, resets_at: null },
+					credits: known,
+				} as never,
+				t0 - CODEX_CREDITS_MAX_AGE_MS + 1_000,
+			);
+			const { ctx } = makeCodexCtx();
+			updateAccountMetadata(
+				makeCodexAccount(),
+				new Response("ok", { status: 200, headers: codexHeaders(20, 100) }),
+				ctx,
+			);
+			expect(
+				(usageCache.get("codex-acct") as { credits?: unknown }).credits,
+			).toEqual(known);
+
+			// Two seconds on, the balance is past its bound; the entry is not.
+			Date.now = () => t0 + 2_000;
+			const cached = usageCache.get("codex-acct") as Record<string, unknown>;
+			expect(cached).not.toBeNull();
+			expect("credits" in cached).toBe(false);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	it("replaces credits when the response reports them", () => {
+		usageCache.set("codex-acct", {
+			seven_day: { utilization: 100, resets_at: null },
+			credits: known,
+		} as never);
+		const { ctx } = makeCodexCtx();
+		const headers = codexHeaders(20, 100);
+		headers.set("x-codex-credits-has-credits", "false");
+		headers.set("x-codex-credits-unlimited", "false");
+
+		updateAccountMetadata(
+			makeCodexAccount(),
+			new Response("ok", { status: 200, headers }),
+			ctx,
+		);
+
+		expect(
+			(usageCache.get("codex-acct") as { credits?: unknown }).credits,
+		).toEqual({ has_credits: false, unlimited: false, balance: null });
 	});
 });

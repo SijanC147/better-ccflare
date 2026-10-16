@@ -1,9 +1,11 @@
 import {
 	type AccountUsageSnapshot,
 	CLAUDE_CLI_VERSION,
+	isUseExtraUsageEnabled,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
+	type CodexCreditsData,
 	PROVIDER_NAMES,
 	supportsUsageTracking,
 	type UsageSpend as TypesUsageSpend,
@@ -33,6 +35,11 @@ import {
 	getRepresentativeNanoGPTWindow,
 	type NanoGPTUsageData,
 } from "./nanogpt-usage-fetcher";
+import {
+	fetchOpenRouterUsageData,
+	getRepresentativeOpenRouterUtilization,
+	type OpenRouterUsageData,
+} from "./openrouter-usage-fetcher";
 import { extractChatgptAccountId } from "./providers/codex/account-id";
 import {
 	CODEX_CREDITS_NOT_OBSERVED,
@@ -99,11 +106,7 @@ export type UsageSpend = Omit<TypesUsageSpend, "limit"> & { limit?: unknown };
  * unexpected format into a confident `0`, and a false zero on a credit balance
  * reads as "this account is spent" when upstream said nothing of the kind.
  */
-export interface CodexCredits {
-	has_credits: boolean;
-	unlimited: boolean;
-	balance: string | null;
-}
+export type CodexCredits = CodexCreditsData;
 
 export interface UsageData {
 	// Core windows — present on legacy payloads but ABSENT on limits[]-only
@@ -128,8 +131,9 @@ export interface UsageData {
 	// entries. Per-model weekly caps (Fable/Opus/Sonnet) live ONLY here.
 	limits?: UsageLimit[];
 	spend?: UsageSpend;
-	// Codex only: the credit balance that lets an account keep serving after its
-	// weekly window is spent. Omitted entirely when upstream said nothing.
+	// Codex only: purchased credits beyond the plan windows, the balance that
+	// lets an account keep serving after its weekly window is spent. Omitted
+	// entirely when upstream said nothing.
 	credits?: CodexCredits;
 	// Allow any additional fields Anthropic might add in the future
 	[key: string]: UsageWindow | ExtraUsage | UsageLimit[] | UsageSpend | unknown;
@@ -141,6 +145,7 @@ export type AnyUsageData =
 	| NanoGPTUsageData
 	| ZaiUsageData
 	| KiloUsageData
+	| OpenRouterUsageData
 	| AlibabaCodingPlanUsageData
 	| XaiUsageData
 	| MinimaxUsageData;
@@ -628,6 +633,13 @@ function utilizationForProvider(
 		case "kilo": {
 			return getRepresentativeKiloUtilization(data as KiloUsageData);
 		}
+		case "openrouter": {
+			// Null for keys with no budget: an unlimited key's purchased credits
+			// have no depletion window, so it is never gated out of selection.
+			return getRepresentativeOpenRouterUtilization(
+				data as OpenRouterUsageData,
+			);
+		}
 		case "alibaba-coding-plan": {
 			return getRepresentativeAlibabaCodingPlanUtilization(
 				data as AlibabaCodingPlanUsageData,
@@ -819,6 +831,16 @@ export function getRepresentativeUsageResetMs(
 					data,
 					getRepresentativeKiloWindow(data as KiloUsageData),
 				);
+			case "openrouter": {
+				// OpenRouter reports a top-level ISO `resetsAt` (sourced from the
+				// key_limit budget), not a nested window's `resets_at`, so the
+				// generic extractUsageResetMs — which indexes by window name —
+				// cannot reach it. Only limited keys carry one.
+				const resetsAt = (data as OpenRouterUsageData).resetsAt;
+				if (typeof resetsAt !== "string") return null;
+				const ms = new Date(resetsAt).getTime();
+				return Number.isFinite(ms) ? ms : null;
+			}
 			case "alibaba-coding-plan":
 				return extractUsageResetMs(
 					data,
@@ -909,10 +931,56 @@ function plainUsageSnapshot(
 ): AccountUsageSnapshot | null {
 	const utilization = getRepresentativeUtilizationForProvider(data, provider);
 	if (utilization === null) return null;
-	return {
+	const snapshot: AccountUsageSnapshot = {
 		utilization,
 		resetMs: getRepresentativeUsageResetMs(data, provider),
 	};
+	// Policy and fact together: the operator allows extra usage AND the
+	// provider says there is some. The window itself is reported unchanged —
+	// only whether it shuts the account out differs.
+	if (isUseExtraUsageEnabled() && hasExtraUsageCapacity(data, provider)) {
+		snapshot.extraUsageAvailable = true;
+	}
+	return snapshot;
+}
+
+/**
+ * Whether the provider reports billed capacity that keeps serving after the
+ * plan window is spent. A fact about the account only; whether to use it is
+ * the "use extra usage" setting's call (see plainUsageSnapshot).
+ *
+ * - codex: purchased credits or an unlimited allowance (`credits`).
+ * - anthropic: overage that is enabled and not yet used up. The 2026 `spend`
+ *   block wins over the legacy `extra_usage` one, the same precedence as
+ *   resolveOverageStatus in proxy/handlers/model-capacity.ts.
+ *
+ * Anything else, or a missing signal, is no capacity: unproven extra usage
+ * must not let a spent account back into selection.
+ */
+export function hasExtraUsageCapacity(
+	data: AnyUsageData | null | undefined,
+	provider: string,
+): boolean {
+	if (!data || typeof data !== "object") return false;
+	const d = data as UsageData;
+	if (provider === "codex") {
+		return d.credits?.unlimited === true || d.credits?.has_credits === true;
+	}
+	if (provider === "anthropic") {
+		if (d.spend && typeof d.spend.enabled === "boolean") {
+			return (
+				d.spend.enabled &&
+				!(typeof d.spend.percent === "number" && d.spend.percent >= 100)
+			);
+		}
+		if (d.extra_usage && typeof d.extra_usage.is_enabled === "boolean") {
+			return (
+				d.extra_usage.is_enabled &&
+				!(d.extra_usage.utilization != null && d.extra_usage.utilization >= 100)
+			);
+		}
+	}
+	return false;
 }
 
 /**
@@ -1306,6 +1374,8 @@ class UsageCache {
 		}
 		if (this.tokenProviders.has(accountId)) {
 			this.tokenProviders.delete(accountId);
+			this.providerTypes.delete(accountId);
+			this.customEndpoints.delete(accountId);
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
 			this.capacityRestoredCallbacks.delete(accountId);
@@ -1351,9 +1421,13 @@ class UsageCache {
 			customEndpoint,
 		);
 		this.inFlightFetches.set(accountId, promise);
-		promise.finally(() => {
-			this.inFlightFetches.delete(accountId);
-		});
+		promise
+			.finally(() => {
+				if (this.inFlightFetches.get(accountId) === promise) {
+					this.inFlightFetches.delete(accountId);
+				}
+			})
+			.catch(() => {});
 		return promise;
 	}
 
@@ -1466,6 +1540,33 @@ class UsageCache {
 					const window = getRepresentativeKiloWindow(data as KiloUsageData);
 					log.debug(
 						`Successfully fetched Kilo usage data for account ${accountId}: $${(data as KiloUsageData).remainingUsd.toFixed(2)} remaining (${utilization?.toFixed(1)}% used, ${window})`,
+					);
+					return { success: true, retryAfterMs: null };
+				}
+			} else if (provider === "openrouter") {
+				// Fetch the OpenRouter credit balance for the key
+				// (GET /api/v1/key, falling back to /api/v1/credits).
+				data = await fetchOpenRouterUsageData(token);
+				if (data) {
+					this.cache.set(accountId, {
+						data,
+						timestamp: Date.now(),
+						creditsObservedAt: CODEX_CREDITS_NOT_OBSERVED,
+					});
+					const credits = data as OpenRouterUsageData;
+					const resetSuffix = credits.resetsAt
+						? `, resets ${credits.resetsAt}`
+						: "";
+					log.debug(
+						`Successfully fetched OpenRouter usage data for account ${accountId}: ${
+							credits.remainingUsd === null
+								? "balance unavailable"
+								: `$${credits.remainingUsd.toFixed(2)} remaining`
+						} (${credits.balanceScope} scope${
+							credits.utilizationPercent === null
+								? ""
+								: `, ${credits.utilizationPercent.toFixed(1)}% used`
+						}${resetSuffix})`,
 					);
 					return { success: true, retryAfterMs: null };
 				}
@@ -1878,6 +1979,29 @@ class UsageCache {
 		if (this.cache.size % 100 === 0) {
 			this.cleanupStaleEntries();
 		}
+	}
+
+	/**
+	 * Install a Codex payload the traffic path parsed off a response, carrying
+	 * a balance that response did not report on that balance's OWN stamp: the
+	 * carry the poller applies, so the two writers of this field cannot
+	 * disagree. A response without `x-codex-credits-*` says nothing about
+	 * credits, and `install` replaces the entry wholesale, so a plain `set`
+	 * erased them. Upstream (2026-10-16 sync, SB23-8189) carried them by
+	 * re-dating them to now, which keeps a balance alive forever on steady
+	 * traffic: the defect PR #236 fixed for the poller.
+	 */
+	setCodexFromTraffic(accountId: string, data: UsageData): void {
+		const carried = carryCodexCredits(
+			data,
+			this.cache.get(accountId),
+			Date.now(),
+		);
+		this.set(
+			accountId,
+			carried.data,
+			carried.creditsObservedAt ?? CODEX_CREDITS_NOT_OBSERVED,
+		);
 	}
 
 	/**

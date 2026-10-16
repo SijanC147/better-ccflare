@@ -24,6 +24,8 @@ import { isUsageExhausted } from "./rate-limit-status";
 export interface AccountUsageInfo {
 	utilization: number;
 	resetMs: number | null;
+	/** Spent window still served on allowed extra usage (see core extra-usage). */
+	extraUsageAvailable?: boolean;
 }
 export type AccountUsageInfoFn = (account: Account) => AccountUsageInfo | null;
 
@@ -101,7 +103,13 @@ export function computePoolStatus(
 		if (!isAccountAvailable(a, now)) return false;
 		const usage = getUsageInfo(a);
 		return (
-			usage !== null && isUsageExhausted(usage.utilization, usage.resetMs, now)
+			usage !== null &&
+			isUsageExhausted(
+				usage.utilization,
+				usage.resetMs,
+				now,
+				usage.extraUsageAvailable,
+			)
 		);
 	}).length;
 

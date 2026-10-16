@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: 4f3f8b577830c5a0f2cf948284f4dec145d658ac -->
+<!-- last-sync-sha: b4fe14b64e38b454929fc0ad6ca74ee062cf4191 -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-10-16 | main | `4f3f8b57..b4fe14b6` | 97 (84 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-8189 |
 | 2026-09-30 | main | `e8042927..4f3f8b57` | 3 | 3 files (resolved by the maintainer App; one clean merge corrected, see below) | merge (two-parent) | pass (CI at `7f85ad53`, both required checks) | [#250](https://github.com/SijanC147/better-ccflare/pull/250) |
 | 2026-09-21 | main | `ea0e3320..e8042927` | 114 | 27 files (25 UU, 1 DU, 1 UD) | merge --no-ff | pass (5,614 tests at the probe head, 2 macOS-only fail; final line in the PR) | [#231](https://github.com/SijanC147/better-ccflare/pull/231) |
 | 2026-09-13 | main | `4d27cb22..ea0e3320` | 106 | resolved by the maintainer App | merge (two-parent) | pass (4,275 tests, 2 macOS-only fail) | [#52](https://github.com/SijanC147/better-ccflare/pull/52) |
@@ -22,6 +23,69 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-10-16: `4f3f8b57..b4fe14b6` (97 upstream commits, 84 non-merge)
+
+**Strategy:** `merge --no-ff` by hand (lane BCCF-8189, SB23-8189). Upstream release 3.5.98.
+**Scale:** 138 upstream files, +10,058 / −888. **Conflicts:** 20 paths, all content (UU).
+Hextap files untouched: `.hextap.json` and `.hextap/tap-registration.json` both `328f95a7…f9fb`.
+Manifests kept at the fork's 3.42.0; `bun.lock` unchanged (upstream changed no dependency).
+
+### Upstream features arriving
+
+- **zstd payload compression at rest** (`3f982a77`, `0a7fe81f`, `f7dcb115`): `zst:` + base64 in the
+  existing TEXT `request_payloads.json` column, compress-then-encrypt. No schema change, so no
+  PostgreSQL port: the codec runs in the repository on both engines, and rows without the prefix
+  read back unchanged. Every read path goes through `decodePayloadFromStorage`.
+- **Requests index rework**: twelve redundant `requests` indexes dropped after the new ones exist
+  (`dropRedundantRequestIndexes`); on PostgreSQL built `CONCURRENTLY` with `lock_timeout`, already
+  ported upstream in `migrations-pg.ts`. None of the fork's own `idx_requests_project*` indexes is
+  on the drop list.
+- **Opt-in "Use Extra Usage"** (`cc839b87`, `94564887`): `use_extra_usage` config,
+  `GET`/`POST /api/config/use-extra-usage`, off by default.
+- **OpenRouter** credit balance, period utilization and API-key usage polling; **DeepSeek
+  peak-hours auto-pause** with a Chinese holiday calendar; peak-hours state served from
+  `/api/accounts`; streaming usage idle timeout (`CCFLARE_STREAM_READ_TIMEOUT_MS`); `/v1/responses`
+  input guards (`sanitize.ts`); SSE keepalive; stats TTL caches; Docker base on trixie.
+
+### Conflicts and how each was resolved
+
+| Path | Resolution |
+|---|---|
+| `package.json`, `apps/cli/package.json` | ours: 3.42.0 |
+| `README.md` | ours plus upstream's "stream read timeout" wording |
+| `packages/core/src/index.ts`, `apps/server/src/server.test.ts`, `packages/proxy/src/handlers/usage-throttling.ts`, `proxy-operations.ts`, `http-api/src/router.ts`, `migrations.ts`, `request-translator.ts` | union of both sides' imports/registrations; the translator keeps the fork's tool-history flatten (SB23-2727) after upstream's `warnings` argument |
+| `http-api/src/handlers/config.ts` | theirs (new imports) |
+| `packages/types/src/account.ts` | ours (`ExtraUsageData`, `extra_usage`), with upstream's note on `credits` |
+| `packages/providers/src/providers/codex/usage.ts`, `usage-fetcher.ts` | ours: the fork's credits parser, `carryCodexCredits` and `creditsObservedAt` stamp; upstream's `carryForwardCodexCredits` deleted |
+| `packages/http-api/src/handlers/accounts.ts` | ours, plus upstream's new imports |
+| `usage-throttling.test.ts` | both suites, upstream's calls given the fork's required `provider` argument |
+| dashboard: `AccountListItem.tsx`, `RateLimitProgress.tsx`, `provider-utils.test.ts`, `useRequestStream.ts` | see the PR body; the fork's card layout and Codex rendering kept, upstream's peak-hours toggle moved into the overflow menu |
+
+### Forks kept
+
+- **Codex credits: one parser, one carry, the fork's.** Upstream independently added
+  `x-codex-credits-*` parsing (both flags required), a body `credits` parser in
+  `usage-endpoint.ts`, and `carryForwardCodexCredits` on the traffic path. The fork keeps its
+  codex-rs rule (gated on `has-credits` alone) and routes upstream's body parser through that same
+  rule, so the cache's `credits` field has one meaning. `carryForwardCodexCredits` is deleted and
+  `response-processor.ts` is back to the fork's write: carrying credits there re-dated them with
+  `set`'s default stamp, which is the immortal-balance defect PR #236 fixed. Two new polling tests
+  pin it (a body balance is dated by its poll; a carried one keeps its own stamp).
+- **Codex credit admission stays unconditional** (SB23-2289, Sean 2026-09-21). Upstream made
+  credits opt-in behind `use_extra_usage`; here the switch adds Anthropic extra-usage admission and
+  changes nothing for Codex. Upstream's tests asserting a credit-covered Codex account is excluded
+  while the switch is off were rewritten to the fork rule, and the switch's own coverage moved to
+  an Anthropic overage case. The account list label now also reads `codexCreditsExcludeWeekly`, so
+  a credit-covered Codex card says `extra_usage` instead of `usage_exhausted` while it is routed.
+- **"Codex usage rendered as Grok credits"** (`a5668f16`): the fork's #154/#236 fix kept.
+- `debug_usage.ts` stays deleted; upstream workflow edits land in `*.yml.disabled` only.
+
+### Typing upstream's tests
+
+Upstream's new tests were written without `exactOptionalPropertyTypes` and literal-union typing:
+seven fixtures adjusted (conditional spreads for `extraUsageAvailable`, `as const` on a reason, a
+widened `string[]`, and `as T | null` where a callback assignment is invisible to narrowing).
 
 
 ## 2026-09-30: `e8042927..4f3f8b57` (3 upstream commits, PR #250)

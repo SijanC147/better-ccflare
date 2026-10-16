@@ -158,6 +158,11 @@ interface RateLimitProgressProps {
 	usageThrottledUntil?: number | null; // Timestamp (ms) until proactive usage throttling clears
 	usageThrottledWindows?: string[]; // Exact usage windows currently being throttled
 	provider: string;
+	// Server-computed peak state (/api/accounts). Read for DeepSeek only, whose
+	// window depends on the server's Chinese holiday calendar. Zai and Anthropic
+	// badges are computed here from ZAI_PEAK_WINDOW / ANTHROPIC_PEAK_WINDOW in
+	// the vendor's own zone, with a countdown.
+	peakHours?: { active: boolean } | null | undefined;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	pauseThresholdFiveHour?: number | null; // Pause at this percent of the 5-hour window; null = off
@@ -322,6 +327,25 @@ function computeProjectedMessage(
 	return `Resets ${formatDuration(timeToExhaustMs - remaining)} before exhaustion`;
 }
 
+function DeepseekPeakBadge({ isPeak }: { isPeak: boolean }) {
+	return (
+		<div className="flex items-center gap-2">
+			<span
+				className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+					isPeak
+						? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+						: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+				}`}
+			>
+				<span
+					className={`h-1.5 w-1.5 rounded-full ${isPeak ? "bg-orange-500" : "bg-green-500"}`}
+				/>
+				{isPeak ? "Peak hours (01–04, 06–10 UTC, weekdays)" : "Off-peak hours"}
+			</span>
+		</div>
+	);
+}
+
 export function RateLimitProgress({
 	resetIso,
 	usageUtilization,
@@ -331,6 +355,7 @@ export function RateLimitProgress({
 	usageThrottledUntil,
 	usageThrottledWindows = [],
 	provider,
+	peakHours = null,
 	className,
 	showWeekly = false,
 	pauseThresholdFiveHour = null,
@@ -359,8 +384,17 @@ export function RateLimitProgress({
 
 	// Allow null resetIso for providers that show usage data (like NanoGPT in PayG mode)
 	// but still render null if there's no resetIso and no usage data to show
-	if (!isCodex && !resetIso && !usageData && !usageRateLimitedUntil)
+	if (!isCodex && !resetIso && !usageData && !usageRateLimitedUntil) {
+		// DeepSeek has no usage windows, but its peak/off-peak status still matters.
+		if (provider === "deepseek" && peakHours) {
+			return (
+				<div className={cn("space-y-3", className)}>
+					<DeepseekPeakBadge isPeak={peakHours.active} />
+				</div>
+			);
+		}
 		return null;
+	}
 
 	// Show explicit rate-limited state when the Anthropic usage API returned 429
 	// and we have no cached data to show.
@@ -389,26 +423,66 @@ export function RateLimitProgress({
 		);
 	}
 
-	// Kilo Gateway: show credit balance in USD instead of a utilization window
+	// Credit-balance providers (Kilo, OpenRouter): show remaining USD instead
+	// of a utilization window. Kilo reports a microdollar-denominated acquired
+	// total (0 = never topped up). OpenRouter reports either the key's own
+	// budget ("key") or, for keys without one, the account credit pool
+	// ("account"); "unknown" means neither could be read and the key has no cap.
 	if (providerShowsCreditsBalance(provider) && usageData) {
-		const kiloData = usageData as {
-			remainingUsd?: number;
+		const creditData = usageData as {
+			remainingUsd?: number | null;
 			totalMicrodollarsAcquired?: number;
+			balanceScope?: "key" | "account" | "unknown";
+			resetInterval?: string | null;
+			resetsAt?: string | null;
 		};
-		if (typeof kiloData.remainingUsd === "number") {
-			const hasCredits = (kiloData.totalMicrodollarsAcquired ?? 0) > 0;
+		const isOpenRouter = provider === PROVIDER_NAMES.OPENROUTER;
+		const hasNumericBalance = typeof creditData.remainingUsd === "number";
+		if (hasNumericBalance || isOpenRouter) {
+			const hasCredits = isOpenRouter
+				? (creditData.remainingUsd ?? 0) > 0
+				: (creditData.totalMicrodollarsAcquired ?? 0) > 0;
+			// A key-scoped budget is an "available limit"; the account-level pool
+			// (used for keys with no budget of their own) is "remaining credits".
+			const isKeyScope = creditData.balanceScope !== "account";
+			const label = isOpenRouter
+				? isKeyScope
+					? "OpenRouter key limit"
+					: "OpenRouter credits"
+				: "Kilo Gateway credits";
+			// Only a key with its own budget depletes on a schedule, so only it
+			// gets reset copy. The account pool never resets. Prefer the exact
+			// reset time; fall back to naming the interval when the payload
+			// carries one but no timestamp.
+			const resetsAtMs = creditData.resetsAt
+				? new Date(creditData.resetsAt).getTime()
+				: null;
+			const relativeReset =
+				isOpenRouter && isKeyScope
+					? formatRelativeReset(resetsAtMs, now)
+					: null;
+			const resetLabel = !(isOpenRouter && isKeyScope)
+				? null
+				: relativeReset
+					? `Resets ${relativeReset}`
+					: creditData.resetInterval
+						? `Resets ${creditData.resetInterval}`
+						: null;
 			return (
 				<div className={cn("space-y-2", className)}>
 					<div className="flex items-center justify-between">
-						<span className="text-xs text-muted-foreground">
-							Kilo Gateway credits
-						</span>
+						<span className="text-xs text-muted-foreground">{label}</span>
 						<span className="text-xs font-medium text-muted-foreground">
-							{hasCredits
-								? `$${kiloData.remainingUsd.toFixed(2)} remaining`
-								: "No credits"}
+							{hasNumericBalance
+								? hasCredits
+									? `$${(creditData.remainingUsd ?? 0).toFixed(2)} remaining`
+									: "No credits"
+								: "Unlimited"}
 						</span>
 					</div>
+					{resetLabel && (
+						<span className="text-xs text-muted-foreground">{resetLabel}</span>
+					)}
 				</div>
 			);
 		}
@@ -752,6 +826,9 @@ export function RateLimitProgress({
 		<div className={cn("space-y-3", className)}>
 			{zaiPeak && <PeakHoursBadge label={zaiPeak} />}
 			{anthropicPeak && <PeakHoursBadge label={anthropicPeak} />}
+			{provider === "deepseek" && peakHours && (
+				<DeepseekPeakBadge isPeak={peakHours.active} />
+			)}
 			{hasOrphanThrottledWindow && usageThrottledUntil != null && (
 				<div className="flex items-center justify-between">
 					<span className="text-xs text-amber-600 dark:text-amber-400">
