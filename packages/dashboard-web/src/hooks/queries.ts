@@ -16,6 +16,27 @@ import {
 	type RetryConfigUpdate,
 } from "../api";
 import { queryKeys } from "../lib/query-keys";
+import { getRequestsSseSeq } from "./useRequestStream";
+
+/**
+ * Fetch a snapshot, retrying while SSE events arrive mid-fetch so the cache is
+ * only ever replaced by a snapshot that already includes those events.
+ */
+export async function fetchStableSnapshot<T>(
+	fetchSnapshot: () => Promise<T>,
+	getSeq: () => number,
+	maxAttempts: number,
+): Promise<T> {
+	let snapshot: T;
+	let attempt = 0;
+	do {
+		const seq = getSeq();
+		snapshot = await fetchSnapshot();
+		attempt++;
+		if (getSeq() === seq) break;
+	} while (attempt < maxAttempts);
+	return snapshot;
+}
 
 /**
  * Build a lightweight RequestPayload from a RequestSummary.
@@ -342,7 +363,11 @@ export const useRequests = (limit: number, _refetchInterval?: number) => {
 			// Fetch only the summary endpoint - it has everything the list view needs.
 			// Full request/response bodies are lazy-loaded per row when needed
 			// (modal open, copy-as-JSON) via /api/requests/payload/:id.
-			const requestsSummary = await api.getRequestsSummary(limit);
+			const requestsSummary = await fetchStableSnapshot(
+				() => api.getRequestsSummary(limit),
+				getRequestsSseSeq,
+				3,
+			);
 			const detailsMap = new Map(
 				requestsSummary.map((summary) => [summary.id, summary]),
 			);
@@ -352,7 +377,9 @@ export const useRequests = (limit: number, _refetchInterval?: number) => {
 		},
 		staleTime: Infinity, // Consider data fresh until manually refetched
 		gcTime: 10 * 60 * 1000, // Keep in cache for 10 minutes
-		// Remove refetchInterval - SSE stream handles real-time updates
+		// SSE is the source of live updates; the stream reconnects indefinitely
+		// and refetches on reconnect, tab visibility and coming back online
+		refetchInterval: false,
 	});
 };
 
@@ -360,6 +387,11 @@ export const useLogHistory = () => {
 	return useQuery({
 		queryKey: queryKeys.logHistory(),
 		queryFn: () => api.getLogHistory(),
+		// Live logs arrive over SSE; a refetch would overwrite them with a
+		// full log-file read. Only (re)load history when the tab mounts.
+		refetchInterval: false,
+		refetchOnWindowFocus: false,
+		staleTime: 0,
 	});
 };
 

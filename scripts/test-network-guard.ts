@@ -68,6 +68,8 @@
  * `CF_PRICING_OFFLINE` is set here for the same reason: without it every test
  * that touches a cost fetches live pricing, which this guard would then fail.
  * A test that exercises the pricing fetch path unsets it and stubs `fetch`.
+ * `CCFLARE_HOLIDAY_FEED_OFFLINE` does the same for the Chinese holiday feed;
+ * a test of that fetch passes its own `fetchFn` and is not affected.
  *
  * Scope: only a root `bun test` loads this file. Bun reads `bunfig.toml` from
  * the working directory alone, so `bun test` run from any subdirectory, such
@@ -83,6 +85,9 @@ import tls from "node:tls";
 // Unconditional, so a developer's exported CF_PRICING_OFFLINE=0 cannot turn
 // live pricing fetches back on for the whole suite.
 process.env.CF_PRICING_OFFLINE = "1";
+// Same for the DeepSeek peak-hours holiday feed the auto-refresh scheduler
+// fetches from raw.githubusercontent.com on its first tick (2026-10-16 sync).
+process.env.CCFLARE_HOLIDAY_FEED_OFFLINE = "1";
 
 const GUARD_FILE = import.meta.path;
 

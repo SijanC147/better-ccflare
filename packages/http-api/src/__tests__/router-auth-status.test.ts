@@ -72,6 +72,9 @@ describe("APIRouter — refusal status", () => {
 			countActiveApiKeys: async () => activeKeys,
 			getActiveApiKeys: async () => (activeKeys > 0 ? records : []),
 			updateApiKeyUsage: () => {},
+			// The router subscribes its stats cache to request deletions (2026-10-16
+			// upstream sync).
+			onRequestsDeleted: () => () => {},
 		} as unknown as DatabaseOperations;
 		const config = {
 			getUsageThrottlingFiveHourEnabled: () => false,

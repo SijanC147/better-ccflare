@@ -4,6 +4,7 @@ import type { Config } from "@better-ccflare/config";
 import {
 	BunSqlAdapter,
 	ensureSchema,
+	RequestRepository,
 	runMigrations,
 } from "@better-ccflare/database";
 import { parseCodexUsageHeaders, usageCache } from "@better-ccflare/providers";
@@ -70,6 +71,11 @@ describe("GET /api/accounts — Codex credits pass-through", () => {
 	function makeHandler() {
 		const dbOps = {
 			getAdapter: () => adapter,
+			// The stored-payload recovery path decodes through the repository
+			// since the 2026-10-16 sync (zstd at rest), so the mock delegates to
+			// the real codec rather than parsing raw bytes.
+			getRequestPayload: (id: string) =>
+				new RequestRepository(adapter).getPayload(id),
 			getStatsRepository: () => ({
 				getSessionStats: async () => new Map(),
 			}),
@@ -404,6 +410,11 @@ describe("GET /api/accounts: weekly throttle agrees with routing (SB23-2541)", (
 	async function card(): Promise<AccountResponse | undefined> {
 		const dbOps = {
 			getAdapter: () => adapter,
+			// The stored-payload recovery path decodes through the repository
+			// since the 2026-10-16 sync (zstd at rest), so the mock delegates to
+			// the real codec rather than parsing raw bytes.
+			getRequestPayload: (id: string) =>
+				new RequestRepository(adapter).getPayload(id),
 			getStatsRepository: () => ({
 				getSessionStats: async () => new Map(),
 			}),

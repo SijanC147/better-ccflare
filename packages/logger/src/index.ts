@@ -153,16 +153,17 @@ export class Logger {
 	debug(message: string, data?: any): void {
 		if (this.level <= LogLevel.DEBUG) {
 			const normalized = normalizeLogData(data);
-			const msg = this.formatMessage("DEBUG", message, normalized);
 			const event: LogEvent = {
 				ts: Date.now(),
 				level: "DEBUG",
 				msg: message,
 				...(normalized !== undefined && { data: normalized }),
 			};
-			logBus.emit("log", event);
+			if (logBus.listenerCount("log") > 0) logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (consoleLoggingOverride ?? !this.silentConsole) console.log(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) {
+				console.log(this.formatMessage("DEBUG", message, normalized));
+			}
 		}
 	}
 
@@ -170,16 +171,17 @@ export class Logger {
 	info(message: string, data?: any): void {
 		if (this.level <= LogLevel.INFO) {
 			const normalized = normalizeLogData(data);
-			const msg = this.formatMessage("INFO", message, normalized);
 			const event: LogEvent = {
 				ts: Date.now(),
 				level: "INFO",
 				msg: message,
 				...(normalized !== undefined && { data: normalized }),
 			};
-			logBus.emit("log", event);
+			if (logBus.listenerCount("log") > 0) logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (consoleLoggingOverride ?? !this.silentConsole) console.log(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) {
+				console.log(this.formatMessage("INFO", message, normalized));
+			}
 		}
 	}
 
@@ -187,16 +189,17 @@ export class Logger {
 	warn(message: string, data?: any): void {
 		if (this.level <= LogLevel.WARN) {
 			const normalized = normalizeLogData(data);
-			const msg = this.formatMessage("WARN", message, normalized);
 			const event: LogEvent = {
 				ts: Date.now(),
 				level: "WARN",
 				msg: message,
 				...(normalized !== undefined && { data: normalized }),
 			};
-			logBus.emit("log", event);
+			if (logBus.listenerCount("log") > 0) logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (consoleLoggingOverride ?? !this.silentConsole) console.warn(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) {
+				console.warn(this.formatMessage("WARN", message, normalized));
+			}
 		}
 	}
 
@@ -204,16 +207,17 @@ export class Logger {
 	error(message: string, error?: any): void {
 		if (this.level <= LogLevel.ERROR) {
 			const normalized = normalizeLogData(error);
-			const msg = this.formatMessage("ERROR", message, normalized);
 			const event: LogEvent = {
 				ts: Date.now(),
 				level: "ERROR",
 				msg: message,
 				...(normalized !== undefined && { data: normalized }),
 			};
-			logBus.emit("log", event);
+			if (logBus.listenerCount("log") > 0) logBus.emit("log", event);
 			logFileWriter?.write(event);
-			if (consoleLoggingOverride ?? !this.silentConsole) console.error(msg);
+			if (consoleLoggingOverride ?? !this.silentConsole) {
+				console.error(this.formatMessage("ERROR", message, normalized));
+			}
 		}
 	}
 

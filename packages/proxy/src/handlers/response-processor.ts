@@ -142,7 +142,7 @@ export function updateAccountMetadata(
 				windowSlot,
 			);
 
-			usageCache.set(account.id, codexUsage);
+			usageCache.setCodexFromTraffic(account.id, codexUsage);
 			log.debug(
 				`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour?.utilization ?? "?"}%, 7d=${codexUsage.seven_day?.utilization ?? "?"}%`,
 			);

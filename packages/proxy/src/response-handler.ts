@@ -379,7 +379,7 @@ export async function forwardToClient(
 			}
 		};
 
-		const onClose = (_buffered: Uint8Array[]): void => {
+		const onClose = (): void => {
 			if (shouldProcessRequest) {
 				// For Anthropic-Messages-shaped SSE streams wrapped by the
 				// terminal-recovery wrapper, prefer the real observed SSE
@@ -493,6 +493,7 @@ export async function forwardToClient(
 			: response.body;
 
 		const passthroughBody = teeStream(responseBody, {
+			collect: false,
 			onChunk,
 			onClose,
 			onError,

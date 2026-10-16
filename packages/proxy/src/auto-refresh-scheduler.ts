@@ -23,6 +23,11 @@ import {
 	claimAutoRefreshPrompt,
 	releaseAutoRefreshPrompt,
 } from "./auto-refresh-prompt-pool";
+import {
+	hasChineseHolidayCalendar,
+	isChinesePublicHoliday,
+	refreshChineseHolidays,
+} from "./chinese-holidays";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import {
 	extractAuthFailureReason,
@@ -93,6 +98,87 @@ export function isZaiPeakHour(ts = Date.now()): boolean {
 }
 
 /**
+ * DeepSeek peak hours: 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday,
+ * excluding Chinese public holidays. Both windows fall on the same UTC and
+ * Beijing calendar day (09:00-12:00 / 14:00-18:00 CST), so the UTC date is
+ * used for the weekday and holiday checks.
+ */
+export function isDeepseekPeakHour(ts = Date.now()): boolean {
+	const d = new Date(ts);
+	const day = d.getUTCDay();
+	if (day === 0 || day === 6) return false;
+	const date = d.toISOString().slice(0, 10);
+	if (isChinesePublicHoliday(date)) return false;
+	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
+	return (utcHour >= 1 && utcHour < 4) || (utcHour >= 6 && utcHour < 10);
+}
+
+/**
+ * Wall-clock weekday and hour in Los Angeles. `hourCycle: "h23"` so midnight
+ * reads 0, never 24.
+ */
+const LOS_ANGELES_CLOCK = new Intl.DateTimeFormat("en-US", {
+	timeZone: "America/Los_Angeles",
+	weekday: "short",
+	hour: "numeric",
+	minute: "numeric",
+	hourCycle: "h23",
+});
+
+/**
+ * Anthropic OAuth peak hours: weekdays 5am-11am in Los Angeles, the vendor's
+ * own timezone and its own weekend. That is 12:00-18:00 UTC while PDT is in
+ * effect and 13:00-19:00 UTC the rest of the year. During these windows 5-hour
+ * sessions consume a larger share of the weekly budget. Informational only:
+ * not part of the peak-hours auto-pause.
+ *
+ * Upstream states this as a fixed 13:00-19:00 UTC, which is an hour late
+ * through PDT; the fork fixed that in the dashboard in #93 (SB23-1867), and the
+ * 2026-10-16 sync brings the same rule here because this now feeds `peakHours`
+ * on /api/accounts (SB23-8195). Keep in sync with ANTHROPIC_PEAK_WINDOW in
+ * packages/dashboard-web/src/utils/provider-utils.ts.
+ */
+export function isAnthropicPeakHour(ts = Date.now()): boolean {
+	const parts = LOS_ANGELES_CLOCK.formatToParts(new Date(ts));
+	const part = (type: Intl.DateTimeFormatPartTypes) =>
+		parts.find((p) => p.type === type)?.value ?? "";
+	const weekday = part("weekday");
+	if (weekday === "Sat" || weekday === "Sun") return false;
+	const hour = Number(part("hour")) + Number(part("minute")) / 60;
+	return hour >= 5 && hour < 11;
+}
+
+const HOLIDAY_REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const HOLIDAY_RETRY_INTERVAL_MS = 60 * 60 * 1000;
+
+/** Providers whose accounts support opt-in peak-hours auto-pause. */
+const PEAK_HOUR_CHECKS: Record<string, (ts?: number) => boolean> = {
+	zai: isZaiPeakHour,
+	deepseek: isDeepseekPeakHour,
+};
+
+/**
+ * Server-side peak-hours state for an account's provider, served on
+ * /api/accounts so the dashboard never recomputes it. Uses the same check
+ * functions as the scheduler's peak-hours auto-pause. `null` for providers
+ * without a peak concept.
+ */
+export function getPeakHoursState(
+	provider: string | null | undefined,
+	ts = Date.now(),
+): { active: boolean } | null {
+	// Own-property lookup: "__proto__"/"constructor" must not hit inherited props
+	const key = provider ?? "";
+	const check =
+		key === "anthropic"
+			? isAnthropicPeakHour
+			: Object.hasOwn(PEAK_HOUR_CHECKS, key)
+				? PEAK_HOUR_CHECKS[key]
+				: undefined;
+	return check ? { active: check(ts) } : null;
+}
+
+/**
  * Auto-refresh scheduler that monitors accounts with auto-refresh enabled
  * and sends dummy messages when their usage window resets
  */
@@ -101,6 +187,9 @@ export class AutoRefreshScheduler {
 	private proxyContext: ProxyContext;
 	private unregisterInterval: (() => void) | null = null;
 	private checkInterval = 60000; // Check every minute
+	// Last Chinese holiday feed refresh attempt (DeepSeek peak-hours exemption)
+	private lastHolidayRefreshAt = 0;
+	private holidayRefresh: Promise<unknown> | null = null;
 	// Track the rate_limit_reset timestamp for each account when we last refreshed it
 	// This allows us to detect when a new window has started (different rate_limit_reset)
 	private lastRefreshResetTime: Map<string, number> = new Map();
@@ -1591,13 +1680,53 @@ export class AutoRefreshScheduler {
 	}
 
 	/**
-	 * Pause or resume zai accounts based on per-account peak_hours_pause_enabled flag.
+	 * Pause or resume accounts (zai, deepseek) based on per-account peak_hours_pause_enabled flag.
 	 * Only touches accounts that have opted in to peak hours auto-pause.
 	 */
 	private async checkPeakHoursPause(): Promise<void> {
-		const inPeak = isZaiPeakHour();
+		// DeepSeek's holiday exemption needs the current calendar. Fetched on the
+		// first tick after startup, then weekly: next year's schedule is published
+		// around Nov/Dec, so a weekly retry picks it up (current + next year are
+		// requested each time). Failures fall back to cached/embedded data.
+		// Fire-and-forget so slow feed timeouts never delay pause/resume checks;
+		// stamped up front so ticks don't start overlapping refreshes. A transient
+		// failure is retried after an hour instead of a week.
+		const now = Date.now();
+		if (now - this.lastHolidayRefreshAt >= HOLIDAY_REFRESH_INTERVAL_MS) {
+			this.lastHolidayRefreshAt = now;
+			this.holidayRefresh = refreshChineseHolidays()
+				.then((ok) => {
+					if (!ok) {
+						this.lastHolidayRefreshAt =
+							now - HOLIDAY_REFRESH_INTERVAL_MS + HOLIDAY_RETRY_INTERVAL_MS;
+					}
+				})
+				.catch(() => {})
+				.finally(() => {
+					this.holidayRefresh = null;
+				});
+		}
+		for (const [provider, isPeak] of Object.entries(PEAK_HOUR_CHECKS)) {
+			// DeepSeek's decision depends on the holiday calendar. If no calendar
+			// covers this year yet (e.g. first tick after startup in 2027+), wait for
+			// the in-flight refresh so a holiday isn't classified as a peak weekday.
+			// Only DeepSeek waits; zai is ordered first and never blocked.
+			if (
+				provider === "deepseek" &&
+				this.holidayRefresh &&
+				!hasChineseHolidayCalendar(new Date().getUTCFullYear())
+			) {
+				await this.holidayRefresh;
+			}
+			await this.checkPeakHoursPauseForProvider(provider, isPeak());
+		}
+	}
 
-		const zaiAccounts = await this.db.query<{
+	private async checkPeakHoursPauseForProvider(
+		provider: string,
+		inPeak: boolean,
+	): Promise<void> {
+		const accounts = await this.db.query<{
 			id: string;
 			name: string;
 			paused: number;
@@ -1605,10 +1734,11 @@ export class AutoRefreshScheduler {
 			peak_hours_pause_enabled: number;
 		}>(
 			`SELECT id, name, COALESCE(paused, 0) as paused, pause_reason, COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled
-			 FROM accounts WHERE provider = 'zai' AND peak_hours_pause_enabled = 1`,
+			 FROM accounts WHERE provider = ? AND peak_hours_pause_enabled = 1`,
+			[provider],
 		);
 
-		for (const account of zaiAccounts) {
+		for (const account of accounts) {
 			if (inPeak && !account.paused) {
 				// Pause account during peak hours
 				// SQL-level guard prevents race: if another actor paused the account
@@ -1617,7 +1747,9 @@ export class AutoRefreshScheduler {
 					"UPDATE accounts SET paused = 1, pause_reason = 'peak_hours' WHERE id = ? AND COALESCE(paused, 0) = 0",
 					[account.id],
 				);
-				log.info(`Peak hours pause: paused zai account '${account.name}'`);
+				log.info(
+					`Peak hours pause: paused ${provider} account '${account.name}'`,
+				);
 			} else if (
 				!inPeak &&
 				account.paused &&
@@ -1630,7 +1762,9 @@ export class AutoRefreshScheduler {
 					"UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ? AND pause_reason = 'peak_hours'",
 					[account.id],
 				);
-				log.info(`Peak hours resume: resumed zai account '${account.name}'`);
+				log.info(
+					`Peak hours resume: resumed ${provider} account '${account.name}'`,
+				);
 			}
 		}
 	}
@@ -1713,6 +1847,11 @@ export class AutoRefreshScheduler {
 		// The same predicate the selector and /health use, staleness guard
 		// included: a 100% reading whose reset has already passed is the poller
 		// lagging behind a rollover, not an exhausted window.
+		//
+		// Deliberately WITHOUT the snapshot's extraUsageAvailable: an account
+		// serving on extra usage still has a spent window, and a probe sent to
+		// it now would only be billed against that extra usage while learning
+		// nothing the traffic path is not already reporting.
 		if (!isUsageExhausted(utilization, resetMs, now)) return false;
 
 		const until =

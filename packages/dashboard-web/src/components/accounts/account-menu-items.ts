@@ -196,12 +196,17 @@ export function accountMenuToggles(
 		});
 	}
 
-	if (account.provider === "zai" && handlers.peakHoursPause) {
+	if (
+		(account.provider === "zai" || account.provider === "deepseek") &&
+		handlers.peakHoursPause
+	) {
 		toggles.push({
 			id: "peak-hours-pause",
 			label: "Peak hours pause",
 			title:
-				"Automatically pause this account during Zai peak hours (14:00–18:00 SGT)",
+				account.provider === "deepseek"
+					? "Automatically pause this account during DeepSeek peak hours (01:00–04:00 and 06:00–10:00 UTC, weekdays, excluding Chinese public holidays)"
+					: "Automatically pause this account during Zai peak hours (14:00–18:00 SGT)",
 			checked: account.peakHoursPauseEnabled ?? false,
 		});
 	}

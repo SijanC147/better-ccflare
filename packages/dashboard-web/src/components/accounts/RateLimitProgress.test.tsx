@@ -645,6 +645,43 @@ describe("RateLimitProgress", () => {
 	});
 });
 
+describe("RateLimitProgress — codex credits vs xAI credits", () => {
+	const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+	it("does not label Codex usage (purchased-credits block) as Grok credits", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={40}
+				usageWindow="five_hour"
+				usageData={{
+					five_hour: { utilization: 40, resets_at: future },
+					seven_day: { utilization: 20, resets_at: future },
+					credits: { has_credits: true, unlimited: false, balance: "5" },
+				}}
+				provider="codex"
+				showWeekly
+			/>,
+		);
+		expect(html).not.toContain("Grok credits");
+		expect(html).toContain("Usage (5-hour)");
+	});
+
+	it("still labels real xAI credits as Grok credits", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageUtilization={30}
+				usageWindow="credits"
+				usageData={{ credits: { utilization: 30, resets_at: future } }}
+				provider="xai"
+				showWeekly
+			/>,
+		);
+		expect(html).toContain("Grok credits");
+	});
+});
+
 describe("RateLimitProgress — usage pause threshold marker", () => {
 	const anthropicUsage: AnthropicUsageData = {
 		five_hour: {
@@ -949,5 +986,135 @@ describe("RateLimitProgress — threshold tooltip wording", () => {
 
 		expect(html).toContain("usage is 20%");
 		expect(html).not.toContain("past the threshold");
+	});
+
+	describe("peak-hours badge", () => {
+		// Upstream's server-driven zai and anthropic badge cases are not
+		// carried: the fork computes those two badges in the dashboard in the
+		// viewer's timezone with a countdown (#88, #93), pinned in
+		// utils/peak-hours.test.ts. Upstream's server copy of the Anthropic
+		// window is the fixed-UTC rule #93 replaced (2026-10-16 sync, SB23-8189).
+		it("shows peak and off-peak badges for deepseek (no usage windows)", () => {
+			const render = (peakHours?: { active: boolean } | null) =>
+				renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						provider="deepseek"
+						peakHours={peakHours}
+					/>,
+				);
+			expect(render({ active: true })).toMatch(/Peak/);
+			expect(render({ active: true })).not.toContain("Off-peak");
+			expect(render({ active: false })).toContain("Off-peak");
+			expect(render(null)).toBe("");
+			expect(render(undefined)).toBe("");
+		});
+	});
+
+	describe("OpenRouter credit balance", () => {
+		// Minimal shape the fetcher produces; the component reads these fields
+		// off `usageData` and branches on `balanceScope`.
+		type CreditData = {
+			usageUsd: number;
+			limitUsd: number | null;
+			remainingUsd: number | null;
+			utilizationPercent: number | null;
+			balanceScope: "key" | "account" | "unknown";
+			resetInterval: string | null;
+			resetsAt: string | null;
+		};
+
+		const render = (usageData: CreditData) =>
+			renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageUtilization={usageData.utilizationPercent}
+					usageData={usageData as never}
+					provider="openrouter"
+				/>,
+			);
+
+		it("labels a key-scoped budget as a limit and shows the reset time", () => {
+			const html = render({
+				usageUsd: 25.5,
+				limitUsd: 100,
+				remainingUsd: 74.5,
+				utilizationPercent: 25.5,
+				balanceScope: "key",
+				resetInterval: "monthly",
+				// Deliberately not an exact multiple of a day: the component reads
+				// the clock again while rendering, so a reset landing precisely on
+				// the 3d boundary rounds down to "2d 23h" whenever even 1ms elapses
+				// between this Date.now() and the component's.
+				resetsAt: new Date(
+					Date.now() + 3 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000,
+				).toISOString(),
+			});
+			expect(html).toContain("OpenRouter key limit");
+			expect(html).toContain("$74.50 remaining");
+			expect(html).toContain("Resets in 3d");
+			// A key-scoped budget is not the account pool.
+			expect(html).not.toContain("OpenRouter credits");
+		});
+
+		it("falls back to naming the interval when no reset time is given", () => {
+			const html = render({
+				usageUsd: 25.5,
+				limitUsd: 100,
+				remainingUsd: 74.5,
+				utilizationPercent: 25.5,
+				balanceScope: "key",
+				resetInterval: "weekly",
+				resetsAt: null,
+			});
+			expect(html).toContain("Resets weekly");
+		});
+
+		it("labels the account pool as credits and shows no reset copy", () => {
+			// Unlimited key: the account pool is purchased credit with no
+			// schedule, so there is nothing to reset.
+			const html = render({
+				usageUsd: 0.6,
+				limitUsd: null,
+				remainingUsd: 34.4,
+				utilizationPercent: null,
+				balanceScope: "account",
+				resetInterval: null,
+				resetsAt: null,
+			});
+			expect(html).toContain("OpenRouter credits");
+			expect(html).toContain("$34.40 remaining");
+			expect(html).not.toContain("Resets");
+			expect(html).not.toContain("OpenRouter key limit");
+		});
+
+		it("renders Unlimited when neither budget nor credits could be read", () => {
+			const html = render({
+				usageUsd: 0,
+				limitUsd: null,
+				remainingUsd: null,
+				utilizationPercent: null,
+				balanceScope: "unknown",
+				resetInterval: null,
+				resetsAt: null,
+			});
+			expect(html).toContain("Unlimited");
+			expect(html).not.toContain("No credits");
+		});
+
+		it("shows no reset copy for an account pool even if an interval leaks in", () => {
+			// Guard: reset copy is gated on key scope, not merely on the fields
+			// being present.
+			const html = render({
+				usageUsd: 0.6,
+				limitUsd: null,
+				remainingUsd: 34.4,
+				utilizationPercent: null,
+				balanceScope: "account",
+				resetInterval: "monthly",
+				resetsAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+			});
+			expect(html).not.toContain("Resets");
+		});
 	});
 });

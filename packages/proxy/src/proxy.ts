@@ -25,9 +25,9 @@ import {
 	createRequestMetadata,
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
+	getAccountUsageThrottleUntil,
 	getComboSlotInfo,
 	getModelFamilyExhaustionInfo,
-	getUsageThrottleUntil,
 	interceptAndModifyRequest,
 	isComboSessionFallbackDisabled,
 	isForceAccountModelEnabled,
@@ -482,9 +482,9 @@ async function handleProxyRequest(
 		const effectiveModel = appliedModel ?? requestModel ?? null;
 
 		for (const account of accounts) {
-			const throttleUntil = getUsageThrottleUntil(
+			const throttleUntil = getAccountUsageThrottleUntil(
+				account.provider ?? "anthropic",
 				usageCache.get(account.id),
-				account.provider,
 				settings,
 				now,
 				{

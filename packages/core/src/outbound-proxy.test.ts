@@ -31,6 +31,29 @@ function startFakeProxy() {
 	return { server, port: server.port ?? 0, requestLines };
 }
 
+/**
+ * `fetch`, with a refused proxy tunnel read as the status it carries: Bun 1.4.3
+ * throws `ERR_PROXY_TUNNEL` (with `status`) where Bun 1.3.14 returns the
+ * proxy's response. Any other error is rethrown. Either arm returns here, so
+ * every caller still asserts the CONNECT line the loopback fake proxy
+ * recorded; the target is a `.invalid` host (RFC 6761), which never resolves,
+ * and the test network guard refuses any non-loopback connection besides.
+ */
+async function proxiedFetch(
+	url: string,
+	init?: FetchInitWithProxy,
+): Promise<{ status: number }> {
+	try {
+		return await fetch(url, init);
+	} catch (error) {
+		const e = error as { code?: unknown; status?: unknown };
+		if (e.code === "ERR_PROXY_TUNNEL" && typeof e.status === "number") {
+			return { status: e.status };
+		}
+		throw error;
+	}
+}
+
 describe("outbound-proxy", () => {
 	const cleanups: Array<() => void> = [];
 
@@ -47,7 +70,12 @@ describe("outbound-proxy", () => {
 
 		installOutboundProxy(() => `http://127.0.0.1:${proxy.port}`);
 
-		const response = await fetch("https://outbound-proxy-test.invalid/x");
+		// The fake proxy refuses CONNECT with a 502. Bun 1.3.14 (CI) returns it
+		// as a response; Bun 1.4.3 throws ERR_PROXY_TUNNEL carrying the same
+		// status. What this test pins is that the CONNECT reached the proxy.
+		const response = await proxiedFetch(
+			"https://outbound-proxy-test.invalid/x",
+		);
 		expect(response.status).toBe(502);
 		expect(proxy.requestLines.length).toBeGreaterThan(0);
 		expect(proxy.requestLines[0]).toStartWith(
@@ -127,9 +155,12 @@ describe("outbound-proxy", () => {
 
 		installOutboundProxy(() => `http://127.0.0.1:${proxyA.port}`);
 
-		const response = await fetch("https://outbound-proxy-test.invalid/y", {
-			proxy: `http://127.0.0.1:${proxyB.port}`,
-		} satisfies FetchInitWithProxy);
+		const response = await proxiedFetch(
+			"https://outbound-proxy-test.invalid/y",
+			{
+				proxy: `http://127.0.0.1:${proxyB.port}`,
+			} satisfies FetchInitWithProxy,
+		);
 
 		expect(response.status).toBe(502);
 		expect(proxyB.requestLines.length).toBeGreaterThan(0);

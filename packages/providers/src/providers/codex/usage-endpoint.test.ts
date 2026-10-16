@@ -66,6 +66,8 @@ describe("parseCodexUsagePayload", () => {
 				utilization: 43,
 				resets_at: new Date((NOW_S + 500_000) * 1000).toISOString(),
 			},
+			// The body's credits block rides along (see usage-credits.test.ts).
+			credits: { has_credits: false, unlimited: false, balance: null },
 		});
 	});
 
@@ -92,7 +94,7 @@ describe("parseCodexUsagePayload", () => {
 			NOW_MS,
 		);
 
-		expect(Object.keys(usage ?? {})).toEqual(["seven_day"]);
+		expect(Object.keys(usage ?? {})).toEqual(["seven_day", "credits"]);
 		expect(usage?.five_hour).toBeUndefined();
 	});
 
@@ -178,7 +180,10 @@ describe("parseCodexUsagePayload", () => {
 			NOW_MS,
 		);
 
-		expect(usage).toEqual({ five_hour: { utilization: 9, resets_at: null } });
+		expect(usage).toEqual({
+			five_hour: { utilization: 9, resets_at: null },
+			credits: { has_credits: false, unlimited: false, balance: null },
+		});
 	});
 
 	it("returns null for bodies without rate_limit", () => {
@@ -267,12 +272,15 @@ describe("fetchCodexUsageData", () => {
 		expect(result.data?.five_hour?.utilization).toBe(12);
 	});
 
-	it("omits the credits KEY when the response sent no credit headers", async () => {
+	it("omits the credits KEY when neither the headers nor the body report credits", async () => {
 		// Whether this endpoint sends x-codex-credits-* is unverified against a
 		// live response. Being wrong about it must cost nothing: absent credits
-		// is the fail-closed path and leaves admission exactly as it was.
+		// is the fail-closed path and leaves admission exactly as it was. Since
+		// the 2026-10-16 sync the body's `credits` block is read too, so this
+		// case drops it.
+		const { credits: _credits, ...bare } = payload();
 		const fetchMock = mock(
-			async () => new Response(JSON.stringify(payload()), { status: 200 }),
+			async () => new Response(JSON.stringify(bare), { status: 200 }),
 		);
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 

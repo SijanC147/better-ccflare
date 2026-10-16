@@ -23,8 +23,13 @@ const CONNECTION_POOL = new Map<
 // Cleanup inactive connections periodically
 const CLEANUP_INTERVAL = 30000; // 30 seconds
 const CONNECTION_TIMEOUT = 60000; // 1 minute
-const MAX_RETRIES = 10;
 const HEARTBEAT_INTERVAL = 15000; // 15 seconds
+const RECONNECT_MAX_DELAY = 30000;
+const HIDDEN_RECONNECT_THRESHOLD = 30000;
+
+// EventSource.readyState values, as numbers so the helpers below stay pure
+const ES_OPEN = 1;
+const ES_CLOSED = 2;
 
 // Global cleanup for connection pool
 let globalCleanupInterval: Timer | null = null;
@@ -60,25 +65,84 @@ const getOrCreateCleanupInterval = () => {
 	return globalCleanupInterval;
 };
 
+let requestsSseSeq = 0;
+
+export function getRequestsSseSeq(): number {
+	return requestsSseSeq;
+}
+
+export function shouldRefetchOnOpen(
+	hasOpenedBefore: boolean,
+	retryCount: number,
+): boolean {
+	return hasOpenedBefore || retryCount > 0;
+}
+
+export function reconnectDelay(
+	retryCount: number,
+	random: () => number = Math.random,
+): number {
+	const base = Math.min(1000 * 2 ** retryCount, RECONNECT_MAX_DELAY);
+	return Math.round(base + random() * base * 0.25);
+}
+
+export function shouldReconnectOnWake(
+	readyState: number | undefined,
+	hiddenMs = 0,
+	isOnlineEvent = false,
+): boolean {
+	return (
+		readyState !== ES_OPEN ||
+		isOnlineEvent ||
+		hiddenMs > HIDDEN_RECONNECT_THRESHOLD
+	);
+}
+
+export function shouldReconnectOnHeartbeat(readyState: number): boolean {
+	return readyState === ES_CLOSED;
+}
+
+function pruneDetailsMap(
+	map: Map<string, RequestResponse>,
+	requests: RequestPayload[],
+): Map<string, RequestResponse> {
+	if (map.size === 0) return map;
+	const ids = new Set(requests.map((r) => r.id));
+	let stale = false;
+	for (const id of map.keys()) {
+		if (!ids.has(id)) {
+			stale = true;
+			break;
+		}
+	}
+	if (!stale) return map;
+	const pruned = new Map<string, RequestResponse>();
+	for (const [id, value] of map) {
+		if (ids.has(id)) pruned.set(id, value);
+	}
+	return pruned;
+}
+
 export function useRequestStream(limit = 200) {
 	const queryClient = useQueryClient();
 	const connectionKey = `requests-stream-${limit}`;
 	const isMountedRef = useRef(true);
+	const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const reconnectNowRef = useRef<() => void>(() => {});
 
-	// Heartbeat to keep connection alive and detect dead connections
+	// Heartbeat to detect a source that was closed without reaching our error
+	// handler. CONNECTING is left alone: the browser or our error path is
+	// already handling it.
 	const setupHeartbeat = useCallback((es: EventSource, key: string) => {
 		return setInterval(() => {
-			if (
-				es.readyState === EventSource.CLOSED ||
-				es.readyState === EventSource.CONNECTING
-			) {
-				console.log(`Connection ${key} is not ready, cleaning up`);
+			if (shouldReconnectOnHeartbeat(es.readyState)) {
+				console.log(`Connection ${key} is closed, reconnecting`);
 				const pooled = CONNECTION_POOL.get(key);
 				if (pooled) {
 					clearInterval(pooled.heartbeat);
 					CONNECTION_POOL.delete(key);
 				}
-				es.close();
+				reconnectNowRef.current();
 			}
 		}, HEARTBEAT_INTERVAL);
 	}, []);
@@ -106,6 +170,7 @@ export function useRequestStream(limit = 200) {
 					  }
 					| { type: "summary"; payload: RequestResponse };
 
+				requestsSseSeq++;
 				queryClient.setQueryData(
 					queryKeys.requests(limit),
 					(
@@ -198,10 +263,14 @@ export function useRequestStream(limit = 200) {
 							}
 
 							// Add new placeholder at the beginning
+							const nextRequests = [placeholder, ...current.requests].slice(
+								0,
+								limit,
+							);
 							return {
 								...current,
-								requests: [placeholder, ...current.requests].slice(0, limit),
-								detailsMap: currentDetailsMap,
+								requests: nextRequests,
+								detailsMap: pruneDetailsMap(currentDetailsMap, nextRequests),
 							};
 						}
 						// Update details map with summary
@@ -250,10 +319,17 @@ export function useRequestStream(limit = 200) {
 									},
 								};
 							}
-							return { ...current, requests: newRequests, detailsMap: map };
+							return {
+								...current,
+								requests: newRequests,
+								detailsMap: pruneDetailsMap(map, newRequests),
+							};
 						}
 
-						return { ...current, detailsMap: map };
+						return {
+							...current,
+							detailsMap: pruneDetailsMap(map, current.requests),
+						};
 					},
 				);
 			} catch (error) {
@@ -265,7 +341,10 @@ export function useRequestStream(limit = 200) {
 
 	// Connect with connection pooling
 	const connect = useCallback(
-		async (retryCount = 0): Promise<EventSource | null> => {
+		async (
+			retryCount = 0,
+			forceRefetch = false,
+		): Promise<EventSource | null> => {
 			// Ensure cleanup interval is running
 			getOrCreateCleanupInterval();
 
@@ -299,11 +378,20 @@ export function useRequestStream(limit = 200) {
 			const es = new EventSource(url);
 
 			// Setup event handlers
+			let hasOpened = false;
+			let attempt = retryCount;
 			es.addEventListener("open", () => {
 				if (!isMountedRef.current) {
 					es.close();
 					return;
 				}
+				if (forceRefetch || shouldRefetchOnOpen(hasOpened, retryCount)) {
+					queryClient.invalidateQueries({
+						queryKey: queryKeys.requests(limit),
+					});
+				}
+				hasOpened = true;
+				attempt = 0;
 				console.log(`SSE connection established: ${connectionKey}`);
 			});
 
@@ -312,6 +400,9 @@ export function useRequestStream(limit = 200) {
 			es.addEventListener("error", (error) => {
 				console.error(`SSE connection error (${connectionKey}):`, error);
 
+				// Stop the browser's built-in auto-reconnect; we manage retries ourselves
+				es.close();
+
 				// Remove from pool
 				const pooled = CONNECTION_POOL.get(connectionKey);
 				if (pooled) {
@@ -319,20 +410,19 @@ export function useRequestStream(limit = 200) {
 					CONNECTION_POOL.delete(connectionKey);
 				}
 
-				// Only reconnect if component is still mounted and we haven't exceeded max retries
-				if (isMountedRef.current && retryCount < MAX_RETRIES) {
-					const delay = Math.min(1000 * 2 ** retryCount, 30000);
+				if (isMountedRef.current) {
+					const delay = reconnectDelay(attempt);
 					console.log(
-						`Reconnecting ${connectionKey} in ${delay}ms (attempt ${retryCount + 1}/${MAX_RETRIES})`,
+						`Reconnecting ${connectionKey} in ${delay}ms (attempt ${attempt + 1})`,
 					);
 
-					setTimeout(() => {
+					if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+					retryTimerRef.current = setTimeout(() => {
+						retryTimerRef.current = null;
 						if (isMountedRef.current) {
-							void connect(retryCount + 1);
+							void connect(attempt + 1);
 						}
 					}, delay);
-				} else if (retryCount >= MAX_RETRIES) {
-					console.error(`Max retries reached for ${connectionKey}, giving up`);
 				}
 			});
 
@@ -347,8 +437,24 @@ export function useRequestStream(limit = 200) {
 
 			return es;
 		},
-		[connectionKey, handleMessage, setupHeartbeat],
+		[connectionKey, handleMessage, setupHeartbeat, queryClient, limit],
 	);
+
+	const reconnectNow = useCallback(() => {
+		if (!isMountedRef.current) return;
+		if (retryTimerRef.current) {
+			clearTimeout(retryTimerRef.current);
+			retryTimerRef.current = null;
+		}
+		const pooled = CONNECTION_POOL.get(connectionKey);
+		if (pooled) {
+			pooled.connection.close();
+			clearInterval(pooled.heartbeat);
+			CONNECTION_POOL.delete(connectionKey);
+		}
+		void connect(0, true);
+	}, [connect, connectionKey]);
+	reconnectNowRef.current = reconnectNow;
 
 	useEffect(() => {
 		isMountedRef.current = true;
@@ -365,9 +471,43 @@ export function useRequestStream(limit = 200) {
 			}
 		});
 
+		// A sleeping laptop or backgrounded tab can kill the stream silently, so
+		// refetch the snapshot and reconnect (if needed) when we come back.
+		let hiddenAt: number | null = null;
+		const recover = (hiddenMs: number, isOnlineEvent: boolean) => {
+			queryClient.invalidateQueries({ queryKey: queryKeys.requests(limit) });
+			if (
+				shouldReconnectOnWake(
+					CONNECTION_POOL.get(connectionKey)?.connection.readyState,
+					hiddenMs,
+					isOnlineEvent,
+				)
+			) {
+				reconnectNow();
+			}
+		};
+		const onVisibilityChange = () => {
+			if (document.visibilityState === "hidden") {
+				hiddenAt = Date.now();
+				return;
+			}
+			const hiddenMs = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+			hiddenAt = null;
+			recover(hiddenMs, false);
+		};
+		const onOnline = () => recover(0, true);
+		document.addEventListener("visibilitychange", onVisibilityChange);
+		window.addEventListener("online", onOnline);
+
 		// Cleanup function
 		return () => {
 			isMountedRef.current = false;
+			document.removeEventListener("visibilitychange", onVisibilityChange);
+			window.removeEventListener("online", onOnline);
+			if (retryTimerRef.current) {
+				clearTimeout(retryTimerRef.current);
+				retryTimerRef.current = null;
+			}
 
 			const pooled = CONNECTION_POOL.get(connectionKey);
 			if (pooled) {
@@ -385,7 +525,7 @@ export function useRequestStream(limit = 200) {
 				es.close();
 			}
 		};
-	}, [connect, connectionKey]);
+	}, [connect, connectionKey, reconnectNow, queryClient, limit]);
 
 	// Global cleanup on unmount
 	useEffect(() => {

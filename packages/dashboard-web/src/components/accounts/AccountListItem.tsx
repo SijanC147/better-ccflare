@@ -501,6 +501,8 @@ export function AccountListItem({
 				// renders the weekly window as "Data unavailable" instead of
 				// disappearing, and a missing quota bar reads as "no limit".
 				account.provider === "codex" ||
+				// DeepSeek has no usage data; mount for the peak/off-peak badge.
+				account.provider === "deepseek" ||
 				providerShowsCreditsBalance(account.provider)) && (
 				<RateLimitProgress
 					resetIso={account.rateLimitReset}
@@ -511,6 +513,7 @@ export function AccountListItem({
 					usageThrottledUntil={account.usageThrottledUntil}
 					usageThrottledWindows={account.usageThrottledWindows}
 					provider={account.provider}
+					peakHours={account.peakHours}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					pauseThresholdFiveHour={
 						supportsUsagePauseThreshold(account.provider) &&

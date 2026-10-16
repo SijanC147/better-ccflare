@@ -7,6 +7,7 @@ import {
 	type AnyUsageData,
 	CODEX_CREDIT_COVERED_WINDOW,
 	codexCreditsExcludeWeekly,
+	getRepresentativeUsageSnapshotForProvider,
 } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 
@@ -270,6 +271,18 @@ function isWindowThrottlingEnabled(
 	return settings.weeklyEnabled;
 }
 
+export interface UsageThrottleOptions {
+	requestModel?: string | null;
+	scopedMode?: "match" | "all";
+	/**
+	 * The account is serving past a spent window on allowed extra usage (see
+	 * the snapshot's `extraUsageAvailable`). Pacing a window that is already
+	 * spent cannot save anything — that traffic is billed beyond the plan — so
+	 * spent windows are not throttled; windows with headroom still are.
+	 */
+	extraUsageAvailable?: boolean;
+}
+
 export function getUsageThrottleStatus(
 	data: AnyUsageData | null,
 	/**
@@ -282,7 +295,7 @@ export function getUsageThrottleStatus(
 	provider: string,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
-	opts?: { requestModel?: string | null; scopedMode?: "match" | "all" },
+	opts?: UsageThrottleOptions,
 ): UsageThrottleStatus {
 	// scopedMode "all" (default, display path) surfaces every per-model cap;
 	// "match" (routing path) only counts a scoped cap when the request's model
@@ -326,6 +339,7 @@ export function getUsageThrottleStatus(
 			continue;
 		}
 		if (!isWindowThrottlingEnabled(window.window, settings)) continue;
+		if (opts?.extraUsageAvailable && window.utilization >= 100) continue;
 		if (window.resetAtMs <= now) continue;
 		const startMs = computeWindowStartMs(window.resetAtMs, window.window);
 		if (startMs === null || startMs >= window.resetAtMs) continue;
@@ -359,10 +373,32 @@ export function getUsageThrottleUntil(
 	provider: string,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
-	opts?: { requestModel?: string | null; scopedMode?: "match" | "all" },
+	opts?: UsageThrottleOptions,
 ): number | null {
 	return getUsageThrottleStatus(data, provider, settings, now, opts)
 		.throttleUntil;
+}
+
+/**
+ * The routing-path throttle decision for one account: getUsageThrottleUntil
+ * with the account's own extra-usage state taken from the same snapshot
+ * account selection admits on, so a spent account that selection lets through
+ * on extra usage is not then refused here with a local 529.
+ */
+export function getAccountUsageThrottleUntil(
+	provider: string,
+	data: AnyUsageData | null | undefined,
+	settings: UsageThrottleSettings,
+	now = Date.now(),
+	opts?: Omit<UsageThrottleOptions, "extraUsageAvailable">,
+): number | null {
+	const extraUsageAvailable =
+		getRepresentativeUsageSnapshotForProvider(data, provider)
+			?.extraUsageAvailable === true;
+	return getUsageThrottleUntil(data ?? null, provider, settings, now, {
+		...opts,
+		extraUsageAvailable,
+	});
 }
 
 export function createUsageThrottledResponse(accounts: Account[]): Response {

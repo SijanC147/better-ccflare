@@ -33,6 +33,9 @@ describe("APIRouter — /api/openai-gateways/:name dispatch", () => {
 			getAdapter: () => adapter,
 			countActiveApiKeys: async () => 0,
 			getActiveApiKeys: async () => [],
+			// The router subscribes its stats cache to request deletions (2026-10-16
+			// upstream sync).
+			onRequestsDeleted: () => () => {},
 		} as unknown as DatabaseOperations;
 		stored = { x: { description: "existing" } };
 		writes = 0;

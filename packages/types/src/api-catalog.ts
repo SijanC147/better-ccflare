@@ -824,6 +824,19 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "GET",
+		path: "/api/config/use-extra-usage",
+		category: "Config",
+		summary:
+			"Whether a spent plan window may keep serving on Anthropic extra usage.",
+	},
+	{
+		method: "POST",
+		path: "/api/config/use-extra-usage",
+		category: "Config",
+		summary: "Toggle serving past a spent plan window on extra usage.",
+	},
+	{
+		method: "GET",
 		path: "/api/config/github-token",
 		category: "Config",
 		summary: "Whether a GitHub token is stored. The token is never returned.",
