@@ -12,6 +12,7 @@ Load balancer proxy for Claude Code. Spreads requests across many account provid
 - `packages/database/src/inline-vacuum-worker.ts`
 - `packages/database/src/inline-incremental-vacuum-worker.ts`
 - `packages/database/src/inline-integrity-check-worker.ts`
+- `packages/database/src/inline-wal-truncate-worker.ts`
 
 If these change when you did not touch worker source, that is a signal (usually wrong Bun version), not churn to commit away. `packages/dashboard-web/dist/**` is also generated, but gitignored.
 

@@ -142,9 +142,10 @@ hosted CI, all-platform native execution, release publication, or tap CI.
 - `packages/database/src/inline-vacuum-worker.ts` — **tracked**
 - `packages/database/src/inline-incremental-vacuum-worker.ts` — **tracked**
 - `packages/database/src/inline-integrity-check-worker.ts` — **tracked**
+- `packages/database/src/inline-wal-truncate-worker.ts` — **tracked**
 
 Prefer running these in an isolated worktree. If you run them in a working checkout, diff
-those three paths afterward. If you did not change worker source and they still differ,
+those four paths afterward. If you did not change worker source and they still differ,
 that is a signal — usually the wrong Bun version — not churn to commit away.
 
 ## Cutting a release

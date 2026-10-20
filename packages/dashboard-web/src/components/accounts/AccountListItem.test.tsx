@@ -29,6 +29,7 @@ const allHandlers: AccountMenuHandlers = {
 	qwenReauth: true,
 	anthropicReauth: true,
 	codexReauth: true,
+	codeBuddyReauth: true,
 };
 
 const baseAccount: Account = {
@@ -584,6 +585,7 @@ describe("AccountListItem", () => {
 			onReauth: spy("qwen"),
 			onAnthropicReauth: spy("anthropic"),
 			onCodexReauth: spy("codex"),
+			onCodeBuddyReauth: spy("codebuddy"),
 		};
 
 		bindAccountMenuHandlers(
@@ -594,9 +596,13 @@ describe("AccountListItem", () => {
 			{ ...baseAccount, provider: "codex" },
 			callbacks,
 		).action.reauth();
+		bindAccountMenuHandlers(
+			{ ...baseAccount, provider: "codebuddy" },
+			callbacks,
+		).action.reauth();
 		bindAccountMenuHandlers(baseAccount, callbacks).action.reauth();
 
-		expect(fired).toEqual(["qwen", "codex", "anthropic"]);
+		expect(fired).toEqual(["qwen", "codex", "codebuddy", "anthropic"]);
 	});
 
 	it("hides every optional action whose callback the parent did not supply", () => {

@@ -8,6 +8,7 @@ export { AccountRenewalDayDialog } from "./AccountRenewalDayDialog";
 export { AccountRequestTransformerDialog } from "./AccountRequestTransformerDialog";
 export { AccountUsageThresholdsDialog } from "./AccountUsageThresholdsDialog";
 export { AnthropicReauthDialog } from "./AnthropicReauthDialog";
+export { CodeBuddyReauthDialog } from "./CodeBuddyReauthDialog";
 export { CodexReauthDialog } from "./CodexReauthDialog";
 export { DeleteConfirmationDialog } from "./DeleteConfirmationDialog";
 export { QwenReauthDialog } from "./QwenReauthDialog";

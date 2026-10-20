@@ -149,6 +149,7 @@ interface ParsedArgs {
 		| "codex"
 		| "qwen"
 		| "openrouter"
+		| "codebuddy"
 		| "xai"
 		| "ollama"
 		| "ollama-cloud"
@@ -674,6 +675,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
+					| "codebuddy"
 					| "xai"
 					| "ollama"
 					| "max";
@@ -702,6 +704,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "codex"
 					| "qwen"
 					| "openrouter"
+					| "codebuddy"
 					| "xai"
 					| "ollama"
 					| "ollama-cloud";
@@ -721,6 +724,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "codex"
 					| "qwen"
 					| "openrouter"
+					| "codebuddy"
 					| "xai"
 					| "ollama"
 					| "ollama-cloud"
@@ -740,6 +744,7 @@ function parseArgs(args: string[]): ParsedArgs {
 					"codex",
 					"qwen",
 					"openrouter",
+					"codebuddy",
 					"xai",
 					"ollama",
 					"ollama-cloud",
@@ -1059,7 +1064,7 @@ Options:
   --ssl-cert <path>    Path to SSL certificate file (enables HTTPS)
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
-    --mode <claude-oauth|console|zai|minimax|deepseek|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|xai|ollama>  Account mode (default: claude-oauth)
+    --mode <claude-oauth|console|zai|minimax|deepseek|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|codebuddy|xai|ollama>  Account mode (default: claude-oauth)
       claude-oauth: Claude CLI account (OAuth)
       console: Claude API account (OAuth)
       zai: z.ai account (API key)
@@ -1273,6 +1278,9 @@ Examples:
 				"  --mode codex               Codex (OpenAI OAuth) provider",
 			);
 			console.error(
+				"  --mode codebuddy           CodeBuddy (browser authentication) provider",
+			);
+			console.error(
 				"  --mode xai                 xAI/Grok (Grok CLI OAuth) provider",
 			);
 			console.error(
@@ -1292,7 +1300,10 @@ Examples:
 
 			// OAuth modes need interactive prompts for the auth code
 			const needsInteractiveAuth =
-				mode === "claude-oauth" || mode === "console" || mode === "codex";
+				mode === "claude-oauth" ||
+				mode === "console" ||
+				mode === "codex" ||
+				mode === "codebuddy";
 
 			if (needsInteractiveAuth) {
 				// Use real prompt adapter for OAuth - needs user to paste auth code

@@ -208,6 +208,12 @@ describe("API Authentication", () => {
 			expect(
 				await authService.isPathExempt("/api/oauth/qwen/status/abc", "GET"),
 			).toBe(true);
+			expect(
+				await authService.isPathExempt(
+					"/api/oauth/codebuddy/status/abc",
+					"GET",
+				),
+			).toBe(true);
 			// Token-mutating endpoints must require auth once it is enabled.
 			expect(await authService.isPathExempt("/api/oauth/init", "POST")).toBe(
 				false,

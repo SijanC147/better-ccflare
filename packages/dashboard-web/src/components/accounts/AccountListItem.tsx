@@ -97,6 +97,7 @@ interface AccountListItemProps {
 	onReauth?: ((account: Account) => void) | undefined;
 	onAnthropicReauth?: ((account: Account) => void) | undefined;
 	onCodexReauth?: ((account: Account) => void) | undefined;
+	onCodeBuddyReauth?: ((account: Account) => void) | undefined;
 }
 
 export function AccountListItem({
@@ -122,6 +123,7 @@ export function AccountListItem({
 	onReauth,
 	onAnthropicReauth,
 	onCodexReauth,
+	onCodeBuddyReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const presenter = new AccountPresenter(account);
@@ -182,6 +184,7 @@ export function AccountListItem({
 		onReauth,
 		onAnthropicReauth,
 		onCodexReauth,
+		onCodeBuddyReauth,
 		onAutoFallbackToggle,
 		onAutoRefreshToggle,
 		onBillingTypeToggle,

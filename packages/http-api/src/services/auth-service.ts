@@ -430,7 +430,8 @@ export class AuthService {
 			const isReadOnlyStatus =
 				method === "GET" &&
 				(path.startsWith("/api/oauth/qwen/status/") ||
-					path.startsWith("/api/oauth/codex/status/"));
+					path.startsWith("/api/oauth/codex/status/") ||
+					path.startsWith("/api/oauth/codebuddy/status/"));
 			return isReadOnlyStatus;
 		}
 

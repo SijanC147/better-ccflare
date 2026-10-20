@@ -782,6 +782,13 @@ export interface RuntimeConfig {
 		synchronous?: "OFF" | "NORMAL" | "FULL";
 		mmapSize?: number;
 		pageSize?: number;
+		/**
+		 * `PRAGMA journal_size_limit` in bytes: the size the SQLite -wal file
+		 * is trimmed back to whenever the WAL is reset. `0` means "no limit"
+		 * (SQLite's default). Defaults to `CCFLARE_WAL_SIZE_LIMIT_BYTES` /
+		 * 64 MiB.
+		 */
+		journalSizeLimitBytes?: number;
 		retry?: {
 			attempts?: number;
 			delayMs?: number;
@@ -927,6 +934,7 @@ export interface ConfigData {
 	db_synchronous?: "OFF" | "NORMAL" | "FULL";
 	db_mmap_size?: number;
 	db_page_size?: number;
+	db_journal_size_limit_bytes?: number;
 	db_retry_attempts?: number;
 	db_retry_delay_ms?: number;
 	db_retry_backoff?: number;
@@ -985,6 +993,20 @@ function validateDatabaseConfig(
 			max: 1073741824, // 1GB max
 			integer: true,
 		});
+	}
+
+	if (config.journalSizeLimitBytes !== undefined) {
+		// 0 means "no limit" (SQLite's default); anything above 0 caps the
+		// size the -wal file is trimmed back to when the WAL is reset.
+		validateNumber(
+			config.journalSizeLimitBytes,
+			"db_journal_size_limit_bytes",
+			{
+				min: 0,
+				max: 1099511627776, // 1TB max
+				integer: true,
+			},
+		);
 	}
 
 	// Validate retry configuration consistency
@@ -4579,6 +4601,11 @@ export class Config extends EventEmitter {
 			defaults.database.pageSize = this.data.db_page_size;
 		} else {
 			defaults.database.pageSize = 2048;
+		}
+		// SQLite -wal size cap. 0 means "no limit" (SQLite's default).
+		if (typeof this.data.db_journal_size_limit_bytes === "number") {
+			defaults.database.journalSizeLimitBytes =
+				this.data.db_journal_size_limit_bytes;
 		}
 		if (typeof this.data.db_retry_attempts === "number") {
 			defaults.database.retry.attempts = this.data.db_retry_attempts;

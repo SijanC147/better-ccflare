@@ -116,6 +116,7 @@ import {
 	registerRefreshClearer,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
+	startWalTruncateJob,
 	stopGlobalTokenHealthChecks,
 	unregisterAutoRefreshTrackingClearer,
 	unregisterCodexUsageRefresher,
@@ -925,6 +926,7 @@ let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
 let stopVacuumCatchUpJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
+let stopWalTruncateJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let stopModelCatalogRefreshJob: (() => void) | null = null;
 let stopServiceStatusRefreshJob: (() => void) | null = null;
@@ -1842,6 +1844,11 @@ export default async function startServer(options?: {
 		description: "WAL checkpoint to prevent unbounded WAL file growth",
 	});
 	stopWalCheckpointJob = unregisterWalCheckpoint;
+
+	// PASSIVE checkpoints never shrink the -wal file. Periodically run a
+	// non-blocking wal_checkpoint(TRUNCATE) as well (default every 10 min,
+	// CCFLARE_WAL_TRUNCATE_INTERVAL_MINUTES=0 disables). SQLite only.
+	stopWalTruncateJob = startWalTruncateJob(dbOps);
 
 	// Initialize load balancing strategy (will be created after runtime config)
 
@@ -2903,6 +2910,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (stopWalCheckpointJob) {
 			stopWalCheckpointJob();
 			stopWalCheckpointJob = null;
+		}
+		if (stopWalTruncateJob) {
+			stopWalTruncateJob();
+			stopWalTruncateJob = null;
 		}
 		if (stopIntegritySchedulerJob) {
 			stopIntegritySchedulerJob();
