@@ -467,7 +467,7 @@ defaults:
           # quality phase also runs typecheck and test BEFORE the adapter regenerates
           # them, so an absent file fails on a missing import.
           rc=0
-          for w in inline-vacuum-worker inline-incremental-vacuum-worker inline-integrity-check-worker; do
+          for w in inline-vacuum-worker inline-incremental-vacuum-worker inline-integrity-check-worker inline-wal-truncate-worker; do
             path="packages/database/src/$w.ts"
             [ -f "$CANDIDATE/$path" ] || { echo "FAIL missing $path" >&2; rc=1; }
           done

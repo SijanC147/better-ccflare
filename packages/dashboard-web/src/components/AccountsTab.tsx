@@ -13,6 +13,7 @@ import {
 	AccountRequestTransformerDialog,
 	AccountUsageThresholdsDialog,
 	AnthropicReauthDialog,
+	CodeBuddyReauthDialog,
 	CodexReauthDialog,
 	DeleteConfirmationDialog,
 	QwenReauthDialog,
@@ -119,6 +120,13 @@ export function AccountsTab() {
 		isOpen: false,
 		account: null,
 	});
+	const [codeBuddyReauthDialog, setCodeBuddyReauthDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
 	const [actionError, setActionError] = useState<string | null>(null);
 
 	const handleAddAccount = async (params: {
@@ -138,6 +146,7 @@ export function AccountsTab() {
 			| "openrouter"
 			| "alibaba-coding-plan"
 			| "codex"
+			| "codebuddy"
 			| "qwen"
 			| "ollama";
 		priority: number;
@@ -644,6 +653,10 @@ export function AccountsTab() {
 		setCodexReauthDialog({ isOpen: true, account });
 	};
 
+	const handleCodeBuddyReauth = (account: Account) => {
+		setCodeBuddyReauthDialog({ isOpen: true, account });
+	};
+
 	const handlePeakHoursPauseToggle = async (account: Account) => {
 		try {
 			await api.updateAccountPeakHoursPause(
@@ -789,6 +802,7 @@ export function AccountsTab() {
 						onReauth={handleReauth}
 						onAnthropicReauth={handleAnthropicReauth}
 						onCodexReauth={handleCodexReauth}
+						onCodeBuddyReauth={handleCodeBuddyReauth}
 					/>
 				</CardContent>
 			</Card>
@@ -925,6 +939,17 @@ export function AccountsTab() {
 				onSuccess={() => {
 					loadAccounts();
 					setAnthropicReauthDialog({ isOpen: false, account: null });
+				}}
+			/>
+			<CodeBuddyReauthDialog
+				isOpen={codeBuddyReauthDialog.isOpen}
+				account={codeBuddyReauthDialog.account}
+				onClose={() =>
+					setCodeBuddyReauthDialog({ isOpen: false, account: null })
+				}
+				onSuccess={() => {
+					loadAccounts();
+					setCodeBuddyReauthDialog({ isOpen: false, account: null });
 				}}
 			/>
 			<CodexReauthDialog

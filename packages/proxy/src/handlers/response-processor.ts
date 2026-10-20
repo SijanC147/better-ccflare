@@ -56,6 +56,7 @@ export function handleRateLimitResponse(
 		account,
 		{
 			resetTime: rateLimitInfo.resetTime,
+			resetIsInferred: rateLimitInfo.resetIsInferred,
 			remaining: rateLimitInfo.remaining,
 			reason,
 		},

@@ -71,6 +71,7 @@ export interface AccountMenuHandlers {
 	qwenReauth: boolean;
 	anthropicReauth: boolean;
 	codexReauth: boolean;
+	codeBuddyReauth: boolean;
 }
 
 /** The subset of the card's props the menu needs. */
@@ -85,6 +86,7 @@ export interface AccountMenuCallbacks {
 	onReauth?: ((account: Account) => void) | undefined;
 	onAnthropicReauth?: ((account: Account) => void) | undefined;
 	onCodexReauth?: ((account: Account) => void) | undefined;
+	onCodeBuddyReauth?: ((account: Account) => void) | undefined;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
 	onBillingTypeToggle: (account: Account) => void;
@@ -110,6 +112,7 @@ export function menuHandlersFrom(
 		qwenReauth: Boolean(callbacks.onReauth),
 		anthropicReauth: Boolean(callbacks.onAnthropicReauth),
 		codexReauth: Boolean(callbacks.onCodexReauth),
+		codeBuddyReauth: Boolean(callbacks.onCodeBuddyReauth),
 	};
 }
 
@@ -148,6 +151,8 @@ export function bindAccountMenuHandlers(
 				if (account.provider === "qwen") return callbacks.onReauth?.(account);
 				if (account.provider === "codex")
 					return callbacks.onCodexReauth?.(account);
+				if (account.provider === "codebuddy")
+					return callbacks.onCodeBuddyReauth?.(account);
 				return callbacks.onAnthropicReauth?.(account);
 			},
 		},
@@ -337,6 +342,9 @@ function reauthTitleFor(
 	}
 	if (account.provider === "codex" && handlers.codexReauth) {
 		return "Re-authenticate this Codex account (preserves all metadata)";
+	}
+	if (account.provider === "codebuddy" && handlers.codeBuddyReauth) {
+		return "Re-authenticate this CodeBuddy account (preserves all metadata)";
 	}
 	return null;
 }

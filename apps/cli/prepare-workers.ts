@@ -25,6 +25,11 @@ const WORKERS: WorkerSpec[] = [
 		output: join(DATABASE_SOURCE, "inline-integrity-check-worker.ts"),
 		exportName: "EMBEDDED_INTEGRITY_CHECK_WORKER_CODE",
 	},
+	{
+		entrypoint: join(DATABASE_SOURCE, "wal-truncate-worker.ts"),
+		output: join(DATABASE_SOURCE, "inline-wal-truncate-worker.ts"),
+		exportName: "EMBEDDED_WAL_TRUNCATE_WORKER_CODE",
+	},
 ];
 
 async function bundleWorker(spec: WorkerSpec): Promise<string> {

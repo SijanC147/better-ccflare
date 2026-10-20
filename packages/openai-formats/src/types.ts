@@ -196,7 +196,7 @@ export interface OpenAIStreamDelta {
 }
 
 export interface OpenAIResponse {
-	id?: string;
+	id?: string | undefined;
 	object?: string;
 	model?: string | undefined;
 	choices?: Array<{
@@ -207,9 +207,9 @@ export interface OpenAIResponse {
 			reasoning_content?: string;
 		};
 		delta?: OpenAIStreamDelta;
-		finish_reason?: string;
+		finish_reason?: string | undefined;
 	}>;
-	usage?: OpenAIUsage;
+	usage?: OpenAIUsage | undefined;
 	error?: {
 		message?: string;
 		type?: string;

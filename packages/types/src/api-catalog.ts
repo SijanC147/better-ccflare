@@ -535,6 +535,24 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "POST",
+		path: "/api/oauth/codebuddy/init",
+		category: "OAuth",
+		summary: "Begin the CodeBuddy device flow.",
+	},
+	{
+		method: "POST",
+		path: "/api/oauth/codebuddy/reauth",
+		category: "OAuth",
+		summary: "Re-authenticate an existing CodeBuddy account.",
+	},
+	{
+		method: "GET",
+		path: "/api/oauth/codebuddy/status/:sessionId",
+		category: "OAuth",
+		summary: "Poll a CodeBuddy device-flow session. Auth-exempt, read-only.",
+	},
+	{
+		method: "POST",
 		path: "/api/oauth/anthropic/reauth/init",
 		category: "OAuth",
 		summary: "Begin Anthropic re-authentication.",

@@ -10,5 +10,9 @@
 	{
 		"path": "packages/database/src/inline-vacuum-worker.d.ts",
 		"reason": "tsc drops a .d.ts whose base name matches an included .ts, and the generated inline-vacuum-worker.ts is tracked, so no include can reach it (SB23-3689, #282). An explicit files entry could, to check one declaration."
+	},
+	{
+		"path": "packages/database/src/inline-wal-truncate-worker.d.ts",
+		"reason": "tsc drops a .d.ts whose base name matches an included .ts, and the generated inline-wal-truncate-worker.ts is tracked, so no include can reach it (SB23-3689, #282; added by the SB23-9312 upstream sync). An explicit files entry could, to check one declaration."
 	}
 ]

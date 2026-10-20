@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: b4fe14b64e38b454929fc0ad6ca74ee062cf4191 -->
+<!-- last-sync-sha: ba82474c17b39478047d86f77e56c4017d036c0b -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-10-20 | main | `b4fe14b6..ba82474c` | 26 (22 non-merge) | 15 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-9312 |
 | 2026-10-16 | main | `4f3f8b57..b4fe14b6` | 97 (84 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-8189 |
 | 2026-09-30 | main | `e8042927..4f3f8b57` | 3 | 3 files (resolved by the maintainer App; one clean merge corrected, see below) | merge (two-parent) | pass (CI at `7f85ad53`, both required checks) | [#250](https://github.com/SijanC147/better-ccflare/pull/250) |
 | 2026-09-21 | main | `ea0e3320..e8042927` | 114 | 27 files (25 UU, 1 DU, 1 UD) | merge --no-ff | pass (5,614 tests at the probe head, 2 macOS-only fail; final line in the PR) | [#231](https://github.com/SijanC147/better-ccflare/pull/231) |
@@ -23,6 +24,39 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-10-20: `b4fe14b6..ba82474c` (26 upstream commits, 22 non-merge)
+
+**Strategy:** `merge --no-ff` by hand (lane BCCF-9312, SB23-9312). Upstream release 3.5.101.
+**Scale:** 71 upstream files, +6,902 / −79. **Conflicts:** 15 paths, all content (UU).
+Hextap files untouched: `.hextap.json` and `.hextap/tap-registration.json` both `328f95a7…`.
+Manifests kept at the fork's 3.43.0; `bun.lock` unchanged. No migration arrived, so no PostgreSQL port.
+
+### Upstream features arriving
+
+- **CodeBuddy provider** (`01d0f095` and follow-ups): device-flow OAuth, an always-streamed upstream
+  aggregated for JSON clients, and the rate-limit window parsed from the 429 body. Fork wiring added
+  by hand: the account menu's reauth action (`account-menu-items.ts`, which replaced upstream's inline
+  buttons), the three `/api/oauth/codebuddy/*` routes in `api-catalog.ts`, and the CLI provider unions.
+- **WAL cap and periodic `wal_checkpoint(TRUNCATE)` on a worker** (`7d145542`, `21f89256`,
+  `aeeec2da`, `4f0e4f33`): a new tracked generated file, `inline-wal-truncate-worker.ts`, built by the
+  fork's `apps/cli/prepare-workers.ts` (upstream's inline build-script hunks were not taken). Its
+  `.d.ts` joins the typecheck-coverage allowlist, and the maintainer gate's worker list gains it.
+- **Integrity check on a low-memory connection** (`87bcae41`): the regenerated
+  `inline-integrity-check-worker.ts` changes for that reason only.
+- **429 cooldown provenance** (`02e927f8`, `5bd12a4e`, `e543bb91`). Behaviour change: a 429 with an
+  upstream-reported reset now benches until that reset, capped at eight days, instead of
+  `min(reset, backoff)`. A provider-invented reset (`resetIsInferred`, Codex's one hour, Anthropic's
+  60s) stays on the ramp. The in-place retry budget (#234) is untouched.
+
+### Resolutions
+
+- `/api/config` `sessionDurationMs`: kept the fork's `config.getRuntime().sessionDurationMs` (#128).
+  Upstream's zero-duration fix is already true there.
+- Manifests, `apps/cli/build-multi-arch.ts`, `.gitignore`: kept the fork's.
+- New optional fields widened to `?: T | undefined` for `exactOptionalPropertyTypes`; upstream's
+  CodeBuddy tests moved onto the shared `makeAccount` fixture and the fork's `fetchSlot`.
+- Inline workers regenerated with Bun 1.3.14.
 
 ## 2026-10-16: `4f3f8b57..b4fe14b6` (97 upstream commits, 84 non-merge)
 

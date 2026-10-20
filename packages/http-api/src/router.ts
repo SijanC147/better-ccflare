@@ -114,6 +114,9 @@ import {
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
+	createCodeBuddyDeviceFlowInitHandler,
+	createCodeBuddyDeviceFlowStatusHandler,
+	createCodeBuddyReauthHandler,
 	createCodexDeviceFlowInitHandler,
 	createCodexDeviceFlowStatusHandler,
 	createCodexReauthHandler,
@@ -186,6 +189,7 @@ export class APIRouter {
 	private authService: AuthService;
 	private qwenStatusHandler: (sessionId: string) => Response;
 	private codexStatusHandler: (sessionId: string) => Response;
+	private codebuddyStatusHandler: (sessionId: string) => Response;
 
 	constructor(context: APIContext) {
 		this.context = context;
@@ -197,6 +201,7 @@ export class APIRouter {
 		);
 		this.qwenStatusHandler = createQwenDeviceFlowStatusHandler();
 		this.codexStatusHandler = createCodexDeviceFlowStatusHandler();
+		this.codebuddyStatusHandler = createCodeBuddyDeviceFlowStatusHandler();
 		this.registerHandlers();
 	}
 
@@ -289,6 +294,9 @@ export class APIRouter {
 		const qwenReauthHandler = createQwenReauthHandler(dbOps);
 		const codexDeviceFlowInitHandler = createCodexDeviceFlowInitHandler(dbOps);
 		const codexReauthHandler = createCodexReauthHandler(dbOps);
+		const codebuddyDeviceFlowInitHandler =
+			createCodeBuddyDeviceFlowInitHandler(dbOps);
+		const codebuddyReauthHandler = createCodeBuddyReauthHandler(dbOps);
 		const anthropicReauthInitHandler = createAnthropicReauthInitHandler(
 			dbOps,
 			config,
@@ -460,6 +468,12 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/oauth/codex/reauth", (req) =>
 			codexReauthHandler(req),
+		);
+		this.handlers.set("POST:/api/oauth/codebuddy/init", (req) =>
+			codebuddyDeviceFlowInitHandler(req),
+		);
+		this.handlers.set("POST:/api/oauth/codebuddy/reauth", (req) =>
+			codebuddyReauthHandler(req),
 		);
 		this.handlers.set("GET:/api/requests", (_req, url) => {
 			const limitParam = url.searchParams.get("limit");
@@ -1322,6 +1336,17 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+		}
+
+		// Check for CodeBuddy auth status endpoint
+		if (path.startsWith("/api/oauth/codebuddy/status/") && method === "GET") {
+			const parts = path.split("/");
+			const sessionId = parts[5];
+			if (sessionId) {
+				return await this.wrapHandler(() =>
+					this.codebuddyStatusHandler(sessionId),
+				)(req, url);
 			}
 		}
 
