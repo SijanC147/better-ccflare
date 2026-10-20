@@ -224,9 +224,9 @@ describe("WAL growth controls", () => {
 				expect(fs.statSync(`${dbPath}-wal`).size).toBeGreaterThan(100_000);
 
 				const result = await dbOps.truncateWal();
-				expect(result).not.toBeNull();
-				expect(result?.busy).toBe(false);
-				expect(result?.error).toBeUndefined();
+				if (!result) throw new Error("truncateWal returned null on SQLite");
+				expect(result.busy).toBe(false);
+				expect(result.error).toBeUndefined();
 				expect(fs.statSync(`${dbPath}-wal`).size).toBe(0);
 				// Data is still there after the checkpoint.
 				expect(

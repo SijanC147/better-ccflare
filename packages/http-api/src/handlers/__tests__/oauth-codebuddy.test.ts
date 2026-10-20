@@ -15,7 +15,7 @@ import {
 	createCodeBuddyReauthHandler,
 } from "../oauth";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-oauth-codebuddy-handler.db`;
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-oauth-codebuddy-handler-${process.pid}.db`;
 
 const originalFetch = globalThis.fetch;
 
