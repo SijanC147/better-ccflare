@@ -351,8 +351,12 @@ export async function forwardToClient(
 					//     WITH the synthetic resetTime below. This is a deliberate
 					//     conservative estimate of the 5h quota window — better to
 					//     under-cool a real quota exhaustion than leave the account
-					//     selectable, and the ramp-capped 429 formula treats
-					//     resetTime only as an upper bound anyway.
+					//     selectable. Since the SB23-9312 upstream sync the 429
+					//     cooldown honours an explicit resetTime literally, so this
+					//     benches for exactly the mid-stream default (60s unless
+					//     configured). Before it, min(resetTime, ramp) gave 30-60s.
+					//     resetIsInferred is deliberately not set: that would move
+					//     it onto the uncapped ramp, up to five minutes.
 					//   "overloaded_error" (529, transient) → the reason alone
 					//     (upstream_529_overloaded_no_reset), no resetTime. Passing
 					//     a synthetic reset for a 529 would misrepresent a ccflare

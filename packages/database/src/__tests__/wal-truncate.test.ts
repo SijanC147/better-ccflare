@@ -37,7 +37,9 @@ function journalSizeLimit(dbOps: DatabaseOperations): number {
  * compile-time option of the SQLite library Bun links: -1 on Linux, where Bun
  * bundles SQLite, and 32768 on macOS, where it uses the system library
  * (measured on Bun 1.3.14 and 1.4.3). "Left at SQLite's default" is asserted
- * against this value rather than a literal -1.
+ * against this value rather than a literal -1. Blind spot: on macOS a
+ * regression that explicitly sets 32768 passes here; Linux CI still asserts
+ * the real -1.
  */
 function defaultJournalSizeLimit(dir: string): number {
 	const db = new Database(path.join(dir, "default-probe.db"));
