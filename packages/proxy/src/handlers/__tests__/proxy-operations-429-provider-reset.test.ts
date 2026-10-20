@@ -123,8 +123,10 @@ function makeContext(
 			prepareRequest: undefined,
 			observeUpstream: undefined,
 			parseRateLimit,
-			// Absent in production for most providers; undefined keeps that path.
-			parseRateLimitFromBody,
+			// Not on the Provider interface: proxy-operations reads it through a
+			// cast, and the fixture throws on any unstubbed key, so it is always
+			// present here. Undefined is the path most providers take.
+			...({ parseRateLimitFromBody } as object),
 		},
 		asyncWriter: {
 			enqueue: mock(async (job: () => void | Promise<void>) => {
