@@ -105,7 +105,7 @@ describe("issue #273 — Group A: helper contract", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Group B — call-site coverage. Static check that the 18 drain sites the
+// Group B — call-site coverage. Static check that the 21 drain sites the
 // spec calls out (429/529/5xx/401/403 failover return-null + retry-loop
 // overwrite) are wired into proxy-operations.ts. The negative-control run
 // removes these lines; this check fails if any are missing.
@@ -127,12 +127,15 @@ describe("issue #273 — Group A: helper contract", () => {
 // The windowless-429 site now drains through `drainDiscardedBodyWithPreview`,
 // which reads to the end like the plain drain and also logs the start of the
 // body (SB23-2781). It still counts as a drain site, so the total stays 18.
+//
+// 21 is the foreign-model error that fails over instead of reaching the
+// client after a native account failed (SB23-10878).
 // ---------------------------------------------------------------------------
 
-const EXPECTED_SITE_COUNT = 20;
+const EXPECTED_SITE_COUNT = 21;
 
 describe("issue #273 — Group B: call-site coverage in proxy-operations.ts", () => {
-	it("proxy-operations.ts has exactly 18 drain call sites", () => {
+	it("proxy-operations.ts has exactly 21 drain call sites", () => {
 		const source = readFileSync(
 			"packages/proxy/src/handlers/proxy-operations.ts",
 			"utf-8",

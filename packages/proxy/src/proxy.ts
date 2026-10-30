@@ -50,6 +50,7 @@ import {
 	setXaiConvId,
 	validateProviderPath,
 } from "./handlers";
+import { createRelevantExhaustionResponse } from "./handlers/failover-relevance";
 import { isSkippedAfterOAuthRefusal } from "./handlers/gateway-oauth-skip";
 import {
 	completeRateLimitProbe,
@@ -567,7 +568,9 @@ async function handleProxyRequest(
 				worktreePath: refusalWorktreePath,
 				projectAttributionSource: projectAttributionSource ?? "none",
 				agentAttributionSource: agentAttributionSource ?? "none",
-				responseStatus: 503,
+				// Every refusal is a 503 except the native failure a combo terminal
+				// answers with (SB23-10878), which records its own status.
+				responseStatus: disabledFallbackResponse.status,
 				responseHeaders: Object.fromEntries(
 					disabledFallbackResponse.headers.entries(),
 				),
@@ -1079,6 +1082,19 @@ async function handleProxyRequest(
 			log.warn(
 				`All combo slots failed for combo "${filteredComboInfo.comboName}", session fallback disabled by the Combo Session Fallback setting (Settings → Advanced)`,
 			);
+			// A slot's foreign error held back in favour of a native failure
+			// (SB23-10878) is answered here too, since step 11 never runs. It
+			// is still recorded as this refusal, which the setting promises.
+			const relevantComboResponse =
+				createRelevantExhaustionResponse(requestMeta);
+			if (relevantComboResponse) {
+				return await returnRefusal(
+					relevantComboResponse,
+					"combo_session_fallback_disabled",
+					accounts.length,
+					filteredComboInfo.comboName,
+				);
+			}
 			return await returnComboSessionFallbackDisabled(
 				filteredComboInfo.comboName,
 				accounts.length,
@@ -1231,7 +1247,18 @@ async function handleProxyRequest(
 		}
 	}
 
-	// 11. All accounts failed - check if OAuth token issues are the cause
+	// 11. All accounts failed. A foreign model's error was held back in favour
+	//     of a native failure (SB23-10878): answer with the native one.
+	const relevantResponse = createRelevantExhaustionResponse(requestMeta);
+	if (relevantResponse) {
+		log.warn(
+			`All accounts failed; returning the ${relevantResponse.status} from an account serving the requested model instead of a rewritten model's error`,
+		);
+		cacheBodyStore.discardStaged(requestMeta.id);
+		return relevantResponse;
+	}
+
+	//     Otherwise check if OAuth token issues are the cause
 	const allAttemptedAccounts = filteredComboInfo
 		? [...accounts, ...(fallbackAccounts ?? [])]
 		: accounts;
