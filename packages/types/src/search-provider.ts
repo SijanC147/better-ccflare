@@ -26,11 +26,11 @@ export interface SearchProviderExtraConfigField {
 	label: string;
 	type: "text" | "number" | "select" | "boolean";
 	/** Options for `type: "select"`. */
-	options?: string[];
-	placeholder?: string;
-	required?: boolean;
-	defaultValue?: string | number | boolean;
-	description?: string;
+	options?: string[] | undefined;
+	placeholder?: string | undefined;
+	required?: boolean | undefined;
+	defaultValue?: string | number | boolean | undefined;
+	description?: string | undefined;
 }
 
 export interface SearchProviderCatalogEntry {
@@ -227,22 +227,22 @@ export interface SearchProviderPublic extends SearchProviderHealthStatus {
 export interface SearchProviderInput {
 	provider: SearchProviderId;
 	label: string;
-	apiKey?: string | null;
-	priority?: number;
-	enabled?: boolean;
-	maxResults?: number;
-	extraConfig?: Record<string, unknown> | null;
+	apiKey?: string | null | undefined;
+	priority?: number | undefined;
+	enabled?: boolean | undefined;
+	maxResults?: number | undefined;
+	extraConfig?: Record<string, unknown> | null | undefined;
 }
 
 export interface SearchProviderUpdate {
-	provider?: SearchProviderId;
-	label?: string;
+	provider?: SearchProviderId | undefined;
+	label?: string | undefined;
 	/** Omit to keep the stored key; pass null to clear it. */
-	apiKey?: string | null;
-	priority?: number;
-	enabled?: boolean;
-	maxResults?: number;
-	extraConfig?: Record<string, unknown> | null;
+	apiKey?: string | null | undefined;
+	priority?: number | undefined;
+	enabled?: boolean | undefined;
+	maxResults?: number | undefined;
+	extraConfig?: Record<string, unknown> | null | undefined;
 }
 
 /**

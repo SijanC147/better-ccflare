@@ -210,7 +210,7 @@ describe("routing write-through", () => {
 			commitRoutingDraft({ only: ["cloudflare"] }, "only", "deepseek, novita"),
 		).toEqual({ only: ["cloudflare", "deepseek", "novita"] });
 		// Nothing to add: the caller gets its own routing back, untouched.
-		const pinned = { only: ["deepseek"] } as const;
+		const pinned = { only: ["deepseek"] };
 		expect(commitRoutingDraft({ ...pinned }, "only", "  ")).toEqual(pinned);
 	});
 

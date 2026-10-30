@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/config/use-extra-usage'
+description: |-
+  Toggle serving past a spent plan window on extra usage.
+method: POST
+url: '{{baseUrl}}/api/config/use-extra-usage'
+order: 37000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

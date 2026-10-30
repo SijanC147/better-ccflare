@@ -343,7 +343,9 @@ describe("Codex per-request state survives the old maps' eviction on the carrier
 							code: "previous_response_not_found",
 						},
 					}),
-					{ status: 400 },
+					// Upstream c1c00b5e reads a recovery body only when it is
+					// labelled JSON, as the real Codex 400 is.
+					{ status: 400, headers: { "content-type": "application/json" } },
 				),
 				messagesRequest(
 					"rec-two",

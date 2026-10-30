@@ -48,7 +48,7 @@ function schemaVersion(db: Database): number {
 		.schema_version;
 }
 
-const COMPOSITE = ["priority ASC", "request_count DESC", "last_used ASC"];
+const COMPOSITE = ["priority DESC", "request_count DESC", "last_used ASC"];
 
 describe("idx_accounts_priority repair (SB23-3947)", () => {
 	it("replaces the one-column form a rebuild left behind", () => {

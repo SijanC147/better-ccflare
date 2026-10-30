@@ -266,7 +266,6 @@ export async function forwardToClient(
 			responseHeaders: responseHeadersObj,
 			isStream,
 			providerRequestId,
-			providerName: ctx.provider.name,
 			// Use the selected account's provider for billing fallback in the
 			// post-processor worker; ctx.provider.name is the server-wide default
 			// (anthropic) and would misclassify plan-only providers like qwen,

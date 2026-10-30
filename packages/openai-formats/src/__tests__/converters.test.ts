@@ -743,7 +743,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			model: "deepseek-v4.1-flash",
 			choices: [
 				{
-					index: 0,
 					message: { role: "assistant", content: "Hi" },
 					finish_reason: "stop",
 				},
@@ -770,7 +769,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			model: "m",
 			choices: [
 				{
-					index: 0,
 					message: { role: "assistant", content: "Hi" },
 					finish_reason: "stop",
 				},

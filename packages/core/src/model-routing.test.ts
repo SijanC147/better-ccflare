@@ -62,7 +62,7 @@ describe("splitModelRouting", () => {
 			sort: "throughput",
 			allow_fallbacks: true,
 			require_parameters: true,
-			data_collection: "deny",
+			data_collection: "deny" as const,
 			max_price: { prompt: 1, completion: "2" },
 			quantizations: ["fp8"],
 		};

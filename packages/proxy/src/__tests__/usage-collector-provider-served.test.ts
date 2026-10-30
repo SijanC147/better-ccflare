@@ -15,7 +15,7 @@ import type { RequestResponse } from "@better-ccflare/types";
 import { UsageCollector } from "../usage-collector";
 import type { StartMessage } from "../worker-messages";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-usage-collector-provider-served.db`;
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-usage-collector-provider-served-${process.pid}.db`;
 
 /** Recorded live OpenRouter /v1/messages 200 body (2026-10-29), trimmed. */
 const OPENROUTER_BODY = JSON.stringify({
@@ -54,6 +54,9 @@ describe("UsageCollector - provider_served", () => {
 
 	afterAll(async () => {
 		collector.dispose();
+		// Release the factory singleton so the next file in this process opens
+		// its own database rather than this one, which is deleted below.
+		DatabaseFactory.reset();
 		try {
 			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
 		} catch (error) {
@@ -85,6 +88,10 @@ describe("UsageCollector - provider_served", () => {
 			apiKeyId: null,
 			apiKeyName: null,
 			retryAttempt: 0,
+			projectId: null,
+			worktreePath: null,
+			originalModel: null,
+			appliedModel: null,
 			failoverAttempts: 0,
 		};
 		collector.handleStart(start);

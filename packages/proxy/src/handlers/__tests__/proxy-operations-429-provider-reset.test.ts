@@ -320,7 +320,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 				}),
 		);
 
-		const ctx = makeProxyContext(() => ({
+		const ctx = makeContext(() => ({
 			isRateLimited: false,
 			resetTime: undefined,
 		}));
@@ -353,7 +353,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 				}),
 		);
 
-		const ctx = makeProxyContext(() => ({
+		const ctx = makeContext(() => ({
 			isRateLimited: false,
 			resetTime: undefined,
 		}));
@@ -446,7 +446,7 @@ describe("proxyWithAccount — 429 bench honours the provider-parsed reset", () 
 				}),
 		);
 
-		const ctx = makeProxyContext(() => ({
+		const ctx = makeContext(() => ({
 			isRateLimited: false,
 			resetTime: undefined,
 		}));

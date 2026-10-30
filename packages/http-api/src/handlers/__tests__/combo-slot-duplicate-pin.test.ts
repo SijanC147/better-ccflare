@@ -43,7 +43,18 @@ function makeDbOps(thrown: unknown) {
 				name: "acc",
 				provider: "anthropic",
 			}),
-			getComboSlots: async (): Promise<Slot[]> => [],
+			// The fork's PUT refuses a slot its combo does not own before it
+			// updates, so the slot the PUT names has to be listed here.
+			getComboSlots: async (): Promise<Slot[]> => [
+				{
+					id: "slot-1",
+					combo_id: "combo-1",
+					account_id: "acc-1",
+					model: "m",
+					priority: 0,
+					enabled: true,
+				},
+			],
 			addComboSlot: async () => {
 				added.push(1);
 				throw thrown;

@@ -398,7 +398,7 @@ describe("transformStreamingResponse — text responses", () => {
 		const events = parseSSEEvents(raw);
 		const msgDelta = events.find((e) => e.event === "message_delta");
 		expect(msgDelta).toBeDefined();
-		if (!msgDelta) throw new Error("expected message_delta event");
+		if (!msgDelta?.data) throw new Error("expected message_delta event");
 		const usage = JSON.parse(msgDelta.data).usage;
 
 		expect(usage).toEqual({
@@ -424,7 +424,7 @@ describe("transformStreamingResponse — text responses", () => {
 		const events = parseSSEEvents(raw);
 		const msgDelta = events.find((e) => e.event === "message_delta");
 		expect(msgDelta).toBeDefined();
-		if (!msgDelta) throw new Error("expected message_delta event");
+		if (!msgDelta?.data) throw new Error("expected message_delta event");
 		const usage = JSON.parse(msgDelta.data).usage;
 
 		expect(usage.input_tokens).toBe(20);

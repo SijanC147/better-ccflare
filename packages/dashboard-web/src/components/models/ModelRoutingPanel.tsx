@@ -54,7 +54,7 @@ export function summarizeRouting(routing: ModelRouting | null): string {
 	return parts.join(" · ");
 }
 
-interface ModelRoutingPanelProps {
+export interface ModelRoutingPanelProps {
 	provider: string | null | undefined;
 	routing: ModelRouting | null;
 	/** Receives the next routing object, or null for "any provider". */
@@ -63,16 +63,18 @@ interface ModelRoutingPanelProps {
 	 * List mode only: the segmented selector for the list element being
 	 * edited. Labels are the stripped models; `index` is which one is current.
 	 */
-	segments?: {
-		labels: string[];
-		index: number;
-		onSelect: (index: number) => void;
-	};
+	segments?:
+		| {
+				labels: string[];
+				index: number;
+				onSelect: (index: number) => void;
+		  }
+		| undefined;
 	/**
 	 * When set, the panel is shown read-only (no list element to edit) with
 	 * this explanation.
 	 */
-	emptyHint?: string | null;
+	emptyHint?: string | null | undefined;
 }
 
 function slugify(value: string): string {

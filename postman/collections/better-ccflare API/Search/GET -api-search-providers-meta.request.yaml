@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/search-providers/meta'
+description: |-
+  The catalog of provider kinds and their config fields.
+method: GET
+url: '{{baseUrl}}/api/search-providers/meta'
+order: 5000

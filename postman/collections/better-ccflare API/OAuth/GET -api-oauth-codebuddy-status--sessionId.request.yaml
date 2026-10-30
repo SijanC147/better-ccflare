@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/oauth/codebuddy/status/:sessionId'
+description: |-
+  Poll a CodeBuddy device-flow session. Auth-exempt, read-only.
+method: GET
+url: '{{baseUrl}}/api/oauth/codebuddy/status/:sessionId'
+order: 11000
+pathVariables:
+  - key: 'sessionId'
+    value: ''

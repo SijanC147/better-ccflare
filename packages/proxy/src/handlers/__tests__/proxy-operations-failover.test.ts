@@ -1243,6 +1243,16 @@ describe("proxyWithAccount — 401 failover", () => {
 	});
 });
 
+// The CodeBuddy forward and replay paths enqueue request rows, which the
+// shared fixture's throwing asyncWriter stub refuses.
+function makeCodeBuddyContext() {
+	return makeProxyContext({
+		asyncWriter: { enqueue: () => {} } as unknown as AsyncDbWriter,
+		// forwardToClient reads this before it reaches the usage collector.
+		config: { getStorePayloads: () => false },
+	});
+}
+
 describe("proxyWithAccount — CodeBuddy 11128 gateway rejection", () => {
 	let originalFetch: typeof globalThis.fetch;
 
@@ -1278,7 +1288,7 @@ describe("proxyWithAccount — CodeBuddy 11128 gateway rejection", () => {
 				},
 				400,
 			),
-		);
+		) as unknown as typeof fetch;
 
 		const bodyBuffer = makeRequestBody();
 		const req = makeRequest(bodyBuffer);
@@ -1290,7 +1300,7 @@ describe("proxyWithAccount — CodeBuddy 11128 gateway rejection", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeCodeBuddyContext(),
 		);
 
 		expect(result).toBeNull();
@@ -1306,7 +1316,7 @@ describe("proxyWithAccount — CodeBuddy 11128 gateway rejection", () => {
 				},
 				400,
 			),
-		);
+		) as unknown as typeof fetch;
 
 		const bodyBuffer = makeRequestBody();
 		const req = makeRequest(bodyBuffer);
@@ -1321,7 +1331,7 @@ describe("proxyWithAccount — CodeBuddy 11128 gateway rejection", () => {
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(),
+				makeCodeBuddyContext(),
 			);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -1373,7 +1383,7 @@ describe("proxyWithAccount — CodeBuddy 11128 terminal rejection", () => {
 				},
 				400,
 			),
-		);
+		) as unknown as typeof fetch;
 
 		const captures: Array<() => Promise<Response | null>> = [];
 		const bodyBuffer = makeRequestBody();
@@ -1389,7 +1399,7 @@ describe("proxyWithAccount — CodeBuddy 11128 terminal rejection", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeCodeBuddyContext(),
 			undefined,
 			undefined,
 			undefined,
@@ -1426,7 +1436,7 @@ describe("proxyWithAccount — CodeBuddy 11128 terminal rejection", () => {
 	it("does not register a replay while other candidates remain", async () => {
 		globalThis.fetch = mock(async () =>
 			jsonResponse({ code: 11128, msg: "rejected" }, 400),
-		);
+		) as unknown as typeof fetch;
 
 		const captures: Array<() => Promise<Response | null>> = [];
 		const bodyBuffer = makeRequestBody();
@@ -1439,7 +1449,7 @@ describe("proxyWithAccount — CodeBuddy 11128 terminal rejection", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeCodeBuddyContext(),
 			undefined,
 			undefined,
 			undefined,
@@ -1481,7 +1491,7 @@ describe("proxyWithAccount — CodeBuddy 11128 oversized body", () => {
 					status: 400,
 					headers: { "Content-Type": "application/json" },
 				}),
-		);
+		) as unknown as typeof fetch;
 
 		const captures: Array<() => Promise<Response | null>> = [];
 		const bodyBuffer = makeRequestBody();
@@ -1503,7 +1513,7 @@ describe("proxyWithAccount — CodeBuddy 11128 oversized body", () => {
 			bodyBuffer,
 			() => undefined,
 			0,
-			makeProxyContext(),
+			makeCodeBuddyContext(),
 			undefined,
 			undefined,
 			undefined,
@@ -1573,7 +1583,7 @@ describe("CodeBuddy rejection diagnostics — scan the transformed body", () => 
 				},
 				400,
 			);
-		});
+		}) as unknown as typeof fetch;
 
 		// Console logging is silent outside debug mode, so observe the logger
 		// API itself (same approach as the account rate-limit guard test).
@@ -1619,7 +1629,7 @@ describe("CodeBuddy rejection diagnostics — scan the transformed body", () => 
 				bodyBuffer,
 				() => undefined,
 				0,
-				makeProxyContext(),
+				makeCodeBuddyContext(),
 			);
 		} finally {
 			warnSpy.mockRestore();

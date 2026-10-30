@@ -20,7 +20,7 @@ export type SearchProviderStatus = SearchProviderPublic["status"];
 export interface SearchProviderTestResult {
 	ok: boolean;
 	latencyMs: number;
-	error?: string;
+	error?: string | undefined;
 }
 
 /** The three global flags from `GET/PATCH /api/web-search/settings`. */

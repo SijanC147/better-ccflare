@@ -22,6 +22,7 @@ const SECRET = "tvly-SECRET-value-1234567890";
 function createFakeStore(seed: Partial<SearchProvider>[] = []): {
 	store: SearchProviderStore;
 	rows: Map<string, SearchProvider>;
+	listActiveByPriority: () => Promise<SearchProvider[]>;
 } {
 	const rows = new Map<string, SearchProvider>();
 	let nextId = 1;
@@ -90,7 +91,8 @@ function createFakeStore(seed: Partial<SearchProvider>[] = []): {
 			}
 			if (patch.priority !== undefined) next.priority = patch.priority;
 			if (patch.maxResults !== undefined) next.maxResults = patch.maxResults;
-			if (patch.extraConfig !== undefined) next.extraConfig = patch.extraConfig;
+			if (patch.extraConfig !== undefined)
+				next.extraConfig = patch.extraConfig ?? {};
 			if (patch.enabled !== undefined) next.enabled = patch.enabled;
 			if (patch.apiKey !== undefined) {
 				next.apiKey =
@@ -102,14 +104,14 @@ function createFakeStore(seed: Partial<SearchProvider>[] = []): {
 		async remove(id) {
 			return rows.delete(id);
 		},
-		async listActiveByPriority() {
-			return [...rows.values()]
-				.filter((r) => r.enabled)
-				.sort((a, b) => a.priority - b.priority);
-		},
 	};
 
-	return { store, rows };
+	const listActiveByPriority = async (): Promise<SearchProvider[]> =>
+		[...rows.values()]
+			.filter((r) => r.enabled)
+			.sort((a, b) => a.priority - b.priority);
+
+	return { store, rows, listActiveByPriority };
 }
 
 const PROVIDER_WITHOUT_KEY = SEARCH_PROVIDER_CATALOG.find(
@@ -250,7 +252,7 @@ describe("search provider handlers", () => {
 	});
 
 	it("toggles enabled via PATCH", async () => {
-		const { store, rows } = createFakeStore([
+		const { store, rows, listActiveByPriority } = createFakeStore([
 			{ provider: PROVIDER_WITH_KEY, label: "A", apiKey: SECRET },
 		]);
 		const handlers = createSearchProviderHandlers(store);
@@ -262,7 +264,7 @@ describe("search provider handlers", () => {
 		expect(res.status).toBe(200);
 		const body = await readJson(res);
 		expect(body.data.enabled).toBe(false);
-		expect((await store.listActiveByPriority()).length).toBe(0);
+		expect((await listActiveByPriority()).length).toBe(0);
 	});
 
 	it("replaces apiKey on PATCH without echoing it", async () => {
@@ -373,9 +375,6 @@ describe("search provider handlers", () => {
 			remove: async () => {
 				throw new Error("store must not be called");
 			},
-			listActiveByPriority: async () => {
-				throw new Error("store must not be called");
-			},
 		};
 		const handlers = createSearchProviderHandlers(store);
 		const res = handlers.meta();
@@ -420,7 +419,7 @@ describe("search provider /test", () => {
 	};
 
 	it("tavily test returns ok on a stubbed 200 with results", async () => {
-		const calls: { url: string; init?: RequestInit }[] = [];
+		const calls: { url: string; init?: RequestInit | undefined }[] = [];
 		globalThis.fetch = (async (
 			input: RequestInfo | URL,
 			init?: RequestInit,
@@ -430,7 +429,7 @@ describe("search provider /test", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		try {
 			const { store, rows } = createFakeStore([
@@ -439,7 +438,7 @@ describe("search provider /test", () => {
 			const handlers = createSearchProviderHandlers(store);
 			// The store only exposes the masked public row, so the handler
 			// resolves the secret key through getApiKey(id) for the outbound call.
-			let requestedId: string | null = null;
+			let requestedId = null as string | null;
 			const res = await handlers.test([...rows.keys()][0], (id) => {
 				requestedId = id;
 				return Promise.resolve(SECRET);
@@ -463,7 +462,7 @@ describe("search provider /test", () => {
 			new Response(JSON.stringify({ error: "unauthorized" }), {
 				status: 401,
 				headers: { "content-type": "application/json" },
-			})) as typeof fetch;
+			})) as unknown as typeof fetch;
 		try {
 			const { store, rows } = createFakeStore([
 				{ provider: "tavily", label: "T", apiKey: SECRET },
@@ -482,12 +481,12 @@ describe("search provider /test", () => {
 		globalThis.fetch = (async () => {
 			called = true;
 			return new Response("{}", { status: 200 });
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		try {
-			const otherProvider = Object.keys(SEARCH_PROVIDER_CATALOG).find(
-				(p) => p !== "tavily",
-			);
+			const otherProvider = SEARCH_PROVIDER_CATALOG.find(
+				(entry) => entry.id !== "tavily",
+			)?.id;
 			if (!otherProvider) return;
 			const { store, rows } = createFakeStore([
 				{ provider: otherProvider, label: "O", apiKey: "k" },

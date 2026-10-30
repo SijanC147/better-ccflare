@@ -64,7 +64,7 @@ function isDuplicateLabelError(error: unknown): boolean {
 export interface SearchProviderTestResult {
 	ok: boolean;
 	latencyMs: number;
-	error?: string;
+	error?: string | undefined;
 }
 
 export interface SearchProviderHandlers {

@@ -3189,6 +3189,8 @@ OAuth tokens will need to be re-authenticated.
 	async runDiscoveryScan(): Promise<unknown> {
 		if (!this._discoveryRunner) return null;
 		return this._discoveryRunner();
+	}
+
 	// ── Search provider operations delegated to repository ────────────────────
 	// `getSearchProvider` / `listSearchProviders` return the masked
 	// (API-facing) shape; the full model, plaintext key included, is only

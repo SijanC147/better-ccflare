@@ -34,7 +34,7 @@ export function SearchProviderRow({
 	onEdit,
 }: {
 	provider: SearchProviderPublic;
-	catalogLabel?: string;
+	catalogLabel?: string | undefined;
 	onEdit: () => void;
 }) {
 	const update = useUpdateSearchProvider();

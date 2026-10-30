@@ -1,0 +1,10 @@
+$kind: http-request
+name: 'GET /api/search-providers/:id'
+description: |-
+  One search provider, API key masked.
+method: GET
+url: '{{baseUrl}}/api/search-providers/:id'
+order: 6000
+pathVariables:
+  - key: 'id'
+    value: ''

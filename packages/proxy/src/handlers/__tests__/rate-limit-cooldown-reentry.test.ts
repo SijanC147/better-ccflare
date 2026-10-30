@@ -652,7 +652,7 @@ describe("explicit-reset honouring switch (#506)", () => {
 		setEnv({ CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS: "1000" });
 		Date.now = () => NOW;
 		const account = makeAccount();
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 		const resetTime = NOW + 60 * 60_000;
 
 		applyRateLimitCooldown(
@@ -674,7 +674,7 @@ describe("explicit-reset honouring switch (#506)", () => {
 		});
 		Date.now = () => NOW;
 		const account = makeAccount();
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,
@@ -702,7 +702,7 @@ describe("explicit-reset honouring switch (#506)", () => {
 		applyRateLimitCooldown(
 			longReset,
 			{ resetTime: NOW + 600_000, reason: "model_fallback_429" },
-			makeCtx({ rateLimited: true }).ctx,
+			makeCtx().ctx,
 		);
 		expect(longReset.rate_limited_until).toBe(NOW + 600_000);
 
@@ -712,7 +712,7 @@ describe("explicit-reset honouring switch (#506)", () => {
 		applyRateLimitCooldown(
 			pastReset,
 			{ resetTime: NOW - 60_000, reason: "model_fallback_429" },
-			makeCtx({ rateLimited: true }).ctx,
+			makeCtx().ctx,
 		);
 		expect(pastReset.rate_limited_until).toBe(
 			NOW + computeRateLimitBackoffMs(11),
@@ -727,7 +727,7 @@ describe("explicit-reset honouring switch (#506)", () => {
 		});
 		Date.now = () => NOW;
 		const account = makeAccount();
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 		const resetTime = NOW + 5_000;
 
 		applyRateLimitCooldown(
@@ -745,7 +745,7 @@ describe("explicit-reset honouring switch (#506)", () => {
 		setEnv({ CCFLARE_RATE_LIMIT_HONOR_EXPLICIT_RESET: "true" });
 		Date.now = () => NOW;
 		const account = makeAccount();
-		const { ctx } = makeCtx({ rateLimited: true });
+		const { ctx } = makeCtx();
 
 		applyRateLimitCooldown(
 			account,

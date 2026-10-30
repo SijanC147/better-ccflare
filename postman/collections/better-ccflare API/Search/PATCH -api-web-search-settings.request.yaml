@@ -1,0 +1,16 @@
+$kind: http-request
+name: 'PATCH /api/web-search/settings'
+description: |-
+  Change any of the three web search settings.
+  
+  Body: {"enabled": true, "maxResultChars": 20000, "bypassHeader": false}
+method: PATCH
+url: '{{baseUrl}}/api/web-search/settings'
+order: 2000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

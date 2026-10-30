@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { makeAccount } from "../../testing/account-fixture";
 import { logBus } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../testing/account-fixture";
 import {
 	getModelName,
 	transformRequestBodyModel,

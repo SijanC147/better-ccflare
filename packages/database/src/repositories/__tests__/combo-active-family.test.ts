@@ -43,7 +43,7 @@ function insertCombo(
 	id: string,
 	name: string,
 	enabled: number,
-): Promise<void> {
+): void {
 	db.run(
 		`INSERT INTO combos (id, name, description, enabled, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -59,7 +59,7 @@ function insertSlot(
 	model: string,
 	priority: number,
 	enabled: number,
-): Promise<void> {
+): void {
 	db.run(
 		`INSERT INTO combo_slots (id, combo_id, account_id, model, priority, enabled)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -72,7 +72,7 @@ function assignFamily(
 	family: string,
 	comboId: string | null,
 	enabled: number,
-): Promise<void> {
+): void {
 	db.run(
 		`INSERT INTO combo_family_assignments (family, combo_id, enabled)
      VALUES (?, ?, ?)
@@ -202,6 +202,9 @@ describe("ComboRepository.getActiveComboForFamily", () => {
 			"model",
 			"priority",
 			"enabled",
+			// The fork's per-slot thresholds ride the join (SB23-3390).
+			"max_utilization_percent",
+			"min_reset_remaining_ms",
 		]);
 
 		db.close();

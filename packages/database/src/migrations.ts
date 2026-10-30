@@ -2362,7 +2362,19 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			`Populated ${insertedCount} default Claude model translations for Bedrock`,
 		);
 
-		// Migrate existing Muse Spark accounts to the corrected 'meta' provider key
+		// Migrate existing Muse Spark accounts to the corrected 'meta' provider key.
+		//
+		// The UNIQUE (name, provider, endpoint) index already exists by now, so
+		// a muse-spark row whose name a meta row already holds made this UPDATE
+		// fail, and the warning below left both rows in place. Drop the index
+		// first; ensureUniqueAccountsIndex at the end of this migration merges
+		// the pair and builds it again.
+		const hasMuseSpark = db
+			.prepare(`SELECT 1 FROM accounts WHERE provider = 'muse-spark' LIMIT 1`)
+			.get();
+		if (hasMuseSpark) {
+			db.run("DROP INDEX IF EXISTS idx_accounts_unique_name_provider_endpoint");
+		}
 		try {
 			const updateCount = db
 				.prepare(

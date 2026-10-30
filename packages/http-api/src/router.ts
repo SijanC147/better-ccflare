@@ -143,8 +143,8 @@ import {
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
 import { createRoutingObservationsHandler } from "./handlers/routing-observations";
-import { createServiceStatusHandler } from "./handlers/service-status";
 import { createSearchProviderHandlers } from "./handlers/search-providers";
+import { createServiceStatusHandler } from "./handlers/service-status";
 import { createSessionAccountHandler } from "./handlers/sessions";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import {
@@ -173,9 +173,9 @@ import {
 } from "./handlers/worktree-rules";
 import { AuthService } from "./services/auth-service";
 import { MERGED_UPSTREAM_SHA } from "./services/fork-identity";
+import { createSearchProviderStore } from "./services/search-providers";
 import { getServiceStatusService } from "./services/service-status-service";
 import { VersionStatusService } from "./services/version-status-service";
-import { createSearchProviderStore } from "./services/search-providers";
 import type { APIContext } from "./types";
 import { errorResponse, jsonResponse } from "./utils/http-error";
 

@@ -16,7 +16,7 @@ import { providerRequestIdFromHeaders } from "@better-ccflare/providers";
 import { UsageCollector } from "../usage-collector";
 import type { StartMessage } from "../worker-messages";
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-usage-collector-payload-provider-request-id.db`;
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-usage-collector-payload-provider-request-id-${process.pid}.db`;
 
 describe("UsageCollector - RequestPayload.meta.providerRequestId", () => {
 	let dbOps: DatabaseOperations;
@@ -42,6 +42,9 @@ describe("UsageCollector - RequestPayload.meta.providerRequestId", () => {
 
 	afterAll(async () => {
 		collector.dispose();
+		// Release the factory singleton so the next file in this process opens
+		// its own database rather than this one, which is deleted below.
+		DatabaseFactory.reset();
 		try {
 			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
 		} catch (error) {
@@ -74,6 +77,10 @@ describe("UsageCollector - RequestPayload.meta.providerRequestId", () => {
 			apiKeyId: null,
 			apiKeyName: null,
 			retryAttempt: 0,
+			projectId: null,
+			worktreePath: null,
+			originalModel: null,
+			appliedModel: null,
 			failoverAttempts: 0,
 			...overrides,
 		};
@@ -115,8 +122,8 @@ describe("UsageCollector - RequestPayload.meta.providerRequestId", () => {
 				providerRequestId: providerRequestIdFromHeaders("anthropic", headers),
 			}),
 		);
-		expect(payload).not.toBeNull();
-		expect(payload?.meta).not.toHaveProperty("providerRequestId");
+		if (!payload) throw new Error("expected a stored payload");
+		expect(payload.meta).not.toHaveProperty("providerRequestId");
 	});
 
 	test("omits providerRequestId when the StartMessage field is an explicit null", async () => {
@@ -127,7 +134,7 @@ describe("UsageCollector - RequestPayload.meta.providerRequestId", () => {
 				providerRequestId: null,
 			}),
 		);
-		expect(payload).not.toBeNull();
-		expect(payload?.meta).not.toHaveProperty("providerRequestId");
+		if (!payload) throw new Error("expected a stored payload");
+		expect(payload.meta).not.toHaveProperty("providerRequestId");
 	});
 });

@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'POST /api/search-providers/:id/test'
+description: |-
+  Send one test query through the provider and report its latency.
+  
+  Calls the provider's real API with the stored key.
+method: POST
+url: '{{baseUrl}}/api/search-providers/:id/test'
+order: 9000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'id'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

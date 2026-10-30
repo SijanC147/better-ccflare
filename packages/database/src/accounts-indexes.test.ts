@@ -36,14 +36,14 @@ const EXPECTED_PRIORITY_COLUMNS = [
 ];
 
 /**
- * Indexes that only the two table rebuilds create (a fresh database never runs
- * a rebuild), so they are only asserted for upgraded databases.
+ * Indexes that only a table rebuild creates. Upstream's rebuilds lose the
+ * PRIMARY KEY and add `idx_accounts_id`, `idx_accounts_provider` and
+ * `idx_accounts_last_used` back. The fork's two rebuilds are an explicit
+ * `CREATE TABLE` identical to a fresh install's, PRIMARY KEY included
+ * (SB23-3918), so an upgraded database ends with exactly a fresh install's
+ * index set and nothing is rebuild-only.
  */
-const REBUILD_ONLY_INDEXES = [
-	"idx_accounts_id",
-	"idx_accounts_provider",
-	"idx_accounts_last_used",
-] as const;
+const REBUILD_ONLY_INDEXES: readonly string[] = [];
 
 function indexSql(db: Database, name: string): string | null {
 	const row = db
@@ -203,10 +203,9 @@ describe("accounts index set (SQLite)", () => {
 		}>;
 		expect(cols.find((c) => c.name === "refresh_token")?.notnull).toBe(0);
 		// The rebuild's `CREATE TABLE accounts_new (…)` keeps the PRIMARY KEY,
-		// so the unique index is redundant here — but it is re-created to match
-		// the account_tier rebuild, which does lose the PK.
+		// which is what makes `id` unique; the fork recreates no separate
+		// `idx_accounts_id` (SB23-3918). The duplicate insert below proves it.
 		expect(cols.find((c) => c.name === "id")?.pk).toBe(1);
-		expect(indexSql(db, "idx_accounts_id") ?? "").toContain("UNIQUE");
 		expect(() =>
 			db
 				.prepare(

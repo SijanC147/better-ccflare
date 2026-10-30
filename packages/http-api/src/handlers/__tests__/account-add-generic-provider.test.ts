@@ -14,7 +14,7 @@ import { createAccountAddHandler } from "../accounts";
 // actually reads from (api_key for key-based providers, the token pair for
 // OAuth providers).
 
-const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-add-generic-provider.db`;
+const TEST_DB_PATH = `${process.env.TMPDIR || "/tmp"}/test-account-add-generic-provider-${process.pid}.db`;
 const SERVER_ID = "test-account-add-generic-provider-server";
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 

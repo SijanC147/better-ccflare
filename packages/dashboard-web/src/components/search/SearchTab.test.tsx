@@ -137,12 +137,17 @@ const catalog: SearchProviderCatalogEntry[] = [
 				options: ["off", "moderate", "strict"],
 			},
 		],
+		implemented: true,
 	},
 	{
-		id: "searxng",
-		label: "SearXNG",
+		// A keyless entry for the validation cases. "searxng" is no
+		// SearchProviderId, so the fixture borrows a real id.
+		id: "parallel",
+		label: "Keyless provider",
 		requiresKey: false,
-		docsUrl: "https://docs.searxng.org/",
+		docsUrl: "https://example.invalid/",
+		extraConfigFields: [],
+		implemented: true,
 	},
 ];
 
@@ -303,7 +308,7 @@ describe("validateForm", () => {
 
 	it("does not require a key when the catalog does not", () => {
 		expect(
-			validateForm({ ...base, provider: "searxng" }, catalog[1], {
+			validateForm({ ...base, provider: "parallel" }, catalog[1], {
 				isEdit: false,
 			}),
 		).toBeNull();

@@ -67,7 +67,7 @@ interface RequestState {
 		costUsd?: number;
 		tokensPerSecond?: number;
 		/** Backend named by the provider's own response body (non-stream only). */
-		providerServed?: string;
+		providerServed?: string | undefined;
 	};
 	lastActivity: number;
 	createdAt: number; // Capacity eviction ordering

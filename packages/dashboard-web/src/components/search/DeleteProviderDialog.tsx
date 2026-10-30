@@ -27,7 +27,7 @@ export function DeleteProviderDialog({
 	onClose,
 }: {
 	provider: SearchProviderPublic;
-	catalogLabel?: string;
+	catalogLabel?: string | undefined;
 	isOpen: boolean;
 	onClose: () => void;
 }) {

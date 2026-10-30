@@ -39,6 +39,16 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
+		usage_pause_five_hour_min_reset_remaining_ms: null,
+		usage_pause_weekly_min_reset_remaining_ms: null,
 		...overrides,
 	};
 }
@@ -137,7 +147,7 @@ async function runFallback(opts: {
 			}),
 			{ status: 200, headers: { "Content-Type": "application/json" } },
 		);
-	});
+	}) as unknown as typeof fetch;
 
 	// The fallback list is looked up by the model IN THE BODY, which the slot
 	// override has already rewritten: give it the entry the test means.
@@ -215,7 +225,7 @@ describe("proxyWithAccount — model fallback follows each entry's routing suffi
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			);
-		});
+		}) as unknown as typeof fetch;
 
 		const bodyText = JSON.stringify({
 			model: "claude-sonnet-4-5",
@@ -299,7 +309,7 @@ describe("proxyWithAccount — model fallback follows each entry's routing suffi
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			);
-		});
+		}) as unknown as typeof fetch;
 
 		const bodyText = JSON.stringify({
 			model: "claude-sonnet-4-5",

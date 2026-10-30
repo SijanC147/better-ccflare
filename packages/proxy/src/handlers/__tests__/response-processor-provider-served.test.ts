@@ -25,20 +25,37 @@ function makeAccount(provider: string): Account {
 		last_used: null,
 		created_at: Date.now(),
 		rate_limited_until: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
 		session_start: null,
 		session_request_count: 0,
 		paused: false,
+		requires_reauth: false,
 		rate_limit_reset: null,
 		rate_limit_status: null,
 		rate_limit_remaining: null,
 		priority: 0,
 		auto_fallback_enabled: false,
 		auto_refresh_enabled: false,
+		auto_pause_on_overage_enabled: false,
+		peak_hours_pause_enabled: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
+		usage_pause_five_hour_min_reset_remaining_ms: null,
+		usage_pause_weekly_min_reset_remaining_ms: null,
 		custom_endpoint: null,
 		model_mappings: null,
+		request_transformer: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
 		consecutive_rate_limits: 0,
+		renewal_day: null,
 	};
 }
 
@@ -174,13 +191,17 @@ describe("UsageCollector — provider_served summary", () => {
 			apiKeyName: null,
 			retryAttempt: 0,
 			failoverAttempts: 0,
+			projectId: null,
+			worktreePath: null,
+			originalModel: null,
+			appliedModel: null,
 			...overrides,
 		};
 	}
 
 	function run(providerName: string, responseBody: string) {
 		const summaries: Array<{ providerServed?: string }> = [];
-		const saved: Array<{ usage?: Record<string, unknown> }> = [];
+		const saved: Array<{ usage?: Record<string, unknown> | undefined }> = [];
 		const collector = new UsageCollector(
 			{
 				saveRequest: async (...args: unknown[]) => {
@@ -204,7 +225,6 @@ describe("UsageCollector — provider_served summary", () => {
 			collector.handleStart(
 				makeStart({
 					providerName,
-					responseBody: null,
 				}) as StartMessage,
 			);
 			await collector.handleEnd({

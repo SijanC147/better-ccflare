@@ -1,4 +1,6 @@
+import { beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@better-ccflare/types";
+import { makeAccount } from "../../../testing/account-fixture";
 import { OpenRouterProvider } from "../provider";
 
 const API_KEY = "test-api-key";
@@ -10,30 +12,12 @@ describe("OpenRouterProvider", () => {
 
 	beforeEach(() => {
 		provider = new OpenRouterProvider();
-		mockAccount = {
+		mockAccount = makeAccount({
 			id: "test-id",
 			name: "test-openrouter-account",
 			provider: "openrouter",
 			refresh_token: "test-api-key",
-			access_token: null,
-			expires_at: null,
-			api_key: null,
-			custom_endpoint: null,
-			rate_limited_until: null,
-			rate_limit_status: null,
-			rate_limit_reset: null,
-			rate_limit_remaining: null,
-			created_at: Date.now(),
-			last_used: null,
-			request_count: 0,
-			total_requests: 0,
-			session_start: null,
-			session_request_count: 0,
-			paused: false,
-			priority: 0,
-			auto_fallback_enabled: false,
-			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {

@@ -28,7 +28,6 @@ function tempIncVacDbPath(): string {
 	return tempDbPath("test-incvac-adaptive");
 }
 
-
 /**
  * Insert `count` request + payload rows with a `bytesPerRow`-ish JSON blob so
  * the on-disk file grows by a few hundred KB. request_payloads.id is a FK to

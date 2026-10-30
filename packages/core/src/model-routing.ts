@@ -15,15 +15,15 @@
 
 /** The subset of OpenRouter's `provider` object we forward. */
 export interface ModelRouting {
-	only?: string[];
-	ignore?: string[];
-	order?: string[];
-	sort?: string;
-	allow_fallbacks?: boolean;
-	require_parameters?: boolean;
-	data_collection?: "allow" | "deny";
-	max_price?: Record<string, unknown>;
-	quantizations?: string[];
+	only?: string[] | undefined;
+	ignore?: string[] | undefined;
+	order?: string[] | undefined;
+	sort?: string | undefined;
+	allow_fallbacks?: boolean | undefined;
+	require_parameters?: boolean | undefined;
+	data_collection?: "allow" | "deny" | undefined;
+	max_price?: Record<string, unknown> | undefined;
+	quantizations?: string[] | undefined;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
