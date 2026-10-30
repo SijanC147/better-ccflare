@@ -56,6 +56,7 @@ import { forwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { applyAccountRequestTransformer } from "./account-request-transformer";
 import { getXaiConvId } from "./account-selector";
+import { noteUpstreamAnswer, suppressForeignError } from "./failover-relevance";
 import { noteWindowlessOAuthRefusal } from "./gateway-oauth-skip";
 import { markFamilyExhausted } from "./model-capacity";
 import { forwardObservedUpstream } from "./observed-upstream";
@@ -1232,7 +1233,7 @@ export async function proxyWithAccount(
 			// Transport-failure retry, bounded by retry_attempts. See
 			// forwardWithTransportRetry for why a throw is the only signal that
 			// makes a retry safe on a non-idempotent POST.
-			return forwardWithTransportRetry(target, attemptOnce, {
+			const answer = await forwardWithTransportRetry(target, attemptOnce, {
 				settings: ctx.runtime.retry,
 				signal,
 				onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
@@ -1241,6 +1242,11 @@ export async function proxyWithAccount(
 					);
 				},
 			});
+			// Which model this answer is about, for the exhaustion ranking in
+			// failover-relevance.ts (SB23-10878). Read at call time: `outgoing`
+			// is declared below and every call comes after it.
+			noteUpstreamAnswer(requestMeta, account, answer, outgoing.model);
+			return answer;
 		};
 		if (
 			process.env.DEBUG?.includes("proxy") ||
@@ -3339,6 +3345,56 @@ export async function proxyWithAccount(
 			}
 			cancelDiscardedResponseBody(response);
 			return null; // Signal to try next account
+		}
+
+		// A foreign model's error after a native failure is not the client's
+		// answer (SB23-10878): fail over, and let proxy.ts report the native
+		// failure if nothing else serves the request. The audit row keeps the
+		// attempt in the history, as the transient-5xx failover above does.
+		if (suppressForeignError(requestMeta, account, response.status)) {
+			log.warn(
+				`Account ${account.name}: ${response.status} for rewritten model ${outgoing.model}, after an account serving ${requestMeta.appliedModel ?? requestMeta.originalModel} had failed; failing over instead of forwarding it`,
+			);
+			const responseTime = Date.now() - requestMeta.timestamp;
+			const modelRewrite = isModelRewrite(
+				requestMeta.originalModel,
+				requestMeta.appliedModel,
+			);
+			const suppressedStatus = response.status;
+			ctx.asyncWriter.enqueue(() =>
+				ctx.dbOps.saveRequest(
+					crypto.randomUUID(),
+					req.method,
+					url.pathname,
+					account.id,
+					suppressedStatus,
+					false,
+					"foreign_model_error",
+					responseTime,
+					failoverAttempts,
+					{ model: outgoing.model },
+					requestMeta.agentUsed ?? undefined,
+					apiKeyId ?? undefined,
+					apiKeyName ?? undefined,
+					requestMeta.project ?? null,
+					undefined,
+					requestMeta.comboName ?? null,
+					modelRewrite ? (requestMeta.originalModel ?? null) : null,
+					modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+					requestMeta.projectAttributionSource ?? null,
+					requestMeta.agentAttributionSource ?? null,
+					null,
+					requestMeta.clientSessionId ?? null,
+					gatewayHint.requestClass,
+					gatewayHint.agentType,
+					gatewayHint.prevToolDurations,
+					gatewayHint.compaction,
+					gatewayHint.contextCompacted,
+					...auditTail,
+				),
+			);
+			cancelDiscardedResponseBody(response);
+			return null;
 		}
 
 		// Forward response to client

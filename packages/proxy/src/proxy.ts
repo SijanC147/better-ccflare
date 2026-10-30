@@ -50,6 +50,7 @@ import {
 	setXaiConvId,
 	validateProviderPath,
 } from "./handlers";
+import { createRelevantExhaustionResponse } from "./handlers/failover-relevance";
 import { isSkippedAfterOAuthRefusal } from "./handlers/gateway-oauth-skip";
 import {
 	completeRateLimitProbe,
@@ -1231,7 +1232,18 @@ async function handleProxyRequest(
 		}
 	}
 
-	// 11. All accounts failed - check if OAuth token issues are the cause
+	// 11. All accounts failed. A foreign model's error was held back in favour
+	//     of a native failure (SB23-10878): answer with the native one.
+	const relevantResponse = createRelevantExhaustionResponse(requestMeta);
+	if (relevantResponse) {
+		log.warn(
+			`All accounts failed; returning the ${relevantResponse.status} from an account serving the requested model instead of a rewritten model's error`,
+		);
+		cacheBodyStore.discardStaged(requestMeta.id);
+		return relevantResponse;
+	}
+
+	//     Otherwise check if OAuth token issues are the cause
 	const allAttemptedAccounts = filteredComboInfo
 		? [...accounts, ...(fallbackAccounts ?? [])]
 		: accounts;
