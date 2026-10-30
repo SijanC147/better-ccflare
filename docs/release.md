@@ -175,14 +175,14 @@ Nothing else carries a release version. `packages/core/src/version.ts` holds
   That reading was correct on the Bun it was taken on and is **version-dependent**, which the
   sentence did not say. Measured at `364aaa4c` in fresh clones, against a lock recording
   `3.23.0` under a manifest saying `3.24.0`: Bun **1.3.14** leaves the tree clean, and Bun
-  **1.4.2** rewrites that one line. 1.3.14 is the pinned version (`.hextap.json` and
-  `ci.yml:47`), and it never writes the field at all, so it can neither create the drift nor
+  **1.4.2** rewrites that one line. 1.3.14 was the pinned version then (`.hextap.json` and
+  `ci.yml:47`; moved to 1.4.4 by `SB23-10882`), and it never writes the field at all, so it can neither create the drift nor
   clear it. Only a newer Bun does. That is why this went unnoticed for two releases: CI runs
   the version that is blind to it, while developers run the version that reports it, and
   every lane saw a dirty tree it was told to ignore.
 - **`bun install --frozen-lockfile` passes either way**, at 1.3.14, against both values. The
   field is informational and bun resolves workspaces by path, so this was never a release
-  hazard. `.hextap.json` runs that exact argv at `runtime_version` 1.3.14, byte-identical to
+  hazard. `.hextap.json` ran that exact argv at `runtime_version` 1.3.14, byte-identical to
   `ci.yml:51`. The v3.8.0 release failure was a *missing workspace package*, which is a
   different problem and does require a regenerated committed lockfile.
 - **npm.** This fork does not publish there; `better-ccflare` on npm is upstream's package.
@@ -243,7 +243,7 @@ These three files must be **byte-identical**:
 homebrew-hextap/Projects/better-ccflare.json
 ```
 
-Current SHA-256: `328f95a73340ff0de3d5489a7fc40fb3f9c9c2f7e55e4603ab465f59e169f9fb`
+Current SHA-256: `4e1ad4a1e9d26119c52998d35613e18377debacb69a637fa89166cf39a8bd080`
 
 No field is safe to edit unilaterally. A legitimate manifest change means: edit
 `.hextap.json`, copy the exact bytes to `.hextap/tap-registration.json`, open a reviewed tap

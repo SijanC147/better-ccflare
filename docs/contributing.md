@@ -660,7 +660,7 @@ We use semantic versioning (SemVer):
 
 1. **Prepare and validate on a feature branch**
    - Update the package versions and `bun.lock` together when the source version changes.
-   - Use Bun `1.3.14` and `bun install --frozen-lockfile`.
+   - Use Bun `1.4.4` and `bun install --frozen-lockfile`.
    - Run the source checks and the pinned Hextap validation ladder.
 
 2. **Merge through the protected pull-request path**

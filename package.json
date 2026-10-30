@@ -58,10 +58,13 @@
 	"engines": {
 		"bun": ">=1.2.8"
 	},
+	"overrides": {
+		"bun": "1.4.4"
+	},
 	"devDependencies": {
 		"@biomejs/biome": "2.4.10",
-		"@types/bun": "1.3.14",
-		"bun-types": "1.3.14",
+		"@types/bun": "1.4.4",
+		"bun-types": "1.4.4",
 		"typescript": "^6.0.2"
 	},
 	"version": "3.45.0"
