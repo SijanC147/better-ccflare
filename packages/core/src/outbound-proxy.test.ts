@@ -70,9 +70,9 @@ describe("outbound-proxy", () => {
 
 		installOutboundProxy(() => `http://127.0.0.1:${proxy.port}`);
 
-		// The fake proxy refuses CONNECT with a 502. Bun 1.3.14 (CI) returns it
-		// as a response; Bun 1.4.3 throws ERR_PROXY_TUNNEL carrying the same
-		// status. What this test pins is that the CONNECT reached the proxy.
+		// The fake proxy refuses CONNECT with a 502. Bun 1.3.14 (CI until SB23-10882)
+		// returns it as a response; Bun 1.4.3 and later, CI's 1.4.4 included,
+		// throw ERR_PROXY_TUNNEL carrying the same status. What this test pins is that the CONNECT reached the proxy.
 		const response = await proxiedFetch(
 			"https://outbound-proxy-test.invalid/x",
 		);

@@ -65,7 +65,8 @@ The four inline workers regenerate byte-identical under the pinned Bun 1.3.14.
   `engines` bump, `overrides.bun`, `build-multi-arch.ts`'s version gate and the `bun-version-file`
   workflow inputs all conflict with the Hextap 1.3.14 recovery boundary. Kept the fork's files; the
   new `bun-version-check.yml` is renamed `.disabled`. The advisories upstream cites are fixed only in
-  1.4.4, so moving the pin is a follow-up for Sean.
+  1.4.4, so moving the pin is a follow-up for Sean. Taken later in SB23-10882 (#318), which
+  moved the pin to 1.4.4 and adopted `overrides.bun`.
 - **Accounts rebuilds**: kept the fork's explicit column lists and canonical rebuild (SB23-3918,
   SB23-3919, SB23-2531), guarded by `accounts-rebuild-gate.test.ts`; upstream's dynamic rebuild and
   its CTAS `account_tier` branch were not taken. Upstream's later `ensureUniqueAccountsIndex` and

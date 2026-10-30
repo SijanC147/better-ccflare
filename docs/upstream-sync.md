@@ -64,7 +64,7 @@ or be deleted.
 
 ## Commands
 
-Package manager **bun**, lockfile `bun.lock`. Toolchain pinned to **Bun 1.3.14** by
+Package manager **bun**, lockfile `bun.lock`. Toolchain pinned to **Bun 1.4.4** by
 `.hextap.json` and `.github/workflows/ci.yml`.
 
 | Purpose | Command |
@@ -203,7 +203,7 @@ Conflict count is not coverage. Audit every item after resolving:
 2. **New workspace package.** Must appear in root `workspaces` *and* a regenerated
    `bun.lock`, or `bun install --frozen-lockfile` fails the release. This killed the first
    `v3.8.0` tag.
-3. **Bun version bump** beyond pinned `1.3.14` — a manifest + tap recovery-boundary
+3. **Bun version bump** beyond pinned `1.4.4` — a manifest + tap recovery-boundary
    change, not a CI tweak. Never change one side silently.
 4. **Build scripts and compile flags** — renamed scripts, changed output paths, new
    network-requiring pre/post-install steps (the release build runs **offline**), or a

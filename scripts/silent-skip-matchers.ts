@@ -8,7 +8,7 @@
  *
  * SB23-3836. Every entry below was measured on 2026-10-01 by running each matcher on
  * `expect(undefined)`, positive and under `.not`, with 19 argument samples, on Bun 1.3.14 (the
- * CI pin) and Bun 1.4.2. The two versions gave byte-identical results. That measurement found
+ * CI pin until SB23-10882 moved it to 1.4.4) and Bun 1.4.2. The two versions gave byte-identical results. That measurement found
  * nine negated matchers missing from the rejecting set, one positive matcher missing from the
  * tolerant set, one entry naming a matcher Bun does not have, and four matchers whose answer
  * depends on their argument. A Bun bump that changes any of it fails the pin test rather than

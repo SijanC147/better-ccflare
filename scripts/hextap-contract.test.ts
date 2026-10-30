@@ -33,7 +33,7 @@ describe("Hextap schema-2 repository contract", () => {
 				build_script: "scripts/hextap-build",
 				profile: {
 					runtime: "bun",
-					runtime_version: "1.3.14",
+					runtime_version: "1.4.4",
 					install: {
 						argv: ["bun", "install", "--frozen-lockfile"],
 					},
@@ -108,7 +108,7 @@ describe("Hextap schema-2 repository contract", () => {
 		expect(ci).toContain(
 			"oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
 		);
-		expect(ci).toContain('bun-version: "1.3.14"');
+		expect(ci).toContain('bun-version: "1.4.4"');
 		expect(ci).toContain("name: Bun and release tooling");
 		expect(ci).toContain("name: Hextap release contract");
 		expect(ci).toContain(`ref: ${TOOLKIT_SHA}`);

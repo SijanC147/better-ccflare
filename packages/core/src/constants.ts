@@ -477,7 +477,7 @@ export function retryDelayMs(
  * of retrying an unsafe one is a double charge or a duplicated answer.
  *
  * Measured on 2026-09-14 on BOTH Bun versions in play, because they disagree.
- * 1.4.2 is local; 1.3.14 is the CI and release pin (.github/workflows/ci.yml).
+ * 1.4.2 was local; 1.3.14 was the CI and release pin until SB23-10882 moved it to 1.4.4.
  * `err.code` is top level in every case; `err.cause` is undefined.
  *
  *   case                                 1.4.2              1.3.14

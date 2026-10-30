@@ -12,7 +12,7 @@ import {
 
 /**
  * SB23-3836. Pins `scripts/check-optional-chain-silent-skip.ts`'s beliefs about Bun's
- * matchers against the Bun that is running this file. CI runs it on the pinned Bun (1.3.14)
+ * matchers against the Bun that is running this file. CI runs it on the pinned Bun (1.4.4 since SB23-10882)
  * and a developer on whatever is installed, so a Bun bump that changes how any matcher treats
  * `undefined` fails here rather than leaving the gate to report correct code or miss a skip.
  *

@@ -1374,8 +1374,8 @@ let serverLifecycleOwned = false;
 
 /**
  * The IP address a Bun server's socket reports it bound, or null. Read
- * defensively, because `Server.address` is absent from the pinned Bun's
- * types (1.3.14) and was measured only on 1.4.2 (SB23-4035).
+ * defensively, because `Server.address` is absent from the Bun types pinned
+ * until SB23-10882 (1.3.14) and was measured only on 1.4.2 (SB23-4035).
  */
 function boundAddress(server: unknown): string | null {
 	const reported = (server as { address?: { address?: unknown } | null })

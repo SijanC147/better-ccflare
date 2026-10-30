@@ -20,7 +20,7 @@
     "build_script": "scripts/hextap-build",
     "profile": {
       "runtime": "bun",
-      "runtime_version": "1.3.14",
+      "runtime_version": "1.4.4",
       "install": {
         "name": "install",
         "argv": [
