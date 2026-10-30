@@ -306,19 +306,31 @@ function send(ctx: ProxyContext): Promise<Response> {
 
 describe("pool exhaustion returns the requested model's error (SB23-10878)", () => {
 	let collector: ReturnType<typeof spyOn> | null = null;
+	let refusalCollector: ReturnType<typeof spyOn> | null = null;
+	let handleStart = mock((_message: { responseStatus: number }) => {});
+	let handleEnd = mock((_message: { error?: string }) => Promise.resolve());
 	beforeEach(() => {
+		handleStart = mock((_message: { responseStatus: number }) => {});
+		handleEnd = mock((_message: { error?: string }) => Promise.resolve());
+		const fake = {
+			handleStart,
+			handleChunk: mock(() => {}),
+			handleEnd,
+		} as unknown as usageCollectorModule.UsageCollector;
 		collector = spyOn(
 			usageCollectorModule,
 			"getUsageCollector",
-		).mockReturnValue({
-			handleStart: mock(() => {}),
-			handleChunk: mock(() => {}),
-			handleEnd: mock(() => Promise.resolve()),
-		} as unknown as usageCollectorModule.UsageCollector);
+		).mockReturnValue(fake);
+		// returnRefusal reads the collector through this accessor.
+		refusalCollector = spyOn(
+			usageCollectorModule,
+			"tryGetUsageCollector",
+		).mockReturnValue(fake);
 	});
 
 	afterEach(() => {
 		collector?.mockRestore();
+		refusalCollector?.mockRestore();
 		fetchSlot.fetch = originalFetch;
 		usageCache.clear();
 		clearFamilyExhaustionCache();
@@ -483,5 +495,12 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 		expect(response.status).toBe(429);
 		const body = (await response.json()) as { error: { type: string } };
 		expect(body.error.type).toBe("rate_limit_error");
+		// Still recorded as the combo refusal, under the status the client got.
+		expect(handleStart.mock.calls.map(([m]) => m.responseStatus)).toEqual([
+			429,
+		]);
+		expect(handleEnd.mock.calls.map(([m]) => m.error)).toEqual([
+			"combo_session_fallback_disabled",
+		]);
 	});
 });

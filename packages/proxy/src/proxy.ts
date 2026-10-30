@@ -568,7 +568,9 @@ async function handleProxyRequest(
 				worktreePath: refusalWorktreePath,
 				projectAttributionSource: projectAttributionSource ?? "none",
 				agentAttributionSource: agentAttributionSource ?? "none",
-				responseStatus: 503,
+				// Every refusal is a 503 except the native failure a combo terminal
+				// answers with (SB23-10878), which records its own status.
+				responseStatus: disabledFallbackResponse.status,
 				responseHeaders: Object.fromEntries(
 					disabledFallbackResponse.headers.entries(),
 				),
@@ -1081,12 +1083,17 @@ async function handleProxyRequest(
 				`All combo slots failed for combo "${filteredComboInfo.comboName}", session fallback disabled by the Combo Session Fallback setting (Settings → Advanced)`,
 			);
 			// A slot's foreign error held back in favour of a native failure
-			// (SB23-10878) is answered here too, since step 11 never runs.
+			// (SB23-10878) is answered here too, since step 11 never runs. It
+			// is still recorded as this refusal, which the setting promises.
 			const relevantComboResponse =
 				createRelevantExhaustionResponse(requestMeta);
 			if (relevantComboResponse) {
-				cacheBodyStore.discardStaged(requestMeta.id);
-				return relevantComboResponse;
+				return await returnRefusal(
+					relevantComboResponse,
+					"combo_session_fallback_disabled",
+					accounts.length,
+					filteredComboInfo.comboName,
+				);
 			}
 			return await returnComboSessionFallbackDisabled(
 				filteredComboInfo.comboName,

@@ -18,12 +18,13 @@
  * native failure's status with an error naming both answers.
  *
  * Exits that hand an upstream error to the client consult this: the final
- * forward in `proxyWithAccount` and the model-not-found pass-through. The
- * `extra_usage_exhausted` 400 pass-through does not: it is Claude-only, says
- * the account's overage is off whatever the model, and writes its own row.
- * The model label is whatever the provider put in the outgoing body; a
- * provider that carries the model in the URL (Vertex AI) leaves it empty, and
- * an empty label counts as native.
+ * forward in `proxyWithAccount`, the model-not-found pass-through and the
+ * terminal-529 forward. The `extra_usage_exhausted` 400 pass-through does
+ * not: it is Claude-only, says the account's overage is off whatever the
+ * model, and writes its own row. The model label is the model each fetch
+ * sends: the outgoing body's on the primary attempt, which a provider that
+ * carries the model in the URL (Vertex AI) leaves empty, and an empty label
+ * counts as native; the fallback model on a model-fallback attempt.
  *
  * A foreign 200 still serves the request, and a foreign error with no native
  * failure before it is still forwarded, so a pool of foreign accounts behaves

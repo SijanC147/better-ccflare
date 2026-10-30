@@ -3380,6 +3380,9 @@ export async function proxyWithAccount(
 		}
 		if (isRateLimited) {
 			if (returnRateLimitedResponseOnExhaustion && response.status === 529) {
+				// A foreign model's terminal 529 after a native failure is not
+				// the client's answer either (SB23-10878).
+				if (failsOverAsForeignError(response)) return null;
 				log.warn(
 					`Account ${account.name} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
