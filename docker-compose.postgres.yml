@@ -139,7 +139,7 @@ services:
   #
   # Requires ./scripts/sqlite-to-pg-migrate.ts next to this compose file.
   migrate:
-    image: oven/bun:1.3-alpine
+    image: oven/bun:1.4.4-alpine
     profiles: ["migrate"]
     depends_on:
       postgres:

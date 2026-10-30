@@ -4,8 +4,8 @@ import * as path from "node:path";
 import ts from "typescript";
 
 /**
- * SB23-2530. `bun.lock` records each workspace's own manifest fields, and the Bun that CI pins
- * (1.3.14) never writes some of them, so CI cannot see them drift. This test can: it compares
+ * SB23-2530. `bun.lock` records each workspace's own manifest fields, and the Bun that CI pinned
+ * until SB23-10882 (1.3.14) never writes some of them, so CI could not see them drift. This test can: it compares
  * the lock with every workspace manifest under whatever Bun is running.
  *
  * Measured 2026-10-01 in scratch copies of the tree at b9446617, one manifest field changed per
@@ -111,10 +111,11 @@ describe("bun.lock agrees with every workspace manifest", () => {
 		});
 	}
 
-	test("the lock format is one the pinned Bun can read", () => {
-		// Bun 1.3.14 refuses lockfileVersion 2, which Bun 1.4.2 writes when it generates a lock
-		// from nothing. Regenerate on the pinned Bun, or move the pin first (ci.yml and
-		// .hextap.json `runtime_version`).
+	test("the lock format stays at lockfileVersion 1", () => {
+		// Bun 1.3.14, the pin until SB23-10882, refused lockfileVersion 2, which Bun 1.4.2 writes
+		// when it generates a lock from nothing. The pin is now 1.4.4, so holding the lock at 1 is
+		// a choice rather than a constraint: moving it is a deliberate change of its own, never a
+		// side effect of regenerating the lock.
 		expect(lock.lockfileVersion).toBe(1);
 	});
 
