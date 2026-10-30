@@ -184,6 +184,10 @@ const RUNTIME_PROBE_KEYS = new Set([
 	"constructor",
 	"asymmetricMatch",
 	"$$typeof",
+	// An optional Provider capability proxyWithAccount reads with `?.` on every
+	// attempt (upstream 7c274918). Absent means "no routing support", which is
+	// what a partial mock describes.
+	"supportsProviderRoutingFor",
 ]);
 
 /**

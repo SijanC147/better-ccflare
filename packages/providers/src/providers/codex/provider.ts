@@ -122,7 +122,7 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.163.0";
+export const CODEX_VERSION = "0.166.0";
 /** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
 const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
@@ -1813,6 +1813,11 @@ export class CodexProvider extends BaseProvider {
 			return null;
 		let error: { code?: unknown; param?: unknown; type?: unknown } | undefined;
 		try {
+			// Clone only after the content-type gate: cloning first teed the body
+			// and returning here for a non-JSON 400/404 left that copy unread, so
+			// the tee buffers for whoever consumes the original. See #382, #356.
+			if (!response.headers.get("content-type")?.includes("application/json"))
+				return null;
 			error = ((await response.clone().json()) as { error?: typeof error })
 				.error;
 		} catch {
@@ -2613,6 +2618,18 @@ export class CodexProvider extends BaseProvider {
 			return response;
 		}
 		try {
+			// Clone only after the content-type gate: a non-JSON 200 took the
+			// clone and then the throw path, leaving the tee branch unread. See
+			// #382, #356.
+			const contentType = response.headers.get("content-type");
+			if (!contentType?.includes("application/json")) {
+				// We replace this response, so the caller never reads the
+				// original body — drain it or its native buffer leaks (#273).
+				if (response.body && !response.body.locked) {
+					void drainReader(response.body.getReader());
+				}
+				throw new Error(`non-JSON content-type (${contentType ?? "none"})`);
+			}
 			const raw = (await response.clone().json()) as {
 				models?: Array<
 					Record<string, unknown> & {

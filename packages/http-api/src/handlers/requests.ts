@@ -88,6 +88,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			gateway_hint_context_compacted: string | null;
 			inbound_format: string | null;
 			inbound_gateway: string | null;
+			provider_served: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name
@@ -160,6 +161,9 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			// arrived through; its path reads /v1/messages (SB23-2727).
 			inboundFormat: request.inbound_format || undefined,
 			inboundGateway: request.inbound_gateway || undefined,
+			// The backend the provider's own response body named — a fact from
+			// the upstream response, absent when the provider does not say.
+			providerServed: request.provider_served || undefined,
 		}));
 
 		return jsonResponse(response);

@@ -57,6 +57,7 @@ export type ApiCategory =
 	| "OAuth"
 	| "Projects"
 	| "Requests"
+	| "Search"
 	| "Stats"
 	| "System";
 
@@ -1178,6 +1179,75 @@ export const API_ROUTES: ApiRoute[] = [
 		summary: "Delete a worktree rule.",
 	},
 
+	// ---------------------------------------------------------------- Search
+	{
+		method: "GET",
+		path: "/api/web-search/settings",
+		category: "Search",
+		summary:
+			"The web search master switch, result size cap and bypass header flag.",
+	},
+	{
+		method: "PATCH",
+		path: "/api/web-search/settings",
+		category: "Search",
+		summary: "Change any of the three web search settings.",
+		bodyHint:
+			'{"enabled": true, "maxResultChars": 20000, "bypassHeader": false}',
+	},
+	{
+		method: "GET",
+		path: "/api/search-providers",
+		category: "Search",
+		summary: "Every configured web search provider, API keys masked.",
+	},
+	{
+		method: "POST",
+		path: "/api/search-providers",
+		category: "Search",
+		summary: "Add a web search provider.",
+		bodyHint: '{"provider": "tavily", "label": "Tavily", "apiKey": "..."}',
+	},
+	{
+		method: "GET",
+		path: "/api/search-providers/meta",
+		category: "Search",
+		summary: "The catalog of provider kinds and their config fields.",
+	},
+	{
+		method: "GET",
+		path: "/api/search-providers/:id",
+		category: "Search",
+		summary: "One search provider, API key masked.",
+	},
+	{
+		method: "PATCH",
+		path: "/api/search-providers/:id",
+		category: "Search",
+		summary: "Update a search provider. Omit apiKey to keep the stored key.",
+	},
+	{
+		method: "DELETE",
+		path: "/api/search-providers/:id",
+		category: "Search",
+		summary: "Delete a search provider.",
+		dangerous: true,
+	},
+	{
+		method: "POST",
+		path: "/api/search-providers/:id/test",
+		category: "Search",
+		summary: "Send one test query through the provider and report its latency.",
+		note: "Calls the provider's real API with the stored key.",
+	},
+	{
+		method: "POST",
+		path: "/api/search-providers/:id/reorder",
+		category: "Search",
+		summary: "Set a search provider's routing priority.",
+		bodyHint: '{"priority": 1}',
+	},
+
 	// ---------------------------------------------------------------- Combos
 	{
 		method: "GET",
@@ -1314,6 +1384,7 @@ export const API_CATEGORIES: ApiCategory[] = [
 	"Projects",
 	"Combos",
 	"Models",
+	"Search",
 	"Meta",
 	"Debug",
 ];

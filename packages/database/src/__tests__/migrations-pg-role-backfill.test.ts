@@ -53,6 +53,11 @@ function makeFakeAdapter(roleColumnExists: boolean): {
 		async run(sql: string): Promise<void> {
 			state.executed.push(sql.replace(/\s+/g, " ").trim());
 		},
+		// runPgUsageBackfills counts rows with runWithChanges.
+		async runWithChanges(sql: string): Promise<number> {
+			state.executed.push(sql.replace(/\s+/g, " ").trim());
+			return 0;
+		},
 	} as unknown as BunSqlAdapter;
 
 	return { adapter, state };
@@ -130,6 +135,11 @@ function makeColumnAdapter(missing: ReadonlySet<string>): {
 		},
 		async run(sql: string): Promise<void> {
 			executed.push(sql.replace(/\s+/g, " ").trim());
+		},
+		// runPgUsageBackfills counts rows with runWithChanges.
+		async runWithChanges(sql: string): Promise<number> {
+			executed.push(sql.replace(/\s+/g, " ").trim());
+			return 0;
 		},
 	} as unknown as BunSqlAdapter;
 	return { adapter, executed };

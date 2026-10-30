@@ -30,6 +30,7 @@ import { OverviewTab } from "./components/OverviewTab";
 import { ProjectsTab } from "./components/ProjectsTab";
 import { RequestsTab } from "./components/RequestsTab";
 import { SettingsTab } from "./components/SettingsTab";
+import { SearchTab } from "./components/search/SearchTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
 import { NotificationsProvider } from "./contexts/notifications-context";
 import { ThemeProvider } from "./contexts/theme-context";
@@ -152,6 +153,13 @@ export function App() {
 				element: <ApiKeysTab />,
 				title: "API Key Management",
 				subtitle: "Generate and manage API keys for authentication",
+			},
+			{
+				path: "/search",
+				element: <SearchTab />,
+				title: "Web search",
+				subtitle:
+					"Serve client web-search requests yourself through your own search providers",
 			},
 			{
 				path: "/logs",

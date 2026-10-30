@@ -925,6 +925,16 @@ async function handleProxyRequest(
 	let response: Response | null = null;
 	let anyAccountAttempted = false;
 
+	// A terminal CodeBuddy gateway rejection (11128) is the only failover
+	// outcome that carries a client-meaningful explanation, so it is kept
+	// across later attempts. If every candidate fails, the *last* such
+	// rejection is returned to the client instead of the generic
+	// "all accounts failed" 503 — otherwise the caller has to read server
+	// logs to know why CodeBuddy refused. Sticky rather than last-wins: a
+	// later attempt failing for an unrelated reason (429, 5xx) must not
+	// erase the explanation.
+	let terminalRejection: (() => Promise<Response | null>) | undefined;
+
 	for (let i = 0; i < accounts.length; i++) {
 		// An OAuth account already refused this gateway request with a windowless
 		// 429; the rest would refuse it too (SB23-2781). Not benched, not counted.
@@ -987,6 +997,9 @@ async function handleProxyRequest(
 				apiKeyName,
 				requestBodyContext,
 				!filteredComboInfo?.comboName && isLastAttemptedCandidate,
+				(capture: () => Promise<Response | null>) => {
+					terminalRejection = capture;
+				},
 			);
 		} finally {
 			if (probeAdmission === "admitted") {
@@ -1043,6 +1056,9 @@ async function handleProxyRequest(
 			apiKeyName,
 			requestBodyContext,
 			!filteredComboInfo?.comboName,
+			(capture: () => Promise<Response | null>) => {
+				terminalRejection = capture;
+			},
 		);
 
 		if (response) {
@@ -1147,6 +1163,9 @@ async function handleProxyRequest(
 						apiKeyName,
 						requestBodyContext,
 						isLastAttemptedFallback,
+						(capture: () => Promise<Response | null>) => {
+							terminalRejection = capture;
+						},
 					);
 				} finally {
 					if (probeAdmission === "admitted") {
@@ -1186,6 +1205,9 @@ async function handleProxyRequest(
 					apiKeyName,
 					requestBodyContext,
 					true,
+					(capture: () => Promise<Response | null>) => {
+						terminalRejection = capture;
+					},
 				);
 
 				if (response) {
@@ -1231,6 +1253,16 @@ async function handleProxyRequest(
 			`All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${needsReauth.map((acc) => acc.name).join(", ")}.\n\nPlease re-authenticate:\n  ${reauthCommands}`,
 			ctx.provider.name,
 		);
+	}
+
+	if (terminalRejection !== undefined) {
+		// The replay bypasses forwardToClient, the path that normally lets
+		// usage-collector's onSummary delete this request's staged body. Drop it
+		// here, or repeated all-candidates-rejected failures would sit in the
+		// 64 MiB staging allowance and evict bodies of active requests.
+		cacheBodyStore.discardStaged(requestMeta.id);
+		const rejectionResponse = await terminalRejection();
+		if (rejectionResponse) return rejectionResponse;
 	}
 
 	cacheBodyStore.discardStaged(requestMeta.id);

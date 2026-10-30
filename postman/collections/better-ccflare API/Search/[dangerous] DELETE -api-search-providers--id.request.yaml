@@ -1,0 +1,19 @@
+$kind: http-request
+name: '[dangerous] DELETE /api/search-providers/:id'
+description: |-
+  Delete a search provider.
+  
+  DANGEROUS: irreversible or disruptive. Never run in a batch.
+method: DELETE
+url: '{{baseUrl}}/api/search-providers/:id'
+order: 8000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'id'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

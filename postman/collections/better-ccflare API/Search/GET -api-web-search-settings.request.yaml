@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/web-search/settings'
+description: |-
+  The web search master switch, result size cap and bypass header flag.
+method: GET
+url: '{{baseUrl}}/api/web-search/settings'
+order: 1000

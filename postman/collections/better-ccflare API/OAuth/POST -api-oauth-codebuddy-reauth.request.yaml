@@ -1,0 +1,14 @@
+$kind: http-request
+name: 'POST /api/oauth/codebuddy/reauth'
+description: |-
+  Re-authenticate an existing CodeBuddy account.
+method: POST
+url: '{{baseUrl}}/api/oauth/codebuddy/reauth'
+order: 10000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+body:
+  type: json
+  content: |-
+    {}

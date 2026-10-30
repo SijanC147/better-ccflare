@@ -14,6 +14,49 @@ const DEFAULT_BACKUP_RETENTION = 3;
 const INTEGER_RE = /^\d+$/;
 
 /**
+ * Every column `runMigrations()` adds to `accounts` with `ALTER TABLE ADD
+ * COLUMN`. The `account_tier` rebuild copies columns across by name and reads
+ * `PRAGMA table_info` before those ALTERs run, so it needs this list to know
+ * which columns it must carry even though the PRAGMA does not show them yet.
+ *
+ * Keep in sync with the ADD COLUMN statements in runMigrations(); the
+ * `account_tier rebuild keeps every column` test fails if this drifts.
+ */
+const ACCOUNT_ADDITIVE_COLUMNS = [
+	"rate_limited_until",
+	"session_start",
+	"session_request_count",
+	"paused",
+	"rate_limit_reset",
+	"rate_limit_reset_at",
+	"rate_limit_status",
+	"rate_limit_remaining",
+	"priority",
+	"auto_fallback_enabled",
+	"custom_endpoint",
+	"auto_refresh_enabled",
+	"model_mappings",
+	"request_transformer",
+	"cross_region_mode",
+	"model_fallbacks",
+	"billing_type",
+	"auto_pause_on_overage_enabled",
+	"pause_reason",
+	"requires_reauth",
+	"consecutive_rate_limits",
+	"last_manual_reauth_at",
+	"peak_hours_pause_enabled",
+	"usage_pause_five_hour_threshold",
+	"usage_pause_weekly_threshold",
+	"usage_pause_five_hour_enabled",
+	"usage_pause_weekly_enabled",
+	"refresh_token_issued_at",
+	"rate_limited_at",
+	"rate_limited_reason",
+	"total_requests",
+] as const;
+
+/**
  * Keep at most this many `.backup.<timestamp>` files alongside the live DB.
  * Each backup is a full copy of the DB (multi-GB in practice), so without a
  * cap they accumulate quickly when rapid restarts trigger repeat migrations.
@@ -180,7 +223,8 @@ export function ensureSchema(db: Database): void {
 			gateway_hint_compaction TEXT,
 			gateway_hint_context_compacted TEXT,
 			inbound_format TEXT,
-			inbound_gateway TEXT
+			inbound_gateway TEXT,
+			provider_served TEXT
 		)
 	`);
 
@@ -210,10 +254,18 @@ export function ensureSchema(db: Database): void {
 	);
 
 	// Create request_payloads table for storing full request/response data
+	//
+	// `payload` holds the binary envelope (flags byte + zstd frame and/or
+	// AES-GCM ciphertext) and is where every new row goes. `json` holds the
+	// legacy text envelope (`zst:`/`enc:` + base64) written before the binary
+	// format existed; it is NOT NULL because older databases were created
+	// that way, and new rows leave it empty. Legacy rows age out through the
+	// payload retention sweep, so no data migration is needed.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_payloads (
 			id TEXT PRIMARY KEY,
 			json TEXT NOT NULL,
+			payload BLOB,
 			timestamp INTEGER,
 			FOREIGN KEY (id) REFERENCES requests(id) ON DELETE CASCADE
 		)
@@ -465,6 +517,43 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_instance_heartbeats_last_heartbeat ON instance_heartbeats(last_heartbeat)`,
 	);
+
+	// Create search_providers table: third-party web-search APIs (Tavily, ...)
+	// routed to by the proxy. `api_key` is stored plaintext like accounts'
+	// keys but never leaves the server — the API only ever sees a mask.
+	// `status` / `cooldown_until` hold the last health probe result.
+	createSearchProvidersTable(db);
+}
+
+/**
+ * Shared DDL for the `search_providers` table and its indexes. Called from
+ * both `ensureSchema()` (fresh DBs) and `runMigrations()` (upgrades).
+ */
+function createSearchProvidersTable(db: Database): void {
+	db.run(`
+		CREATE TABLE IF NOT EXISTS search_providers (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			label TEXT NOT NULL,
+			api_key TEXT,
+			priority INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			max_results INTEGER NOT NULL DEFAULT 10,
+			extra_config TEXT,
+			status TEXT NOT NULL DEFAULT 'unknown',
+			status_message TEXT,
+			status_checked_at INTEGER,
+			cooldown_until INTEGER,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+	`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_search_providers_priority ON search_providers(priority)`,
+	);
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_search_providers_label ON search_providers(label)`,
+	);
 }
 
 /**
@@ -508,6 +597,32 @@ export function ensureSchema(db: Database): void {
  * wraps it in `db.transaction(() => { ... })`).
  */
 function collapseAccountDuplicatesPreservingState(db: Database): void {
+	// The merge below orders by refresh_token_issued_at and reads columns that
+	// additive migrations introduce. It is called before those migrations run,
+	// so on a legacy database they may not exist yet — restore the ones it
+	// needs first. None of these carry account state that can be lost: without
+	// the column there is nothing to preserve.
+	const present = new Set(
+		(
+			db.prepare("PRAGMA table_info(accounts)").all() as Array<{ name: string }>
+		).map((c) => c.name),
+	);
+	for (const [column, decl] of [
+		["refresh_token_issued_at", "INTEGER"],
+		["last_manual_reauth_at", "INTEGER"],
+		["consecutive_rate_limits", "INTEGER NOT NULL DEFAULT 0"],
+		["peak_hours_pause_enabled", "INTEGER NOT NULL DEFAULT 0"],
+		["billing_type", "TEXT DEFAULT NULL"],
+		["rate_limit_reset_at", "INTEGER"],
+		["rate_limited_at", "INTEGER"],
+		["rate_limited_reason", "TEXT"],
+	] as const) {
+		if (!present.has(column)) {
+			db.prepare(`ALTER TABLE accounts ADD COLUMN ${column} ${decl}`).run();
+			present.add(column);
+		}
+	}
+
 	// Find every tuple (name, provider, COALESCE(custom_endpoint,'')) that
 	// currently has more than one row. For each, pick the survivor and merge.
 	const dupGroups = db
@@ -799,6 +914,102 @@ function collapseAccountDuplicatesPreservingState(db: Database): void {
 				`to the surviving account ids.`,
 		);
 	}
+}
+
+/**
+ * Create the UNIQUE index on `(name, provider, COALESCE(custom_endpoint,''))`
+ * that enforces atomic account uniqueness, collapsing existing duplicates
+ * first.
+ *
+ * Why the DB constraint: the previous SELECT-then-INSERT pre-check in
+ * `assertAccountNameAvailable` is non-atomic and lets concurrent adds (or any
+ * path that bypasses the pre-check — e.g. cli-commands, oauth-flow,
+ * dashboard-web direct inserts) persist duplicate rows. The constraint closes
+ * the race; the pre-check remains as a friendly fast-path that returns a clean
+ * 400 without a wasted INSERT round-trip.
+ *
+ * The index cannot be created while duplicates exist — `CREATE UNIQUE INDEX`
+ * fails with "UNIQUE constraint failed" on the first colliding row — so
+ * duplicates are collapsed per tuple BEFORE creating it, **without destroying
+ * account state**: keep the row most likely to still hold working
+ * credentials, merge the others' state into it, and repoint every dependent
+ * row (combo_slots, requests, usage_snapshots) at the surviving id. An earlier
+ * implementation kept the arbitrary minimum-rowid row and DELETED the rest;
+ * that silently dropped live OAuth refresh tokens, cascade-removed combo
+ * slots, and orphaned request history rows whose `account_used` pointed at the
+ * deleted id.
+ *
+ * Idempotent: if the index already exists, skip both the dedup and the
+ * CREATE. Callers rely on that — it runs once on the normal path and again
+ * after the accounts rebuilds, which `DROP TABLE` the index.
+ */
+function ensureUniqueAccountsIndex(db: Database): void {
+	const alreadyExists = db
+		.prepare(
+			`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_accounts_unique_name_provider_endpoint'`,
+		)
+		.get();
+	if (alreadyExists) return;
+
+	collapseAccountDuplicatesPreservingState(db);
+	db.prepare(
+		`CREATE UNIQUE INDEX idx_accounts_unique_name_provider_endpoint
+		 ON accounts(name, provider, COALESCE(custom_endpoint, ''))`,
+	).run();
+	log.info(
+		"Created UNIQUE index idx_accounts_unique_name_provider_endpoint on accounts",
+	);
+}
+
+/**
+ * The exact key `idx_accounts_priority` must have. Both leading columns are
+ * DESC so the dashboard list (`ORDER BY priority DESC, request_count DESC`)
+ * is served by a plain index scan rather than an index scan plus a sort.
+ * Mirrors performance-indexes.ts and migrations-pg.ts — all three change
+ * together.
+ */
+const ACCOUNTS_PRIORITY_INDEX_SHAPE = [
+	{ name: "priority", desc: 1 },
+	{ name: "request_count", desc: 1 },
+	{ name: "last_used", desc: 0 },
+] as const;
+
+/**
+ * True when `idx_accounts_priority` exists AND has the key in
+ * `ACCOUNTS_PRIORITY_INDEX_SHAPE`. Reads the actual key columns rather than
+ * the stored `CREATE INDEX` text, so it is insensitive to formatting, and it
+ * reports false when the index is missing (nothing to drop) or carries an
+ * older definition (the legacy single-column `(priority)`, or the
+ * mixed-direction composite).
+ */
+function accountsPriorityIndexHasExpectedShape(db: Database): boolean {
+	const exists = db
+		.prepare(
+			`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_accounts_priority'`,
+		)
+		.get();
+	if (!exists) return false;
+
+	const keyColumns = (
+		db.prepare("PRAGMA index_xinfo(idx_accounts_priority)").all() as Array<{
+			seqno: number;
+			name: string | null;
+			key: number;
+			desc: number;
+		}>
+	)
+		.filter((c) => c.key === 1 && c.name !== null)
+		.sort((a, b) => a.seqno - b.seqno)
+		.map((c) => ({ name: c.name, desc: c.desc }));
+
+	return (
+		keyColumns.length === ACCOUNTS_PRIORITY_INDEX_SHAPE.length &&
+		keyColumns.every(
+			(c, i) =>
+				c.name === ACCOUNTS_PRIORITY_INDEX_SHAPE[i]?.name &&
+				c.desc === ACCOUNTS_PRIORITY_INDEX_SHAPE[i]?.desc,
+		)
+	);
 }
 
 export function runMigrations(db: Database, dbPath?: string): void {
@@ -1871,6 +2082,23 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added inbound_gateway column to requests table");
 		}
 
+		// Add provider_served if it doesn't exist. The backend an OpenRouter
+		// response body names as having served the request (e.g. "Morph"). NULL
+		// for every provider that does not state it — most of them, and every
+		// streaming response. Written after the fact by updateRequestUsage.
+		if (!requestsColumnNames.includes("provider_served")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN provider_served TEXT").run();
+			log.info("Added provider_served column to requests table");
+		}
+
+		// Add the binary payload column to request_payloads if it doesn't exist.
+		// Existing rows keep their legacy text envelope in `json` until the
+		// payload retention sweep prunes them; no data migration is needed.
+		if (!requestPayloadsColumnNames.includes("payload")) {
+			db.prepare("ALTER TABLE request_payloads ADD COLUMN payload BLOB").run();
+			log.info("Added payload column to request_payloads table");
+		}
+
 		// Add timestamp column to request_payloads if it doesn't exist
 		if (!requestPayloadsColumnNames.includes("timestamp")) {
 			db.prepare(
@@ -1916,6 +2144,11 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			).run();
 			log.info("Created index on api_keys role column");
 		}
+
+		// Ensure search_providers exists (for upgrades from pre-web-search
+		// installs). Idempotent, so fresh DBs — where ensureSchema() already
+		// created it — pay nothing.
+		createSearchProvidersTable(db);
 
 		// Add performance indexes
 		addPerformanceIndexes(db);
@@ -2129,7 +2362,19 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			`Populated ${insertedCount} default Claude model translations for Bedrock`,
 		);
 
-		// Migrate existing Muse Spark accounts to the corrected 'meta' provider key
+		// Migrate existing Muse Spark accounts to the corrected 'meta' provider key.
+		//
+		// The UNIQUE (name, provider, endpoint) index already exists by now, so
+		// a muse-spark row whose name a meta row already holds made this UPDATE
+		// fail, and the warning below left both rows in place. Drop the index
+		// first; ensureUniqueAccountsIndex at the end of this migration merges
+		// the pair and builds it again.
+		const hasMuseSpark = db
+			.prepare(`SELECT 1 FROM accounts WHERE provider = 'muse-spark' LIMIT 1`)
+			.get();
+		if (hasMuseSpark) {
+			db.run("DROP INDEX IF EXISTS idx_accounts_unique_name_provider_endpoint");
+		}
 		try {
 			const updateCount = db
 				.prepare(
@@ -2146,6 +2391,27 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				`Error updating muse-spark provider values: ${(error as Error).message}`,
 			);
 		}
+
+		// Re-apply the accounts indexes LAST. The accounts table rebuilds
+		// above (DROP TABLE + CREATE TABLE AS SELECT + RENAME) drop every
+		// accounts index — including the UNIQUE name/provider/endpoint index and
+		// the ones created earlier in this function — so without this pass an
+		// upgraded database would run for a whole startup cycle without them.
+		// Both calls are idempotent, and inside this transaction they cost
+		// nothing when nothing was dropped.
+		//
+		// `idx_accounts_priority` may still carry an older definition:
+		// `IF NOT EXISTS` alone never replaces it, and a database only
+		// re-creates its accounts table once. So its shape is checked and it
+		// is dropped only when it differs — on an already-correct database
+		// this pass issues no writes at all. Scoped to this one name; if it is
+		// dropped, addPerformanceIndexes() re-creates it on the next line.
+		if (!accountsPriorityIndexHasExpectedShape(db)) {
+			db.run("DROP INDEX IF EXISTS idx_accounts_priority");
+		}
+		addPerformanceIndexes(db);
+		ensureUniqueAccountsIndex(db);
+		dropRedundantRequestIndexes(db);
 	});
 
 	// Execute the migration transaction

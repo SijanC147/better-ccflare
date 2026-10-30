@@ -1,0 +1,17 @@
+$kind: http-request
+name: 'PATCH /api/search-providers/:id'
+description: |-
+  Update a search provider. Omit apiKey to keep the stored key.
+method: PATCH
+url: '{{baseUrl}}/api/search-providers/:id'
+order: 7000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'id'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

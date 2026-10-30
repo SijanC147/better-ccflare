@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/search-providers'
+description: |-
+  Every configured web search provider, API keys masked.
+method: GET
+url: '{{baseUrl}}/api/search-providers'
+order: 3000

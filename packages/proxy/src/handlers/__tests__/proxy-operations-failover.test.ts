@@ -1,9 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import type { AsyncDbWriter } from "@better-ccflare/database";
+import { Logger } from "@better-ccflare/logger";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
 import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
-import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
+import {
+	isModelUnavailableError,
+	proxyWithAccount,
+	systemSuspectScan,
+} from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 // Minimal Account fixture for openai-compatible provider
@@ -1227,5 +1240,419 @@ describe("proxyWithAccount — 401 failover", () => {
 			// itself proves the success path was taken and no failover (null) occurred.
 			expect(threwUsageCollectorError).toBe(true);
 		}
+	});
+});
+
+// The CodeBuddy forward and replay paths enqueue request rows, which the
+// shared fixture's throwing asyncWriter stub refuses.
+function makeCodeBuddyContext() {
+	return makeProxyContext({
+		asyncWriter: { enqueue: () => {} } as unknown as AsyncDbWriter,
+		// forwardToClient reads this before it reaches the usage collector.
+		config: { getStorePayloads: () => false },
+	});
+}
+
+describe("proxyWithAccount — CodeBuddy 11128 gateway rejection", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	function makeCodeBuddyAccount(): Account {
+		return makeAccount({
+			id: "acc-cb",
+			name: "codebuddy-test",
+			provider: "codebuddy",
+			api_key: null,
+			access_token: "tok",
+			refresh_token: "refresh",
+			expires_at: Date.now() + 24 * 60 * 60 * 1000,
+			custom_endpoint: "https://codebuddy.example.com",
+			model_mappings: null,
+		});
+	}
+
+	it("fails over (returns null) on 400 code 11128 channel-verification rejection", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					code: 11128,
+					msg: "Illegal API invocation from an unapproved channel",
+					requestId: "upstream-req-1",
+				},
+				400,
+			),
+		) as unknown as typeof fetch;
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeCodeBuddyAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeCodeBuddyContext(),
+		);
+
+		expect(result).toBeNull();
+	});
+
+	it("still forwards other 400 flat-code bodies to the client", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					code: 11101,
+					msg: "tool_choice must be a string",
+					requestId: "upstream-req-2",
+				},
+				400,
+			),
+		) as unknown as typeof fetch;
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		let result: Response | null = null;
+		let threwUsageCollectorError = false;
+		try {
+			result = await proxyWithAccount(
+				req,
+				new URL("https://proxy.local/v1/messages"),
+				makeCodeBuddyAccount(),
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				makeCodeBuddyContext(),
+			);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			if (!msg.includes("UsageCollector not initialized")) throw e;
+			threwUsageCollectorError = true;
+		}
+
+		// The 400 must be forwarded (not failover): either the response object is
+		// returned, or forwardToClient threw the expected collector error.
+		if (result) {
+			expect(result.status).toBe(400);
+		} else {
+			expect(threwUsageCollectorError).toBe(true);
+		}
+	});
+});
+
+describe("proxyWithAccount — CodeBuddy 11128 terminal rejection", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	function makeCodeBuddyAccount(): Account {
+		return makeAccount({
+			id: "acc-cb",
+			name: "codebuddy-test",
+			provider: "codebuddy",
+			api_key: null,
+			access_token: "tok",
+			refresh_token: "refresh",
+			expires_at: Date.now() + 24 * 60 * 60 * 1000,
+			custom_endpoint: "https://codebuddy.example.com",
+			model_mappings: null,
+		});
+	}
+
+	it("hands the caller a replay so the gateway's message can reach the client", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					code: 11128,
+					msg: "Illegal API invocation from an unapproved channel",
+				},
+				400,
+			),
+		) as unknown as typeof fetch;
+
+		const captures: Array<() => Promise<Response | null>> = [];
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		// The upstream body is consumed eagerly (bounded) so abandoning the
+		// replay cannot leak the native body (#273); the replay must therefore
+		// be invokable any number of times.
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeCodeBuddyAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeCodeBuddyContext(),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			true, // terminal attempt: nothing left to fail over to
+			(capture) => {
+				captures.push(capture);
+			},
+		);
+
+		// The attempt still fails over (null) so the caller's loop semantics are
+		// unchanged; only the terminal path registers a replay.
+		expect(result).toBeNull();
+		expect(captures).toHaveLength(1);
+
+		const replayed = await captures[0]();
+		expect(replayed).not.toBeNull();
+		expect(replayed?.status).toBe(400);
+		// Providers read these off the response; the replay is rebuilt from a
+		// string, so they must be restored explicitly (CodeBuddy's rejection
+		// log takes its request id from the header).
+		expect(replayed?.headers.get("x-better-ccflare-request-id")).toBe("req-1");
+		expect(replayed?.headers.get("x-better-ccflare-request-path")).toBe(
+			"/v1/messages",
+		);
+		const replayedBody = (await replayed?.json()) as {
+			error?: { message?: string };
+		};
+		// The converter now passes the real gateway message through instead of
+		// the generic invalid_response text.
+		expect(replayedBody.error?.message).toContain("11128");
+	});
+
+	it("does not register a replay while other candidates remain", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse({ code: 11128, msg: "rejected" }, 400),
+		) as unknown as typeof fetch;
+
+		const captures: Array<() => Promise<Response | null>> = [];
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeCodeBuddyAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeCodeBuddyContext(),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false, // another account may still serve this request
+			(capture) => {
+				captures.push(capture);
+			},
+		);
+
+		expect(result).toBeNull();
+		expect(captures).toHaveLength(0);
+	});
+});
+
+describe("proxyWithAccount — CodeBuddy 11128 oversized body", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("discards instead of buffering an oversized terminal rejection", async () => {
+		// A real gateway rejection is a small JSON envelope. Anything past the
+		// cap is not one, so it must fall back to ordinary failover rather than
+		// being held in memory for a replay.
+		const huge = JSON.stringify({
+			code: 11128,
+			msg: "Illegal API invocation from an unapproved channel",
+			padding: "x".repeat(80 * 1024),
+		});
+		globalThis.fetch = mock(
+			async () =>
+				new Response(huge, {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				}),
+		) as unknown as typeof fetch;
+
+		const captures: Array<() => Promise<Response | null>> = [];
+		const bodyBuffer = makeRequestBody();
+		const result = await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			makeAccount({
+				id: "acc-cb",
+				name: "codebuddy-test",
+				provider: "codebuddy",
+				api_key: null,
+				access_token: "tok",
+				refresh_token: "refresh",
+				expires_at: Date.now() + 24 * 60 * 60 * 1000,
+				custom_endpoint: "https://codebuddy.example.com",
+				model_mappings: null,
+			}),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeCodeBuddyContext(),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			true,
+			(capture) => {
+				captures.push(capture);
+			},
+		);
+
+		expect(result).toBeNull();
+		expect(captures).toHaveLength(0);
+	});
+});
+
+describe("systemSuspectScan", () => {
+	it("reports fixed identity terms by count", () => {
+		const scan = systemSuspectScan(
+			"You are Claude Code, Anthropic's official CLI for Claude. Claude Code again.",
+		);
+		expect(scan).toContain("official CLI for Claude=1");
+		expect(scan).toContain("Claude Code=2");
+		expect(scan).toContain("Anthropic=1");
+	});
+
+	it("reports none when no known term is present", () => {
+		expect(systemSuspectScan("You are a helpful coding assistant.")).toBe(
+			"none",
+		);
+	});
+
+	it("never echoes raw request text", () => {
+		const secret = "SENTINEL-do-not-log\n[FAKE LOG LINE]";
+		const scan = systemSuspectScan(secret);
+		expect(scan).not.toContain("SENTINEL");
+		expect(scan).not.toContain("FAKE LOG LINE");
+	});
+
+	it("handles a missing body", () => {
+		expect(systemSuspectScan(undefined)).toBe("no-body");
+	});
+});
+
+describe("CodeBuddy rejection diagnostics — scan the transformed body", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("logs the rejection warning from the transformed body", async () => {
+		// Greptile P1/P2 on #515: scanning the CLIENT body listed terms the
+		// provider had already removed. This asserts the WARNING ITSELF, so a
+		// regression back to the client body fails here.
+		let sentBody = "";
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const req = input instanceof Request ? input : new Request(String(input));
+			sentBody = await req.text();
+			return jsonResponse(
+				{
+					code: 11128,
+					msg: "Illegal API invocation from an unapproved channel",
+				},
+				400,
+			);
+		}) as unknown as typeof fetch;
+
+		// Console logging is silent outside debug mode, so observe the logger
+		// API itself (same approach as the account rate-limit guard test).
+		const warnings: string[] = [];
+		const warnSpy = spyOn(Logger.prototype, "warn").mockImplementation(((
+			message: string,
+		) => {
+			warnings.push(message);
+		}) as never);
+
+		const bodyBuffer = new TextEncoder().encode(
+			JSON.stringify({
+				model: "claude-sonnet-4-5",
+				max_tokens: 10,
+				system:
+					// Both stripped sentences, plus "Anthropic" as a surviving
+					// term the diagnostic must still report. Note the desensitizer
+					// zero-width-splits brand terms in system text, so any term it
+					// covers reaches the gateway inert — the scan reports the sent
+					// bytes, which is what this asserts.
+					"You are Claude Code, Anthropic's official CLI for Claude. You are powered by the model named Sonnet 5.5. The exact model ID is claude-sonnet-5-5. Assistant knowledge cutoff is June 2026. Anthropic wrote you.",
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		).buffer as ArrayBuffer;
+
+		let result: Response | null = null;
+		try {
+			result = await proxyWithAccount(
+				makeRequest(bodyBuffer),
+				new URL("https://proxy.local/v1/messages"),
+				makeAccount({
+					id: "acc-cb",
+					name: "codebuddy-test",
+					provider: "codebuddy",
+					api_key: null,
+					access_token: "tok",
+					refresh_token: "refresh",
+					expires_at: Date.now() + 24 * 60 * 60 * 1000,
+					custom_endpoint: "https://codebuddy.example.com",
+					model_mappings: null,
+				}),
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				makeCodeBuddyContext(),
+			);
+		} finally {
+			warnSpy.mockRestore();
+		}
+
+		expect(result).toBeNull(); // 11128 fails over
+
+		// The upstream really did receive the stripped body...
+		expect(sentBody).not.toContain("official CLI for Claude");
+		expect(sentBody).not.toContain("powered by the model named");
+
+		const suspectLine = warnings.find((w) => w.includes("system_suspects"));
+		expect(suspectLine).toBeDefined();
+		const suspects =
+			suspectLine?.split("system_suspects:")[1]?.trim().split(",") ?? [];
+
+		// ...so the warning must not name what was stripped...
+		expect(suspects).not.toContain("official CLI for Claude=1");
+		expect(suspects).not.toContain("powered by the model named=1");
+		// ...and must be derived from the sent body rather than the client's:
+		// it reported the stripped sentences only because it scanned the client
+		// body, so an empty result is the correct answer when everything was
+		// removed or desensitized before dispatch.
+		expect(suspectLine).not.toContain("official CLI for Claude");
 	});
 });

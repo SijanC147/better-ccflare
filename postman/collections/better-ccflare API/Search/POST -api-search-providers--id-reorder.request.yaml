@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'POST /api/search-providers/:id/reorder'
+description: |-
+  Set a search provider's routing priority.
+  
+  Body: {"priority": 1}
+method: POST
+url: '{{baseUrl}}/api/search-providers/:id/reorder'
+order: 10000
+headers:
+  - key: 'Content-Type'
+    value: 'application/json'
+pathVariables:
+  - key: 'id'
+    value: ''
+body:
+  type: json
+  content: |-
+    {}

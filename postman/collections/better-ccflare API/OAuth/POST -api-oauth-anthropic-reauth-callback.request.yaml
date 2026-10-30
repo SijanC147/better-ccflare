@@ -4,7 +4,7 @@ description: |-
   Complete Anthropic re-authentication.
 method: POST
 url: '{{baseUrl}}/api/oauth/anthropic/reauth/callback'
-order: 10000
+order: 13000
 headers:
   - key: 'Content-Type'
     value: 'application/json'

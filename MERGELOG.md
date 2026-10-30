@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: ba82474c17b39478047d86f77e56c4017d036c0b -->
+<!-- last-sync-sha: 15cff50eec307e5bed17964dccb99de6a56f5513 -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-10-30 | main | `ba82474c..15cff50e` | 88 (71 non-merge) | 34 files (33 UU, 1 DU) | merge --no-ff | see the entry below | see the PR for SB23-10879 |
 | 2026-10-20 | main | `b4fe14b6..ba82474c` | 26 (22 non-merge) | 15 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-9312 |
 | 2026-10-16 | main | `4f3f8b57..b4fe14b6` | 97 (84 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-8189 |
 | 2026-09-30 | main | `e8042927..4f3f8b57` | 3 | 3 files (resolved by the maintainer App; one clean merge corrected, see below) | merge (two-parent) | pass (CI at `7f85ad53`, both required checks) | [#250](https://github.com/SijanC147/better-ccflare/pull/250) |
@@ -24,6 +25,66 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-10-30: `ba82474c..15cff50e` (88 upstream commits, 71 non-merge)
+
+**Strategy:** `merge --no-ff` by hand (lane BCCF-10879, SB23-10879). Upstream release 3.5.109.
+**Scale:** 151 upstream files, +16,867 / −646. **Conflicts:** 34 paths, 33 content (UU) and
+`.github/workflows/release.yml` delete/modify (kept deleted, standing resolution).
+Hextap files untouched: `.hextap.json` and `.hextap/tap-registration.json` both `328f95a7…`.
+Manifests kept at the fork's 3.44.0. `bun.lock` unchanged: no dependency change arrived.
+The four inline workers regenerate byte-identical under the pinned Bun 1.3.14.
+
+### Upstream features arriving
+
+- **Web search providers** (`66159ecf`, `41b205c6`, `bd71d649`, `792b588a`, `7f1a6173`): a
+  `search_providers` table, repository, CRUD API, `/api/web-search/settings` and a `/search`
+  dashboard page. Upstream already ported the table to PostgreSQL (`ensureSchemaPg` and
+  `runMigrationsPg`). The ten routes are added to `api-catalog.ts` under a new `Search` category,
+  and the local Postman collection is regenerated (not pushed).
+- **Per-model pinning and exclusion of inference providers** (`7c274918`), with
+  `applyModelAndRouting` replacing the fork's model re-patch on the model-fallback path.
+- **`POST /api/accounts` accepts every provider** (`d441ac2e`) and a CLI-style `mode`.
+- **Provider request id and served backend** (`42948a67`, `21ef1efd`): new `requests.provider_served`
+  column (SQLite and PostgreSQL) and `providerRequestId` in the stored payload meta.
+- **Binary payload column** (`c1daa30b`): new `request_payloads.payload` BLOB / BYTEA. Rows written
+  after the upgrade use it; a rollback to 3.44.x cannot read them.
+- **CodeBuddy 11128 failover and terminal replay** (`922738f2` … `4e971b01`), two new discard sites
+  (the issue-273 site count goes 18 to 20).
+- **Cache-token fixes** in `openai-formats` (`e01a0fe6`, `24af8013`) and Codex response-clone guards
+  (`c1c00b5e`, `7ffee27a`).
+- **429 reset honouring becomes a switch** (`f961135a`): `CCFLARE_RATE_LIMIT_HONOR_EXPLICIT_RESET`,
+  default true. With the default, v3.44.0's rule stands: a 429 naming an upstream reset benches until
+  that reset, capped at eight days. What changes: a 429 whose only deadline is ccflare's own 60s
+  default no longer benches a full minute; it follows the `CCFLARE_RATE_LIMIT_BACKOFF_*` ramp. Set
+  the variable to `false` to restore `min(reset, now + backoff)` for every 429.
+
+### Resolutions
+
+- **Bun 1.4.4 pin not taken** (`7b629eb0`, `ab73314d`): `.bun-version`, `packageManager`, the
+  `engines` bump, `overrides.bun`, `build-multi-arch.ts`'s version gate and the `bun-version-file`
+  workflow inputs all conflict with the Hextap 1.3.14 recovery boundary. Kept the fork's files; the
+  new `bun-version-check.yml` is renamed `.disabled`. The advisories upstream cites are fixed only in
+  1.4.4, so moving the pin is a follow-up for Sean.
+- **Accounts rebuilds**: kept the fork's explicit column lists and canonical rebuild (SB23-3918,
+  SB23-3919, SB23-2531), guarded by `accounts-rebuild-gate.test.ts`; upstream's dynamic rebuild and
+  its CTAS `account_tier` branch were not taken. Upstream's later `ensureUniqueAccountsIndex` and
+  priority-index shape check remain and are idempotent.
+- `idx_accounts_priority` is now `(priority DESC, request_count DESC, last_used)` upstream; the fork's
+  shape check in `performance-indexes.ts` now targets that key.
+- `getActiveComboForFamily`: took upstream's single joined query and added both per-slot threshold
+  columns to it, so SB23-3390 does not return.
+- `combos.ts`: kept the fork's threshold validation and slot-ownership check, and took upstream's
+  duplicate-slot `409`.
+- `providerRequestId` is keyed on the serving account's provider, not `ctx.provider.name`.
+- The model-fallback re-patch still leaves `model` out of a body the provider removed it from
+  (vertex-ai, SB23-3971).
+- `apps/cli/__tests__/cli.test.ts`: kept the fork's hermetic temp and config-home handling; upstream's
+  private run-directory refactor was not taken.
+- Kept: #236 Codex credits rule, #234 `InPlaceRetryBudget`, #128 `getRuntime().sessionDurationMs`,
+  the fork `CLAUDE.md`.
+- Upstream's new code and tests widened for `exactOptionalPropertyTypes` (`?: T | undefined`,
+  runtime-identical), and upstream test fixtures corrected where they named types that do not exist.
 
 ## 2026-10-20: `b4fe14b6..ba82474c` (26 upstream commits, 22 non-merge)
 

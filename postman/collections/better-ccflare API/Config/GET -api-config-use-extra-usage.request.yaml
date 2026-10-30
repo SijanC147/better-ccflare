@@ -1,0 +1,7 @@
+$kind: http-request
+name: 'GET /api/config/use-extra-usage'
+description: |-
+  Whether a spent plan window may keep serving on Anthropic extra usage.
+method: GET
+url: '{{baseUrl}}/api/config/use-extra-usage'
+order: 36000
