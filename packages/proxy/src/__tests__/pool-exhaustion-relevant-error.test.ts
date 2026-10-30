@@ -22,7 +22,7 @@ import {
 	spyOn,
 } from "bun:test";
 import { AnthropicProvider, usageCache } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+import type { Account, ComboWithSlots } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { clearFamilyExhaustionCache } from "../handlers/model-capacity";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
@@ -110,12 +110,15 @@ function metaAccount(priority = 10): Account {
 	});
 }
 
-function makeContext(accounts: Account[]): ProxyContext {
+function makeContext(
+	accounts: Account[],
+	combo: ComboWithSlots | null = null,
+): ProxyContext {
 	return makeProxyContext({
 		strategy: { select: mock((accs: Account[]) => accs) },
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
-			getActiveComboForFamily: mock(async () => null),
+			getActiveComboForFamily: mock(async () => combo),
 			markAccountRateLimited: mock(() =>
 				Promise.resolve({ consecutiveRateLimits: 1, applied: true }),
 			),
@@ -131,8 +134,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 			getModelScopedCapacityRouting: () => "off",
 			getStorePayloads: () => false,
 			getForceAccountModel: () => false,
-			getCombosEnabled: () => false,
-			getComboSessionFallback: () => true,
+			getCombosEnabled: () => combo !== null,
+			// A combo here always tests the terminal that skips step 11.
+			getComboSessionFallback: () => combo === null,
 		},
 		provider: new AnthropicProvider(),
 		asyncWriter: {
@@ -220,6 +224,65 @@ function installFetch(
 		throw new Error(`unexpected fetch in relevant-error test: ${url.href}`);
 	};
 	return calls;
+}
+
+/** One combo slot per account, each sending the requested model. */
+function makeCombo(accountIds: string[]): ComboWithSlots {
+	return {
+		id: "combo-haiku",
+		name: "ComboHaiku",
+		description: null,
+		enabled: true,
+		created_at: Date.now(),
+		updated_at: Date.now(),
+		slots: accountIds.map((accountId, index) => ({
+			id: `slot-${index}`,
+			combo_id: "combo-haiku",
+			account_id: accountId,
+			model: MODEL,
+			priority: index,
+			enabled: true,
+			max_utilization_percent: null,
+			min_reset_remaining_ms: null,
+		})),
+	};
+}
+
+/**
+ * Answers Anthropic calls in order and records `<host>:<model>` for every
+ * call, so a test can see which model each answer was about.
+ */
+function installModelFetch(
+	anthropicAnswers: Array<() => Response>,
+	metaAnswer: () => Response,
+): string[] {
+	const seen: string[] = [];
+	let index = 0;
+	fetchSlot.fetch = async (input, init) => {
+		const request =
+			input instanceof Request ? input : new Request(String(input), init);
+		const url = new URL(request.url);
+		const body = (await request.json()) as { model?: string };
+		if (url.hostname === "api.anthropic.com") {
+			seen.push(`anthropic:${body.model}`);
+			const answer = anthropicAnswers[index++];
+			if (!answer) throw new Error("no Anthropic answer left");
+			return answer();
+		}
+		if (url.href.startsWith(META_ENDPOINT)) {
+			seen.push(`meta:${body.model}`);
+			return metaAnswer();
+		}
+		throw new Error(`unexpected fetch in relevant-error test: ${url.href}`);
+	};
+	return seen;
+}
+
+function errorResponse(status: number, type: string): Response {
+	return new Response(
+		JSON.stringify({ type: "error", error: { type, message: type } }),
+		{ status, headers: { "content-type": "application/json" } },
+	);
 }
 
 function send(ctx: ProxyContext): Promise<Response> {
@@ -337,5 +400,88 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 
 		expect(calls.hosts).toEqual([...Array(6).fill("anthropic"), "meta"]);
 		expect(response.status).toBe(200);
+	});
+
+	it("a model-fallback answer is labelled with the model that fetch sent: foreign 402 fails over", async () => {
+		const native = makeAccount({ id: "anthropic-X", name: "X", priority: 0 });
+		const mapped = makeAccount({
+			id: "anthropic-A",
+			name: "A",
+			priority: 1,
+			model_mappings: JSON.stringify({ haiku: [MODEL, "claude-sonnet-9"] }),
+		});
+		const ctx = makeContext([native, mapped]);
+		const seen = installModelFetch(
+			[windowless429, windowless429, () => errorResponse(402, "billing_error")],
+			metaBilling402,
+		);
+
+		const response = await send(ctx);
+
+		expect(seen).toEqual([
+			`anthropic:${MODEL}`,
+			`anthropic:${MODEL}`,
+			"anthropic:claude-sonnet-9",
+		]);
+		expect(response.status).toBe(429);
+	});
+
+	it("a model-fallback answer on the requested model is native: its 413 reaches the client", async () => {
+		const native = makeAccount({ id: "anthropic-X", name: "X", priority: 0 });
+		const mapped = makeAccount({
+			id: "anthropic-A",
+			name: "A",
+			priority: 1,
+			model_mappings: JSON.stringify({ haiku: ["claude-haiku-4-5", MODEL] }),
+		});
+		const ctx = makeContext([native, mapped]);
+		const seen = installModelFetch(
+			[
+				windowless429,
+				windowless429,
+				() => errorResponse(413, "request_too_large"),
+			],
+			metaBilling402,
+		);
+
+		const response = await send(ctx);
+
+		expect(seen).toEqual([
+			`anthropic:${MODEL}`,
+			"anthropic:claude-haiku-4-5",
+			`anthropic:${MODEL}`,
+		]);
+		expect(response.status).toBe(413);
+	});
+
+	it("META's model-not-found 404 after a native failure fails over too", async () => {
+		const ctx = makeContext([
+			makeAccount({ id: "anthropic-X", name: "X", priority: 0 }),
+			metaAccount(1),
+		]);
+		const seen = installModelFetch([windowless429], () =>
+			errorResponse(404, "not_found_error"),
+		);
+
+		const response = await send(ctx);
+
+		expect(seen).toEqual([`anthropic:${MODEL}`, `meta:${META_MODEL}`]);
+		expect(response.status).toBe(429);
+	});
+
+	it("a combo with session fallback off answers the native 429, not the combo-disabled error", async () => {
+		const accounts = [...anthropicAccounts(), metaAccount()];
+		const ctx = makeContext(
+			accounts,
+			makeCombo(accounts.map((account) => account.id)),
+		);
+		const calls = installFetch(() => windowless429(), metaBilling402);
+
+		const response = await send(ctx);
+
+		expect(calls.hosts).toEqual([...Array(6).fill("anthropic"), "meta"]);
+		expect(response.status).toBe(429);
+		const body = (await response.json()) as { error: { type: string } };
+		expect(body.error.type).toBe("rate_limit_error");
 	});
 });

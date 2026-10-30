@@ -1190,6 +1190,67 @@ export async function proxyWithAccount(
 			inbound.gateway,
 		] as const;
 
+		/**
+		 * True when `response` is a foreign model's error after a native failure
+		 * (SB23-10878, failover-relevance.ts): writes the attempt's audit row, as
+		 * the transient-5xx failover does, drains the body, and the caller
+		 * returns null to fail over. Checked at every exit that hands an upstream
+		 * error to the client.
+		 */
+		const failsOverAsForeignError = (response: Response): boolean => {
+			const suppressed = suppressForeignError(
+				requestMeta,
+				account,
+				response.status,
+			);
+			if (!suppressed) return false;
+			log.warn(
+				`Account ${account.name}: ${response.status} for rewritten model ${suppressed.upstreamModel}, after an account serving ${requestMeta.appliedModel ?? requestMeta.originalModel} had failed; failing over instead of forwarding it`,
+			);
+			const responseTime = Date.now() - requestMeta.timestamp;
+			const modelRewrite = isModelRewrite(
+				requestMeta.originalModel,
+				requestMeta.appliedModel,
+			);
+			const suppressedStatus = response.status;
+			ctx.asyncWriter.enqueue(() =>
+				ctx.dbOps.saveRequest(
+					crypto.randomUUID(),
+					req.method,
+					url.pathname,
+					account.id,
+					suppressedStatus,
+					false,
+					"foreign_model_error",
+					responseTime,
+					failoverAttempts,
+					suppressed.upstreamModel
+						? { model: suppressed.upstreamModel }
+						: undefined,
+					requestMeta.agentUsed ?? undefined,
+					apiKeyId ?? undefined,
+					apiKeyName ?? undefined,
+					requestMeta.project ?? null,
+					undefined,
+					requestMeta.comboName ?? null,
+					modelRewrite ? (requestMeta.originalModel ?? null) : null,
+					modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+					requestMeta.projectAttributionSource ?? null,
+					requestMeta.agentAttributionSource ?? null,
+					null,
+					requestMeta.clientSessionId ?? null,
+					gatewayHint.requestClass,
+					gatewayHint.agentType,
+					gatewayHint.prevToolDurations,
+					gatewayHint.compaction,
+					gatewayHint.contextCompacted,
+					...auditTail,
+				),
+			);
+			cancelDiscardedResponseBody(response);
+			return true;
+		};
+
 		// Dedicated controller so a stuck-upstream drain deadline (see
 		// anthropic-terminal-recovery.ts) can abort this request's fetch
 		// connection after the fact — a signal not part of `init.signal` at
@@ -1205,7 +1266,14 @@ export async function proxyWithAccount(
 		// invariant that every provider has to remember. Merged with
 		// drainAbortController so the terminal-recovery drain deadline can also
 		// abort this same fetch later.
-		const forwardUpstream = async (target: Request) => {
+		// `model` labels the answer for failover-relevance.ts (SB23-10878). It
+		// defaults to the model in flight, read at call time (`outgoing` is
+		// declared below and every call comes after it); a caller sending a
+		// different model than `outgoing` holds passes that model.
+		const forwardUpstream = async (
+			target: Request,
+			model: string = outgoing.model,
+		) => {
 			const signal = AbortSignal.any([req.signal, drainAbortController.signal]);
 			const attemptOnce = (attemptTarget: Request) =>
 				forwardObservedUpstream(
@@ -1242,10 +1310,7 @@ export async function proxyWithAccount(
 					);
 				},
 			});
-			// Which model this answer is about, for the exhaustion ranking in
-			// failover-relevance.ts (SB23-10878). Read at call time: `outgoing`
-			// is declared below and every call comes after it.
-			noteUpstreamAnswer(requestMeta, account, answer, outgoing.model);
+			noteUpstreamAnswer(requestMeta, account, answer, model);
 			return answer;
 		};
 		if (
@@ -2500,7 +2565,10 @@ export async function proxyWithAccount(
 					// surface the real error. Strip content-encoding/content-length
 					// first: Bun's fetch already decompressed the body, so leaving the
 					// upstream `content-encoding: gzip` header makes the client try to
-					// gunzip plaintext → "Decompression error: ZlibError".
+					// gunzip plaintext → "Decompression error: ZlibError". A foreign
+					// model's not-found says nothing about the requested model, so
+					// after a native failure it fails over instead (SB23-10878).
+					if (failsOverAsForeignError(rawResponse)) return null;
 					return withSanitizedProxyHeaders(rawResponse);
 				}
 
@@ -2627,7 +2695,9 @@ export async function proxyWithAccount(
 					cancelDiscardedResponseBody(rawResponse);
 					rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
 						? materializeSyntheticResponse(retryTransformedRequest)
-						: await forwardUpstream(retryTransformedRequest);
+						: // Labelled with the model this fetch sends: `outgoing` adopts
+							// `nextModel` only below, after the answer is in.
+							await forwardUpstream(retryTransformedRequest, nextModel);
 					if (retryTransformedBodyText === undefined) {
 						// Body unreadable — unreachable for a buffer-backed Request.
 						// Record the model and leave the replay on the previous request
@@ -3349,53 +3419,8 @@ export async function proxyWithAccount(
 
 		// A foreign model's error after a native failure is not the client's
 		// answer (SB23-10878): fail over, and let proxy.ts report the native
-		// failure if nothing else serves the request. The audit row keeps the
-		// attempt in the history, as the transient-5xx failover above does.
-		if (suppressForeignError(requestMeta, account, response.status)) {
-			log.warn(
-				`Account ${account.name}: ${response.status} for rewritten model ${outgoing.model}, after an account serving ${requestMeta.appliedModel ?? requestMeta.originalModel} had failed; failing over instead of forwarding it`,
-			);
-			const responseTime = Date.now() - requestMeta.timestamp;
-			const modelRewrite = isModelRewrite(
-				requestMeta.originalModel,
-				requestMeta.appliedModel,
-			);
-			const suppressedStatus = response.status;
-			ctx.asyncWriter.enqueue(() =>
-				ctx.dbOps.saveRequest(
-					crypto.randomUUID(),
-					req.method,
-					url.pathname,
-					account.id,
-					suppressedStatus,
-					false,
-					"foreign_model_error",
-					responseTime,
-					failoverAttempts,
-					{ model: outgoing.model },
-					requestMeta.agentUsed ?? undefined,
-					apiKeyId ?? undefined,
-					apiKeyName ?? undefined,
-					requestMeta.project ?? null,
-					undefined,
-					requestMeta.comboName ?? null,
-					modelRewrite ? (requestMeta.originalModel ?? null) : null,
-					modelRewrite ? (requestMeta.appliedModel ?? null) : null,
-					requestMeta.projectAttributionSource ?? null,
-					requestMeta.agentAttributionSource ?? null,
-					null,
-					requestMeta.clientSessionId ?? null,
-					gatewayHint.requestClass,
-					gatewayHint.agentType,
-					gatewayHint.prevToolDurations,
-					gatewayHint.compaction,
-					gatewayHint.contextCompacted,
-					...auditTail,
-				),
-			);
-			cancelDiscardedResponseBody(response);
-			return null;
-		}
+		// failure if nothing else serves the request.
+		if (failsOverAsForeignError(response)) return null;
 
 		// Forward response to client
 		return forwardToClient(

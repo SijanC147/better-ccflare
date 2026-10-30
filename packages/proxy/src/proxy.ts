@@ -1080,6 +1080,14 @@ async function handleProxyRequest(
 			log.warn(
 				`All combo slots failed for combo "${filteredComboInfo.comboName}", session fallback disabled by the Combo Session Fallback setting (Settings → Advanced)`,
 			);
+			// A slot's foreign error held back in favour of a native failure
+			// (SB23-10878) is answered here too, since step 11 never runs.
+			const relevantComboResponse =
+				createRelevantExhaustionResponse(requestMeta);
+			if (relevantComboResponse) {
+				cacheBodyStore.discardStaged(requestMeta.id);
+				return relevantComboResponse;
+			}
 			return await returnComboSessionFallbackDisabled(
 				filteredComboInfo.comboName,
 				accounts.length,

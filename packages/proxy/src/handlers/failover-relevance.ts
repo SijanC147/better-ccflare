@@ -17,6 +17,14 @@
  * the request fails over, and if nothing else serves it, the client gets the
  * native failure's status with an error naming both answers.
  *
+ * Exits that hand an upstream error to the client consult this: the final
+ * forward in `proxyWithAccount` and the model-not-found pass-through. The
+ * `extra_usage_exhausted` 400 pass-through does not: it is Claude-only, says
+ * the account's overage is off whatever the model, and writes its own row.
+ * The model label is whatever the provider put in the outgoing body; a
+ * provider that carries the model in the URL (Vertex AI) leaves it empty, and
+ * an empty label counts as native.
+ *
  * A foreign 200 still serves the request, and a foreign error with no native
  * failure before it is still forwarded, so a pool of foreign accounts behaves
  * exactly as before. Six native 429s with no foreign answer still end in the
@@ -24,7 +32,7 @@
  */
 import type { Account, RequestMeta } from "@better-ccflare/types";
 
-interface UpstreamAnswer {
+export interface UpstreamAnswer {
 	accountId: string;
 	provider: string;
 	status: number;
@@ -35,7 +43,7 @@ interface UpstreamAnswer {
 }
 
 interface RequestFailoverState {
-	/** The newest answer per account, in first-answer order. */
+	/** The newest answer per account, oldest first. */
 	answers: Map<string, UpstreamAnswer>;
 	/** A foreign error not forwarded because a native attempt had failed first. */
 	suppressed: UpstreamAnswer | null;
@@ -74,7 +82,11 @@ export function noteUpstreamAnswer(
 		const value = response.headers.get(name);
 		if (value !== null) retryHeaders.push([name, value]);
 	}
-	stateFor(meta).answers.set(account.id, {
+	const { answers } = stateFor(meta);
+	// Delete first: `Map.set` on an existing key keeps its first position, and
+	// the order is what "newest" reads.
+	answers.delete(account.id);
+	answers.set(account.id, {
 		accountId: account.id,
 		provider: account.provider,
 		status: response.status,
@@ -102,21 +114,21 @@ function newestNativeFailure(
 
 /**
  * Whether `account`'s error answer must fail over instead of reaching the
- * client: true when its newest answer is a foreign error and a native attempt
- * on another account failed first. Records the suppression when it is.
+ * client: its newest answer, when that is a foreign error and a native attempt
+ * on another account failed first, else null. Records the suppression.
  */
 export function suppressForeignError(
 	meta: RequestMeta,
 	account: Account,
 	status: number,
-): boolean {
-	if (status < 400) return false;
+): UpstreamAnswer | null {
+	if (status < 400) return null;
 	const state = states.get(meta);
 	const own = state?.answers.get(account.id);
-	if (!state || !own || own.native) return false;
-	if (!newestNativeFailure(state)) return false;
+	if (!state || !own || own.native) return null;
+	if (!newestNativeFailure(state)) return null;
 	state.suppressed = own;
-	return true;
+	return own;
 }
 
 const ERROR_TYPES: Record<number, string> = {
