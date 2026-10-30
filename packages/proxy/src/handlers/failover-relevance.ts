@@ -86,14 +86,15 @@ export function noteUpstreamAnswer(
 	});
 }
 
-/** The newest native error answer from an account other than `account`. */
-function nativeFailureBefore(
+/**
+ * The newest native error answer. One answer is kept per account, so the
+ * caller's own foreign answer can never be it.
+ */
+function newestNativeFailure(
 	state: RequestFailoverState,
-	accountId: string | null,
 ): UpstreamAnswer | null {
 	let found: UpstreamAnswer | null = null;
 	for (const answer of state.answers.values()) {
-		if (answer.accountId === accountId) continue;
 		if (answer.native && answer.status >= 400) found = answer;
 	}
 	return found;
@@ -113,7 +114,7 @@ export function suppressForeignError(
 	const state = states.get(meta);
 	const own = state?.answers.get(account.id);
 	if (!state || !own || own.native) return false;
-	if (!nativeFailureBefore(state, account.id)) return false;
+	if (!newestNativeFailure(state)) return false;
 	state.suppressed = own;
 	return true;
 }
@@ -140,7 +141,7 @@ export function createRelevantExhaustionResponse(
 ): Response | null {
 	const state = states.get(meta);
 	if (!state?.suppressed) return null;
-	const native = nativeFailureBefore(state, null);
+	const native = newestNativeFailure(state);
 	if (!native) return null;
 	const foreign = state.suppressed;
 	const requested = requestedModel(meta) ?? "the requested model";
