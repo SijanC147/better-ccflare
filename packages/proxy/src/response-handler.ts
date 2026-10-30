@@ -5,6 +5,7 @@ import {
 	withSanitizedProxyHeaders,
 } from "@better-ccflare/http-common";
 import { Logger, openObserveShipsPayloads } from "@better-ccflare/logger";
+import { providerRequestIdFromHeaders } from "@better-ccflare/providers";
 import {
 	type Account,
 	type AgentAttributionSource,
@@ -194,6 +195,12 @@ export async function forwardToClient(
 	// the body here would leave it nothing to ship.
 	const shouldStorePayloads =
 		(ctx.config.getStorePayloads?.() ?? true) || openObserveShipsPayloads();
+	// Keyed on the serving account's provider, not ctx.provider.name, which is
+	// the server-wide default (see providerName below).
+	const providerRequestId = providerRequestIdFromHeaders(
+		account?.provider ?? ctx.provider.name,
+		response.headers,
+	);
 
 	// Filter out:
 	//   - count_tokens requests on providers that synthesize or proxy advisory
@@ -258,6 +265,8 @@ export async function forwardToClient(
 			responseStatus: response.status,
 			responseHeaders: responseHeadersObj,
 			isStream,
+			providerRequestId,
+			providerName: ctx.provider.name,
 			// Use the selected account's provider for billing fallback in the
 			// post-processor worker; ctx.provider.name is the server-wide default
 			// (anthropic) and would misclassify plan-only providers like qwen,

@@ -7,9 +7,11 @@ import {
 	getServerErrorRetryEnabled,
 	isUsageExhausted,
 	logError,
+	type ModelRouting,
 	ProviderError,
 	type RetrySettings,
 	retryDelayMs,
+	splitModelRouting,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import {
@@ -29,6 +31,7 @@ import {
 	isAnthropicOutOfCredits,
 	type Provider,
 	type ProviderRequestContext,
+	readCodeBuddyGatewayRejection,
 	recoverCodexMessagesContinuation,
 	usageCache,
 } from "@better-ccflare/providers";
@@ -41,7 +44,14 @@ import { cacheBodyStore } from "../cache-body-store";
 import { ensureCodexModelDefaults } from "../codex-model-catalog";
 import { extractGatewayHintHeadersFromRequest } from "../gateway-hint-headers";
 import { extractInboundMarkerFromRequest } from "../inbound-marker";
-import { RequestBodyContext, readOutgoingBody } from "../request-body-context";
+import {
+	accountSupportsProviderRouting,
+	applyModelAndRouting,
+	patchModelAndRouting,
+	RequestBodyContext,
+	readOutgoingBody,
+	resolveSlotRouting,
+} from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { applyAccountRequestTransformer } from "./account-request-transformer";
@@ -136,6 +146,21 @@ function currentScopedPercentForFamily(
  * fallbacks — see `resetIsInferred` on `RateLimitInfo`.
  */
 export type CooldownSource = "header" | "provider" | "usage_cache" | "default";
+
+/**
+ * Whether a `CooldownSource` names a window the account itself is known to be
+ * inside — the only kind that may bench until the deadline.
+ *
+ * `default` is ccflare's own 60s probe-cooldown fallback, returned when the 429
+ * named nothing; treating it as the account's window benched every header-less
+ * 429 for a full minute and bypassed the backoff settings (#506). `usage_cache`
+ * is a window learned from the account's own usage API, so it is not invented
+ * and keeps the bench. `provider` is left to `resetIsInferred`, which the
+ * provider sets when its value is its own default.
+ */
+export function isExplicitUpstreamCooldown(source: CooldownSource): boolean {
+	return source !== "default";
+}
 
 export function extractCooldownUntil(
 	response: Response,
@@ -988,6 +1013,141 @@ export async function proxyUnauthenticated(
  * @param ctx - The proxy context
  * @returns Promise resolving to response or null if failed
  */
+/**
+ * Thinking modes ccflare knows about. `thinking.type` is client-controlled, so
+ * the fingerprint maps it through this allow-list instead of echoing the raw
+ * value: the text logger preserves newlines verbatim, and an unconstrained
+ * string would let a caller inject fabricated log lines.
+ */
+const KNOWN_THINKING_TYPES = new Set(["adaptive", "enabled", "disabled"]);
+
+function thinkingTypeLabel(thinking: unknown): string {
+	if (thinking === undefined || thinking === null) return "none";
+	if (typeof thinking !== "object") return "unknown";
+	const type = (thinking as { type?: unknown }).type;
+	if (typeof type !== "string") return "unknown";
+	return KNOWN_THINKING_TYPES.has(type) ? type : "unknown";
+}
+
+/**
+ * Cap on a buffered terminal-rejection body. CodeBuddy's gateway rejections
+ * are small JSON envelopes; anything larger is not one.
+ */
+const MAX_TERMINAL_REJECTION_BYTES = 64 * 1024;
+
+/**
+ * Read a response body into a string, giving up (and cancelling the source)
+ * as soon as it exceeds `maxBytes`. Returns null when the body is too large or
+ * unreadable, so the caller can fall back to discarding.
+ */
+async function readBoundedBody(
+	body: ReadableStream<Uint8Array> | null,
+	maxBytes: number,
+): Promise<string | null> {
+	if (!body) return "";
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				await reader.cancel().catch(() => {});
+				return null;
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const merged = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		merged.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(merged);
+}
+
+/**
+ * Compact, PII-free description of a request body, for diagnosing gateway
+ * rejections whose payloads are never stored. Returns a fixed string on any
+ * parse failure so the log line always renders. Every value is either a
+ * number, a boolean derived from one, or drawn from a fixed vocabulary —
+ * nothing client-supplied reaches the log verbatim.
+ */
+function requestShapeFingerprint(bodyText: string | undefined): string {
+	if (bodyText === undefined) return "no-body";
+	try {
+		const body = JSON.parse(bodyText) as {
+			stream?: unknown;
+			messages?: unknown;
+			tools?: unknown;
+			system?: unknown;
+			thinking?: unknown;
+			metadata?: unknown;
+		};
+		const messages = Array.isArray(body.messages) ? body.messages.length : 0;
+		const tools = Array.isArray(body.tools) ? body.tools.length : 0;
+		const systemBlocks = Array.isArray(body.system)
+			? body.system.length
+			: typeof body.system === "string"
+				? 1
+				: 0;
+		return `stream=${body.stream === true} msgs=${messages} tools=${tools} system_blocks=${systemBlocks} thinking=${thinkingTypeLabel(body.thinking)} metadata=${body.metadata !== undefined}`;
+	} catch {
+		return "unparseable";
+	}
+}
+
+/**
+ * Diagnostic aid for CodeBuddy 11128 ("Illegal API invocation from an
+ * unapproved channel"). The gateway fingerprints client-identity text, and a
+ * rejected attempt stores no payload, so a rejection is otherwise
+ * undiagnosable after the fact. This reports which FIXED, known identity
+ * terms still occur in the outgoing body — counts only, never raw request
+ * text — so the next fingerprint can be identified from the journal alone.
+ */
+const SUSPECT_IDENTITY_TERMS: readonly string[] = [
+	"official CLI for Claude",
+	"Claude Code",
+	"claude-cli",
+	"claude-",
+	"Anthropic",
+	"Claude, an AI",
+	"you are Claude",
+	"powered by the model named",
+	"knowledge cutoff",
+	"Claude Agent SDK",
+	"Model Context Protocol",
+	"Pro subscription",
+];
+
+export function systemSuspectScan(bodyText: string | undefined): string {
+	if (bodyText === undefined) return "no-body";
+	try {
+		const text = bodyText;
+		const hits: string[] = [];
+		for (const term of SUSPECT_IDENTITY_TERMS) {
+			let count = 0;
+			for (
+				let i = text.indexOf(term);
+				i !== -1;
+				i = text.indexOf(term, i + term.length)
+			) {
+				count += 1;
+			}
+			if (count > 0) hits.push(`${term}=${count}`);
+		}
+		// "claude-" covers every claude-* model id; report it once, not per id.
+		return hits.length > 0 ? hits.join(",") : "none";
+	} catch {
+		return "unreadable";
+	}
+}
+
 export async function proxyWithAccount(
 	req: Request,
 	url: URL,
@@ -1002,6 +1162,15 @@ export async function proxyWithAccount(
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
 	returnRateLimitedResponseOnExhaustion = false,
+	/**
+	 * Receives a replay of this attempt's terminal CodeBuddy gateway
+	 * rejection. The attempt itself still returns `null` so the caller keeps
+	 * failing over; the caller invokes the capture only if *every* candidate
+	 * fails, turning the generic "all accounts failed" 503 into the gateway's
+	 * own explanation. The response cannot be returned directly here because
+	 * returning it would stop failover.
+	 */
+	onTerminalRejection?: (capture: () => Promise<Response | null>) => void,
 ): Promise<Response | null> {
 	try {
 		// Extracted once for the whole call: every direct `saveRequest` audit
@@ -1088,8 +1257,53 @@ export async function proxyWithAccount(
 			requestBodyContext ?? new RequestBodyContext(requestBodyBuffer);
 		let effectiveBodyContext = baseBodyContext;
 		let effectiveBodyBuffer = baseBodyContext.getBuffer();
+		// The slot's routing pin, when it applied. It is the account-level
+		// default for this slot's model: a model-list fallback entry WITHOUT its
+		// own suffix inherits it (an entry with a suffix overrides it for that
+		// entry). Without this, the fallback loop would delete the operator's
+		// pin — or worse, an `ignore` pin would be violated.
+		let slotRouting: ModelRouting | null = null;
+		// Capability of the upstream THIS account actually talks to, from the
+		// provider instance that will serve (and transform) the request — a
+		// host-aware adapter (NanoGPT on a custom endpoint) answers per account,
+		// and the provider-name list alone would wrongly let routing through.
+		const provider = getProvider(account.provider) || ctx.provider;
+		const supportsProviderRoutingFor =
+			provider.supportsProviderRoutingFor?.bind(provider);
+		const accountSupportsRouting = () =>
+			accountSupportsProviderRouting(
+				account,
+				supportsProviderRoutingFor
+					? () => supportsProviderRoutingFor(account)
+					: undefined,
+			);
 		if (modelOverride && effectiveBodyBuffer) {
-			const overriddenContext = baseBodyContext.withPatchedModel(modelOverride);
+			// A slot model may carry a provider-routing suffix. The model goes
+			// upstream stripped; the routing becomes body.provider only for a
+			// provider that accepts it (the same rule providers'
+			// transformRequestBodyModel applies). Leaving it in the model id would
+			// hand a provider that does not understand routing a garbage name.
+			const overrideSplit = splitModelRouting(modelOverride);
+			const overriddenContext = baseBodyContext.withPatchedModel(
+				overrideSplit.model,
+			);
+			if (overriddenContext && overrideSplit.routing) {
+				const accepted = resolveSlotRouting(
+					account,
+					overrideSplit.routing,
+					accountSupportsRouting,
+				);
+				if (accepted) {
+					overriddenContext.mutateParsedJson((body) => {
+						body.provider = accepted;
+					});
+					slotRouting = accepted;
+				} else {
+					log.debug(
+						`Combo model override for account ${account.name} carries provider routing, but provider "${account.provider}" does not support it; routing ignored`,
+					);
+				}
+			}
 			if (overriddenContext) {
 				effectiveBodyContext = overriddenContext;
 				effectiveBodyBuffer = overriddenContext.getBuffer();
@@ -1133,8 +1347,6 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// Get the provider for this account
-		const provider = getProvider(account.provider) || ctx.provider;
 		// The per-request carrier (SB23-2508): one object for this attempt, handed
 		// by reference to prepareRequest, buildUrl, every transformRequestBody and
 		// every processResponse call below, the in-place retries and the
@@ -1930,6 +2142,7 @@ export async function proxyWithAccount(
 				// Provenance travels with the deadline: the provider's inferred
 				// flag only applies when its own value is what won. A real
 				// `retry-after` header outranks it, and must keep its full wait.
+				// Our own `default` fallback is never an upstream window (#506).
 				const cooldown = extractCooldownUntilWithSource(
 					rawResponse,
 					account.id,
@@ -1942,7 +2155,8 @@ export async function proxyWithAccount(
 					{
 						resetTime: cooldown.until,
 						resetIsInferred:
-							cooldown.source === "provider" && providerReset.resetIsInferred,
+							!isExplicitUpstreamCooldown(cooldown.source) ||
+							(cooldown.source === "provider" && providerReset.resetIsInferred),
 						reason,
 					},
 					ctx,
@@ -1990,6 +2204,150 @@ export async function proxyWithAccount(
 			return NOT_CLASSIFIED;
 		};
 
+		// ── codebuddy_gateway_rejection: 400 code 11128 from CodeBuddy's gateway ──
+		// The flat {code, msg} body matches none of the model-unavailable
+		// patterns below, so before this branch the 400 was forwarded to the
+		// client as terminal — a combo's remaining slots (often a different
+		// provider entirely) were never tried. Channel verification (observed
+		// live 2026-10-29: "Illegal API invocation from an unapproved channel")
+		// and first-message-shape rejections are both CodeBuddy-specific, so
+		// failing over to the next account is always the right move. No bench:
+		// the cause is upstream gateway policy that can clear on its own, and
+		// benching would hide the failure behind an ever-growing cooldown.
+		// The rejected attempt keeps its audit row (same saveRequest pattern as
+		// the org_permission_denied path) so the pattern stays diagnosable from
+		// the dashboard.
+		const classifyCodeBuddyChannelRejection = async (
+			response: Response,
+			terminal: boolean,
+		): Promise<UpstreamErrorClassification> => {
+			if (provider.name !== "codebuddy" || response.status !== 400)
+				return NOT_CLASSIFIED;
+			// The reader clones internally only after the content-type gate
+			// (issue #356); pass the response un-cloned.
+			const rejection = await readCodeBuddyGatewayRejection(response);
+			if (rejection === null) return NOT_CLASSIFIED;
+			let requestedModel: string | null = null;
+			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
+			// The gateway reuses 11128 for channel verification AND for
+			// request-shape rejections, so the upstream msg is the only way
+			// to tell a client-identity block from a malformed request in
+			// the journal. Keep it in the log, not the audit row, so the
+			// dashboard's error grouping stays stable. The shape fingerprint
+			// answers the follow-up no payload can (rejected attempts store
+			// none): which client requests does the gateway accept?
+			log.warn(
+				`codebuddy_gateway_rejection shape: ${requestShapeFingerprint(outgoing.bodyText)} system_suspects: ${systemSuspectScan(outgoing.bodyText)}`,
+			);
+			log.warn(
+				`Account ${account.name} codebuddy_gateway_rejection (400 code ${rejection.code}${requestedModel ? `, model=${requestedModel}` : ""}) — ${rejection.msg}; failing over to next account`,
+			);
+			// The audit row stays real-traffic-only, same rationale as the
+			// org_permission_denied path: a synthetic probe's rejection was
+			// never a client-visible request.
+			if (!isSyntheticInternal) {
+				const responseTime = Date.now() - requestMeta.timestamp;
+				const modelRewrite = isModelRewrite(
+					requestMeta.originalModel,
+					requestMeta.appliedModel,
+				);
+				ctx.asyncWriter.enqueue(() =>
+					ctx.dbOps.saveRequest(
+						crypto.randomUUID(),
+						req.method,
+						url.pathname,
+						account.id,
+						400,
+						false,
+						"codebuddy_gateway_rejection",
+						responseTime,
+						failoverAttempts,
+						requestedModel ? { model: requestedModel } : undefined,
+						requestMeta.agentUsed ?? undefined,
+						apiKeyId ?? undefined,
+						apiKeyName ?? undefined,
+						requestMeta.project ?? null,
+						undefined,
+						requestMeta.comboName ?? null,
+						modelRewrite ? (requestMeta.originalModel ?? null) : null,
+						modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+						requestMeta.projectAttributionSource ?? null,
+						requestMeta.agentAttributionSource ?? null,
+						null,
+						requestMeta.clientSessionId ?? null,
+						gatewayHint.requestClass,
+						gatewayHint.agentType,
+						gatewayHint.prevToolDurations,
+						gatewayHint.compaction,
+						gatewayHint.contextCompacted,
+					),
+				);
+			}
+			if (terminal) {
+				// Nothing left to fail over to in this attempt's own view, but the
+				// caller may still have other accounts: hand it a replay instead
+				// of discarding the explanation.
+				//
+				// The body is read NOW, bounded, rather than left on the
+				// response for the replay to consume later (#273). The caller
+				// may abandon the replay without ever invoking it — for example
+				// handleProxyRequest throws its OAuth-expiry error before
+				// reaching the replay — and an unread native body in that case
+				// is exactly the leak class cancelDiscardedResponseBody exists
+				// for. A gateway rejection is a small JSON envelope, so an
+				// over-cap body is not a real rejection: it is discarded and
+				// treated as an ordinary failover instead of being buffered.
+				let terminalBody: string | null = null;
+				try {
+					terminalBody = await readBoundedBody(
+						response.body,
+						MAX_TERMINAL_REJECTION_BYTES,
+					);
+				} catch {
+					terminalBody = null;
+				}
+				if (terminalBody === null) {
+					cancelDiscardedResponseBody(response);
+					return null;
+				}
+				const capturedStatus = response.status;
+				const capturedStatusText = response.statusText;
+				const capturedHeaders = new Headers(response.headers);
+				// The replay is rebuilt from a string, not the original response,
+				// so it misses the tags added further down the normal path (which
+				// this branch returns before reaching). Restore the ones providers
+				// read off the response: CodeBuddy's logModerationBlockIfPresent
+				// takes the request id from this header, and processResponse
+				// branches on the request path.
+				capturedHeaders.set("x-better-ccflare-request-id", requestMeta.id);
+				capturedHeaders.set("x-better-ccflare-request-path", requestMeta.path);
+				const capturedModel = effectiveBodyContext.getModel();
+				onTerminalRejection?.(() =>
+					provider.processResponse(
+						new Response(terminalBody, {
+							status: capturedStatus,
+							statusText: capturedStatusText,
+							headers: capturedHeaders,
+						}),
+						account,
+						req.headers,
+						drainAbortController,
+						{ requestModel: capturedModel },
+					),
+				);
+				return null;
+			}
+			cancelDiscardedResponseBody(response);
+			return null;
+		};
+
+		const codeBuddyRejectionOutcome = await classifyCodeBuddyChannelRejection(
+			rawResponse,
+			returnRateLimitedResponseOnExhaustion,
+		);
+		if (codeBuddyRejectionOutcome !== NOT_CLASSIFIED)
+			return codeBuddyRejectionOutcome;
+
 		/**
 		 * The classification chain as a retry response has to see it: every
 		 * handler above, in the first-response order, minus the model-cycling
@@ -2021,6 +2379,12 @@ export async function proxyWithAccount(
 
 			const orgDenied = await classifyOrgPermissionDenied(retried);
 			if (orgDenied !== NOT_CLASSIFIED) return orgDenied;
+
+			const codeBuddyRejected = await classifyCodeBuddyChannelRejection(
+				retried,
+				returnRateLimitedResponseOnExhaustion,
+			);
+			if (codeBuddyRejected !== NOT_CLASSIFIED) return codeBuddyRejected;
 
 			// Everything below lived under `isModelUnavailableError`, which is
 			// unconditionally true for a 429 and only reachable for 404/400
@@ -2147,8 +2511,22 @@ export async function proxyWithAccount(
 					// mapModelName internally which remaps non-Claude names back to the primary
 					// model (no family match → sonnet fallback). We always want nextModel to
 					// reach the upstream provider verbatim.
-					const patchedContext =
-						effectiveBodyContext.withPatchedModel(nextModel);
+					//
+					// Routing is PER LIST ENTRY: an entry may carry a ` {...}` suffix
+					// pinning upstream providers for THAT model. The model is sent
+					// stripped, and body.provider becomes this entry's routing — or is
+					// removed when the entry has none. Leaving the previous entry's
+					// pin in place would send the new model to the old model's
+					// provider.
+					const nextSplit = splitModelRouting(nextModel);
+					const nextBareModel = nextSplit.model;
+					const patchedContext = patchModelAndRouting(
+						effectiveBodyContext,
+						nextBareModel,
+						nextSplit.routing,
+						slotRouting,
+						accountSupportsRouting,
+					);
 					const patchedBody = patchedContext?.getBuffer() ?? null;
 					if (!patchedBody) {
 						log.warn("Failed to patch request body for model retry");
@@ -2206,14 +2584,19 @@ export async function proxyWithAccount(
 					if (retryTransformedBodyText !== undefined) {
 						try {
 							const transformedBody = JSON.parse(retryTransformedBodyText);
-							// Only a body that still names a model was remapped. One the
-							// provider took the model out of (vertex-ai puts it in the URL)
-							// must not get it back.
+							// Only a body that still names a model gets the model back. One
+							// the provider took the model out of (vertex-ai puts it in the
+							// URL) must not get it back (SB23-3971); an empty model makes
+							// applyModelAndRouting leave `model` alone and patch routing only.
 							if (
-								Object.hasOwn(transformedBody, "model") &&
-								transformedBody.model !== nextModel
+								applyModelAndRouting(
+									transformedBody,
+									Object.hasOwn(transformedBody, "model") ? nextBareModel : "",
+									nextSplit.routing,
+									slotRouting,
+									accountSupportsRouting,
+								)
 							) {
-								transformedBody.model = nextModel;
 								const repatchedBodyText = JSON.stringify(transformedBody);
 								const repatchedHeaders = new Headers(
 									retryTransformedRequest.headers,
@@ -2246,8 +2629,8 @@ export async function proxyWithAccount(
 						// have.
 						//
 						// `model` is attribution-only in this branch, and deliberately
-						// still `nextModel`: `rawResponse` above came from
-						// `retryTransformedRequest`, so `nextModel` is the model that
+						// still `nextBareModel`: `rawResponse` above came from
+						// `retryTransformedRequest`, so `nextBareModel` is the model that
 						// actually produced the response `processResponse` is about to
 						// read `requestModel` for. Recording it unconditionally is also
 						// what the pre-descriptor `responseModelFallback = nextModel`
@@ -2258,13 +2641,13 @@ export async function proxyWithAccount(
 						adoptOutgoingRequest(
 							outgoing.request,
 							outgoing.bodyText,
-							nextModel,
+							nextBareModel,
 						);
 					} else {
 						adoptOutgoingRequest(
 							retryTransformedRequest,
 							retryTransformedBodyText,
-							nextModel,
+							nextBareModel,
 						);
 					}
 
@@ -2343,8 +2726,9 @@ export async function proxyWithAccount(
 							{
 								resetTime: cooldown.until,
 								resetIsInferred:
-									cooldown.source === "provider" &&
-									providerReset.resetIsInferred,
+									!isExplicitUpstreamCooldown(cooldown.source) ||
+									(cooldown.source === "provider" &&
+										providerReset.resetIsInferred),
 								reason,
 							},
 							ctx,

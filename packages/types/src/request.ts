@@ -173,6 +173,7 @@ export interface RequestRow {
 	gateway_hint_context_compacted: string | null;
 	inbound_format: string | null;
 	inbound_gateway: string | null;
+	provider_served: string | null;
 }
 
 // Domain model
@@ -230,6 +231,13 @@ export interface Request {
 	 */
 	inboundFormat?: string | undefined;
 	inboundGateway?: string | undefined;
+	/**
+	 * The backend the provider's own response body names as having served the
+	 * request (OpenRouter body `provider`, e.g. "Morph"). A fact from the
+	 * response, never inferred; absent for providers that do not state it and
+	 * for streaming responses, whose frames carry no such field.
+	 */
+	providerServed?: string | undefined;
 }
 
 // API response type
@@ -286,6 +294,7 @@ export interface RequestResponse {
 	/** See the matching fields on `Request` above. */
 	inboundFormat?: string | undefined;
 	inboundGateway?: string | undefined;
+	providerServed?: string | undefined;
 }
 
 // Detailed request with payload
@@ -334,6 +343,14 @@ export interface RequestPayload {
 		// the "Rate Limited" badge from a summary-only payload (no body
 		// hydration required).
 		rateLimited?: boolean;
+		/**
+		 * The upstream provider's own per-request id (e.g. NanoGPT
+		 * `x-request-id`), when it exposes one. Lets an operator look the
+		 * request up in the provider's web UI logs. Deliberately says nothing
+		 * about which backend/provider served the request. Absent for every
+		 * provider with no known id header.
+		 */
+		providerRequestId?: string;
 	};
 }
 
@@ -402,6 +419,7 @@ export function toRequest(row: RequestRow): Request {
 			row.gateway_hint_context_compacted || undefined,
 		inboundFormat: row.inbound_format || undefined,
 		inboundGateway: row.inbound_gateway || undefined,
+		providerServed: row.provider_served || undefined,
 	};
 }
 
@@ -449,6 +467,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		gatewayHintContextCompacted: request.gatewayHintContextCompacted,
 		inboundFormat: request.inboundFormat,
 		inboundGateway: request.inboundGateway,
+		providerServed: request.providerServed,
 	};
 }
 

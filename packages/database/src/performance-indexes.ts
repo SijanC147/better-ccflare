@@ -134,7 +134,7 @@ export function addPerformanceIndexes(db: Database): void {
 		.join(", ");
 	if (
 		priorityKey !== "" &&
-		priorityKey !== "priority ASC, request_count DESC, last_used ASC"
+		priorityKey !== "priority DESC, request_count DESC, last_used ASC"
 	) {
 		db.run("DROP INDEX idx_accounts_priority");
 		log.info(
@@ -143,7 +143,7 @@ export function addPerformanceIndexes(db: Database): void {
 	}
 	db.run(`
 		CREATE INDEX IF NOT EXISTS idx_accounts_priority
-		ON accounts(priority ASC, request_count DESC, last_used)
+		ON accounts(priority DESC, request_count DESC, last_used)
 	`);
 	log.info("Added index: idx_accounts_priority");
 

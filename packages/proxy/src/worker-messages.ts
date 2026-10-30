@@ -32,6 +32,10 @@ export interface StartMessage {
 	// Project attribution (resolved on main thread before worker handoff)
 	projectId: string | null;
 	worktreePath: string | null;
+	// Upstream provider's own per-request id (e.g. NanoGPT `x-request-id`),
+	// when the provider exposes one. Purely for looking the request up in the
+	// provider's web UI logs; says nothing about which backend served it.
+	providerRequestId?: string | null | undefined;
 
 	// Provider info for rate limit parsing
 	providerName: string;

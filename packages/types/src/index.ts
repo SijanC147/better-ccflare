@@ -18,6 +18,7 @@ export * from "./openai-gateways";
 export * from "./project";
 export * from "./rate-limit-reason";
 export * from "./request";
+export * from "./search-provider";
 export * from "./stats";
 export * from "./strategy";
 export * from "./usage-history";

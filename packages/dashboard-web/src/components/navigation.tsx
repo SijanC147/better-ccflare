@@ -13,6 +13,8 @@ import {
 	Menu,
 	PanelLeftClose,
 	PanelLeftOpen,
+	RefreshCw,
+	Search,
 	Settings,
 	Shield,
 	TerminalSquare,
@@ -45,6 +47,7 @@ const _navItems: NavItem[] = [
 	{ label: "Combos", icon: Zap, path: "/combos" },
 	{ label: "Agents", icon: Bot, path: "/agents" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
+	{ label: "Search", icon: Search, path: "/search" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "Settings", icon: Settings, path: "/settings" },
 ];
@@ -89,6 +92,7 @@ export function Navigation({
 		baseItems.push(
 			{ label: "Agents", icon: Bot, path: "/agents" },
 			{ label: "API Keys", icon: Key, path: "/api-keys" },
+			{ label: "Search", icon: Search, path: "/search" },
 			{ label: "Logs", icon: FileText, path: "/logs" },
 			{
 				label: "API Playground",

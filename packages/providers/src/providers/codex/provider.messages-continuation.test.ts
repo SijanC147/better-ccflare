@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import type { Account } from "@better-ccflare/types";
 import { makeAccount } from "../../testing/account-fixture";
 import { CodexProvider } from "./provider";
 
@@ -550,7 +551,7 @@ describe("Messages fallback cache and continuation", () => {
 						code: "previous_response_not_found",
 					},
 				}),
-				{ status },
+				{ status, headers: { "content-type": "application/json" } },
 			);
 			const recovered = await provider.recoverMessagesContinuation(
 				rejected,
@@ -576,6 +577,34 @@ describe("Messages fallback cache and continuation", () => {
 			]);
 			expect(third.previous_response_id).toBeUndefined();
 			expect(third.input.length).toBeGreaterThan(1);
+		});
+	for (const [label, contentType] of [
+		["text/html", "text/html"],
+		["no content-type", undefined],
+	] as const)
+		test(`a ${label} rejection body does not trigger continuation recovery`, async () => {
+			const provider = new CodexProvider();
+			await request(provider, "one");
+			await complete(provider, "one");
+			await request(provider, "two", replay);
+			const original = new Request("https://example.com/v1/messages", {
+				method: "POST",
+				headers: { "x-better-ccflare-request-id": "two" },
+				body: "{}",
+			});
+			const headers: Record<string, string> = {};
+			if (contentType) headers["content-type"] = contentType;
+			const rejected = new Response("<html>bad gateway</html>", {
+				status: 400,
+				headers,
+			});
+			// A clone above the gate keeps the same `null` result but strands the
+			// tee branch, so assert the clone never happens (#382).
+			const clone = spyOn(rejected, "clone");
+			expect(
+				await provider.recoverMessagesContinuation(rejected, original, account),
+			).toBeNull();
+			expect(clone).not.toHaveBeenCalled();
 		});
 	test("unrelated HTTP errors do not trigger continuation recovery", async () => {
 		const provider = new CodexProvider();
