@@ -194,12 +194,12 @@ jobs:
         run: ./scripts/ci-changed-paths contract
         working-directory: source
 
-      - name: Check out Hextap v0.4.2 contract
+      - name: Check out Hextap v0.8.2 contract
         if: steps.changes.outputs.relevant != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SijanC147/hextap-toolkit
-          ref: 613f0d37a0c84cff20a8e277fc5e9c374f9cbc26
+          ref: 18b9c37e123d34899d8bf360263873790d822ed4
           path: toolkit
           persist-credentials: false
 

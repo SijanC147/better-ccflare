@@ -30,8 +30,8 @@ version, and Hextap refuses a rollback when the selected Formula is pinned. `hom
 release-*publication* recovery — a different thing entirely, covered in `docs/release.md`.
 
 *Verified locally 2026-08-29:* installed toolkit is `brew-hextap 0.6.0 (commit 9d1f6ef1ca365f83b118473d5bfcda416e7bf77c)`.
-Note this is the **local CLI** version and is independent of the workflow pin (`v0.4.2` /
-`613f0d37…`) in `.github/workflows/hextap-release.yml`. Do not "reconcile" them; they are
+Note this is the **local CLI** version and is independent of the workflow pin (`v0.8.2` /
+`18b9c37e…`) in `.github/workflows/hextap-release.yml`. Do not "reconcile" them; they are
 different things.
 
 ## Local mode — roll back this machine only

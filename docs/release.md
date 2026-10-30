@@ -258,8 +258,8 @@ targets, the paired-Linux rule, the Windows `.exe` rule, `macos_only: true`, and
 The toolkit pin in `.github/workflows/hextap-release.yml` is equally load-bearing:
 
 ```
-Hextap Toolkit v0.4.2
-613f0d37a0c84cff20a8e277fc5e9c374f9cbc26
+Hextap Toolkit v0.8.2
+18b9c37e123d34899d8bf360263873790d822ed4
 ```
 
 Never float it to `@main` or a tag. Upgrading requires a provenance-only PR. The reusable

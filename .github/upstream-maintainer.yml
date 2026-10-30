@@ -959,7 +959,7 @@ defaults:
     version:
       # MUST be fork-semver, and this is not a preference. The upstream-release scheme
       # produces X.Y.Z+timestamp, and the Hextap toolkit refuses build metadata outright.
-      # From internal/release/metadata.go at 613f0d37, the commit hextap-release.yml pins:
+      # From internal/release/metadata.go at 18b9c37e (v0.8.2), the commit hextap-release.yml pins:
       #
       #   // Build metadata is intentionally unsupported because release asset identity
       #   // must map to exactly one tag and Formula version.
