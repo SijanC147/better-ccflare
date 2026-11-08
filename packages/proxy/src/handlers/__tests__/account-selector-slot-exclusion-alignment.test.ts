@@ -14,6 +14,7 @@ import type {
 	ComboWithSlots,
 	RequestMeta,
 } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { handleProxy } from "../../proxy";
 import * as usageCollectorModule from "../../usage-collector";
 import {
@@ -73,6 +74,23 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
+		usage_pause_five_hour_min_reset_remaining_ms: null,
+		usage_pause_weekly_min_reset_remaining_ms: null,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		consecutive_rate_limits: 0,
+		renewal_day: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
 		...overrides,
 	};
 }
@@ -105,6 +123,8 @@ function makeCombo(accountIds: string[]): ComboWithSlots {
 			model: pinFor(accountId),
 			priority,
 			enabled: true,
+			max_utilization_percent: null,
+			min_reset_remaining_ms: null,
 		})),
 	};
 }
@@ -231,7 +251,7 @@ async function runProxy(
 	slotIds: string[],
 ): Promise<{ pins: string[]; status: number }> {
 	const calls: unknown[][] = [];
-	globalThis.fetch = mock(async (...args: unknown[]) => {
+	fetchSlot.fetch = mock(async (...args: unknown[]) => {
 		calls.push(args);
 		return successResponse();
 	});
@@ -301,7 +321,7 @@ describe("combo slots stay index-aligned with provider exclusions", () => {
 
 		// End to end: the first survivor goes upstream under its own pin.
 		const calls: unknown[][] = [];
-		globalThis.fetch = mock(async (...args: unknown[]) => {
+		fetchSlot.fetch = mock(async (...args: unknown[]) => {
 			calls.push(args);
 			return successResponse();
 		});

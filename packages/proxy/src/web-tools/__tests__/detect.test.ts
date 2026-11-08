@@ -32,14 +32,15 @@ function helperBody(
 describe("detectWebSearchRequest", () => {
 	test("detects the real Claude Code helper request", () => {
 		const detected = detectWebSearchRequest(helperBody(), OPTIONS);
-		expect(detected).not.toBeNull();
-		expect(detected?.query).toBe("latest bun release");
-		expect(detected?.maxUses).toBe(8);
-		expect(detected?.toolType).toBe("web_search_20250305");
-		expect(detected?.stream).toBe(true);
-		expect(detected?.model).toBe("claude-sonnet-5-5");
-		expect(detected?.allowedDomains).toBeUndefined();
-		expect(detected?.blockedDomains).toBeUndefined();
+		if (!detected)
+			throw new Error("expected the helper request to be detected");
+		expect(detected.query).toBe("latest bun release");
+		expect(detected.maxUses).toBe(8);
+		expect(detected.toolType).toBe("web_search_20250305");
+		expect(detected.stream).toBe(true);
+		expect(detected.model).toBe("claude-sonnet-5-5");
+		expect(detected.allowedDomains).toBeUndefined();
+		expect(detected.blockedDomains).toBeUndefined();
 	});
 
 	test("matches the web_search_ prefix for current and future versions", () => {

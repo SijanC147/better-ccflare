@@ -1215,6 +1215,27 @@ export const API_ROUTES: ApiRoute[] = [
 		summary: "The catalog of provider kinds and their config fields.",
 	},
 	{
+		method: "PATCH",
+		path: "/api/search-providers/free-tier",
+		category: "Search",
+		summary: "Turn every keyless free-tier search provider on or off at once.",
+		bodyHint: '{"enabled": true}',
+	},
+	{
+		method: "GET",
+		path: "/api/web-tool-calls",
+		category: "Search",
+		summary: "Recent web search and fetch tool calls served locally.",
+		query: ["limit", "status", "since", "providerKind"],
+	},
+	{
+		method: "GET",
+		path: "/api/web-tool-calls/summary",
+		category: "Search",
+		summary: "Web tool call counts and outcomes over a time window.",
+		query: ["hours"],
+	},
+	{
 		method: "GET",
 		path: "/api/search-providers/:id",
 		category: "Search",

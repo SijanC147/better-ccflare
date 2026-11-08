@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { isRateLimitReason } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { shouldCountAsCircuitFailure } from "../../circuit-breaker";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -43,6 +44,16 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
+		usage_pause_five_hour_min_reset_remaining_ms: null,
+		usage_pause_weekly_min_reset_remaining_ms: null,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -206,7 +217,7 @@ describe("proxyWithAccount — upstream 402 (out of credits upstream)", () => {
 	});
 
 	it("fails over (returns null for the account) on a 402 without benching it", async () => {
-		globalThis.fetch = mock(async () => upstream402());
+		fetchSlot.fetch = mock(async () => upstream402());
 
 		const ctx = makeProxyContext();
 		const account = makeAccount();
@@ -229,7 +240,7 @@ describe("proxyWithAccount — upstream 402 (out of credits upstream)", () => {
 	});
 
 	it("records the request with reason upstream_402_out_of_credits", async () => {
-		globalThis.fetch = mock(async () => upstream402());
+		fetchSlot.fetch = mock(async () => upstream402());
 
 		const ctx = makeProxyContext();
 		const bodyBuffer = makeRequestBody("claude-sonnet-4-5");
@@ -246,7 +257,7 @@ describe("proxyWithAccount — upstream 402 (out of credits upstream)", () => {
 	});
 
 	it("threads gateway hint headers through to the 402 saveRequest call", async () => {
-		globalThis.fetch = mock(async () => upstream402());
+		fetchSlot.fetch = mock(async () => upstream402());
 
 		const ctx = makeProxyContext();
 		const bodyBuffer = makeRequestBody();
@@ -285,12 +296,12 @@ describe("proxyWithAccount — upstream 402 (out of credits upstream)", () => {
 		const first = makeAccount({ id: "acc-a", name: "a" });
 		const second = makeAccount({ id: "acc-b", name: "b" });
 
-		globalThis.fetch = mock(async () => upstream402());
+		fetchSlot.fetch = mock(async () => upstream402());
 		const firstResult = await runProxy(first, bodyBuffer, ctx);
 		expect(firstResult).toBeNull();
 		expect(capturedForward).toBeNull();
 
-		globalThis.fetch = mock(async () => success200());
+		fetchSlot.fetch = mock(async () => success200());
 		const secondResult = await runProxy(second, bodyBuffer, ctx, 1);
 		expect(secondResult?.status).toBe(200);
 		expect(capturedForward?.status).toBe(200);
@@ -309,7 +320,7 @@ describe("proxyWithAccount — upstream 402 (out of credits upstream)", () => {
 		// First attempt 500 (transient server error → in-place retry), retry
 		// answers 402. The retry re-runs the classification chain.
 		let calls = 0;
-		globalThis.fetch = mock(async () => {
+		fetchSlot.fetch = mock(async () => {
 			calls++;
 			if (calls === 1)
 				return new Response(
@@ -337,7 +348,7 @@ describe("proxyWithAccount — upstream 402 (out of credits upstream)", () => {
 		// The primary answers 429 (rate-limited) because a 404 with no fallback
 		// models is forwarded by design; 429 always enters the model list.
 		const sentModels: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
 			const req = input instanceof Request ? input : new Request(String(input));
 			const body = JSON.parse(await req.text().catch(() => "{}"));
 			sentModels.push(body.model);

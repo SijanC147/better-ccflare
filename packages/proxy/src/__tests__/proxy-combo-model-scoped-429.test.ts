@@ -16,6 +16,7 @@ import {
 } from "../handlers/model-cooldown";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
+import { fetchSlot } from "./fetch-slot";
 
 const originalFetch = globalThis.fetch;
 
@@ -66,6 +67,20 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		requires_reauth: false,
+		peak_hours_pause_enabled: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
+		usage_pause_five_hour_min_reset_remaining_ms: null,
+		usage_pause_weekly_min_reset_remaining_ms: null,
+		request_transformer: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -234,6 +249,8 @@ describe("handleProxy combo 429 — free slot must not bench the account's paid 
 			model: FREE_MODEL,
 			priority: 0,
 			enabled: true,
+			max_utilization_percent: null,
+			min_reset_remaining_ms: null,
 		},
 		{
 			id: "slot-paid",
@@ -242,12 +259,14 @@ describe("handleProxy combo 429 — free slot must not bench the account's paid 
 			model: PAID_MODEL,
 			priority: 1,
 			enabled: true,
+			max_utilization_percent: null,
+			min_reset_remaining_ms: null,
 		},
 	]);
 
 	it("serves the paid slot in the same request and leaves the account unbenched", async () => {
 		// Free model is over quota; the paid model still works.
-		globalThis.fetch = mock(async (...args: unknown[]) => {
+		fetchSlot.fetch = mock(async (...args: unknown[]) => {
 			calls.push(args);
 			const model = await sentModel(args);
 			return model === FREE_MODEL ? quota429Response() : successResponse(model);
@@ -273,7 +292,7 @@ describe("handleProxy combo 429 — free slot must not bench the account's paid 
 	});
 
 	it("routes the next request straight to the paid slot — no repeated free-model 429", async () => {
-		globalThis.fetch = mock(async (...args: unknown[]) => {
+		fetchSlot.fetch = mock(async (...args: unknown[]) => {
 			calls.push(args);
 			const model = await sentModel(args);
 			return model === FREE_MODEL ? quota429Response() : successResponse(model);

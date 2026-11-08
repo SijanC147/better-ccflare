@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import { setComboSlotInfo } from "../account-selector";
 import { clearFamilyExhaustionCache } from "../model-capacity";
 import { isModelCooling, resetModelCooldownsForTests } from "../model-cooldown";
@@ -72,6 +73,16 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		pause_reason: null,
 		refresh_token_issued_at: null,
 		consecutive_rate_limits: 0,
+		requires_reauth: false,
+		usage_pause_five_hour_threshold: null,
+		usage_pause_weekly_threshold: null,
+		usage_pause_five_hour_enabled: false,
+		usage_pause_weekly_enabled: false,
+		usage_pause_five_hour_min_reset_remaining_ms: null,
+		usage_pause_weekly_min_reset_remaining_ms: null,
+		request_transformer: null,
+		last_manual_reauth_at: null,
+		renewal_day: null,
 		...overrides,
 	};
 }
@@ -212,7 +223,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("cools only the slot's model when the account has a different-model sibling slot", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		const meta = makeRequestMeta({ comboName: "my-combo" });
 		setComboSlotInfo(meta, {
@@ -245,7 +256,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("uses definitionSlots, not the per-request filtered slots, to find a sibling", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		// The request's routable `slots` list contains ONLY the failed model's
 		// slot — model-b is cooling and was filtered out of the returned
@@ -279,7 +290,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("falls back to slots when definitionSlots is absent (benches when no sibling there)", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		// No definitionSlots populated: the sibling check must fall back to the
 		// per-request `slots` list, which here holds only the failed model.
@@ -303,7 +314,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("falls back to slots when definitionSlots IS absent but a sibling lives there", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		// Same fallback, the other direction: with no definitionSlots the two
 		// routable slots ARE the definition, so the sibling is still found and
@@ -329,7 +340,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("cools with the store's 5-minute fallback TTL when the 429 names no reset", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		const meta = makeRequestMeta({ comboName: "my-combo" });
 		setComboSlotInfo(meta, {
@@ -357,7 +368,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("write the same audit-row shape as the account-wide path", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		const meta = makeRequestMeta({ comboName: "my-combo" });
 		setComboSlotInfo(meta, {
@@ -387,7 +398,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("benches the account when comboName was cleared (stale ComboSlotInfo, post-step-10 SessionStrategy fallback)", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		// proxy.ts step 10 clears comboName before re-selecting with
 		// SessionStrategy, but the WeakMap entry from the failed combo selection
@@ -417,7 +428,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("benches the account when the combo has no different-model slot for this account", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		const meta = makeRequestMeta({ comboName: "my-combo" });
 		setComboSlotInfo(meta, {
@@ -438,7 +449,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 	});
 
 	it("benches the account when the only sibling slot is a passthrough (empty modelOverride)", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		fetchSlot.fetch = mock(async () => plain429());
 
 		const meta = makeRequestMeta({ comboName: "my-combo" });
 		setComboSlotInfo(meta, {
@@ -471,7 +482,7 @@ describe("proxyWithAccount — combo 429 cools (account, model), not the account
 			Math.floor((Date.now() + 4 * 24 * 60 * 60 * 1000) / 1000) * 1000;
 		const iso = new Date(resetMs).toISOString().replace(/\.\d{3}Z$/, "Z");
 
-		globalThis.fetch = mock(
+		fetchSlot.fetch = mock(
 			async () =>
 				new Response(
 					JSON.stringify({

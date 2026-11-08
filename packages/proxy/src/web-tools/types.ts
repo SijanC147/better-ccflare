@@ -37,9 +37,9 @@ export interface DetectedWebSearchRequest {
 	/** The search query, already stripped of Claude Code's prompt prefix. */
 	query: string;
 	/** Anthropic `allowed_domains` from the tool definition, if any. */
-	allowedDomains?: string[];
+	allowedDomains?: string[] | undefined;
 	/** Anthropic `blocked_domains` from the tool definition, if any. */
-	blockedDomains?: string[];
+	blockedDomains?: string[] | undefined;
 	/** `max_uses` from the tool definition; informational for now. */
 	maxUses: number;
 	/** e.g. `web_search_20250305`. Informational — never branch on the value. */
@@ -84,10 +84,10 @@ export interface WebToolSearchHit {
 export interface WebToolSearchRequest {
 	query: string;
 	maxResults: number;
-	allowedDomains?: string[];
-	blockedDomains?: string[];
+	allowedDomains?: string[] | undefined;
+	blockedDomains?: string[] | undefined;
 	/** Aborted when the client disconnects or the overall deadline expires. */
-	signal?: AbortSignal;
+	signal?: AbortSignal | undefined;
 }
 
 /** Per-provider configuration, as stored in `search_providers`. */
@@ -101,7 +101,7 @@ export interface WebToolAdapterConfig {
 	 * remember per-row facts (e.g. Brave's plan not including an endpoint) key
 	 * that memory on it, and simply skip the optimisation when it is absent.
 	 */
-	rowId?: string;
+	rowId?: string | undefined;
 }
 
 /**

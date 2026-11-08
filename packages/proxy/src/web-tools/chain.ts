@@ -41,11 +41,11 @@ type SearchProviderRepository = ReturnType<
 export interface WebToolChainDeps {
 	dbOps: Pick<DatabaseOperations, "getSearchProviderRepository">;
 	/** Client-disconnect signal; aborts every in-flight and future attempt. */
-	signal?: AbortSignal;
+	signal?: AbortSignal | undefined;
 	/** Injectable clock for tests; defaults to `Date.now`. */
-	now?: () => number;
+	now?: (() => number) | undefined;
 	/** Optional warn sink; the chain never logs at other levels. */
-	log?: { warn(msg: string): void };
+	log?: { warn(msg: string): void } | undefined;
 }
 
 export interface WebToolChainResult {

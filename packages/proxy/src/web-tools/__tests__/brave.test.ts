@@ -5,6 +5,7 @@
  * calls, and nothing here touches Anthropic.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import {
 	BRAVE_LLM_CONTEXT_URL,
 	BRAVE_SEARCH_URL,
@@ -394,11 +395,11 @@ describe("brave adapter — errors", () => {
 	});
 
 	it("surfaces an abort as a status-408 error", async () => {
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			const error = new Error("aborted");
 			error.name = "AbortError";
 			throw error;
-		}) as typeof fetch;
+		};
 
 		let caught: unknown;
 		try {
@@ -415,9 +416,9 @@ describe("brave adapter — errors", () => {
 	});
 
 	it("wraps a transport failure without echoing the query", async () => {
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			throw new Error("connection refused");
-		}) as typeof fetch;
+		};
 
 		let caught: unknown;
 		try {
@@ -489,9 +490,9 @@ describe("brave adapter — test()", () => {
 	});
 
 	it("returns ok:false on a transport failure without throwing", async () => {
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			throw new Error("dns");
-		}) as typeof fetch;
+		};
 
 		const result = await adapter.test(baseConfig);
 

@@ -7,11 +7,28 @@
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import type { SearchProvider } from "@better-ccflare/types";
-import type { WebToolChainDeps } from "../chain";
+import { fetchSlot } from "../../__tests__/fetch-slot";
+import type { WebToolChainDeps, WebToolChainOutcome } from "../chain";
 import type { WebToolSearchRequest } from "../types";
 import { runWebSearchChainFromModule } from "./chain-module";
 
 const originalFetch = globalThis.fetch;
+
+/**
+ * Asserts the chain served the search and narrows to the success arm, so a
+ * test reading `providerLabel` or `hits` fails here, naming the outcome, when
+ * the chain gave up instead.
+ */
+function expectSuccess(
+	outcome: WebToolChainOutcome | null | undefined,
+): Extract<WebToolChainOutcome, { ok: true }> {
+	if (!outcome?.ok) {
+		throw new Error(
+			`expected a served search, got ${JSON.stringify(outcome ?? null)}`,
+		);
+	}
+	return outcome;
+}
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
@@ -137,11 +154,11 @@ describe("runWebSearchChain — provider selection", () => {
 		expect(attempted).toEqual(["key-a"]);
 		expect(result).not.toBeNull();
 		expect(result?.ok).toBe(true);
-		expect(result?.providerId).toBe("tavily");
-		expect(result?.providerRowId).toBe("a");
-		expect(result?.providerLabel).toBe("A");
-		expect(result?.hits).toHaveLength(1);
-		expect(result?.hits[0].url).toBe("https://a.example/1");
+		expect(expectSuccess(result).providerId).toBe("tavily");
+		expect(expectSuccess(result).providerRowId).toBe("a");
+		expect(expectSuccess(result).providerLabel).toBe("A");
+		expect(expectSuccess(result).hits).toHaveLength(1);
+		expect(expectSuccess(result).hits[0]?.url).toBe("https://a.example/1");
 		expect(result?.latencyMs).toBeGreaterThanOrEqual(0);
 		expect(health).toEqual([
 			{
@@ -167,7 +184,7 @@ describe("runWebSearchChain — provider selection", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(attempted).toEqual(["key-second"]);
-		expect(result?.providerLabel).toBe("Second");
+		expect(expectSuccess(result).providerLabel).toBe("Second");
 	});
 
 	it("skips a provider whose cooldown is still in the future", async () => {
@@ -187,7 +204,7 @@ describe("runWebSearchChain — provider selection", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(attempted).toEqual(["key-ready"]);
-		expect(result?.providerLabel).toBe("Ready");
+		expect(expectSuccess(result).providerLabel).toBe("Ready");
 		// No attempt means no health write for the skipped row.
 		expect(health.map((write) => write.id)).toEqual(["ready"]);
 	});
@@ -231,7 +248,7 @@ describe("runWebSearchChain — provider selection", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(attempted).toEqual(["key-tavily"]);
-		expect(result?.providerLabel).toBe("Tavily");
+		expect(expectSuccess(result).providerLabel).toBe("Tavily");
 	});
 
 	it("skips a key-requiring provider that has no key stored", async () => {
@@ -246,7 +263,7 @@ describe("runWebSearchChain — provider selection", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(attempted).toEqual(["key-keyed"]);
-		expect(result?.providerLabel).toBe("Keyed");
+		expect(expectSuccess(result).providerLabel).toBe("Keyed");
 	});
 
 	it("attempts a keyless provider with no key stored", async () => {
@@ -275,7 +292,7 @@ describe("runWebSearchChain — provider selection", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(attemptedKeys).toEqual(["better-ccflare"]);
-		expect(result?.providerLabel).toBe("Keenable (free)");
+		expect(expectSuccess(result).providerLabel).toBe("Keenable (free)");
 	});
 
 	it("falls through to the next provider when a keyless one fails", async () => {
@@ -308,7 +325,7 @@ describe("runWebSearchChain — provider selection", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(keenableCalls).toBe(1);
-		expect(result?.providerLabel).toBe("Keyed");
+		expect(expectSuccess(result).providerLabel).toBe("Keyed");
 	});
 
 	it("returns null when no provider is eligible", async () => {
@@ -410,9 +427,9 @@ describe("runWebSearchChain — failure attribution", () => {
 	it("never puts the API key in the failure message", async () => {
 		const canary = "tvly-CANARY-failure-message";
 		const { deps } = makeDeps([makeProvider({ apiKey: canary })]);
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			throw new Error(`rejected ${canary}`);
-		}) as typeof fetch;
+		};
 
 		const outcome = await runWebSearchChainFromModule(deps, searchRequest);
 		expect(outcome.ok).toBe(false);
@@ -449,8 +466,8 @@ describe("runWebSearchChain — fallback behaviour", () => {
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
 		expect(attempted).toEqual(["key-a", "key-b"]);
-		expect(result?.providerLabel).toBe("B");
-		expect(result?.hits[0].url).toBe("https://b.example/1");
+		expect(expectSuccess(result).providerLabel).toBe("B");
+		expect(expectSuccess(result).hits[0]?.url).toBe("https://b.example/1");
 		expect(health).toEqual([
 			{
 				id: "a",
@@ -481,8 +498,8 @@ describe("runWebSearchChain — fallback behaviour", () => {
 
 		expect(attempted).toEqual(["key-a"]);
 		expect(result).not.toBeNull();
-		expect(result?.providerLabel).toBe("A");
-		expect(result?.hits).toEqual([]);
+		expect(expectSuccess(result).providerLabel).toBe("A");
+		expect(expectSuccess(result).hits).toEqual([]);
 		expect(health).toEqual([
 			{ id: "a", status: "ok", statusMessage: null, cooldownUntil: null },
 		]);
@@ -521,7 +538,7 @@ describe("runWebSearchChain — fallback behaviour", () => {
 
 		const result = await runWebSearchChainFromModule(deps, searchRequest);
 
-		expect(result?.hits).toHaveLength(1);
+		expect(expectSuccess(result).hits).toHaveLength(1);
 	});
 });
 
@@ -557,10 +574,10 @@ describe("runWebSearchChain — health accounting", () => {
 		const { deps, health, warnings } = makeDeps([
 			makeProvider({ id: "a", label: "A", apiKey: canary }),
 		]);
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			// Simulates a badly behaved adapter/upstream echoing the credential.
 			throw new Error(`upstream rejected ${canary}`);
-		}) as typeof fetch;
+		};
 
 		await runWebSearchChainFromModule(deps, searchRequest);
 
@@ -645,7 +662,7 @@ describe("runWebSearchChain — request pass-through", () => {
 		);
 		const elapsed = Date.now() - started;
 
-		expect(outcome?.hits.length).toBeGreaterThan(0);
+		expect(expectSuccess(outcome).hits.length).toBeGreaterThan(0);
 		expect(elapsed).toBeLessThan(1000);
 		releaseWrite();
 	});

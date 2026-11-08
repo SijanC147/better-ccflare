@@ -17,7 +17,7 @@ function anthropicRequest(
 
 function imageParts(msg: OpenAIMessage | undefined) {
 	if (!msg || !Array.isArray(msg.content)) throw new Error("expected array");
-	return msg.content as Array<Record<string, unknown>>;
+	return msg.content as unknown as Array<Record<string, unknown>>;
 }
 
 // ── User/assistant message images ────────────────────────────────────────────
@@ -359,7 +359,7 @@ describe("convertAnthropicRequestToOpenAI — images in tool results", () => {
 							{
 								type: "tool_result",
 								tool_use_id: "t1",
-								content: [{ type: "image", source: {} }],
+								content: [{ type: "image", source: {} as never }],
 							},
 							{
 								type: "tool_result",

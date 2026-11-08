@@ -362,7 +362,7 @@ describe("buildWebSearchResponse (non-streaming)", () => {
 		]);
 		expect(message.content[0].input).toEqual({ query: "latest bun release" });
 		expect(message.content[1].tool_use_id).toBe(message.content[0].id);
-		expect(message.content[2].text.length).toBeGreaterThan(0);
+		expect((message.content[2].text ?? "").length).toBeGreaterThan(0);
 		expect(message.usage.server_tool_use.web_search_requests).toBe(1);
 	});
 });
@@ -390,7 +390,7 @@ describe("buildWebSearchErrorResponse", () => {
 				"web_search_tool_result",
 				"text",
 			]);
-			expect(message.content[2].text.length).toBeGreaterThan(0);
+			expect((message.content[2].text ?? "").length).toBeGreaterThan(0);
 			// Explanations stay generic: no URLs, provider names or keys.
 			expect(message.content[2].text).not.toContain("http");
 		}

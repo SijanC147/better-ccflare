@@ -57,11 +57,13 @@ function summary(
 function makeStore(options: { rows?: WebToolCall[]; fail?: boolean } = {}) {
 	const listCalls: Array<{
 		limit: number;
-		filters?: {
-			status?: WebToolCallStatus;
-			providerKind?: string;
-			since?: number;
-		};
+		filters?:
+			| {
+					status?: WebToolCallStatus | undefined;
+					providerKind?: string | undefined;
+					since?: number | undefined;
+			  }
+			| undefined;
 	}> = [];
 	const summarySince: number[] = [];
 	const store: WebToolCallStore = {

@@ -137,6 +137,8 @@ function slot(
 		model,
 		priority,
 		enabled: true,
+		max_utilization_percent: null,
+		min_reset_remaining_ms: null,
 	};
 }
 
@@ -409,7 +411,7 @@ function expectRetryable(result: RunOutcome): void {
 
 /** An account whose cooldown just expired and whose probe lease is taken. */
 function suppress(account: Account): Account {
-	const suppressed = {
+	const suppressed: Account = {
 		...account,
 		rate_limited_until: Date.now() - 1,
 		rate_limited_reason: "upstream_529_overloaded_no_reset",

@@ -364,6 +364,8 @@ describe("vision capability cache — skip a route that already refused the imag
 				model: pinnedModel,
 				priority: 0,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 			{
 				id: "slot-1",
@@ -372,6 +374,8 @@ describe("vision capability cache — skip a route that already refused the imag
 				model: "second-pinned-model",
 				priority: 1,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 		]);
 		const ctx = makeContext([blind, serving], { combo });
@@ -545,6 +549,8 @@ describe("vision capability cache — an all-skipped pool does not re-ask a blin
 				model: pinnedModel,
 				priority: 0,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 		]);
 		const ctx = makeContext([blind], { combo });
@@ -649,6 +655,8 @@ describe("vision capability cache — provider routing the key cannot represent"
 				model: pinnedModel,
 				priority: 0,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 			{
 				id: "slot-1",
@@ -657,6 +665,8 @@ describe("vision capability cache — provider routing the key cannot represent"
 				model: "second-pinned-model",
 				priority: 1,
 				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
 			},
 		]);
 		const ctx = makeContext([blind, serving], { combo, providerRouting: true });

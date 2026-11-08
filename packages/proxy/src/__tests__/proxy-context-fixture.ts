@@ -31,7 +31,9 @@
  * to remove:
  *
  * - `strategy`, `config`, `provider` and `asyncWriter` when the caller does not
- *   supply them, and any `dbOps` method the caller did not supply.
+ *   supply them, and any `dbOps` method the caller did not supply. One
+ *   exception: `config.getWebSearchEnabled` and `getWebSearchBypassHeader`
+ *   answer `false` unless the mock names them (see `CONFIG_DEFAULTS`).
  *
  * ## Supplying `strategy`, `config`, `provider` or `asyncWriter` (SB23-2483)
  *
@@ -202,11 +204,13 @@ function throwingStub<T extends object>(
 	field: string,
 	known: Record<string, unknown> = {},
 	callerSupplied = false,
+	defaults: Record<string, unknown> = {},
 ): T {
 	return new Proxy({} as T, {
 		get(_target, property) {
 			if (typeof property === "symbol") return undefined;
 			if (Object.hasOwn(known, property)) return known[property];
+			if (Object.hasOwn(defaults, property)) return defaults[property];
 			if (RUNTIME_PROBE_KEYS.has(property)) return undefined;
 			throw new Error(
 				`ProxyContext.${field}.${property} was read by a test that did not supply it. ` +
@@ -260,13 +264,34 @@ function isPlainObject(value: object): boolean {
 function suppliedOrStub<T extends object>(
 	field: string,
 	supplied: MockOf<T> | undefined,
+	defaults: Record<string, unknown> = {},
 ): T {
-	if (supplied === undefined) return throwingStub<T>(field);
+	if (supplied === undefined)
+		return throwingStub<T>(field, {}, false, defaults);
 	if (isPlainObject(supplied)) {
-		return throwingStub<T>(field, supplied as Record<string, unknown>, true);
+		return throwingStub<T>(
+			field,
+			supplied as Record<string, unknown>,
+			true,
+			defaults,
+		);
 	}
 	return supplied as T;
 }
+
+/**
+ * `Config` members served when a mock does not name them. `proxy.ts` asks
+ * `maybeInterceptWebSearch` about every request with a parsed body, before
+ * account selection, and that reads both of these (upstream's `web_search`
+ * intercept, SB23-11280). Off is the shipped default for both, and it makes
+ * the intercept return null without reading anything else, so a test that
+ * does not care about web search takes the path it took before the intercept
+ * existed. A mock that names either member wins.
+ */
+const CONFIG_DEFAULTS: Record<string, unknown> = {
+	getWebSearchEnabled: () => false,
+	getWebSearchBypassHeader: () => false,
+};
 
 /**
  * A complete `RuntimeConfig`. The values match the shipped defaults rather
@@ -303,6 +328,11 @@ export interface ProxyContextOverrides {
 	provider?: MockOf<Provider>;
 	/** As `strategy`. */
 	asyncWriter?: MockOf<AsyncDbWriter>;
+	/**
+	 * The upstream-response forwarder `proxyWithAccount` calls instead of the
+	 * real `forwardToClient`. Absent by default, so production's own is used.
+	 */
+	forwardToClient?: ProxyContext["forwardToClient"] | undefined;
 }
 
 /**
@@ -326,7 +356,7 @@ export function makeProxyContext(
 			"strategy",
 			overrides.strategy,
 		),
-		config: suppliedOrStub<Config>("config", overrides.config),
+		config: suppliedOrStub<Config>("config", overrides.config, CONFIG_DEFAULTS),
 		provider: suppliedOrStub<Provider>("provider", overrides.provider),
 		asyncWriter: suppliedOrStub<AsyncDbWriter>(
 			"asyncWriter",
@@ -335,6 +365,9 @@ export function makeProxyContext(
 	};
 	if (overrides.internalProbeSecret !== undefined) {
 		context.internalProbeSecret = overrides.internalProbeSecret;
+	}
+	if (overrides.forwardToClient !== undefined) {
+		context.forwardToClient = overrides.forwardToClient;
 	}
 	return context;
 }

@@ -5,6 +5,7 @@
  * calls, and nothing here touches Anthropic.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import {
 	createParallelAdapter,
 	PARALLEL_SEARCH_URL,
@@ -354,11 +355,11 @@ describe("parallel adapter — errors", () => {
 	});
 
 	it("surfaces an abort as a status-408 error", async () => {
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			const error = new Error("aborted");
 			error.name = "AbortError";
 			throw error;
-		}) as typeof fetch;
+		};
 
 		let caught: unknown;
 		try {

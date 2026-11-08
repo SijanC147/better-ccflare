@@ -50,6 +50,7 @@ function makeProvider(overrides: Partial<SearchProvider> = {}): SearchProvider {
 		enabled: true,
 		maxResults: 5,
 		extraConfig: {},
+		tier: "paid",
 		status: "unknown",
 		statusMessage: null,
 		statusCheckedAt: null,
@@ -180,8 +181,12 @@ function makeHarness(
 			getWebSearchMaxResultChars: () => options.maxResultChars ?? 4000,
 		},
 		dbOps: (options.trace ?? makeTraceSink()).dbOps,
-		project: options.project,
-		accountId: options.accountId,
+		// Named only when the test supplies them: absent and `null` are different
+		// inputs, and the deps type does not take an explicit `undefined`.
+		...(options.project !== undefined ? { project: options.project } : {}),
+		...(options.accountId !== undefined
+			? { accountId: options.accountId }
+			: {}),
 		log: {
 			info: (message: string) => info.push(message),
 			warn: (message: string) => warn.push(message),

@@ -344,9 +344,11 @@ function contextToHits(
  * pull out Brave's machine code (`error.code`) when the body is its documented
  * `{type: "ErrorResponse", error: {status, detail, code}}` shape.
  */
-async function readErrorDetail(
-	response: Response,
-): Promise<{ excerpt: string; code?: string; detail?: string }> {
+async function readErrorDetail(response: Response): Promise<{
+	excerpt: string;
+	code?: string | undefined;
+	detail?: string | undefined;
+}> {
 	let text: string;
 	try {
 		text = await response.text();

@@ -23,9 +23,9 @@ export interface WebToolCallStore {
 	listWebToolCalls(
 		limit: number,
 		filters?: {
-			status?: WebToolCallStatus;
-			providerKind?: string;
-			since?: number;
+			status?: WebToolCallStatus | undefined;
+			providerKind?: string | undefined;
+			since?: number | undefined;
 		},
 	): Promise<WebToolCall[]>;
 	webToolCallSummary(since: number): Promise<WebToolCallSummary[]>;

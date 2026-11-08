@@ -248,6 +248,8 @@ export interface OpenAIResponse {
 		};
 		delta?: OpenAIStreamDelta;
 		finish_reason?: string | undefined;
+		/** Choice position; real OpenAI responses carry it. */
+		index?: number | undefined;
 	}>;
 	usage?: OpenAIUsage | undefined;
 	error?: {

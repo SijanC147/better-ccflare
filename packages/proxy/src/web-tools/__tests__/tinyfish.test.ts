@@ -5,6 +5,7 @@
  * calls, and nothing here touches Anthropic.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import { fetchSlot } from "../../__tests__/fetch-slot";
 import {
 	createTinyfishAdapter,
 	TINYFISH_ERROR_STATUS_MISSING_KEY,
@@ -347,11 +348,11 @@ describe("tinyfish adapter — errors", () => {
 	});
 
 	it("surfaces an abort as a status-408 error", async () => {
-		globalThis.fetch = (async () => {
+		fetchSlot.fetch = async () => {
 			const error = new Error("aborted");
 			error.name = "AbortError";
 			throw error;
-		}) as typeof fetch;
+		};
 
 		let caught: unknown;
 		try {

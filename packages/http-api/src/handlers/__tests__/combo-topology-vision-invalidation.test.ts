@@ -226,7 +226,10 @@ describe("removing a combo slot", () => {
 			"slot-gone",
 		);
 
-		expect(res.status).toBe(200);
+		// The fork scopes slot DELETE to the combo first (Codex P2), and with no
+		// slot-by-id lookup an already-gone slot is indistinguishable from one in
+		// another combo, so it answers 400 rather than upstream's 200.
+		expect(res.status).toBe(400);
 		expect(db.removed).toEqual([]);
 		expect(isVisionUnsupported("acc-1", "old-pin")).toBe(true);
 	});

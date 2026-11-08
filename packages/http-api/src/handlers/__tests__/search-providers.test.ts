@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	SEARCH_PROVIDER_CATALOG,
 	type SearchProvider,
+	type SearchProviderId,
 	type SearchProviderInput,
 	type SearchProviderPublic,
 	type SearchProviderUpdate,
@@ -388,6 +389,9 @@ describe("search provider handlers", () => {
 			remove: async () => {
 				throw new Error("store must not be called");
 			},
+			setFreeTierEnabled: async () => {
+				throw new Error("store must not be called");
+			},
 		};
 		const handlers = createSearchProviderHandlers(store);
 		const res = handlers.meta();
@@ -497,9 +501,12 @@ describe("search provider /test", () => {
 		}) as unknown as typeof fetch;
 
 		try {
-			const otherProvider = SEARCH_PROVIDER_CATALOG.find(
-				(entry) => entry.id !== "tavily",
-			)?.id;
+			// Upstream now implements every catalog provider, so the first
+			// non-Tavily entry has a real adapter and would call fetch. Use an
+			// unimplemented entry if one exists, else a kind no adapter serves.
+			const otherProvider =
+				SEARCH_PROVIDER_CATALOG.find((entry) => entry.implemented === false)
+					?.id ?? ("not-a-provider" as SearchProviderId);
 			if (!otherProvider) return;
 			const { store, rows } = createFakeStore([
 				{ provider: otherProvider, label: "O", apiKey: "k" },
@@ -597,7 +604,7 @@ describe("search provider test — adapter delegation", () => {
 	// for every other provider, even once they had adapters. It now runs the
 	// adapter's own test(), so the button exercises the real URL and auth.
 	it("tests a non-Tavily provider through its adapter", async () => {
-		const calls: Array<{ url: string; init?: RequestInit }> = [];
+		const calls: Array<{ url: string; init?: RequestInit | undefined }> = [];
 		const original = globalThis.fetch;
 		globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
 			calls.push({ url: String(url), init });

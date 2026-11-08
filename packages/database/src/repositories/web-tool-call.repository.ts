@@ -18,10 +18,10 @@ const SELECT_COLUMNS = `
 	estimated_cost_usd`;
 
 export interface WebToolCallListFilters {
-	status?: WebToolCallStatus;
-	providerKind?: string;
+	status?: WebToolCallStatus | undefined;
+	providerKind?: string | undefined;
 	/** Epoch ms; only rows at or after this are returned. */
-	since?: number;
+	since?: number | undefined;
 }
 
 /**

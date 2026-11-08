@@ -144,7 +144,7 @@ function redactUrl(url: string): string {
  */
 async function readErrorDetail(
 	response: Response,
-): Promise<{ excerpt: string; code?: string }> {
+): Promise<{ excerpt: string; code?: string | undefined }> {
 	let text: string;
 	try {
 		text = await response.text();

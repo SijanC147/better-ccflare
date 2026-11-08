@@ -28,11 +28,11 @@ interface Envelope<T> {
 }
 
 export interface WebToolCallQuery {
-	limit?: number;
-	status?: WebToolCallStatus;
-	providerKind?: string;
+	limit?: number | undefined;
+	status?: WebToolCallStatus | undefined;
+	providerKind?: string | undefined;
 	/** Epoch ms; rows at or after this instant. */
-	since?: number;
+	since?: number | undefined;
 }
 
 const STATUSES: WebToolCallStatus[] = ["ok", "error", "fallthrough"];
