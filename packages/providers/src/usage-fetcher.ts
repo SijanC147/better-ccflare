@@ -1,6 +1,7 @@
 import {
 	type AccountUsageSnapshot,
 	CLAUDE_CLI_VERSION,
+	isUsageExhausted,
 	isUseExtraUsageEnabled,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
@@ -942,6 +943,46 @@ function plainUsageSnapshot(
 		snapshot.extraUsageAvailable = true;
 	}
 	return snapshot;
+}
+
+/**
+ * Whether this account is admitted ONLY because of billed capacity beyond its
+ * plan: its plan window is spent, and it still serves on Anthropic extra usage
+ * (the `use_extra_usage` switch) or on Codex credits (SB23-2289).
+ *
+ * Sean's ruling of 2026-11-08 (SB23-8202): "only switch to overage credits
+ * after all other subscription-based account options have been spent." The
+ * selector uses this to order such accounts after every account that still
+ * has plan quota. It decides ordering only; admission is unchanged, so a pool
+ * whose plan accounts are all spent or failing still reaches the overage
+ * account, and with the switch off a spent Anthropic account is still benched.
+ *
+ * Two routes, because the two kinds of billed capacity enter admission at
+ * different places:
+ * - `extraUsageAvailable` on the snapshot leaves the window unchanged, so the
+ *   plain window check without it says whether the plan is spent;
+ * - Codex credits remove the weekly window from the admission fold before the
+ *   snapshot is built, so the plan is spent when the fold WITH that window
+ *   reaches 100.
+ */
+export function servesOnlyOnOverage(
+	data: AnyUsageData | null | undefined,
+	provider: string,
+	now: number = Date.now(),
+): boolean {
+	if (!data || typeof data !== "object") return false;
+	const snapshot = getRepresentativeUsageSnapshotForProvider(data, provider);
+	if (
+		snapshot?.extraUsageAvailable === true &&
+		isUsageExhausted(snapshot.utilization, snapshot.resetMs, now, false)
+	) {
+		return true;
+	}
+	if (codexCreditsExcludeWeekly(data, provider)) {
+		const withWeekly = utilizationForProvider(data, provider, false, false);
+		return withWeekly !== null && withWeekly >= 100;
+	}
+	return false;
 }
 
 /**

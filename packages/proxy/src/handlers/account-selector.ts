@@ -9,6 +9,7 @@ import { Logger } from "@better-ccflare/logger";
 import {
 	getRepresentativeUsageSnapshotForProvider,
 	isOfficialXaiEndpoint,
+	servesOnlyOnOverage,
 	usageCache,
 } from "@better-ccflare/providers";
 import type {
@@ -180,6 +181,43 @@ function usageSnapshot(account: Account): AccountUsageSnapshot | null {
 		usageCache.get(account.id),
 		account.provider ?? "anthropic",
 	);
+}
+
+/**
+ * Overage is a last resort (SB23-8202, Sean 2026-11-08): "only switch to
+ * overage credits after all other subscription-based account options have been
+ * spent." Returns a stable partition of `items`: every account that still has
+ * plan quota first, in its existing order, then every account that is spent on
+ * its plan and admitted only on Anthropic extra usage or Codex credits, also in
+ * its existing order. Failover walks the list in order, so an overage account
+ * is reached only when every plan account before it was not chosen or failed.
+ * Ranking among plan accounts is untouched, and a list holding a single
+ * account, or only overage accounts, comes back as it was.
+ *
+ * Used by combo and gateway ladders (`collectAvailableComboSlots`, which
+ * keeps its slot entries aligned with its accounts); the main pool splits
+ * before its strategy runs instead (`selectOverageLast`). A ladder whose only usable slot is on overage still uses
+ * it, because there is no plan alternative to prefer.
+ */
+export function orderOverageLast<T>(
+	items: T[],
+	accountOf: (item: T) => Account,
+	now: number = Date.now(),
+): T[] {
+	const plan: T[] = [];
+	const overage: T[] = [];
+	for (const item of items) {
+		if (isOverage(accountOf(item), now)) {
+			overage.push(item);
+		} else {
+			plan.push(item);
+		}
+	}
+	if (overage.length === 0 || plan.length === 0) return items;
+	log.info(
+		`Overage last: ${overage.length} account(s) serving only on extra usage or credits moved after ${plan.length} account(s) with plan quota`,
+	);
+	return [...plan, ...overage];
 }
 
 /**
@@ -639,7 +677,10 @@ export async function getOrderedAccounts(
 		// be mistaken for one of those "actually has capacity" accounts.
 		// Provider is still determined dynamically per account downstream.
 		return {
-			ordered: ctx.strategy.select(candidates, meta),
+			ordered: isAutoRefreshBypass
+				? // Probes keep the strategy's order: they target accounts, not quota.
+					ctx.strategy.select(candidates, meta)
+				: selectOverageLast(candidates, meta, ctx, now),
 			all: allAccounts,
 		};
 	} catch (error) {
@@ -658,6 +699,46 @@ export async function getOrderedAccounts(
 		// This will cause the proxy to fall back to unauthenticated mode
 		return { ordered: [], all: [] };
 	}
+}
+
+/**
+ * The main pool's order with overage last (SB23-8202). The split happens
+ * BEFORE the strategy runs, so a session strategy stamps and sticks to an
+ * account that will actually serve: sorting after `select` left the session
+ * stamp on a demoted overage account while a plan account served. The
+ * overage accounts follow in priority order, available ones only, without
+ * going through the strategy, so they never take a session stamp while a plan
+ * account is in front of them. With no plan account left the strategy orders
+ * the overage accounts as it would any pool.
+ */
+function selectOverageLast(
+	candidates: Account[],
+	meta: RequestMeta,
+	ctx: ProxyContext,
+	now: number,
+): Account[] {
+	const plan = candidates.filter((a) => !isOverage(a, now));
+	const overage = candidates.filter((a) => isOverage(a, now));
+	if (plan.length === 0 || overage.length === 0) {
+		return ctx.strategy.select(candidates, meta);
+	}
+	log.info(
+		`Overage last: ${overage.length} account(s) serving only on extra usage or credits held behind ${plan.length} account(s) with plan quota`,
+	);
+	return [
+		...ctx.strategy.select(plan, meta),
+		...overage
+			.filter((account) => isAccountAvailable(account, now))
+			.sort((a, b) => a.priority - b.priority),
+	];
+}
+
+function isOverage(account: Account, now: number): boolean {
+	return servesOnlyOnOverage(
+		usageCache.get(account.id),
+		account.provider ?? "anthropic",
+		now,
+	);
 }
 
 /**
@@ -784,7 +865,21 @@ async function collectAvailableComboSlots(
 		);
 	}
 
-	return { availableAccounts, slotEntries, accountMap, permittedAccountIds };
+	// Overage last within a ladder too (SB23-8202). Pairs are reordered
+	// together so accounts[i] and slotEntries[i] stay aligned.
+	const ordered = orderOverageLast(
+		availableAccounts.map((account, i) => ({
+			account,
+			entry: slotEntries[i] as { accountId: string; modelOverride: string },
+		})),
+		(pair) => pair.account,
+	);
+	return {
+		availableAccounts: ordered.map((pair) => pair.account),
+		slotEntries: ordered.map((pair) => pair.entry),
+		accountMap,
+		permittedAccountIds,
+	};
 }
 
 /**

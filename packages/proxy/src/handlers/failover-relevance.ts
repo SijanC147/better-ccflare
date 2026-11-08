@@ -52,6 +52,8 @@ interface RequestFailoverState {
 	answers: Map<string, UpstreamAnswer>;
 	/** A foreign error not forwarded because a native attempt had failed first. */
 	suppressed: UpstreamAnswer | null;
+	/** The newest native 402's body, kept to replay on an all-402 pool (SB23-11281). */
+	native402: { accountId: string; body: string; contentType: string } | null;
 }
 
 const states = new WeakMap<RequestMeta, RequestFailoverState>();
@@ -59,7 +61,7 @@ const states = new WeakMap<RequestMeta, RequestFailoverState>();
 function stateFor(meta: RequestMeta): RequestFailoverState {
 	let state = states.get(meta);
 	if (!state) {
-		state = { answers: new Map(), suppressed: null };
+		state = { answers: new Map(), suppressed: null, native402: null };
 		states.set(meta, state);
 	}
 	return state;
@@ -68,6 +70,20 @@ function stateFor(meta: RequestMeta): RequestFailoverState {
 /** The model the client asked for, after any agent rewrite. */
 function requestedModel(meta: RequestMeta): string | null {
 	return meta.appliedModel ?? meta.originalModel ?? null;
+}
+
+/** One trailing `-YYYYMMDD` snapshot date, and nothing else. */
+const DATE_SUFFIX = /-\d{8}$/;
+
+/**
+ * Whether two model ids name the same model once one trailing `-YYYYMMDD`
+ * snapshot date is stripped from each (Sean's ruling on SB23-10878's open
+ * question, 2026-11-08). `claude-sonnet-4-5` and `claude-sonnet-4-5-20250929`
+ * are the same model; `claude-opus-4` and `claude-opus-4-8` are not. No prefix
+ * matching and no version stripping.
+ */
+export function sameModelIgnoringDate(a: string, b: string): boolean {
+	return a.replace(DATE_SUFFIX, "") === b.replace(DATE_SUFFIX, "");
 }
 
 /**
@@ -98,7 +114,10 @@ export function noteUpstreamAnswer(
 		upstreamModel,
 		// With no model on either side there is nothing to rank by, so the
 		// answer counts as native and nothing changes.
-		native: !requested || !upstreamModel || upstreamModel === requested,
+		native:
+			!requested ||
+			!upstreamModel ||
+			sameModelIgnoringDate(upstreamModel, requested),
 		retryHeaders,
 	});
 }
@@ -183,4 +202,58 @@ export function createRelevantExhaustionResponse(
 		}),
 		{ status: native.status, headers },
 	);
+}
+
+/** A 402 body larger than this is not kept; the pool then ends as before. */
+const MAX_402_BODY_CHARS = 64 * 1024;
+
+/**
+ * Keeps a native 402's body before the out-of-credits classifier fails the
+ * request over (SB23-11281). Since the upstream sync of `#322` a 402 fails
+ * over without benching, so a pool where every account answers 402, a single
+ * out-of-credit account included, used to end on the generic 503 and lose the
+ * provider's billing message. Reads the body, so call it in place of
+ * discarding it. A foreign 402 is not kept: it is about another model.
+ */
+export async function noteNative402Body(
+	meta: RequestMeta,
+	account: Account,
+	response: Response,
+): Promise<void> {
+	const own = states.get(meta)?.answers.get(account.id);
+	if (!own || !own.native || own.status !== 402) return;
+	let body: string;
+	try {
+		body = await response.text();
+	} catch {
+		return;
+	}
+	if (body.length > MAX_402_BODY_CHARS) return;
+	stateFor(meta).native402 = {
+		accountId: account.id,
+		body,
+		contentType: response.headers.get("content-type") ?? "application/json",
+	};
+}
+
+/**
+ * The response for an exhausted pool where EVERY account's newest answer was
+ * a native 402: the newest one's body, status and retry headers, replayed as
+ * `#316` replays native failures. Null otherwise, so any other exhaustion
+ * keeps its existing response.
+ */
+export function createAll402ExhaustionResponse(
+	meta: RequestMeta,
+): Response | null {
+	const state = states.get(meta);
+	if (!state?.native402 || state.answers.size === 0) return null;
+	let newest: UpstreamAnswer | null = null;
+	for (const answer of state.answers.values()) {
+		if (answer.status !== 402 || !answer.native) return null;
+		newest = answer;
+	}
+	if (!newest || newest.accountId !== state.native402.accountId) return null;
+	const headers = new Headers(newest.retryHeaders);
+	headers.set("content-type", state.native402.contentType);
+	return new Response(state.native402.body, { status: 402, headers });
 }

@@ -58,7 +58,11 @@ import { forwardToClient as defaultForwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { applyAccountRequestTransformer } from "./account-request-transformer";
 import { getComboSlotInfo, getXaiConvId } from "./account-selector";
-import { noteUpstreamAnswer, suppressForeignError } from "./failover-relevance";
+import {
+	noteNative402Body,
+	noteUpstreamAnswer,
+	suppressForeignError,
+} from "./failover-relevance";
 import { noteWindowlessOAuthRefusal } from "./gateway-oauth-skip";
 import { markFamilyExhausted } from "./model-capacity";
 import {
@@ -2452,6 +2456,9 @@ export async function proxyWithAccount(
 						),
 					);
 				}
+				// Keep the billing message for an all-402 pool (SB23-11281).
+				// Reads the body, so the discard below finds it consumed.
+				await noteNative402Body(requestMeta, account, rawResponse);
 				cancelDiscardedResponseBody(rawResponse);
 				return null;
 			}
