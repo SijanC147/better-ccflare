@@ -52,7 +52,9 @@ function TraceRow({ trace, now }: { trace: WebToolCall; now: number }) {
 		>
 			<span
 				className="w-16 shrink-0 text-xs text-muted-foreground"
-				title={new Date(trace.timestamp).toLocaleString()}
+				title={new Date(trace.timestamp).toLocaleString(undefined, {
+					hourCycle: "h23",
+				})}
 			>
 				{formatRelativeTime(trace.timestamp, now)}
 			</span>

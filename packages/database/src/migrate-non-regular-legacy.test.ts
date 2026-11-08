@@ -173,15 +173,23 @@ async function migrateInSubprocess(
 		].join("\n"),
 		"utf8",
 	);
+	// An explicit BETTER_CCFLARE_DB_PATH now suppresses the legacy import
+	// entirely (upstream, migrate-from-ccflare.ts), so the child must take the
+	// default path, which XDG_CONFIG_HOME already places inside the fixture.
+	if (newDbPath !== join(dir, "better-ccflare", "better-ccflare.db")) {
+		throw new Error(`newDbPath ${newDbPath} is not the default under ${dir}`);
+	}
+	const env: Record<string, string | undefined> = {
+		...process.env,
+		XDG_CONFIG_HOME: dir,
+	};
+	delete env.BETTER_CCFLARE_DB_PATH;
+	delete env.ccflare_DB_PATH;
 	const proc = Bun.spawn({
 		cmd: [process.execPath, "run", script],
 		stdout: "pipe",
 		stderr: "pipe",
-		env: {
-			...process.env,
-			XDG_CONFIG_HOME: dir,
-			BETTER_CCFLARE_DB_PATH: newDbPath,
-		},
+		env,
 	});
 	const pid = proc.pid;
 	livePids.add(pid);
@@ -288,13 +296,18 @@ describe("a legacy database path that is not a regular file", () => {
 		const { dir, legacyDbPath, newDbPath } = makeLegacyTree();
 		const previousXdg = process.env.XDG_CONFIG_HOME;
 		const previousDbPath = process.env.BETTER_CCFLARE_DB_PATH;
+		const previousLegacyDbPath = process.env.ccflare_DB_PATH;
 		try {
 			// A directory does not block the way a FIFO does, so this one runs in
 			// process. It shares the guard, and it is the shape an operator hits by
 			// pointing XDG_CONFIG_HOME at a tree that holds a folder there.
 			mkdirSync(legacyDbPath);
 			process.env.XDG_CONFIG_HOME = dir;
-			process.env.BETTER_CCFLARE_DB_PATH = newDbPath;
+			// Unset rather than pointed at newDbPath: an explicit path now makes
+			// migrateFromCcflare() return false before it looks at the legacy
+			// path, which would pass this test without reaching the guard.
+			delete process.env.BETTER_CCFLARE_DB_PATH;
+			delete process.env.ccflare_DB_PATH;
 			expect(migrateFromCcflare()).toBe(false);
 			expect(existsSync(newDbPath)).toBe(false);
 		} finally {
@@ -307,6 +320,9 @@ describe("a legacy database path that is not a regular file", () => {
 				delete process.env.BETTER_CCFLARE_DB_PATH;
 			} else {
 				process.env.BETTER_CCFLARE_DB_PATH = previousDbPath;
+			}
+			if (previousLegacyDbPath !== undefined) {
+				process.env.ccflare_DB_PATH = previousLegacyDbPath;
 			}
 			removeFixtureDir(dir);
 		}

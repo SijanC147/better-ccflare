@@ -804,6 +804,12 @@ export class APIRouter {
 		this.handlers.set("GET:/api/search-providers/meta", () =>
 			this.searchProviderHandlers.meta(),
 		);
+		// { enabled } bulk toggle. A static route, so the exact-match lookup
+		// answers it before the /api/search-providers/:id branch could read
+		// "free-tier" as an id.
+		this.handlers.set("PATCH:/api/search-providers/free-tier", (req) =>
+			this.searchProviderHandlers.setFreeTier(req),
+		);
 
 		// Web tool call traces. Both are static paths, so no dynamic route can
 		// shadow them.
@@ -1361,14 +1367,6 @@ export class APIRouter {
 				const alertAckHandler = createAlertAcknowledgeHandler(this.context);
 				return await this.wrapHandler(() => alertAckHandler(alertId))(req, url);
 			}
-		}
-
-		// PATCH /api/search-providers/free-tier — { enabled } bulk toggle. Must
-		// precede the :id routes below, which would read "free-tier" as an id.
-		if (path === "/api/search-providers/free-tier" && method === "PATCH") {
-			return await this.wrapHandler((req) =>
-				this.searchProviderHandlers.setFreeTier(req),
-			)(req, url);
 		}
 
 		// Check for dynamic search provider endpoints (/api/search-providers/:id)
