@@ -4,10 +4,13 @@ import { RETRY_DEFAULTS } from "@better-ccflare/core";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
 import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
-import * as responseHandlerModule from "../../response-handler";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
+import {
+	clearVisionCapability,
+	isVisionUnsupported,
+} from "../vision-capability";
 
 /**
  * Transient upstream 5xx (500/502/503/504) handling: one in-place retry on the
@@ -121,6 +124,7 @@ function makeContext(): ProxyContext {
 		},
 		config: { getStorePayloads: () => true },
 		internalProbeSecret: "test-secret",
+		forwardToClient: capturingForward,
 	});
 }
 
@@ -148,40 +152,27 @@ function serverErrorResponse(
 }
 
 /**
- * Captures the Response handed to `forwardToClient` instead of letting the
- * real one throw "UsageCollector not initialized".
+ * Captures the Response handed to the forwarding step.
  *
- * Reaching the pass-through path proves only that we did not fail over; it
- * says nothing about WHICH response was passed through. Every assertion that
- * the *upstream* status and body survived to the client needs the captured
- * argument, so the terminal-account cases install this stub.
- *
- * `mock.module` is process-global in Bun with no per-file isolation, so the
- * stub is installed inside the individual test and torn down in `afterEach` —
- * never at module top level, where it would also rewrite `forwardToClient`
- * for every other proxy test file sharing the process.
+ * Injected through `ctx.forwardToClient`, NOT via `mock.module`: that function
+ * is a static import in `proxy-operations`, bound when the module is first
+ * evaluated, so a `mock.module` rewrite could never take effect there. The
+ * old stub only appeared to work because the REAL `forwardToClient` happens to
+ * throw "UsageCollector not initialized" when no collector was initialised —
+ * and in a full suite another test file can initialise one first, at which
+ * point the real function returns normally and these tests failed with
+ * "expected forwarded to be true" (received false).
  */
 let capturedForward: Response | null = null;
 
-// Snapshotted at load time, before any mock.module call: Bun live-updates the
-// imported namespace object, so reading it during teardown would hand the stub
-// straight back and leak it into every test that follows.
-const realResponseHandler = { ...responseHandlerModule };
-
-function captureForwardedResponse(): void {
-	capturedForward = null;
-	mock.module("../../response-handler", () => ({
-		...realResponseHandler,
-		forwardToClient: async (options: { response: Response }) => {
-			capturedForward = options.response;
-			return options.response;
-		},
-	}));
-}
+/** The forwarding seam every test in this file runs against. */
+const capturingForward = (async ({ response }: { response: Response }) => {
+	capturedForward = response;
+	return response;
+}) as unknown as NonNullable<ProxyContext["forwardToClient"]>;
 
 function restoreForwardToClient(): void {
 	capturedForward = null;
-	mock.module("../../response-handler", () => realResponseHandler);
 }
 
 /**
@@ -196,15 +187,22 @@ async function runProxy(
 	ctx: ProxyContext,
 	isLastAccount = false,
 	failoverAttempts = 0,
-): Promise<{ result: Response | null; forwarded: boolean }> {
+): Promise<{
+	result: Response | null;
+	forwarded: boolean;
+	meta: RequestMeta;
+}> {
 	let forwarded = false;
 	let result: Response | null = null;
+	// Returned so a test can read back the per-attempt signals proxyWithAccount
+	// stamps on it (`visionRejected`), which the caller loop in proxy.ts consumes.
+	const meta = makeRequestMeta();
 	try {
 		result = await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			account,
-			makeRequestMeta(),
+			meta,
 			bodyBuffer,
 			() => undefined,
 			failoverAttempts,
@@ -216,11 +214,17 @@ async function runProxy(
 			isLastAccount,
 		);
 	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		if (!msg.includes("UsageCollector not initialized")) throw e;
-		forwarded = true;
+		// Not the proof of forwarding any more: the injected forwarder returns
+		// a response rather than throwing. Kept only so an unexpected throw is
+		// visible as a non-forward if a future change reintroduces one.
+		void e;
+		forwarded = false;
 	}
-	return { result, forwarded };
+	// Forwarding is proven by the injected seam having been called, not by an
+	// exception from an uninitialised singleton. This is the whole point of the
+	// seam: it is deterministic regardless of what other test files ran first.
+	forwarded = forwarded || capturedForward !== null;
+	return { result, forwarded, meta };
 }
 
 /**
@@ -231,6 +235,345 @@ async function runProxy(
 const saveCalls = (ctx: ProxyContext) =>
 	(ctx.dbOps.saveRequest as ReturnType<typeof mock>).mock
 		.calls as unknown as unknown[][];
+
+describe("proxyWithAccount — image rejection on an in-place retry", () => {
+	let originalFetch: typeof fetchSlot.fetch;
+
+	beforeEach(() => {
+		originalFetch = fetchSlot.fetch;
+		resetRateLimitProbeGatesForTests();
+		// The learned-refusal cache is process-global module state.
+		clearVisionCapability();
+	});
+
+	afterEach(() => {
+		fetchSlot.fetch = originalFetch;
+		restoreForwardToClient();
+	});
+
+	/**
+	 * A body that reaches `classifyRetriedUpstreamResponse`: an assistant turn
+	 * carrying a thinking block is what makes `filterThinkingBlocks` strip it and
+	 * re-issue in place. `withImage` adds the image block the vision gate looks
+	 * for — without one the retried 400 is not a vision rejection at all, because
+	 * `requestCarriesImageContent` says the request never carried an image.
+	 */
+	function thinkingRetryBody(
+		withImage: boolean,
+		extra: Record<string, unknown> = {},
+	): ArrayBuffer {
+		return new TextEncoder().encode(
+			JSON.stringify({
+				model: "claude-sonnet-4-5",
+				max_tokens: 10,
+				messages: [
+					{
+						role: "user",
+						content: withImage
+							? [
+									{ type: "text", text: "hello" },
+									{
+										type: "image",
+										source: {
+											type: "base64",
+											media_type: "image/png",
+											data: "abc",
+										},
+									},
+								]
+							: "hello",
+					},
+					{
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "hmm", signature: "sig" },
+							{ type: "text", text: "hi" },
+						],
+					},
+				],
+				...extra,
+			}),
+		).buffer;
+	}
+
+	/**
+	 * First attempt: Anthropic's overloaded shape as an SSE stream, which is what
+	 * the proxy synthesizes a 529 from. 529 is the retry that sets
+	 * `retriedInPlace` and hands the retried response to
+	 * `classifyRetriedUpstreamResponse` — the thinking-signature and
+	 * cache_control retries do NOT reach that classifier, so a 400 there cannot
+	 * exercise this path. Retried attempt: a 400 that denies image input.
+	 * Returns the call log.
+	 */
+	function mockOverloadThenVisionRejection(): number[] {
+		const calls: number[] = [];
+		fetchSlot.fetch = mock(async () => {
+			calls.push(calls.length + 1);
+			if (calls.length === 1) {
+				const sse = [
+					'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5","usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+					'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}\n\n',
+				].join("");
+				return new Response(sse, {
+					status: 529,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			return new Response(
+				JSON.stringify({
+					error: { message: "This model does not support image input." },
+				}),
+				{ status: 400, headers: { "content-type": "application/json" } },
+			);
+		});
+		return calls;
+	}
+
+	// The first-pass short-circuit only sees the initial response. A retry that
+	// rejects image input used to fall through `status !== 429` in
+	// classifyRetriedUpstreamResponse and reach the client instead of the next
+	// account. An invalid-thinking-signature 400 is the simplest in-place retry
+	// a mixed provider fixture can trigger.
+	it("fails over when an in-place retry rejects image input", async () => {
+		const calls = mockOverloadThenVisionRejection();
+
+		const ctx = makeContext();
+		// filterThinkingBlocks only produces a different body when an assistant
+		// turn actually carries a thinking block; without one the retry is
+		// skipped and this path is never reached.
+		const bodyBuffer = thinkingRetryBody(true);
+		const { forwarded } = await runProxy(
+			makeRequest(bodyBuffer),
+			makeAccount(),
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(calls.length).toBeGreaterThanOrEqual(2);
+		expect(forwarded).toBe(false);
+		// The LAST upstream response is the retried 400; it must be the one the
+		// assertion above is about. The first response is a thinking-signature
+		// error, which the retry replaces without ever being classified as vision.
+		expect(capturedForward?.status ?? null).not.toBe(400);
+	});
+
+	// The gate's other half. The same retried 400 on a request that carried no
+	// image is not a vision rejection: `requestCarriesImageContent` is false, so
+	// the classifier never runs and the 400 stays with the client instead of
+	// being replayed across every account and reported as `vision_unsupported`.
+	it("forwards the retried 400 when the request carried no image", async () => {
+		const calls = mockOverloadThenVisionRejection();
+
+		const ctx = makeContext();
+		const bodyBuffer = thinkingRetryBody(false);
+		const { forwarded } = await runProxy(
+			makeRequest(bodyBuffer),
+			makeAccount(),
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(calls.length).toBeGreaterThanOrEqual(2);
+		expect(forwarded).toBe(true);
+		expect(capturedForward?.status).toBe(400);
+	});
+
+	/**
+	 * An image-carrying body with no thinking block, so the only in-place retry
+	 * in play is the transient-5xx one the test scripts. The model is the one the
+	 * request ASKED for, which is the model half of the vision capability key.
+	 */
+	function imageBody(model = "claude-sonnet-4-5"): ArrayBuffer {
+		return new TextEncoder().encode(
+			JSON.stringify({
+				model,
+				max_tokens: 10,
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "what is in this picture" },
+							{
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: "image/png",
+									data: "abc",
+								},
+							},
+						],
+					},
+				],
+			}),
+		).buffer;
+	}
+
+	function visionRejection400(): Response {
+		return new Response(
+			JSON.stringify({
+				error: { message: "This model does not support image input." },
+			}),
+			{ status: 400, headers: { "content-type": "application/json" } },
+		);
+	}
+
+	// The retry classification is the SECOND place a refusal is confirmed, so it
+	// has to teach the cache as well as fail over — otherwise a pair that only
+	// ever refuses on a retried response would be re-probed on every image
+	// request forever. Recorded under the model the request asked for, which is
+	// the key routing looks up before it skips a candidate.
+	it("records the refused pair in the vision capability cache", async () => {
+		const calls = mockOverloadThenVisionRejection();
+
+		const ctx = makeContext();
+		const bodyBuffer = thinkingRetryBody(true);
+		await runProxy(makeRequest(bodyBuffer), makeAccount(), bodyBuffer, ctx);
+
+		expect(calls.length).toBeGreaterThanOrEqual(2);
+		expect(isVisionUnsupported("acc-1", "claude-sonnet-4-5")).toBe(true);
+	});
+
+	// ... and it must NOT record a refusal that belongs to a different model.
+	// When the model-cycling fallback ran first, the response being classified
+	// answers for a fallback alias reached through a transient failure on the
+	// requested model. Recording that under the requested model would sideline a
+	// route whose primary may read images perfectly well the moment the transient
+	// clears — a capability claim the evidence does not support, held for a full
+	// TTL.
+	it("records nothing when the refusal belongs to a cycled fallback model", async () => {
+		const calls: number[] = [];
+		const sentModels: string[] = [];
+		fetchSlot.fetch = mock(async (input: RequestInfo | URL) => {
+			const wire =
+				input instanceof Request ? input : new Request(String(input));
+			const body = JSON.parse(
+				await wire
+					.clone()
+					.text()
+					.catch(() => "{}"),
+			) as {
+				model?: string;
+			};
+			sentModels.push(body.model ?? "");
+			calls.push(calls.length + 1);
+			if (calls.length === 1) {
+				// A plain 429 on the requested model: model-unavailable, so the
+				// account's model list is cycled.
+				return new Response(
+					JSON.stringify({
+						error: { type: "api_error", message: "Rate limit exceeded" },
+					}),
+					{ status: 429, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (calls.length === 2) {
+				// A transient 500 on the fallback alias: not model-unavailable, so the
+				// cycling stops here and the 5xx retry re-issues in place.
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "api_error", message: "Internal server error" },
+					}),
+					{ status: 500, headers: { "content-type": "application/json" } },
+				);
+			}
+			// The retried response denies image input — but it is the FALLBACK's
+			// answer, not the requested model's.
+			return visionRejection400();
+		}) as unknown as typeof fetch;
+
+		const ctx = makeContext();
+		const bodyBuffer = imageBody();
+		const account = makeAccount({
+			// Two entries for the requested model's family, so the cycling loop has
+			// somewhere to go.
+			model_mappings: JSON.stringify({
+				sonnet: ["primary-target-model", "fallback-target-model"],
+			}),
+		});
+		const { result, forwarded, meta } = await runProxy(
+			makeRequest(bodyBuffer),
+			account,
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(calls.length).toBeGreaterThanOrEqual(3);
+		// The cycling really happened: from the second request on, the wire carried
+		// the fallback alias, so the retried 400 below is that alias's answer and
+		// not the requested model's.
+		expect(sentModels[1]).toBe("fallback-target-model");
+		expect(sentModels[2]).toBe("fallback-target-model");
+		// The failover itself is unchanged: an image refusal still returns null so
+		// the caller moves to the next account / combo slot.
+		expect(result).toBeNull();
+		expect(forwarded).toBe(false);
+		// Neither key is recorded: the requested model has no evidence against it,
+		// and the alias that did refuse is never a lookup key.
+		expect(isVisionUnsupported("acc-1", "claude-sonnet-4-5")).toBe(false);
+		expect(isVisionUnsupported("acc-1", "fallback-target-model")).toBe(false);
+		// And the per-attempt signal stays unset for the same reason. It is the
+		// other half of what the terminal verdict in proxy.ts counts, so a refusal
+		// that is not evidence about the requested pair must not be counted as one:
+		// leaving it unset makes this attempt read as "capability unknown", which
+		// keeps an image request retryable instead of answering a permanent 400 on
+		// the strength of a fallback alias's opinion.
+		expect(meta.visionRejected).toBeFalsy();
+	});
+
+	// The other half of the same guard: when the model-cycling fallback did NOT
+	// run, the retried refusal is the requested model's own and the signal is
+	// stamped, so the caller loop can count it.
+	it("stamps visionRejected when the retried refusal belongs to the requested model", async () => {
+		const calls = mockOverloadThenVisionRejection();
+
+		const ctx = makeContext();
+		const bodyBuffer = thinkingRetryBody(true);
+		const { result, meta } = await runProxy(
+			makeRequest(bodyBuffer),
+			makeAccount(),
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(calls.length).toBeGreaterThanOrEqual(2);
+		expect(result).toBeNull();
+		expect(meta.visionRejected).toBe(true);
+		// Same evidence, recorded on both sides: the cache entry a later request
+		// skips on, and the per-attempt flag this request's verdict counts.
+		expect(isVisionUnsupported("acc-1", "claude-sonnet-4-5")).toBe(true);
+	});
+
+	// The routing guard's asymmetry, and the one that matters: a refusal under a
+	// client-supplied `provider` is still first-hand evidence for THIS request —
+	// a retry would carry the same provider — so the per-attempt flag counts,
+	// while the cross-request cache write is withheld because the key does not
+	// represent the routing the refusal arrived under. Suppressing the flag too
+	// turned a confirmed refusal into "capability unknown", so a request every
+	// eligible route had refused still answered a retryable 503.
+	it("stamps visionRejected on a retried refusal under a client provider, but records nothing", async () => {
+		const calls = mockOverloadThenVisionRejection();
+
+		const ctx = makeContext();
+		const bodyBuffer = thinkingRetryBody(true, {
+			provider: { only: ["client-picked-upstream"] },
+		});
+		const { result, meta } = await runProxy(
+			makeRequest(bodyBuffer),
+			makeAccount(),
+			bodyBuffer,
+			ctx,
+		);
+
+		expect(calls.length).toBeGreaterThanOrEqual(2);
+		expect(result).toBeNull();
+		// This request's verdict may count the refusal...
+		expect(meta.visionRejected).toBe(true);
+		// ...but no other request may inherit it: the bare pair says nothing about
+		// the provider this refusal arrived under.
+		expect(isVisionUnsupported("acc-1", "claude-sonnet-4-5")).toBe(false);
+	});
+});
 
 describe("proxyWithAccount — transient upstream 5xx retry and failover", () => {
 	let originalFetch: typeof fetchSlot.fetch;
@@ -682,7 +1025,9 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 			callCount++;
 			return serverErrorResponse(500);
 		});
-		captureForwardedResponse();
+		// A call, not an assignment: assigning null here narrows capturedForward
+		// to null for the rest of the test, so its reads type as never.
+		restoreForwardToClient();
 
 		const ctx = makeContext();
 		const account = makeAccount();
@@ -741,7 +1086,9 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 				"anthropic-ratelimit-unified-reset": String(resetSeconds),
 			});
 		});
-		captureForwardedResponse();
+		// A call, not an assignment: assigning null here narrows capturedForward
+		// to null for the rest of the test, so its reads type as never.
+		restoreForwardToClient();
 
 		const ctx = makeContext();
 		const account = makeAccount();

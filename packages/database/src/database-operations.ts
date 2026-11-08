@@ -28,6 +28,10 @@ import type {
 	SearchProviderUpdate,
 	StrategyStore,
 	VacuumStatus,
+	WebToolCall,
+	WebToolCallStatus,
+	WebToolCallSummary,
+	WebToolCallWriteInput,
 	WorktreeRule,
 	WorktreeRuleKind,
 } from "@better-ccflare/types";
@@ -65,11 +69,16 @@ import { SearchProviderRepository } from "./repositories/search-provider.reposit
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { UsageHistoryRepository } from "./repositories/usage-history.repository";
+import { WebToolCallRepository } from "./repositories/web-tool-call.repository";
 import {
 	compileCheck,
 	WorktreeRuleRepository,
 } from "./repositories/worktree-rule.repository";
 import { withDatabaseRetry } from "./retry";
+import {
+	seedFreeSearchProviders,
+	setFreeSearchTiersEnabled,
+} from "./search-tier-seeding";
 import { runWalTruncateInWorker } from "./wal-truncate-runner";
 
 const log = new Logger("DatabaseOperations");
@@ -579,6 +588,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private _discoveryRunner: (() => Promise<unknown>) | null = null;
 	private usageHistory: UsageHistoryRepository;
 	private searchProviders: SearchProviderRepository;
+	private webToolCalls: WebToolCallRepository;
 
 	constructor(
 		dbPath?: string,
@@ -755,6 +765,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.worktreeRules = new WorktreeRuleRepository(this.adapter);
 		this.usageHistory = new UsageHistoryRepository(this.adapter);
 		this.searchProviders = new SearchProviderRepository(this.adapter);
+		this.webToolCalls = new WebToolCallRepository(this.adapter);
 	}
 
 	/**
@@ -771,6 +782,19 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		// Default mode is "warn" — see #351.
 		const mode = readMultiInstanceMode();
 		await runStartupGuard(this.adapter, { mode });
+		// Install any missing free-tier search rows (disabled, last resort).
+		// Idempotent and create-only, so operator edits are never overwritten.
+		try {
+			const created = await seedFreeSearchProviders(this.searchProviders);
+			if (created.length > 0) {
+				console.log(
+					`[database] seeded free search providers: ${created.join(", ")}`,
+				);
+			}
+		} catch (error) {
+			// Seeding is a convenience; a failure must not block startup.
+			console.warn("Failed to seed free search providers:", error);
+		}
 		// Start the heartbeat loop so this instance's row is refreshed
 		// while it lives. The stopper is invoked from close().
 		this.heartbeatStop = startHeartbeatLoop(this.adapter);
@@ -1364,6 +1388,35 @@ OAuth tokens will need to be re-authenticated.
 		return this.usageHistory.deleteOlderThan(cutoffTs);
 	}
 
+	// ── Web tool call analytics ───────────────────────────────────────────────
+
+	/** Record one intercepted web tool call (id + timestamp generated here). */
+	async recordWebToolCall(input: WebToolCallWriteInput): Promise<void> {
+		await this.webToolCalls.record(input);
+	}
+
+	/** Newest-first web tool calls, optionally filtered. */
+	async listWebToolCalls(
+		limit: number,
+		filters?: {
+			status?: WebToolCallStatus | undefined;
+			providerKind?: string | undefined;
+			since?: number | undefined;
+		},
+	): Promise<WebToolCall[]> {
+		return this.webToolCalls.listRecent(limit, filters);
+	}
+
+	/** Per `(provider_kind, status)` totals for calls at or after `since`. */
+	async webToolCallSummary(since: number): Promise<WebToolCallSummary[]> {
+		return this.webToolCalls.summary(since);
+	}
+
+	/** Delete web tool calls older than `cutoff`; returns rows removed. */
+	async pruneWebToolCalls(cutoff: number): Promise<number> {
+		return this.webToolCalls.deleteOlderThan(cutoff);
+	}
+
 	async forceResetAccountRateLimit(accountId: string): Promise<boolean> {
 		return withDatabaseRetry(
 			async () => {
@@ -1759,19 +1812,27 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRequestsByAccount(since);
 	}
 
-	// Cleanup operations — two explicit passes:
+	// Cleanup operations — three explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
 	// Pass 2: delete request metadata older than requestRetentionMs
+	// Pass 3: delete web_tool_calls older than webToolRetentionMs (optional)
+	//
+	// Pass 3 is skippable: when `webToolRetentionMs` is omitted or not a finite
+	// number, web-tool rows are left alone (existing two-argument callers keep
+	// their exact behaviour). `removedWebToolCalls` is additive on the result.
 	async cleanupOldRequests(
 		payloadRetentionMs: number,
 		requestRetentionMs?: number,
+		webToolRetentionMs?: number,
 	): Promise<{
 		removedRequests: number;
 		removedPayloads: number;
+		removedWebToolCalls: number;
 	}> {
 		const now = Date.now();
 		let removedPayloads = 0;
 		let removedRequests = 0;
+		let removedWebToolCalls = 0;
 		// Set once pass 2 starts: a batched delete that throws midway may already
 		// have removed rows whose count is lost with the exception.
 		let requestPassStarted = false;
@@ -1794,6 +1855,18 @@ OAuth tokens will need to be re-authenticated.
 				removedRequests = await this.requests.deleteOlderThan(requestCutoff);
 				requestPassStarted = false;
 			}
+
+			// Pass 3 — web tool call analytics (no derived stats depend on them)
+			if (
+				typeof webToolRetentionMs === "number" &&
+				Number.isFinite(webToolRetentionMs)
+			) {
+				// Same `now` as the other passes: the cutoff is deterministic for
+				// a run, exactly like the request/payload cutoffs above.
+				removedWebToolCalls = await this.pruneWebToolCalls(
+					now - webToolRetentionMs,
+				);
+			}
 		} finally {
 			// Runs on success and on a throwing pass (original error still
 			// propagates). Drop counts cached before or during cleanup.
@@ -1805,7 +1878,7 @@ OAuth tokens will need to be re-authenticated.
 			}
 		}
 
-		return { removedRequests, removedPayloads };
+		return { removedRequests, removedPayloads, removedWebToolCalls };
 	}
 
 	/**
@@ -2947,8 +3020,12 @@ OAuth tokens will need to be re-authenticated.
 		return this.combo.updateSlot(slotId, fields);
 	}
 
-	async removeComboSlot(slotId: string): Promise<void> {
-		await this.combo.removeSlot(slotId);
+	/**
+	 * Deletes a combo slot; resolves to the removed slot's account id, or null
+	 * when no such slot existed.
+	 */
+	async removeComboSlot(slotId: string): Promise<string | null> {
+		return this.combo.removeSlot(slotId);
 	}
 
 	async getComboSlots(comboId: string): Promise<ComboSlot[]> {
@@ -3227,9 +3304,35 @@ OAuth tokens will need to be re-authenticated.
 		return toSearchProviderPublic(updated);
 	}
 
+	/**
+	 * Update, but only if the stored key is still `expectedApiKey` (null for
+	 * "still no key"). Returns null when it moved — the caller re-reads and
+	 * retries, so a tier derived from a stale key is never written.
+	 */
+	async updateSearchProviderExpectingKey(
+		id: string,
+		fields: SearchProviderUpdate,
+		expectedApiKey: string | null,
+	): Promise<SearchProviderPublic | null> {
+		const updated = await this.searchProviders.updateExpectingKey(
+			id,
+			fields,
+			expectedApiKey,
+		);
+		return updated ? toSearchProviderPublic(updated) : null;
+	}
+
 	/** @returns true if a row was deleted, false if the id didn't exist. */
 	async deleteSearchProvider(id: string): Promise<boolean> {
 		return this.searchProviders.delete(id);
+	}
+
+	/**
+	 * Enable/disable every free-tier row (the "use free tier" toggle).
+	 * @returns ids of the rows whose state changed.
+	 */
+	async setFreeSearchTiersEnabled(enabled: boolean): Promise<string[]> {
+		return setFreeSearchTiersEnabled(this.searchProviders, enabled);
 	}
 
 	/** Enabled providers by priority ASC (proxy routing order). */

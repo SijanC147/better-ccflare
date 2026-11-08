@@ -110,6 +110,8 @@ function makeContext(account: Account): ProxyContext {
 		},
 		runtime: { clientId: "test" },
 		config: {
+			getWebSearchEnabled: () => false,
+			getWebSearchBypassHeader: () => true,
 			getUsageThrottlingFiveHourEnabled: () => true,
 			getUsageThrottlingWeeklyEnabled: () => true,
 			getSystemPromptCacheTtl1h: () => false,

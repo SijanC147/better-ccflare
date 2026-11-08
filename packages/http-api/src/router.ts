@@ -164,6 +164,7 @@ import {
 	createUpstreamDispatchHandler,
 	createVersionStatusHandler,
 } from "./handlers/version-status";
+import { createWebToolCallHandlers } from "./handlers/web-tool-calls";
 import {
 	createWorktreeRuleCreateHandler,
 	createWorktreeRuleDeleteHandler,
@@ -196,6 +197,7 @@ export class APIRouter {
 	private searchProviderHandlers!: ReturnType<
 		typeof createSearchProviderHandlers
 	>;
+	private webToolCallHandlers!: ReturnType<typeof createWebToolCallHandlers>;
 
 	constructor(context: APIContext) {
 		this.context = context;
@@ -377,10 +379,14 @@ export class APIRouter {
 		const apiKeysStatsHandler = createApiKeysStatsHandler(dbOps);
 
 		// Web-search provider handlers (store adapted from dbOps)
-		const searchProviderHandlers = createSearchProviderHandlers(
+		// Read via the instance below, so no route depends on a constructor
+		// local biome would strip the field out from under.
+		this.searchProviderHandlers = createSearchProviderHandlers(
 			createSearchProviderStore(dbOps),
 		);
-		this.searchProviderHandlers = searchProviderHandlers;
+
+		// Web tool call traces (read-only; rows are written by the proxy)
+		this.webToolCallHandlers = createWebToolCallHandlers(dbOps);
 
 		// Register routes
 		this.handlers.set("GET:/health", (_req, url) => healthHandler(url));
@@ -790,13 +796,22 @@ export class APIRouter {
 		// Search provider routes. /meta is a static route registered before
 		// the dynamic /:id block later in handleRequest so it is never treated as an id.
 		this.handlers.set("GET:/api/search-providers", () =>
-			searchProviderHandlers.list(),
+			this.searchProviderHandlers.list(),
 		);
 		this.handlers.set("POST:/api/search-providers", (req) =>
-			searchProviderHandlers.create(req),
+			this.searchProviderHandlers.create(req),
 		);
 		this.handlers.set("GET:/api/search-providers/meta", () =>
-			searchProviderHandlers.meta(),
+			this.searchProviderHandlers.meta(),
+		);
+
+		// Web tool call traces. Both are static paths, so no dynamic route can
+		// shadow them.
+		this.handlers.set("GET:/api/web-tool-calls", (_req, url) =>
+			this.webToolCallHandlers.list(url.searchParams),
+		);
+		this.handlers.set("GET:/api/web-tool-calls/summary", (_req, url) =>
+			this.webToolCallHandlers.summary(url.searchParams),
 		);
 	}
 
@@ -1346,6 +1361,14 @@ export class APIRouter {
 				const alertAckHandler = createAlertAcknowledgeHandler(this.context);
 				return await this.wrapHandler(() => alertAckHandler(alertId))(req, url);
 			}
+		}
+
+		// PATCH /api/search-providers/free-tier — { enabled } bulk toggle. Must
+		// precede the :id routes below, which would read "free-tier" as an id.
+		if (path === "/api/search-providers/free-tier" && method === "PATCH") {
+			return await this.wrapHandler((req) =>
+				this.searchProviderHandlers.setFreeTier(req),
+			)(req, url);
 		}
 
 		// Check for dynamic search provider endpoints (/api/search-providers/:id)

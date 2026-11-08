@@ -17,6 +17,14 @@ export interface ComboSlotInfo {
 	 * falling back to the pool or answering as pool exhaustion.
 	 */
 	gatewayLadder?: boolean;
+	/**
+	 * Every ENABLED slot in the combo definition, independent of this request's
+	 * availability filtering. `slots` above is the per-request routable subset
+	 * (index-aligned with the returned accounts); this is the stable definition
+	 * for decisions that must not change as slots cool down — e.g. whether an
+	 * account has another model slot (comboHasSiblingModel in proxy-operations).
+	 */
+	definitionSlots?: Array<{ accountId: string; modelOverride: string }>;
 }
 
 export interface RequestMeta {
@@ -35,6 +43,17 @@ export interface RequestMeta {
 	comboName?: string | null;
 	/** Combo slot index being attempted (set per-iteration in proxy loop) */
 	comboSlotIndex?: number | null;
+	/**
+	 * Set by `proxyWithAccount` when this attempt failed because the upstream
+	 * rejected the request's image input. Reset before each attempt by the caller
+	 * loop, which reads it back afterwards and counts the trues: an attempt that
+	 * refused the image is one of the two ways a route becomes *known* blind for
+	 * the terminal `vision_unsupported` verdict (the other is the capability
+	 * cache). A refusal the model-cycling fallback suppressed does NOT set it —
+	 * that response belongs to a fallback alias, so it is not evidence about the
+	 * (account, model) pair the verdict is asking about.
+	 */
+	visionRejected?: boolean;
 	/** Per-client session id (from request body metadata.user_id) for session-affinity routing. */
 	clientSessionId?: string | null;
 	/** Model the client originally requested, before any agent-preference rewrite. */

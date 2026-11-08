@@ -1,5 +1,8 @@
 import { splitModelRouting } from "@better-ccflare/core";
-import type { ComboSlot, ComboWithSlots } from "@better-ccflare/types";
+import type {
+	ComboSlot,
+	ComboWithSlotsWithCooldown,
+} from "@better-ccflare/types";
 import {
 	closestCenter,
 	DndContext,
@@ -78,6 +81,7 @@ function SlotModelLabel({ model }: { model?: string | null }) {
 
 interface SortableSlotRowProps {
 	slot: ComboSlot;
+	cooldownUntil: number | null;
 	comboId: string;
 	index: number;
 	accountName: string;
@@ -89,6 +93,7 @@ interface SortableSlotRowProps {
 function SortableSlotRow({
 	slot,
 	comboId,
+	cooldownUntil,
 	index,
 	accountName,
 	provider,
@@ -117,7 +122,7 @@ function SortableSlotRow({
 			ref={setNodeRef}
 			style={style}
 			className={cn(
-				"flex items-center gap-2 rounded-md border bg-card px-3 py-2",
+				"flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-card px-3 py-2",
 				// A disabled slot is legible as disabled without opening the popover.
 				!slot.enabled && "opacity-60",
 			)}
@@ -134,15 +139,34 @@ function SortableSlotRow({
 				<GripVertical className="h-4 w-4" />
 			</button>
 
-			<div className="flex min-w-0 flex-1 flex-col">
+			{/* Wraps onto its own line on narrow screens only when it has to; the
+			    account is the key identity of a slot, so it wraps rather than
+			    truncating, while the model keeps its glyph budget. */}
+			<div className="flex min-w-0 flex-[1_1_12rem] flex-col">
 				<div className="flex min-w-0 items-center gap-2">
 					<Badge variant="secondary" className="shrink-0 text-xs">
 						{provider}
 					</Badge>
-					<span className="truncate text-sm font-medium">{accountName}</span>
+					<span
+						className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]"
+						title={accountName}
+					>
+						{accountName}
+					</span>
 					{!slot.enabled && (
 						<Badge variant="outline" className="shrink-0 text-xs">
 							disabled
+						</Badge>
+					)}
+					{/* Cooldowns are per (account, model): a badge on the slot row, not
+					    the account, since the account's other slots stay routable. */}
+					{isFutureCooldown(cooldownUntil) && (
+						<Badge
+							variant="destructive"
+							className="shrink-0 text-[10px] font-normal"
+							title={`Cooling until ${new Date(cooldownUntil).toISOString()}`}
+						>
+							Cooling · {new Date(cooldownUntil).toISOString().slice(11, 19)}Z
 						</Badge>
 					)}
 				</div>
@@ -166,7 +190,7 @@ function SortableSlotRow({
 				size="sm"
 				onClick={onRemove}
 				disabled={isRemoving}
-				className="shrink-0 text-destructive hover:text-destructive"
+				className="ml-auto shrink-0 text-destructive hover:text-destructive"
 			>
 				<Trash2 className="h-4 w-4" />
 			</Button>
@@ -193,7 +217,12 @@ function modelFieldHint(
 }
 
 interface ComboSlotBuilderProps {
-	combo: ComboWithSlots;
+	combo: ComboWithSlotsWithCooldown;
+}
+
+/** The badge is live state: an expired deadline must not render as "Cooling". */
+function isFutureCooldown(until: number | null): until is number {
+	return until !== null && until > Date.now();
 }
 
 export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
@@ -403,6 +432,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 										<SortableSlotRow
 											key={slot.id}
 											slot={slot}
+											cooldownUntil={slot.cooldown_until ?? null}
 											comboId={combo.id}
 											accountName={name}
 											provider={provider}

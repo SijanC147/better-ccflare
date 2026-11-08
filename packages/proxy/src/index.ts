@@ -53,16 +53,21 @@ export {
 	clearAccountRefreshCache,
 	clearAutoRefreshTrackingForAccount,
 	clearFamilyExhaustionForAccount,
+	clearModelCooldownsForAccount,
 	clearPendingRotation,
+	clearVisionCapability,
 	computeReauthDeadline,
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
+	getModelCooldownUntil,
 	getRoutingObservations,
 	getUsageThrottleStatus,
 	getUsageThrottleUntil,
 	getValidAccessToken,
 	isRefreshTokenLikelyExpired,
+	isVisionUnsupported,
+	markVisionUnsupported,
 	type ReauthDeadlineStatus,
 	type RoutingObservation,
 	type RoutingObservationAccount,
@@ -81,6 +86,10 @@ export {
 	unregisterPollingRestarter,
 	unregisterRefreshClearer,
 } from "./handlers";
+export {
+	markModelCooling,
+	resetModelCooldownsForTests,
+} from "./handlers/model-cooldown";
 export {
 	runIntegrityCheckOnDemand,
 	startFullIntegrityCheckBackground,
@@ -123,6 +132,8 @@ export {
 	truncateWalAfterIntegrityCheck,
 	truncateWalQuietly,
 } from "./wal-truncate";
+export { getWebToolAdapter } from "./web-tools/adapters";
+export { TAVILY_SEARCH_URL } from "./web-tools/adapters/tavily";
 export type {
 	ChunkMessage,
 	ControlMessage,

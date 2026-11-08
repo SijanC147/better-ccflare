@@ -22,3 +22,4 @@ export * from "./search-provider";
 export * from "./stats";
 export * from "./strategy";
 export * from "./usage-history";
+export * from "./web-tool-call";

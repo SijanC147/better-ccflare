@@ -16,7 +16,7 @@ import type {
 	Combo,
 	ComboFamilyAssignment,
 	ComboSlot,
-	ComboWithSlots,
+	ComboWithSlotsWithCooldown,
 	ContextInsightsResponse,
 	InvalidConfigEntry,
 	LogEvent,
@@ -2687,10 +2687,11 @@ class API extends HttpClient {
 		});
 	}
 
-	async getCombo(id: string): Promise<{ combo: ComboWithSlots }> {
-		const res = await this.get<{ success: boolean; data: ComboWithSlots }>(
-			`/api/combos/${id}`,
-		);
+	async getCombo(id: string): Promise<{ combo: ComboWithSlotsWithCooldown }> {
+		const res = await this.get<{
+			success: boolean;
+			data: ComboWithSlotsWithCooldown;
+		}>(`/api/combos/${id}`);
 		return { combo: res.data };
 	}
 

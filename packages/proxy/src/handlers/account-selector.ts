@@ -32,6 +32,7 @@ import {
 	isAccountExhaustedForModel,
 	type ModelFamilyExhaustionInfo,
 } from "./model-capacity";
+import { getModelCooldownUntil } from "./model-cooldown";
 import { isInternalProbe, type ProxyContext } from "./proxy-types";
 
 const log = new Logger("AccountSelector");
@@ -47,6 +48,109 @@ export function setComboSlotInfo(meta: RequestMeta, info: ComboSlotInfo): void {
 /** Retrieve combo slot info from a RequestMeta (null if not combo-routed) */
 export function getComboSlotInfo(meta: RequestMeta): ComboSlotInfo | null {
 	return comboSlotInfoMap.get(meta) ?? null;
+}
+
+/**
+ * A candidate this request could have been routed to, but that the selector
+ * dropped for a reason that clears on its own — a usage cap, a rate-limit
+ * cooldown, a pause, an expired credential, a model-scoped capacity exclusion.
+ *
+ * proxy.ts reads the list before it answers an image request terminally: a
+ * deferred candidate whose capability is still unknown means the request might
+ * have succeeded once the deferral cleared, so the answer has to stay
+ * retryable. Only a candidate the vision capability cache already knows to be
+ * blind stops blocking, which is the whole reason the verdict is built on the
+ * cache — knowledge survives cooldowns, probes and capacity filters, and
+ * availability does not.
+ *
+ * `modelOverride` is shaped exactly like {@link ComboSlotInfo}'s entry: the
+ * model this candidate WOULD have been asked for, or null when it would have
+ * carried the request's own model. The pool path always records null rather
+ * than the routing model the selector was handed, because the vision cache is
+ * keyed on the request body's own model string and an agent-preference rewrite
+ * makes the two differ. Resolving null against the body in proxy.ts is what
+ * keeps this read key byte-identical to the write key — see `visionKeyModel` in
+ * proxy-operations.ts and `visionSkipModel` in proxy.ts.
+ */
+export interface DeferredVisionCandidate {
+	accountId: string;
+	modelOverride: string | null;
+}
+
+/**
+ * Whether an account is OUT of rotation indefinitely — a state that waiting
+ * cannot clear: a MANUAL pause (the strategy's auto-unpause deliberately skips
+ * reason "manual"; overage, peak-hours and failure-threshold pauses lift
+ * themselves) or a dead refresh token (`requires_reauth` needs a human to
+ * re-authenticate).
+ *
+ * A candidate only holds the terminal vision verdict open when waiting could
+ * plausibly make it serve the image, so an indefinitely held-out account is not
+ * a deferred candidate at all — recording one would make the verdict
+ * unreachable on any fleet with one such account. `needsReauth` names only
+ * accounts the selector actually SELECTED, so an account dropped here is never
+ * the one that message asks for.
+ *
+ * Shared by both deferral recording sites — the pool path (`notePoolDeferrals`
+ * below) and the combo-slot recording in the combo branch — so the two cannot
+ * drift: any future drop-recording site must apply the same hold-out filter or
+ * the verdict silently regresses to inertness on that path.
+ */
+export function isIndefinitelyHeldOut(account: Account): boolean {
+	return Boolean(
+		(account.paused && account.pause_reason === "manual") ||
+			account.requires_reauth,
+	);
+}
+
+// Module-level WeakMap, mirroring comboSlotInfoMap above rather than widening
+// RequestMeta's shape with a field only one consumer reads.
+const deferredCandidatesMap = new WeakMap<
+	RequestMeta,
+	DeferredVisionCandidate[]
+>();
+
+/**
+ * Records candidates a selection dropped, ADDING to whatever is already
+ * recorded and ignoring duplicates.
+ *
+ * Additive rather than a replacement because one request can select twice: a
+ * combo whose slots all failed re-selects for SessionStrategy fallback (proxy.ts
+ * Step 10), and a candidate the first selection deferred is still deferred
+ * afterwards. Deduplicated because the two selections overlap heavily, and a
+ * pair counted twice would be a pair whose capability is checked twice for one
+ * candidate.
+ */
+export function addDeferredCandidates(
+	meta: RequestMeta,
+	candidates: readonly DeferredVisionCandidate[],
+): void {
+	if (candidates.length === 0) return;
+	const existing = deferredCandidatesMap.get(meta);
+	const seen = new Set(
+		existing?.map((c) => `${c.accountId}\u0000${c.modelOverride ?? ""}`) ?? [],
+	);
+	const merged = existing ? existing.slice() : [];
+	for (const candidate of candidates) {
+		const key = `${candidate.accountId}\u0000${candidate.modelOverride ?? ""}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		merged.push({ ...candidate });
+	}
+	deferredCandidatesMap.set(meta, merged);
+}
+
+/**
+ * The candidates every selection for this request deferred, in the order they
+ * were recorded. Empty when nothing was deferred — including for a request that
+ * pinned one account with `x-better-ccflare-account-id`, where every other
+ * account is permanently ineligible for THIS request rather than deferred, and
+ * so correctly does not hold the verdict open.
+ */
+export function getDeferredCandidates(
+	meta: RequestMeta,
+): DeferredVisionCandidate[] {
+	return deferredCandidatesMap.get(meta) ?? [];
 }
 
 // Canonical definition lives in model-capacity.ts (single source of truth —
@@ -558,23 +662,40 @@ export async function getOrderedAccounts(
 
 /**
  * Walk a combo's slots in priority order and keep the ones that can take this
- * request now: enabled, account known and available, not throttled by the
- * slot's own rule, and not capacity-excluded for the slot's model. Shared by
- * family combos and gateway combos so both apply the same slot rules.
+ * request now: enabled, account known and available, its (account, model) pair
+ * not in a model-scoped cooldown, not throttled by the slot's own rule, not
+ * capacity-excluded for the slot's model, and not excluded for this request.
+ * Shared by family combos and gateway combos so both apply the same slot rules.
+ *
+ * `isExcluded` is resolved ONCE over the whole fleet into `permittedAccountIds`
+ * and each candidate is checked against it before it is pushed, so an excluded
+ * slot never reaches `slotEntries`: the returned accounts and `slotEntries`
+ * stay index-aligned by construction, which proxy.ts relies on when it pairs
+ * accounts[i] with slots[i]. The predicate is used rather than
+ * `applyExclusions` because that function warns about everything it filtered,
+ * and the fleet here includes accounts that were never combo candidates; the
+ * slots actually skipped are counted and logged once.
  */
 async function collectAvailableComboSlots(
 	combo: ComboWithSlots,
 	ctx: ProxyContext,
 	model: string,
+	isExcluded: (account: Account) => boolean,
 ): Promise<{
 	availableAccounts: Account[];
 	slotEntries: Array<{ accountId: string; modelOverride: string }>;
+	accountMap: Map<string, Account>;
+	permittedAccountIds: Set<string>;
 }> {
 	const allAccounts = await ctx.dbOps.getAllAccounts();
 	const accountMap = new Map<string, Account>();
 	for (const account of allAccounts) {
 		accountMap.set(account.id, account);
 	}
+	const permittedAccountIds = new Set(
+		allAccounts.filter((a) => !isExcluded(a)).map((a) => a.id),
+	);
+	let excludedSlots = 0;
 
 	const availableAccounts: Account[] = [];
 	const slotEntries: Array<{
@@ -597,6 +718,21 @@ async function collectAvailableComboSlots(
 		const slotUsage = usageSnapshot(account);
 
 		if (!isAccountAvailable(account, Date.now(), slotUsage ?? undefined)) {
+			continue;
+		}
+
+		// A 429 only cools the (account, model) pair it hit: the account stays
+		// eligible for its other combo slots. The slot's effective upstream
+		// model is the one that cools: a passthrough slot (empty model) sends
+		// the request's own model.
+		const slotModel = slot.model?.trim() ? slot.model : model;
+		const cooldownUntil = slotModel
+			? getModelCooldownUntil(account.id, slotModel)
+			: null;
+		if (cooldownUntil !== null) {
+			log.info(
+				`Combo slot ${slot.account_id}/${slotModel} for ${combo.name} is in a model-scoped cooldown until ${new Date(cooldownUntil).toISOString()} — skipping (account stays eligible for its other slots)`,
+			);
 			continue;
 		}
 
@@ -630,6 +766,11 @@ async function collectAvailableComboSlots(
 			continue;
 		}
 
+		if (!permittedAccountIds.has(account.id)) {
+			excludedSlots++;
+			continue;
+		}
+
 		availableAccounts.push(account);
 		slotEntries.push({
 			accountId: slot.account_id,
@@ -637,7 +778,80 @@ async function collectAvailableComboSlots(
 		});
 	}
 
-	return { availableAccounts, slotEntries };
+	if (excludedSlots > 0) {
+		log.warn(
+			`Skipping ${excludedSlots} combo slot(s) whose account is excluded for this request type (provider exclusion header, or an Anthropic OAuth account after one refused this OpenAI-gateway request)`,
+		);
+	}
+
+	return { availableAccounts, slotEntries, accountMap, permittedAccountIds };
+}
+
+/**
+ * Record the definition slots this request could not route as deferred vision
+ * candidates, the combo counterpart of `notePoolDeferrals` in
+ * `selectAccountsForRequest`, and return the definition (every ENABLED slot).
+ *
+ * Recorded here rather than in proxy.ts, whose combo loop has only
+ * (accountId, modelOverride) per slot and no `Account` row, so a manually
+ * paused or dead-token slot was indistinguishable from a cooling one and held
+ * the terminal vision verdict open forever.
+ *
+ * A dropped slot is deferred unless it is out for good: an account excluded
+ * for this request (not in `permittedAccountIds`) is permanently ineligible,
+ * and an indefinite hold-out (`isIndefinitelyHeldOut`) returns only by
+ * operator action. Eligibility is tested against the permit set and the
+ * account row directly, not against what the slot loop dropped: that loop
+ * drops for unavailability, cooldown or capacity BEFORE it checks the
+ * exclusion, so an excluded-AND-cooling slot would otherwise be deferred as
+ * merely temporary. A slot whose account is gone from the fleet has no row to
+ * filter on and stays deferred: its capability is unknowable, and the
+ * retryable answer is the honest one for a broken combo.
+ *
+ * Callers run this on EVERY exit from their combo branch, before the routable
+ * check, so the fall-throughs carry the record too.
+ */
+function recordDeferredComboSlots(
+	meta: RequestMeta,
+	combo: ComboWithSlots,
+	slotEntries: ReadonlyArray<{ accountId: string; modelOverride: string }>,
+	accountMap: ReadonlyMap<string, Account>,
+	permittedAccountIds: ReadonlySet<string>,
+): Array<{ accountId: string; modelOverride: string }> {
+	const definitionSlots = combo.slots
+		.filter((s) => s.enabled)
+		.map((s) => ({
+			accountId: s.account_id,
+			modelOverride: s.model,
+		}));
+	const routableSlots = new Set(
+		slotEntries.map(
+			(entry) => `${entry.accountId}\u0000${entry.modelOverride ?? ""}`,
+		),
+	);
+	const deferredComboSlots: DeferredVisionCandidate[] = [];
+	for (const definitionSlot of definitionSlots) {
+		if (
+			routableSlots.has(
+				`${definitionSlot.accountId}\u0000${definitionSlot.modelOverride ?? ""}`,
+			)
+		) {
+			continue;
+		}
+		const account = accountMap.get(definitionSlot.accountId);
+		if (
+			account &&
+			(!permittedAccountIds.has(account.id) || isIndefinitelyHeldOut(account))
+		) {
+			continue;
+		}
+		deferredComboSlots.push({
+			accountId: definitionSlot.accountId,
+			modelOverride: definitionSlot.modelOverride,
+		});
+	}
+	addDeferredCandidates(meta, deferredComboSlots);
+	return definitionSlots;
 }
 
 /**
@@ -867,6 +1081,35 @@ export async function selectAccountsForRequest(
 			.map((p) => p.trim())
 			.filter(Boolean) ?? [];
 
+	/**
+	 * Whether `account`'s provider is excluded for this request. Split out of
+	 * `applyExclusions` so a caller can test membership WITHOUT emitting that
+	 * function's warning: the warning counts the list it was handed, and the
+	 * combo path hands it the whole fleet while caring only about the slots it
+	 * actually skips.
+	 */
+	const isProviderExcluded = (a: Account): boolean => {
+		for (const ex of excludeProviders) {
+			// "anthropic-oauth" targets only Anthropic OAuth accounts (refresh_token present),
+			// leaving Anthropic API key accounts (console mode) eligible.
+			if (ex === "anthropic-oauth") {
+				if (a.provider === "anthropic" && a.refresh_token != null) return true;
+			} else if (a.provider === ex) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	/**
+	 * Whether `account` is out for this request for good: its provider is
+	 * excluded, or it is an Anthropic OAuth account after one already refused
+	 * this OpenAI-gateway request (SB23-2781). The combo paths resolve their
+	 * permit set from this, so neither drop is ever recorded as a deferral.
+	 */
+	const isExcludedForRequest = (a: Account): boolean =>
+		isSkippedAfterOAuthRefusal(meta, a) || isProviderExcluded(a);
+
 	const applyExclusions = (candidates: Account[]): Account[] => {
 		let accounts = candidates;
 		// Set once an OAuth account refused this OpenAI-gateway request with a
@@ -882,19 +1125,7 @@ export async function selectAccountsForRequest(
 			accounts = kept;
 		}
 		if (excludeProviders.length === 0) return accounts;
-		const filtered = accounts.filter((a) => {
-			for (const ex of excludeProviders) {
-				// "anthropic-oauth" targets only Anthropic OAuth accounts (refresh_token present),
-				// leaving Anthropic API key accounts (console mode) eligible.
-				if (ex === "anthropic-oauth") {
-					if (a.provider === "anthropic" && a.refresh_token != null)
-						return false;
-				} else {
-					if (a.provider === ex) return false;
-				}
-			}
-			return true;
-		});
+		const filtered = accounts.filter((a) => !isProviderExcluded(a));
 		const skipped = accounts.length - filtered.length;
 		if (skipped > 0) {
 			log.warn(
@@ -940,16 +1171,30 @@ export async function selectAccountsForRequest(
 			meta.comboName = gatewayComboName;
 			return [];
 		}
-		const { availableAccounts, slotEntries } = await collectAvailableComboSlots(
+		// Exclusions are applied inside the slot walk, so `routed` and
+		// `slotEntries` are index-aligned by construction.
+		const {
+			availableAccounts: routed,
+			slotEntries,
+			accountMap,
+			permittedAccountIds,
+		} = await collectAvailableComboSlots(
 			combo,
 			ctx,
 			model,
+			isExcludedForRequest,
 		);
-		const routed = applyExclusions(availableAccounts);
-		const kept = new Set(routed.map((a) => a.id));
+		const definitionSlots = recordDeferredComboSlots(
+			meta,
+			combo,
+			slotEntries,
+			accountMap,
+			permittedAccountIds,
+		);
 		setComboSlotInfo(meta, {
 			comboName: combo.name,
-			slots: slotEntries.filter((entry) => kept.has(entry.accountId)),
+			slots: slotEntries,
+			definitionSlots,
 			gatewayLadder: true,
 		});
 		meta.comboName = combo.name;
@@ -1001,34 +1246,78 @@ export async function selectAccountsForRequest(
 						`Combo routing active: ${combo.name} for family ${family} (${combo.slots.length} slots, ${passthroughSlots} passthrough)`,
 					);
 
-					const { availableAccounts, slotEntries } =
-						await collectAvailableComboSlots(combo, ctx, model);
+					// Exclusions are applied inside the slot walk, so the returned
+					// accounts and `slotEntries` stay index-aligned by construction.
+					const {
+						availableAccounts,
+						slotEntries,
+						accountMap,
+						permittedAccountIds,
+					} = await collectAvailableComboSlots(
+						combo,
+						ctx,
+						model,
+						isExcludedForRequest,
+					);
 
-					// Apply exclusions first, then stamp combo metadata only when
-					// we will actually combo-route; otherwise the fallback path
-					// would persist comboName on a request handled by
-					// SessionStrategy and a downstream retry could re-enter the
-					// combo branch (Codex round 5 P2).
-					const filteredComboAccounts = applyExclusions(availableAccounts);
-					if (filteredComboAccounts.length > 0) {
+					// `definitionSlots` is the stable combo definition (every ENABLED
+					// slot), so an account's sibling-model check survives its own
+					// slots cooling down. The deferral record has to run on every
+					// exit from this branch, so it is computed before the routable
+					// check; the combo STATE is deliberately not set with it.
+					const definitionSlots = recordDeferredComboSlots(
+						meta,
+						combo,
+						slotEntries,
+						accountMap,
+						permittedAccountIds,
+					);
+
+					if (availableAccounts.length > 0) {
 						// Only mark this request as combo-routed once combo accounts are
-						// actually being returned — setting this earlier (even when every
-						// slot ends up unavailable/filtered) would leave stale combo state
-						// on `meta` for the normal-routing fallthrough below.
+						// actually being returned. Setting it on a fall-through leaves
+						// stale combo state on `meta` for what downstream treats as
+						// ordinary, non-combo selection, and that state is not cosmetic:
+						// proxy.ts resolves model pins from it BY POSITION and reads
+						// `comboName` to decide whether a terminal upstream error is
+						// forwarded to the client or discarded for failover. The
+						// deferred-slot recording above is the part that must run on
+						// every exit; this is not. (The fallback-disabled exit below
+						// sets its own info, with `slots: []`.)
+						//
+						// `slots` is the per-request routable subset and MUST stay
+						// index-aligned with the returned accounts: the same length,
+						// with slots[i].accountId === returned[i].id.
 						const slotInfo: ComboSlotInfo = {
 							comboName: combo.name,
 							slots: slotEntries,
+							definitionSlots,
 						};
 						setComboSlotInfo(meta, slotInfo);
 						meta.comboName = combo.name;
-						return filteredComboAccounts;
+
+						// Already exclusion-filtered inside the loop, so this is
+						// index-aligned with `slots`.
+						return availableAccounts;
 					}
 
 					// All slots unavailable — fall back to normal routing. Combo state
-					// is deliberately left unset (never was set above) so this fallthrough
-					// is treated as ordinary, non-combo selection downstream.
+					// is deliberately left unset so this fallthrough is treated as
+					// ordinary, non-combo selection downstream.
 					if (isComboSessionFallbackDisabled(ctx)) {
-						setComboSlotInfo(meta, { comboName: combo.name, slots: [] });
+						setComboSlotInfo(meta, {
+							comboName: combo.name,
+							slots: [],
+							// Even with no routable slots this request, keep the
+							// stable definition so a 429 can still prove the
+							// account has a sibling-model slot.
+							definitionSlots: combo.slots
+								.filter((s) => s.enabled)
+								.map((s) => ({
+									accountId: s.account_id,
+									modelOverride: s.model,
+								})),
+						});
 						meta.comboName = combo.name;
 						log.warn(
 							`All ${combo.slots.length} combo slots unavailable for ${combo.name}, session fallback disabled by the Combo Session Fallback setting (Settings → Advanced)`,
@@ -1068,6 +1357,68 @@ export async function selectAccountsForRequest(
 			);
 		}
 	}
+
+	/**
+	 * Records the accounts this selection dropped but that could route again
+	 * later, so proxy.ts's terminal vision verdict cannot claim a permanence the
+	 * fleet has not earned.
+	 *
+	 * The universe is `allAccounts` — the raw DB read — minus the two drops that
+	 * are permanent FOR THIS REQUEST and therefore are not deferrals: the
+	 * providers the client excluded with `x-better-ccflare-exclude-providers`, and
+	 * an account that cannot serve the requested model as written while "force
+	 * account model" forbids substituting one. Neither can ever answer this
+	 * request however long the client waits, so neither can rescue it.
+	 *
+	 * Everything else missing from `selected` is a deferral. That is computed as a
+	 * set difference rather than a per-reason list on purpose. Some of the drops
+	 * happen in this file (the usage-cap pre-filter in getOrderedAccounts, the
+	 * model-scoped capacity filter below) but the availability drop — paused,
+	 * rate_limited_until, requires_reauth — happens inside
+	 * `ctx.strategy.select()`, in the load-balancer package, where this function
+	 * cannot see it. Enumerating only the local reasons would repeat exactly the
+	 * mistake that got the first attempt at the verdict reverted (e64e7f13):
+	 * computing permanence from the candidates that survived selection instead of
+	 * the candidates that were eligible.
+	 *
+	 * Deliberately conservative about what counts as eligible. An auto-resuming
+	 * pause (overage, peak-hours, failure-threshold) is recorded as deferred:
+	 * the account returns to rotation by itself with the image unchanged, so it
+	 * must hold the verdict open. A MANUAL pause and a `requires_reauth` account
+	 * are filtered out before recording instead — see the comment on the filter
+	 * below.
+	 *
+	 * Only called on the paths that return a non-empty selection: an empty one
+	 * makes proxy.ts answer at its Step 7 (model-family exhaustion, usage
+	 * throttling, pool_exhausted) before any candidate loop runs, so the verdict
+	 * that reads this list is never reached.
+	 */
+	const notePoolDeferrals = (selected: Account[]): void => {
+		// Every filter between `allAccounts` and `selected` only ever removes, so
+		// equal lengths means nothing was dropped. That is the healthy-fleet case
+		// and this runs on the selection path of every request, so it returns
+		// before allocating anything.
+		if (selected.length === allAccounts.length) return;
+
+		const selectedIds = new Set(selected.map((account) => account.id));
+		const forcedModel = model && isForceAccountModelEnabled(ctx) ? model : null;
+		const deferred = applyExclusions(allAccounts)
+			.filter((account) => !selectedIds.has(account.id))
+			// An operator's hold-out, not a deferral: see
+			// {@link isIndefinitelyHeldOut}, shared with the combo-slot recording
+			// below so the two paths cannot drift.
+			.filter((account) => !isIndefinitelyHeldOut(account))
+			.filter(
+				(account) =>
+					forcedModel === null || accountServesModel(account, forcedModel),
+			)
+			// null, not `model`: the cache key is the request body's own model
+			// string, which an agent-preference rewrite can make differ from the
+			// routing model. proxy.ts resolves null against the body so the key
+			// matches the one a refusal would have been written under.
+			.map((account) => ({ accountId: account.id, modelOverride: null }));
+		addDeferredCandidates(meta, deferred);
+	};
 
 	// Model-scoped capacity filter for the non-combo (or combo-inactive/
 	// combo-exhausted-fallthrough) path: drop accounts whose weekly per-model
@@ -1176,9 +1527,11 @@ export async function selectAccountsForRequest(
 				});
 				return [];
 			}
+			notePoolDeferrals(available);
 			return applyXaiCacheAffinity(available, meta);
 		}
 	}
 
+	notePoolDeferrals(orderedAccounts);
 	return applyXaiCacheAffinity(orderedAccounts, meta);
 }
