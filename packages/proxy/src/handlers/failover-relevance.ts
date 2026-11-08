@@ -28,7 +28,11 @@
  *
  * A foreign 200 still serves the request, and a foreign error with no native
  * failure before it is still forwarded, so a pool of foreign accounts behaves
- * exactly as before. Six native 429s with no foreign answer still end in the
+ * exactly as before, with one exception: a 402. Upstream's out-of-credits
+ * classifier (`classifyOutOfCredits402` in `proxy-operations.ts`) fails a 402
+ * over to the next account from every account, native or foreign, whatever
+ * came before it, so a foreign 402 is never forwarded while another account
+ * remains. Six native 429s with no foreign answer still end in the
  * all-accounts-failed 503.
  */
 import type { Account, RequestMeta } from "@better-ccflare/types";
@@ -135,6 +139,9 @@ export function suppressForeignError(
 const ERROR_TYPES: Record<number, string> = {
 	400: "invalid_request_error",
 	401: "authentication_error",
+	// Anthropic's name for a 402 (its errors page: "billing_error"). A native
+	// 402 is recorded like any other answer, so it can be the replayed status.
+	402: "billing_error",
 	403: "permission_error",
 	404: "not_found_error",
 	413: "request_too_large",

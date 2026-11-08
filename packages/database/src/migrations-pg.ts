@@ -422,6 +422,9 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 	// Create search_providers table (see SQLite migration for rationale).
 	await createSearchProvidersTablePg(adapter);
 
+	// Create web_tool_calls table (see SQLite migration for rationale).
+	await createWebToolCallsTablePg(adapter);
+
 	log.info("PostgreSQL schema ensured");
 }
 
@@ -442,6 +445,7 @@ async function createSearchProvidersTablePg(
 			enabled INTEGER NOT NULL DEFAULT 1,
 			max_results INTEGER NOT NULL DEFAULT 10,
 			extra_config TEXT,
+			tier TEXT NOT NULL DEFAULT 'paid',
 			status TEXT NOT NULL DEFAULT 'unknown',
 			status_message TEXT,
 			status_checked_at BIGINT,
@@ -455,6 +459,40 @@ async function createSearchProvidersTablePg(
 	);
 	await adapter.unsafe(
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_search_providers_label ON search_providers(label)`,
+	);
+}
+
+/**
+ * Create the `web_tool_calls` table and its indexes. Shared by
+ * `ensureSchemaPg()` (fresh DBs) and `runMigrationsPg()` (upgrades).
+ * `status` semantics match the SQLite migration's doc comment.
+ */
+async function createWebToolCallsTablePg(
+	adapter: BunSqlAdapter,
+): Promise<void> {
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS web_tool_calls (
+			id TEXT PRIMARY KEY,
+			timestamp BIGINT NOT NULL,
+			tool TEXT NOT NULL,
+			provider_id TEXT,
+			provider_kind TEXT,
+			account_id TEXT,
+			project TEXT,
+			query_text TEXT,
+			query_chars BIGINT NOT NULL,
+			result_count BIGINT,
+			latency_ms BIGINT NOT NULL,
+			status TEXT NOT NULL,
+			error_code TEXT,
+			estimated_cost_usd DOUBLE PRECISION
+		)
+	`);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_web_tool_calls_timestamp ON web_tool_calls(timestamp DESC)`,
+	);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_web_tool_calls_kind_timestamp ON web_tool_calls(provider_kind, timestamp DESC)`,
 	);
 }
 
@@ -1260,6 +1298,12 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 	// Add columns that might be missing from older schema versions
 	const columnsToAdd: ColumnToAdd[] = [
 		{
+			table: "search_providers",
+			column: "tier",
+			definition:
+				"ALTER TABLE search_providers ADD COLUMN tier TEXT NOT NULL DEFAULT 'paid'",
+		},
+		{
 			table: "accounts",
 			column: "cross_region_mode",
 			definition:
@@ -1622,6 +1666,17 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			"Backfilled existing API keys to 'admin' role (PostgreSQL parity with SQLite migration)",
 		);
 	}
+	// search_providers.tier backfill — mirrors the SQLite migration, which
+	// recomputes EVERY row from its key on each startup. That is deliberate:
+	// the column is added with `DEFAULT 'paid'`, so a freshly added column
+	// would otherwise mark existing keyless rows paid and the free toggle
+	// would never reach them. Recomputing unconditionally is safe because the
+	// tier is derived from `api_key` on every write anyway — the two cannot
+	// disagree once this has run.
+	await adapter.unsafe(
+		`UPDATE search_providers SET tier = CASE
+			WHEN api_key IS NULL OR api_key = '' THEN 'free' ELSE 'paid' END`,
+	);
 
 	// Performance indexes — mirrors packages/database/src/performance-indexes.ts
 	// (addPerformanceIndexes) plus idx_api_keys_role, both applied to SQLite via
@@ -1922,6 +1977,9 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 
 	// Ensure search_providers exists (for upgrades from pre-web-search installs).
 	await createSearchProvidersTablePg(adapter);
+
+	// Ensure web_tool_calls exists (for upgrades from pre-web-tools installs).
+	await createWebToolCallsTablePg(adapter);
 
 	// Rename oauth_sessions.mode 'max' → 'claude-oauth'
 	try {

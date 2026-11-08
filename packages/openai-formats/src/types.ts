@@ -9,16 +9,22 @@ export interface OpenAIToolCall {
 	};
 }
 
+/**
+ * One entry of an OpenAI chat-completions content array. Text parts carry
+ * `text`; image parts carry `image_url` instead. Anthropic `image` blocks are
+ * converted into this shape so vision-capable models actually receive them.
+ */
+export interface OpenAIContentPart {
+	type: string;
+	text?: string;
+	cache_control?: { type: string };
+	/** Present when `type === "image_url"`. */
+	image_url?: { url: string };
+}
+
 export interface OpenAIMessage {
 	role: "system" | "user" | "assistant" | "tool";
-	content:
-		| string
-		| null
-		| Array<{
-				type: string;
-				text?: string;
-				cache_control?: { type: string };
-		  }>;
+	content: string | null | OpenAIContentPart[];
 	tool_calls?: OpenAIToolCall[];
 	tool_call_id?: string;
 	reasoning_content?: string;
@@ -106,7 +112,13 @@ export type AnthropicContentBlock =
 
 export interface AnthropicMessage {
 	role: "user" | "assistant";
-	content: string | AnthropicContentBlock[];
+	/**
+	 * `AnthropicContent` (not `AnthropicContentBlock`): the two differ only in
+	 * that this admits `image`, and handing images to an OpenAI-compatible
+	 * gateway is exactly what `toOpenAIImagePart` exists for. Keeping the
+	 * narrower type here would make the image branch unrepresentable.
+	 */
+	content: string | AnthropicContent[];
 }
 
 export interface AnthropicTool {
@@ -154,6 +166,12 @@ export interface TransformStreamContext {
 	extractedModel: string;
 	contextWindowSize?: number | undefined;
 	hasSentStart: boolean;
+	/**
+	 * True once any upstream chunk carried a non-empty `choices[0].finish_reason`.
+	 * Declares that the upstream considers the completion finished, so a stream
+	 * that ends without `[DONE]` may still be terminated (see the flush branch).
+	 */
+	hasSeenFinishReason: boolean;
 	hasSentContentBlockStart: boolean;
 	hasSentThinkingBlockStart: boolean;
 	thinkingBlockClosed: boolean;
@@ -181,8 +199,22 @@ export interface TransformStreamContext {
 	maxToolCallIndex: number;
 }
 
+/**
+ * Content block used by gateways that shape `content`/`delta.content` as an
+ * array (e.g. Mistral serving GLM): `{type:"text"}` or a `{type:"thinking"}`
+ * block whose `thinking` is a string or an array of text parts.
+ */
+export interface OpenAIContentBlock {
+	type: string;
+	text?: string;
+	thinking?: string | OpenAIContentBlock[];
+	closed?: boolean;
+}
+
+export type OpenAIStreamContent = string | OpenAIContentBlock[] | null;
+
 export interface OpenAIStreamDelta {
-	content?: string;
+	content?: OpenAIStreamContent;
 	reasoning_content?: string;
 	tool_calls?: Array<{
 		index: number;
@@ -201,13 +233,23 @@ export interface OpenAIResponse {
 	model?: string | undefined;
 	choices?: Array<{
 		message?: {
-			content?: string | null;
+			content?: OpenAIStreamContent;
 			role?: string;
 			tool_calls?: OpenAIToolCall[];
 			reasoning_content?: string;
+			/**
+			 * OpenRouter-shaped gateways (kilo, openrouter, nanogpt) return
+			 * reasoning here rather than in `reasoning_content`; the docs name
+			 * `reasoning` as the field and `reasoning_content` as an alias. The
+			 * streaming transform already accepts both (stream.ts) — this keeps
+			 * the non-streaming path from silently dropping the thinking.
+			 */
+			reasoning?: string;
 		};
 		delta?: OpenAIStreamDelta;
 		finish_reason?: string | undefined;
+		/** Choice position; real OpenAI responses carry it. */
+		index?: number | undefined;
 	}>;
 	usage?: OpenAIUsage | undefined;
 	error?: {

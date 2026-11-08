@@ -3,7 +3,10 @@ export {
 	type RequestJsonBody,
 } from "../request-body-context";
 export {
+	addDeferredCandidates,
+	type DeferredVisionCandidate,
 	getComboSlotInfo,
+	getDeferredCandidates,
 	getModelFamilyExhaustionInfo,
 	getXaiConvId,
 	isComboSessionFallbackDisabled,
@@ -36,6 +39,12 @@ export {
 	resolveOverageStatus,
 } from "./model-capacity";
 export {
+	clearModelCooldownsForAccount,
+	getModelCooldownUntil,
+	isModelCooling,
+	markModelCooling,
+} from "./model-cooldown";
+export {
 	accountCanServeOpenAICompatPath,
 	createOpenAICompatUnsupportedResponse,
 	isOpenAICompatCompletionPath,
@@ -46,6 +55,7 @@ export {
 	OPENAI_COMPAT_UNSUPPORTED_MESSAGE,
 	OPENAI_COMPAT_UNSUPPORTED_STATUS,
 } from "./openai-compat-path";
+
 export {
 	clearPendingRotation,
 	flushPendingRotation,
@@ -60,6 +70,7 @@ export {
 	type PoolExhaustionKind,
 	proxyUnauthenticated,
 	proxyWithAccount,
+	requestCarriesImageContent,
 } from "./proxy-operations";
 export {
 	ERROR_MESSAGES,
@@ -125,3 +136,14 @@ export {
 	getUsageThrottleStatus,
 	getUsageThrottleUntil,
 } from "./usage-throttling";
+export {
+	clearVisionCapability,
+	DEFAULT_VISION_CAPABILITY_TTL_MS,
+	isVisionUnsupported,
+	MAX_VISION_CAPABILITY_ENTRIES,
+	markVisionUnsupported,
+	VISION_CAPABILITY_TTL_MS,
+	type VisionCapabilityEntry,
+	visionCapabilitySnapshot,
+	visionCapabilityTtlMs,
+} from "./vision-capability";

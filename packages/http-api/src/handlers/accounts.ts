@@ -5,6 +5,7 @@ import { join } from "node:path";
 import * as cliCommands from "@better-ccflare/cli-commands";
 import type { Config } from "@better-ccflare/config";
 import {
+	isUsageExhausted,
 	parseUsagePauseMinResetMs,
 	parseUsagePauseThreshold,
 	patterns,
@@ -47,8 +48,10 @@ import {
 	clearAutoRefreshTrackingForAccount,
 	clearCodexModelCacheForAccount,
 	clearFamilyExhaustionForAccount,
+	clearModelCooldownsForAccount,
 	clearOpenAICompatibleModelCacheForAccount,
 	clearPendingRotation,
+	clearVisionCapability,
 	getPeakHoursState,
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
@@ -111,6 +114,11 @@ const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
 	// Transient upstream 500/502/503/504 that outlived its in-place retry. Also
 	// written to accounts.rate_limited_reason — the account is benched briefly.
 	"upstream_5xx_server_error",
+	// Upstream 402 (credits depleted upstream). Never written to
+	// accounts.rate_limited_reason — the account is not benched — but listed
+	// so this set stays a faithful mirror of the union and a future path that
+	// does persist it cannot be silently nulled.
+	"upstream_402_out_of_credits",
 ]);
 
 function toRateLimitReason(v: string | null): RateLimitReason | null {
@@ -459,6 +467,28 @@ export function createAccountsListHandler(
 			[now, now, now, sessionDuration],
 		);
 
+		// The proxy drops usage-capped accounts before strategy.select() sees
+		// them (getOrderedAccounts in proxy/src/handlers/account-selector.ts).
+		// peek() has no usage data, so it gets the same filtered list here.
+		// Without this, a capped account that the router skips is reported as
+		// primary. Same snapshot and predicate as the router, so the staleness
+		// guard and the extra-usage exception match too.
+		const peekCandidates = accounts.filter((a) => {
+			const usage = getRepresentativeUsageSnapshotForProvider(
+				usageCache.get(a.id),
+				a.provider ?? "anthropic",
+			);
+			return (
+				usage === null ||
+				!isUsageExhausted(
+					usage.utilization,
+					usage.resetMs,
+					now,
+					usage.extraUsageAvailable,
+				)
+			);
+		});
+
 		// Ask the active load-balancing strategy which account it would pick
 		// next from the same in-memory snapshot we use to build the response —
 		// querying again would open a race window where isPrimary could land
@@ -467,7 +497,7 @@ export function createAccountsListHandler(
 		// the Account interface is unused at peek time.
 		const primaryId = strategy
 			? strategy.peek(
-					accounts.map(
+					peekCandidates.map(
 						(a) =>
 							({
 								id: a.id,
@@ -1334,13 +1364,19 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// Clear the remaining account-keyed in-memory caches that have no
 			// TTL/periodic sweep of their own: a pending refresh-token rotation
 			// still waiting to be persisted, this account's cached Codex/
-			// openai-compatible model listing, and any negative-cache exhaustion
-			// marks for it.
+			// openai-compatible model listing, any negative-cache exhaustion
+			// marks for it, and its per-model cooldown entries.
 			clearPendingRotation(accountId);
 			clearCodexModelCacheForAccount(accountId);
 			clearOpenAICompatibleModelCacheForAccount(accountId);
 			clearFamilyExhaustionForAccount(accountId);
+			clearModelCooldownsForAccount(accountId);
 			clearDerivedProviderModelDefaultsForAccount(accountId);
+			// The learned image refusals are the one account-keyed cache here that
+			// DOES expire on its own, so this is tidiness rather than a leak fix:
+			// they describe a route that no longer exists, and dropping them keeps
+			// the store free of entries for accounts that are gone.
+			clearVisionCapability(accountId);
 
 			return jsonResponse({
 				success: true,
@@ -3924,6 +3960,11 @@ export function createAccountCustomEndpointUpdateHandler(
 
 			log.info(`Updated custom endpoint for account ${accountId}`);
 
+			// A different endpoint is a different upstream, and "this model cannot
+			// accept image input" was learned from the old one. Drop this account's
+			// learned refusals so the new endpoint is asked rather than skipped.
+			clearVisionCapability(accountId);
+
 			return jsonResponse({
 				success: true,
 				message: "Custom endpoint updated successfully",
@@ -4037,6 +4078,13 @@ export function createAccountModelMappingsUpdateHandler(
 			]);
 
 			log.info(`Updated model mappings for account ${accountId}`);
+
+			// The learned-refusal key is the model the request ASKED for, while the
+			// mapping decides which upstream model actually serves it. Remapping
+			// therefore changes the truth behind an unchanged key: an entry learned
+			// from the old target would skip a route whose new target may read
+			// images fine. Drop this account's entries so the new mapping is asked.
+			clearVisionCapability(accountId);
 
 			return jsonResponse({
 				success: true,
@@ -4189,6 +4237,11 @@ export function createAccountModelFallbacksUpdateHandler(
 				`Merged model fallbacks into model_mappings for account ${accountId}`,
 			);
 
+			// Same invalidation as the model-mappings update above: fallbacks land in
+			// model_mappings, so they change which upstream model can end up serving a
+			// request whose learned-refusal key stays the same.
+			clearVisionCapability(accountId);
+
 			return jsonResponse({
 				success: true,
 				message: "Model fallbacks merged into model mappings",
@@ -4328,6 +4381,12 @@ export function createAccountReloadHandler(dbOps: DatabaseOperations) {
 
 			// Clear usage cache for this account to prevent memory leaks
 			usageCache.delete(accountId);
+
+			// Reload exists to pick up credentials written behind this server's back
+			// (a CLI re-authentication, a hand-edited row). New credentials can mean a
+			// different upstream account or organisation, so the image refusals
+			// learned against the old ones no longer describe this route.
+			clearVisionCapability(accountId);
 
 			log.info(`Token reload triggered for account '${account.name}'`);
 

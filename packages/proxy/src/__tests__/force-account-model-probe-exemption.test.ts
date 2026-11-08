@@ -42,6 +42,8 @@ function makeContext(observed: boolean[]): ProxyContext {
 		},
 		runtime: { clientId: "test" },
 		config: {
+			getWebSearchEnabled: () => false,
+			getWebSearchBypassHeader: () => true,
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,

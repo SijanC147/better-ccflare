@@ -12,6 +12,7 @@ import {
 	type RetrySettings,
 	retryDelayMs,
 	splitModelRouting,
+	stripModelRouting,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import {
@@ -33,6 +34,7 @@ import {
 	type ProviderRequestContext,
 	readCodeBuddyGatewayRejection,
 	recoverCodexMessagesContinuation,
+	UPSTREAM_402_OUT_OF_CREDITS_REASON,
 	usageCache,
 } from "@better-ccflare/providers";
 import type {
@@ -52,13 +54,17 @@ import {
 	readOutgoingBody,
 	resolveSlotRouting,
 } from "../request-body-context";
-import { forwardToClient } from "../response-handler";
+import { forwardToClient as defaultForwardToClient } from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { applyAccountRequestTransformer } from "./account-request-transformer";
-import { getXaiConvId } from "./account-selector";
+import { getComboSlotInfo, getXaiConvId } from "./account-selector";
 import { noteUpstreamAnswer, suppressForeignError } from "./failover-relevance";
 import { noteWindowlessOAuthRefusal } from "./gateway-oauth-skip";
 import { markFamilyExhausted } from "./model-capacity";
+import {
+	DEFAULT_MODEL_COOLDOWN_TTL_MS,
+	markModelCooling,
+} from "./model-cooldown";
 import { forwardObservedUpstream } from "./observed-upstream";
 import {
 	ERROR_MESSAGES,
@@ -73,9 +79,23 @@ import { isRetryable429 } from "./retryable-429";
 import { getValidAccessToken } from "./token-manager";
 import { forwardWithTransportRetry } from "./upstream-retry";
 import { collectWindows } from "./usage-throttling";
+import { markVisionUnsupported } from "./vision-capability";
 import { peekSseForZai1305 } from "./zai-1305";
 
 const log = new Logger("ProxyOperations");
+
+/**
+ * Resolve the forwarding step for this context.
+ *
+ * Returns the real implementation unless a caller injected an override. The
+ * override exists for tests: `forwardToClient` is bound at module-evaluation
+ * time, so `mock.module` cannot replace it for this module, which previously
+ * made the 5xx failover tests depend on which other test file ran first.
+ * Production never sets the field, so this is a single property read.
+ */
+function resolveForwardToClient(ctx: ProxyContext) {
+	return ctx.forwardToClient ?? defaultForwardToClient;
+}
 
 import {
 	cancelDiscardedResponseBody,
@@ -592,13 +612,22 @@ function cacheControlRejectorKey(accountId: string, model: string): string {
 }
 
 /**
- * Checks if a 400 response is caused by an upstream provider rejecting the
- * cache_control field (e.g. GLM-5.1 strict OpenAI-compatible validation).
+ * Checks if a response is caused by an upstream provider rejecting the
+ * cache_control field. Two shapes are seen in practice:
+ *   - GLM-5.1 style: HTTP 400, a flat string message (e.g. "Extra inputs are
+ *     not permitted: cache_control is not a valid field").
+ *   - Mistral style: HTTP 422, `{object: "error", message: {detail: [...]}}`
+ *     with pydantic `extra_forbidden` errors whose `loc` names the field.
+ * `cache_control` is Anthropic-only - it is not part of the OpenAI
+ * chat-completions schema - so a retry without it is the correct recovery for
+ * either shape. Matching anything but `cache_control` in the loc array keeps
+ * unrelated 422s (e.g. `thinking`, `output_config` - also Anthropic-only but
+ * not fixed by stripping cache_control) from marking the pair as a rejector.
  */
-async function isCacheControlRejectionError(
+export async function isCacheControlRejectionError(
 	response: Response,
 ): Promise<boolean> {
-	if (response.status !== 400) return false;
+	if (response.status !== 400 && response.status !== 422) return false;
 
 	try {
 		const contentType = response.headers.get("content-type");
@@ -610,16 +639,279 @@ async function isCacheControlRejectionError(
 		// original. Reachable in normal operation: providers such as Qwen do
 		// return non-JSON error bodies. See issue #356.
 		const json = await response.clone().json();
-		const message: string = json.error?.message ?? json.message ?? "";
-		return (
-			typeof message === "string" &&
-			message.includes("cache_control") &&
-			(message.includes("Extra inputs are not permitted") ||
-				message.includes("unknown field"))
-		);
+		// Mistral nests the pydantic errors under a top-level `detail` array and
+		// wraps the same array in `message` only on some paths; check both.
+		const detail = Array.isArray(json.detail)
+			? json.detail
+			: (json.error?.message ?? json.message)?.detail;
+		if (Array.isArray(detail) && detail.length > 0) {
+			return hasCacheControlDetail(detail);
+		}
+		// Flat string message (GLM-style).
+		const message = json.error?.message ?? json.message ?? "";
+		if (typeof message === "string") {
+			return (
+				message.includes("cache_control") &&
+				(message.includes("Extra inputs are not permitted") ||
+					message.includes("unknown field"))
+			);
+		}
+		return false;
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * True when any pydantic validation entry is the strict-schema rejection of
+ * `cache_control`. Two loc shapes carry the field: a short
+ * `[... "cache_control"]` path, and the long union branch where the name sits
+ * in `msg` instead - the retry strip is keyed on the field, not on where
+ * pydantic reports it.
+ */
+function hasCacheControlDetail(detail: unknown[]): boolean {
+	return detail.some((entry: unknown) => {
+		if (typeof entry !== "object" || entry === null) return false;
+		const { loc, msg } = entry as { loc?: unknown; msg?: unknown };
+		const msgText = typeof msg === "string" ? msg : "";
+		if (!msgText.includes("Extra inputs are not permitted")) return false;
+		const locText = Array.isArray(loc) ? loc.join(".") : "";
+		return (
+			locText.includes("cache_control") || msgText.includes("cache_control")
+		);
+	});
+}
+
+/** Words for the image input the request carried. */
+const IMAGE_INPUT_NOUNS = [
+	"image",
+	"images",
+	"image_url",
+	"image url",
+	"image input",
+	"image content",
+	"vision",
+	"visual",
+	"modality",
+	"modalities",
+	"multimodal",
+	"file",
+	"files",
+	"attachment",
+	"attachments",
+] as const;
+
+/**
+ * Phrasings that state the *capability is absent*: "not supported",
+ * "unsupported", "does not accept", "doesn't work with", ...
+ */
+const CAPABILITY_ABSENT_PATTERNS = [
+	"not support",
+	"n't support",
+	// OpenRouter word order: "endpoints that support image input" (there is no
+	// "not" before "support" — the absence is in "No endpoints found").
+	"that support",
+	"unsupported",
+	"not supported",
+	// A schema that rejects the image part outright — GLM-style "unknown field"
+	// or pydantic "Extra inputs are not permitted" — means the gateway cannot
+	// represent image input at all. This is a capability limit, not a malformed
+	// payload; those are excluded earlier by NON_CAPABILITY_ERROR_PATTERNS.
+	"unknown field",
+	"extra inputs are not permitted",
+	"extra_forbidden",
+	"does not accept",
+	"doesn't accept",
+	"do not accept",
+	"cannot accept",
+	"can't accept",
+	"not accept",
+	"only supports",
+	"only support",
+	"only accepts",
+	"only accept",
+	"not available",
+	"isn't available",
+	"not enabled",
+	"no support",
+	"not a valid",
+	"invalid content type",
+] as const;
+
+/**
+ * Why a 400 is about the *content of the request*, not the model's ability.
+ * A malformed or oversized image, a bad base64 payload, a content-policy hit or
+ * an over-length conversation rejects the same way on every account, so failing
+ * over would just repeat it and end in a generic error. These are left to the
+ * client, which is the only party that can fix them.
+ */
+const NON_CAPABILITY_ERROR_PATTERNS = [
+	"invalid base64",
+	"base64",
+	"malformed",
+	"corrupt",
+	"decode",
+	"decode error",
+	"too large",
+	"too big",
+	"exceeds",
+	"maximum size",
+	"max size",
+	"file size",
+	"dimensions",
+	"resolution",
+	"policy",
+	"moderation",
+	"content filter",
+	"content_filter",
+	"safety",
+	"blocked",
+	"not allowed",
+	"too many",
+	"exceeded the maximum",
+] as const;
+
+/**
+ * True when `text` states that the model cannot accept image input.
+ *
+ * Requires BOTH halves: a word naming the image input the request carried, and
+ * a phrasing that asserts the capability is missing. Requiring both is what
+ * keeps malformed-image errors ("Invalid image_url: invalid base64 data") and
+ * policy rejections from looking like "this model has no vision" — those name
+ * an image but do not deny a capability, and are excluded explicitly too.
+ */
+function mentionsUnsupportedImageInput(text: string): boolean {
+	const lower = text.toLowerCase();
+	if (NON_CAPABILITY_ERROR_PATTERNS.some((p) => lower.includes(p))) {
+		return false;
+	}
+	const namesImageInput = IMAGE_INPUT_NOUNS.some((p) => lower.includes(p));
+	if (!namesImageInput) return false;
+	return CAPABILITY_ABSENT_PATTERNS.some((p) => lower.includes(p));
+}
+
+/**
+ * Checks if a 400 means the requested model cannot accept image input.
+ *
+ * better-ccflare converts Anthropic image blocks to OpenAI `image_url` parts
+ * for every account, because it has no per-model vision capability data for
+ * the gateways it fronts (most expose none). The contract is to assume vision
+ * works and fail over when an upstream says otherwise: the caller treats a
+ * match like an unavailable model, trying the next combo slot / account
+ * instead of forwarding the 400 to the client.
+ *
+ * Only 400 is considered. Other 4xx shapes are either request-wide (auth,
+ * billing) or already classified elsewhere.
+ *
+ * Callers MUST gate this on `requestCarriesImageContent`: the matcher reads the
+ * upstream's wording, and image nouns include `file`, `attachment` and
+ * `modality`, so a text-only request's unrelated 400 can name one of them with
+ * a negation. Without the gate that request is replayed across every account
+ * and terminates as `vision_unsupported` instead of reaching the client as the
+ * 400 that explains it.
+ */
+export async function isVisionUnsupportedError(
+	response: Response,
+): Promise<boolean> {
+	if (response.status !== 400) return false;
+
+	try {
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+
+		// Cloned only after the content-type gate, for the reason spelled out in
+		// isCacheControlRejectionError: cloning earlier tees the body and strands
+		// the copy for every non-JSON error. See issue #356.
+		const json = await response.clone().json();
+
+		// Candidate strings from the shapes in use: `error.message`,
+		// `message.detail[].msg`, top-level `detail`, and `message` itself.
+		const candidates: string[] = [];
+		const push = (value: unknown) => {
+			if (typeof value === "string") candidates.push(value);
+		};
+
+		push(json.error?.message);
+		push(json.detail);
+		push(json.message);
+		const detail = Array.isArray(json.detail)
+			? json.detail
+			: Array.isArray(json.error?.message?.detail)
+				? json.error.message.detail
+				: Array.isArray(json.message?.detail)
+					? json.message.detail
+					: undefined;
+		if (Array.isArray(detail)) {
+			for (const entry of detail) {
+				if (typeof entry === "object" && entry !== null) {
+					const { msg, loc } = entry as { msg?: unknown; loc?: unknown };
+					const msgText = typeof msg === "string" ? msg : "";
+					const locText = Array.isArray(loc) ? loc.join(".") : "";
+					// Each entry is scored on its OWN combined text, not as two
+					// separate candidates: pydantic splits the two halves the matcher
+					// needs — `loc` names `image_url`, `msg` says "Extra inputs are
+					// not permitted" — so neither string alone can ever match. Joined,
+					// the malformed-payload exclusion still applies per entry, since
+					// "invalid base64" in one entry's msg is not rescued by another
+					// entry naming an image.
+					candidates.push(`${locText} ${msgText}`);
+				}
+			}
+		}
+
+		return candidates.some(mentionsUnsupportedImageInput);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True when the request body actually carries image content.
+ *
+ * The gate `isVisionUnsupportedError` needs: that classifier reads an
+ * upstream's wording, and its image nouns include `file`, `files`,
+ * `attachment`, `modality` and `visual`. A text-only request can therefore trip
+ * it on an unrelated 400 — "Unsupported parameter: 'modalities' is not supported
+ * with this model", "The file 'file-abc' is not available for this
+ * organization", "This endpoint does not accept attachments" — and would be
+ * replayed across every combo slot and account, ending as `vision_unsupported`
+ * when the client should have got the 400 that explains the failure.
+ *
+ * Walks the parsed body rather than scanning bytes: a Claude Code conversation
+ * routinely contains the literal `"type":"image"` inside a text block (source
+ * code, JSON samples, review threads), which a substring match would read as an
+ * image the request never carried.
+ *
+ * Both wire shapes count — Anthropic `image` blocks (message level, and nested
+ * in a `tool_result`, which is where a tool-produced screenshot lives) and
+ * OpenAI `image_url` parts, for a request that arrives already converted.
+ * A body that is absent or unparseable answers false: nothing was converted, so
+ * nothing image-shaped went upstream.
+ */
+export function requestCarriesImageContent(
+	context: RequestBodyContext | null | undefined,
+): boolean {
+	const body = context?.getParsedJson();
+	if (!body) return false;
+	const messages = (body as { messages?: unknown }).messages;
+	if (!Array.isArray(messages)) return false;
+
+	const blockCarriesImage = (block: unknown): boolean => {
+		if (!block || typeof block !== "object") return false;
+		const type = (block as { type?: unknown }).type;
+		if (type === "image" || type === "image_url") return true;
+		if (type === "tool_result") {
+			const nested = (block as { content?: unknown }).content;
+			return Array.isArray(nested) && nested.some(blockCarriesImage);
+		}
+		return false;
+	};
+
+	return messages.some((message) => {
+		if (!message || typeof message !== "object") return false;
+		const content = (message as { content?: unknown }).content;
+		return Array.isArray(content) && content.some(blockCarriesImage);
+	});
 }
 
 /**
@@ -961,7 +1253,7 @@ export async function proxyUnauthenticated(
 				),
 		);
 
-		return forwardToClient(
+		return resolveForwardToClient(ctx)(
 			{
 				requestId: requestMeta.id,
 				method: req.method,
@@ -1147,6 +1439,45 @@ export function systemSuspectScan(bodyText: string | undefined): string {
 	} catch {
 		return "unreadable";
 	}
+}
+
+/**
+ * Whether this account has another combo slot, in the request's current
+ * combo DEFINITION, carrying a DIFFERENT model than `model`. Only then is a 429
+ * on this slot safe to scope to the (account, model) pair instead of benching
+ * the account: the account still has a routable slot, and benching it would also
+ * block that slot. A passthrough slot (empty modelOverride) is treated as
+ * NOT different — it sends the request's own model, and the ambiguity
+ * resolves in favour of the existing, better-tested account-wide bench.
+ *
+ * The check consults `info.definitionSlots` (the stable enabled-slot list from
+ * the combo definition) rather than `info.slots` (the per-request routable
+ * subset). `slots` shrinks as slots cool down, so after model A cools, the
+ * next request's `slots` no longer contains A — and a 429 on a sibling model B
+ * would then find no sibling and bench the whole account, blocking A too once
+ * A's own cooldown expires. `definitionSlots` falls back to `slots` for any
+ * caller that doesn't populate it.
+ *
+ * `meta.comboName != null` is the authoritative "this attempt is combo-routed"
+ * signal, not the presence of a ComboSlotInfo: proxy.ts's step-10 combo
+ * fallback clears comboName before re-selecting with SessionStrategy, leaving
+ * a stale entry in the WeakMap that must not authorise the model-scoped branch.
+ */
+function comboHasSiblingModel(
+	meta: RequestMeta,
+	accountId: string,
+	model: string | null,
+): boolean {
+	const info = getComboSlotInfo(meta);
+	if (!info || meta.comboName == null) return false;
+	const slots = info.definitionSlots ?? info.slots;
+	const normalizedModel = model ? stripModelRouting(model).trim() : "";
+	return slots.some(
+		(s) =>
+			s.accountId === accountId &&
+			s.modelOverride.trim().length > 0 &&
+			stripModelRouting(s.modelOverride).trim() !== normalizedModel,
+	);
 }
 
 export async function proxyWithAccount(
@@ -1395,6 +1726,65 @@ export async function proxyWithAccount(
 				effectiveBodyBuffer = baseBodyContext.getBuffer();
 			}
 		}
+
+		/**
+		 * The model half of the (account, model) key this attempt's image
+		 * verdict is recorded under. It has to be the exact string proxy.ts
+		 * computes before it decides whether to skip a candidate — a write and a
+		 * read that disagree by one character are two keys for one route, and the
+		 * cache never hits.
+		 *
+		 * Both sides therefore use the same expression over the same inputs: the
+		 * combo slot's model override when one applied, otherwise the request's
+		 * own model, read from the very same `RequestBodyContext` the caller
+		 * handed in (`baseBodyContext` IS `requestBodyContext` whenever a context
+		 * is passed, which every routing call site does).
+		 *
+		 * Deliberately NOT `effectiveBodyContext.getModel()`: that is the model
+		 * AFTER `withPatchedModel` stripped a provider-routing suffix off the
+		 * override, so a suffixed slot pin would be written under the bare id and
+		 * read back under the suffixed one. The suffix stays in the key because it
+		 * selects which upstream answers, so `m {"only":["a"]}` and `m` are two
+		 * different capability questions even on the same account (see
+		 * vision-capability.ts, constraint 3).
+		 *
+		 * The truthiness test mirrors the override guard above exactly, so an
+		 * override that did NOT apply — an empty-string passthrough slot — falls
+		 * back to the body's model on both sides. With no body at all this is blank
+		 * unless a slot override named a model, and either way nothing is recorded:
+		 * a body-less request cannot carry an image, so the gate below never lets it
+		 * reach a write, and `markVisionUnsupported` treats a blank model as a no-op
+		 * anyway.
+		 */
+		const visionKeyModel =
+			(modelOverride ? modelOverride : baseBodyContext.getModel()) ?? "";
+
+		/**
+		 * Whether this attempt's image refusal must NOT reach the vision
+		 * capability cache: the effective outgoing body carries a `provider`
+		 * routing object that did not come from the slot's routing suffix.
+		 *
+		 * The cache key is the (account, model) pair — suffix included — and
+		 * represents provider routing ONLY through that suffix. Routing can also
+		 * travel as a body field: on the anthropic-compatible family a
+		 * client-supplied `provider` passes through untouched, so the same key
+		 * would serve two different upstream choices, and a refusal learned
+		 * under one would sideline the other for a full TTL.
+		 *
+		 * Suppression rather than widening the key: a `provider` value is an
+		 * arbitrarily shaped object, and normalising it into a key string is
+		 * more surface than declining to use the cache when the routing is not
+		 * represented in it. `slotRouting` is non-null exactly when the suffix
+		 * in `visionKeyModel` produced the body's `provider` (the
+		 * `resolveSlotRouting` acceptance above), so a slot-pinned routing IS
+		 * represented in the key and still learns; only a provider the client
+		 * sent suppresses the write. Read at `visionKeyModel` time — the
+		 * model-cycling fallback below patches a fresh context and never
+		 * mutates this one, so the answer cannot go stale between here and the
+		 * two call sites that consume it.
+		 */
+		const visionRoutingUnrepresentedInKey =
+			effectiveBodyContext.getParsedJson()?.provider != null && !slotRouting;
 
 		// Stage the original request body + headers for cache keepalive replay.
 		// Uses the pre-transform body (effectiveBodyBuffer may have a model override
@@ -1983,6 +2373,91 @@ export async function proxyWithAccount(
 			return NOT_CLASSIFIED;
 		};
 
+		/** HTTP 402 from any provider: the account is out of credits upstream. */
+		const classifyOutOfCredits402 = async (
+			rawResponse: Response,
+		): Promise<UpstreamErrorClassification> => {
+			// ── upstream_402_out_of_credits: money/quota exhausted upstream ──
+			// Any provider can answer 402 when the account's funding is gone:
+			// Mistral (balance / included monthly usage), OpenRouter and
+			// NanoGPT-style resellers (no credits). The request itself is fine,
+			// so a same-account retry is pointless — fail over to the next
+			// account. The account is NOT benched: credits can come back at any
+			// moment via a top-up, or at a month rollover we cannot observe, so
+			// any bench length would be a guess that could lock the account out
+			// past a reset. Returning `null` (fail over) also short-circuits
+			// processProxyResponse, which is exactly what we want here: the
+			// account keeps whatever state it already had.
+			//
+			// Matched on status alone, for every provider. 402 is not a status
+			// any supported upstream uses for anything other than "payment
+			// required", and a missed match only costs the client the upstream
+			// error, whereas a body-shape probe would clone every 402 body.
+			if (rawResponse.status === 402) {
+				// A 402 from an account that rewrote the model, after an account
+				// serving the requested model failed, is a foreign error first
+				// (SB23-10878): it fails over the same way, but its row says
+				// `foreign_model_error` and the exhausted pool answers the native
+				// failure instead of the generic 503.
+				if (failsOverAsForeignError(rawResponse)) return null;
+
+				let requestedModel: string | null = null;
+				if (effectiveBodyBuffer)
+					requestedModel = effectiveBodyContext.getModel();
+
+				const reason: RateLimitReason = UPSTREAM_402_OUT_OF_CREDITS_REASON;
+				log.warn(
+					`Account ${account.name} upstream_402_out_of_credits (402${requestedModel ? `, model=${requestedModel}` : ""}) — ` +
+						`account is out of credits upstream; NOT benching account, failing over to next account`,
+				);
+				// Synthetic probes still learn something real here, but their
+				// rejection was never a client-visible request — the audit row,
+				// like the other classification paths', is real-traffic-only.
+				if (!isSyntheticInternal) {
+					const responseTime = Date.now() - requestMeta.timestamp;
+					const modelRewrite = isModelRewrite(
+						requestMeta.originalModel,
+						requestMeta.appliedModel,
+					);
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest(
+							crypto.randomUUID(),
+							req.method,
+							url.pathname,
+							account.id,
+							402,
+							false,
+							reason,
+							responseTime,
+							failoverAttempts,
+							requestedModel ? { model: requestedModel } : undefined,
+							requestMeta.agentUsed ?? undefined,
+							apiKeyId ?? undefined,
+							apiKeyName ?? undefined,
+							requestMeta.project ?? null,
+							undefined,
+							requestMeta.comboName ?? null,
+							modelRewrite ? (requestMeta.originalModel ?? null) : null,
+							modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+							requestMeta.projectAttributionSource ?? null,
+							requestMeta.agentAttributionSource ?? null,
+							null,
+							requestMeta.clientSessionId ?? null,
+							gatewayHint.requestClass,
+							gatewayHint.agentType,
+							gatewayHint.prevToolDurations,
+							gatewayHint.compaction,
+							gatewayHint.contextCompacted,
+							...auditTail,
+						),
+					);
+				}
+				cancelDiscardedResponseBody(rawResponse);
+				return null;
+			}
+			return NOT_CLASSIFIED;
+		};
+
 		/** 429 carrying `overage-disabled-reason: out_of_credits`. */
 		const classifyOutOfCredits429 = async (
 			rawResponse: Response,
@@ -2198,14 +2673,15 @@ export async function proxyWithAccount(
 					return null;
 				}
 
-				log.warn(
-					`Account ${account.name} rate-limited (429), no model fallbacks — failing over to next account`,
-				);
 				// The provider's own read of this response outranks the usage-API
 				// marker and the default: it names the window that just refused
 				// the request. Providers that publish the window in the body
 				// (ZAI, CodeBuddy) get it parsed here; the body read is gated on
 				// a JSON error body inside the provider's parser.
+				//
+				// Hoisted above the combo branch below so a combo-routed 429 and
+				// the account-wide bench share one body read and one resolved
+				// deadline rather than reading the body twice.
 				const providerReset = await resolveProviderResetTime(
 					provider,
 					rawResponse,
@@ -2221,54 +2697,102 @@ export async function proxyWithAccount(
 					providerReset.resetTime,
 				);
 				const reason: RateLimitReason = "model_fallback_429";
+				// A reset we invented rather than one the upstream named: our own
+				// `default` 60s probe cooldown, or a provider's own default when no
+				// real header outranked it. Both exits below share this so the
+				// account-wide bench and the model-scoped cooldown agree on
+				// provenance, and so the model cooldown can defer to the store's
+				// 5-minute fallback rather than the invented deadline.
+				const resetIsInferred =
+					!isExplicitUpstreamCooldown(cooldown.source) ||
+					(cooldown.source === "provider" && providerReset.resetIsInferred);
+				// Shared by both exits below so the account-wide bench and the
+				// model-scoped cooldown cannot drift in the audit row they write.
+				const saveNoFallback429AuditRow = () => {
+					const responseTime = Date.now() - requestMeta.timestamp;
+					const modelRewrite = isModelRewrite(
+						requestMeta.originalModel,
+						requestMeta.appliedModel,
+					);
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest(
+							crypto.randomUUID(),
+							req.method,
+							url.pathname,
+							account.id,
+							429,
+							false,
+							reason,
+							responseTime,
+							failoverAttempts,
+							requestedModel ? { model: requestedModel } : undefined,
+							requestMeta.agentUsed ?? undefined,
+							apiKeyId ?? undefined,
+							apiKeyName ?? undefined,
+							requestMeta.project ?? null,
+							undefined,
+							requestMeta.comboName ?? null,
+							modelRewrite ? (requestMeta.originalModel ?? null) : null,
+							modelRewrite ? (requestMeta.appliedModel ?? null) : null,
+							requestMeta.projectAttributionSource ?? null,
+							requestMeta.agentAttributionSource ?? null,
+							null,
+							requestMeta.clientSessionId ?? null,
+							gatewayHint.requestClass,
+							gatewayHint.agentType,
+							gatewayHint.prevToolDurations,
+							gatewayHint.compaction,
+							gatewayHint.contextCompacted,
+							...auditTail,
+						),
+					);
+				};
+
+				// ── combo slot 429: model-scoped, NOT account-wide ──
+				// A combo routes one request through ordered (account, model)
+				// slots, so a 429 from ONE slot says nothing about the account's
+				// other slots. When the combo definition proves this account
+				// still has a different-model slot to route to, cool only the
+				// (account, model) pair and fail over: benching the account
+				// would also block that healthy slot (the CodeBuddy free
+				// deepseek-v4.1-flash vs paid deepseek-v4.1-flash-sg incident).
+				// `applyRateLimitCooldown` is deliberately NOT called here — no
+				// consecutive_rate_limits bump, no RateLimitError, no
+				// circuit-breaker failure, all correct for a model-scoped reason.
+				if (
+					requestedModel != null &&
+					comboHasSiblingModel(requestMeta, account.id, requestedModel)
+				) {
+					markModelCooling(
+						account.id,
+						requestedModel,
+						resetIsInferred ? null : cooldown.until,
+					);
+					log.warn(
+						`Account ${account.name} 429 on combo slot model "${requestedModel}" — model-scoped cooldown ${
+							resetIsInferred
+								? `for the store's ${DEFAULT_MODEL_COOLDOWN_TTL_MS / 60_000}min fallback TTL (no upstream reset named)`
+								: `until ${new Date(cooldown.until).toISOString()}`
+						} (account NOT benched: it has another combo slot with a different model)`,
+					);
+					saveNoFallback429AuditRow();
+					cancelDiscardedResponseBody(rawResponse);
+					return null;
+				}
+
+				log.warn(
+					`Account ${account.name} rate-limited (429), no model fallbacks — failing over to next account`,
+				);
 				applyRateLimitCooldown(
 					account,
 					{
 						resetTime: cooldown.until,
-						resetIsInferred:
-							!isExplicitUpstreamCooldown(cooldown.source) ||
-							(cooldown.source === "provider" && providerReset.resetIsInferred),
+						resetIsInferred,
 						reason,
 					},
 					ctx,
 				);
-				const responseTime = Date.now() - requestMeta.timestamp;
-				const modelRewrite = isModelRewrite(
-					requestMeta.originalModel,
-					requestMeta.appliedModel,
-				);
-				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps.saveRequest(
-						crypto.randomUUID(),
-						req.method,
-						url.pathname,
-						account.id,
-						429,
-						false,
-						reason,
-						responseTime,
-						failoverAttempts,
-						requestedModel ? { model: requestedModel } : undefined,
-						requestMeta.agentUsed ?? undefined,
-						apiKeyId ?? undefined,
-						apiKeyName ?? undefined,
-						requestMeta.project ?? null,
-						undefined,
-						requestMeta.comboName ?? null,
-						modelRewrite ? (requestMeta.originalModel ?? null) : null,
-						modelRewrite ? (requestMeta.appliedModel ?? null) : null,
-						requestMeta.projectAttributionSource ?? null,
-						requestMeta.agentAttributionSource ?? null,
-						null,
-						requestMeta.clientSessionId ?? null,
-						gatewayHint.requestClass,
-						gatewayHint.agentType,
-						gatewayHint.prevToolDurations,
-						gatewayHint.compaction,
-						gatewayHint.contextCompacted,
-						...auditTail,
-					),
-				);
+				saveNoFallback429AuditRow();
 				cancelDiscardedResponseBody(rawResponse);
 				return null;
 			}
@@ -2419,6 +2943,40 @@ export async function proxyWithAccount(
 		if (codeBuddyRejectionOutcome !== NOT_CLASSIFIED)
 			return codeBuddyRejectionOutcome;
 
+		// Whether THIS request actually carried image content — resolved lazily,
+		// at most once, and shared by the first-response classification below and
+		// the retried-response one in `classifyRetriedUpstreamResponse`.
+		//
+		// `isVisionUnsupportedError` reads only the upstream's wording, so without
+		// this gate an unrelated 400 that happens to name a file, an attachment or
+		// a modality would replay a text-only request across every account. But
+		// walking the parsed body is O(messages x blocks) and this code sits on the
+		// response path of EVERY request, 200s included — a long Claude Code
+		// conversation would pay it per request for an image it never sent. So
+		// callers test the classifier first (a status comparison for anything but
+		// a JSON 400) and consult this only on a match.
+		// See requestCarriesImageContent.
+		let requestCarriesImagesResolved: boolean | null = null;
+		const requestCarriesImages = () =>
+			(requestCarriesImagesResolved ??=
+				requestCarriesImageContent(effectiveBodyContext));
+
+		/**
+		 * Whether the model-cycling fallback below has re-issued this attempt
+		 * against one of the account's OTHER configured models. Declared here,
+		 * before the closure that reads it, because `classifyRetriedUpstreamResponse`
+		 * is defined above that loop and invoked long after it.
+		 *
+		 * It exists to keep the vision cache honest. The cache key is the model the
+		 * request ASKED for, so a refusal is only evidence about that key when the
+		 * response being classified is a response to that model. After cycling, the
+		 * response belongs to a fallback alias reached through a transient 429/404 on
+		 * the requested one: recording it would sideline a route whose primary may
+		 * read images perfectly well the moment that transient clears — a capability
+		 * claim the evidence does not support, for up to a full TTL.
+		 */
+		let modelCycledTo = false;
+
 		/**
 		 * The classification chain as a retry response has to see it: every
 		 * handler above, in the first-response order, minus the model-cycling
@@ -2451,11 +3009,72 @@ export async function proxyWithAccount(
 			const orgDenied = await classifyOrgPermissionDenied(retried);
 			if (orgDenied !== NOT_CLASSIFIED) return orgDenied;
 
+			const outOfCredits402 = await classifyOutOfCredits402(retried);
+			if (outOfCredits402 !== NOT_CLASSIFIED) return outOfCredits402;
+
 			const codeBuddyRejected = await classifyCodeBuddyChannelRejection(
 				retried,
 				returnRateLimitedResponseOnExhaustion,
 			);
 			if (codeBuddyRejected !== NOT_CLASSIFIED) return codeBuddyRejected;
+
+			// An in-place retry can reject image input just as the first attempt
+			// did (a 429 that later answers 400, say). The first-pass short-circuit
+			// only covers the initial response, so without this the retried 400
+			// falls through to `processProxyResponse` and reaches the client
+			// instead of the next account / combo slot. Checked before the
+			// `status !== 429` narrowing below, which exists for the 429-only
+			// handlers and would discard it.
+			// Classifier first: for anything but a JSON 400 it is a status
+			// comparison, whereas the gate walks the parsed request body.
+			if ((await isVisionUnsupportedError(retried)) && requestCarriesImages()) {
+				log.warn(
+					`Account ${account.name} rejected image input on an in-place retry — failing over to next model/account`,
+				);
+				// Second confirmed-rejection site: an in-place retry can refuse the
+				// image just as the first attempt did, and its `return null` fails
+				// over exactly the same way, so it has to teach the cache too —
+				// otherwise a pair that only ever refuses on the retried response
+				// would be re-probed on every image request forever. Same key as the
+				// first-response site: the retry replays the same body against the
+				// same account and the same requested model, so it is the same
+				// (account, model) capability question — unless the model-cycling
+				// fallback had already swapped that model out, in which case the
+				// refusal is a fallback alias's and says nothing about the key. See
+				// `modelCycledTo`.
+				//
+				// `visionRejected` is guarded by `modelCycledTo` and by nothing
+				// else, matching the first-response site: it is first-hand evidence
+				// about THIS request, which asked under its own routing, so it
+				// counts toward this request's verdict whatever the body carried.
+				// A cycled alias's refusal is the one thing that must not count —
+				// it is not evidence about the requested pair, and leaving the flag
+				// unset makes this attempt read as "capability unknown", which keeps
+				// the request retryable instead of answering a permanent 400 on the
+				// strength of an alias's opinion.
+				//
+				// The CACHE write is the half that `visionRoutingUnrepresentedInKey`
+				// gates, and only that half: a refusal under a client-supplied
+				// `provider` says nothing about the bare (account, model) pair, so
+				// recording it would suppress a different provider's route on every
+				// later request for a whole TTL. Suppressing the flag too — the bug
+				// this replaces — cost the opposite error: a confirmed refusal on an
+				// in-place retry under a client `provider` left the route counted as
+				// unknown, so a request every eligible route had refused still
+				// answered a retryable 503.
+				if (!modelCycledTo) {
+					requestMeta.visionRejected = true;
+					if (!visionRoutingUnrepresentedInKey) {
+						markVisionUnsupported(account.id, visionKeyModel);
+					}
+				}
+				// Drain the response being abandoned: the `retried` argument, not the
+				// outer `response` binding it aliases at today's only call site. The
+				// classifier read a clone, so this body is still unread, and draining
+				// any other object would leave it holding native memory (#273).
+				cancelDiscardedResponseBody(retried);
+				return null;
+			}
 
 			// Everything below lived under `isModelUnavailableError`, which is
 			// unconditionally true for a 429 and only reachable for 404/400
@@ -2512,12 +3131,69 @@ export async function proxyWithAccount(
 		const orgPermissionOutcome = await classifyOrgPermissionDenied(rawResponse);
 		if (orgPermissionOutcome !== NOT_CLASSIFIED) return orgPermissionOutcome;
 
+		const outOfCredits402Outcome = await classifyOutOfCredits402(rawResponse);
+		if (outOfCredits402Outcome !== NOT_CLASSIFIED)
+			return outOfCredits402Outcome;
+
 		// On model unavailable / rate-limited: cycle through the model list for
 		// this account. getModelList returns [primary, ...fallbacks] merged from
 		// model_mappings arrays and legacy model_fallbacks. We already tried index 0
 		// (the primary), so start at index 1.
 		let zai1305AlreadyChecked = false;
-		if (await isModelUnavailableError(rawResponse)) {
+
+		// The request carried images and this model cannot read them. Classified
+		// separately from `isModelUnavailableError`: that predicate answers only
+		// for 429s and model-not-found 400/404s, so an image rejection matches
+		// neither and would otherwise be forwarded to the client. The flag is
+		// consumed below to reach the same model/slot fallback a rate-limited
+		// model gets, so the next combo slot / account is tried and this one is
+		// not benched.
+		//
+		// Gated on the request actually carrying image content: the matcher reads
+		// the upstream's wording only, so a text-only request whose 400 happens to
+		// name a file, an attachment or a modality would otherwise be replayed
+		// across every account. The classifier is tested first — a status
+		// comparison for anything but a JSON 400 — so the gate's walk of the
+		// parsed request body runs only on a match, never on the text-only
+		// majority and never on a 200.
+		const visionUnsupported =
+			(await isVisionUnsupportedError(rawResponse)) && requestCarriesImages();
+		if (visionUnsupported) {
+			let rejectedModel: string | null = null;
+			if (effectiveBodyBuffer) rejectedModel = effectiveBodyContext.getModel();
+			log.warn(
+				`Account ${account.name}${rejectedModel ? ` (model=${rejectedModel})` : ""} ` +
+					`rejected image input — failing over to next model/account`,
+			);
+			// Learn the refusal: this is the first of the two confirmed-rejection
+			// sites to run (the other is `classifyRetriedUpstreamResponse` above,
+			// which only sees a response that needed an in-place retry), and both end
+			// in the `return null` that fails the image over to the next slot /
+			// account. Recording the pair here is what lets routing skip it on the
+			// NEXT image request instead of paying the same round-trip — body
+			// uploaded, 400 read, response drained — every time. Keyed on
+			// `visionKeyModel`, not on `rejectedModel` above: the log wants the
+			// stripped model that actually went upstream, the cache wants the
+			// string the skip site computes.
+			//
+			// Also stamp the per-attempt signal the caller loop reads back: this
+			// site always answers for the model that was asked for (the
+			// model-cycling fallback runs later), so it needs none of the
+			// `modelCycledTo` guard the retried-response site above carries.
+			//
+			// `visionRejected` is stamped unconditionally — the refusal happened
+			// under THIS request's own routing, so it is first-hand evidence for
+			// this request's verdict whatever the body carried. The cache write
+			// is not: an entry keyed on the bare pair would suppress a different
+			// provider's route on every later request for a whole TTL. See
+			// `visionRoutingUnrepresentedInKey`.
+			requestMeta.visionRejected = true;
+			if (!visionRoutingUnrepresentedInKey) {
+				markVisionUnsupported(account.id, visionKeyModel);
+			}
+		}
+
+		if (visionUnsupported || (await isModelUnavailableError(rawResponse))) {
 			// Log 429 response headers for debugging upstream rate-limit info
 			if (rawResponse.status === 429) {
 				const rlHeaders: Record<string, string> = {};
@@ -2542,11 +3218,33 @@ export async function proxyWithAccount(
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
-			const outOfCreditsOutcome = await classifyOutOfCredits429(
-				rawResponse,
-				requestedModel,
-			);
-			if (outOfCreditsOutcome !== NOT_CLASSIFIED) return outOfCreditsOutcome;
+			// Quota classification reads response headers; an image rejection is a
+			// 400 with no rate-limit metadata, so skip it rather than risk a
+			// misclassification, and go straight to the fallback decision below.
+			if (!visionUnsupported) {
+				const outOfCreditsOutcome = await classifyOutOfCredits429(
+					rawResponse,
+					requestedModel,
+				);
+				if (outOfCreditsOutcome !== NOT_CLASSIFIED) return outOfCreditsOutcome;
+			}
+
+			// An image rejection always fails over to the next account / combo
+			// slot. Unlike model-not-found, there is no model-list cycling to try
+			// here: the model list is per-account and re-trying the same gateway
+			// with a different alias of the same model would just be rejected
+			// again, and `classifyNoFallback429` below would forward the 400 and
+			// end the request. This covers both shapes — no model on the body, and
+			// an account whose model list has a single entry (the alias case,
+			// where `modelList.length <= 1` still holds).
+			//
+			// The classifier read a clone, so this response's body is still unread;
+			// drain it before abandoning it (#273 / #382), as every other
+			// discard-then-fail-over site does.
+			if (visionUnsupported) {
+				cancelDiscardedResponseBody(rawResponse);
+				return null;
+			}
 
 			if (requestedModel) {
 				const modelList = getModelList(requestedModel, account);
@@ -2726,6 +3424,9 @@ export async function proxyWithAccount(
 							nextBareModel,
 						);
 					}
+					// From here on, every response belongs to `nextModel`, not to the
+					// model the request asked for. See `modelCycledTo`.
+					modelCycledTo = true;
 
 					rawResponse = await checkZai1305(
 						rawResponse,
@@ -2851,6 +3552,17 @@ export async function proxyWithAccount(
 				cancelDiscardedResponseBody(rawResponse);
 				return null;
 			}
+
+			// A model-fallback retry can answer 402 even though the primary did not
+			// (it was 404/429, say). That response left the cycling loop and reaches
+			// here, past the first-response check and without setting
+			// `retriedInPlace`, so it would otherwise be forwarded to the client
+			// instead of failing over. Same classification as a primary 402: record
+			// the reason, do not bench, fail over.
+			const fallbackOutOfCredits402 =
+				await classifyOutOfCredits402(rawResponse);
+			if (fallbackOutOfCredits402 !== NOT_CLASSIFIED)
+				return fallbackOutOfCredits402;
 		}
 
 		// Inject request metadata into response headers so providers can read
@@ -3386,7 +4098,7 @@ export async function proxyWithAccount(
 				log.warn(
 					`Account ${account.name} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
-				return forwardToClient(
+				return resolveForwardToClient(ctx)(
 					{
 						requestId: requestMeta.id,
 						method: req.method,
@@ -3426,7 +4138,7 @@ export async function proxyWithAccount(
 		if (failsOverAsForeignError(response)) return null;
 
 		// Forward response to client
-		return forwardToClient(
+		return resolveForwardToClient(ctx)(
 			{
 				requestId: requestMeta.id,
 				method: req.method,
@@ -3492,13 +4204,31 @@ export const POOL_EXHAUSTED_MAX_RETRY_AFTER_SECONDS = 3600;
  *
  * `pool_exhausted` means "every account is genuinely exhausted (rate-limited,
  * usage-capped, paused, requires reauth, or otherwise filtered out)".
- * `circuit_open` means "the circuit breaker is refusing this account". The
- * wire shape stays identical — only `error.type` and `accounts[].reason`
- * differ — so SDK clients keep treating the response as a 503 transient.
- * Downstream consumers that need to differentiate (e.g. the AO fleet reaper)
- * read the JSON body.
+ * `circuit_open` means "the circuit breaker is refusing this account". For
+ * those two the wire shape stays identical — only `error.type` and
+ * `accounts[].reason` differ — so SDK clients keep treating the response as a
+ * 503 transient. Downstream consumers that need to differentiate (e.g. the AO
+ * fleet reaper) read the JSON body.
+ *
+ * `vision_unsupported` means every candidate ELIGIBLE for this request is known
+ * unable to serve its image: each was either attempted and refused, or is
+ * recorded in the vision capability cache as blind. It is NOT an exhaustion
+ * state — no account is benched, nothing is cooling down, and retrying the same
+ * request cannot succeed — so it is a 400 and carries no `Retry-After` and no
+ * `next_available_at`. It rides this envelope because that is what tells a
+ * client "this is a routing outcome, not a mid-stream failure". The caller that
+ * decides when the predicate holds is proxy.ts; see `everyEligibleRouteIsBlind`
+ * there for why it is built on the cache rather than on availability.
  */
-export type PoolExhaustionKind = "pool_exhausted" | "circuit_open";
+export type PoolExhaustionKind =
+	| "pool_exhausted"
+	| "circuit_open"
+	| "vision_unsupported";
+
+/** Client-facing message for the one cause a wait cannot fix. */
+export const VISION_UNSUPPORTED_MESSAGE =
+	"Image input is not supported by any model eligible for this request. " +
+	"Remove the image, or route the request to a model that accepts image input.";
 
 /**
  * Per-account reason values emitted in `accounts[].reason`.
@@ -3507,6 +4237,11 @@ export type PoolExhaustionKind = "pool_exhausted" | "circuit_open";
  * refused this account, NOT that the account's cooldown is expired. Reporting
  * a circuit-open account as `rate_limited` would mislead the reaper into
  * pausing session spawns for the wrong reason.
+ *
+ * `vision_unsupported` is distinct for the same kind of reason: the account is
+ * healthy and either was tried or is already known blind. Reporting a cooldown
+ * reason there would send the reaper off to pause session spawns for a state
+ * that will not recover.
  */
 export type PoolExhaustionAccountReason =
 	| "requires_reauth"
@@ -3514,6 +4249,7 @@ export type PoolExhaustionAccountReason =
 	| "usage_exhausted"
 	| "rate_limited"
 	| "circuit_open"
+	| "vision_unsupported"
 	| "unavailable";
 
 /**
@@ -3546,12 +4282,20 @@ const CIRCUIT_OPEN_RETRY_AFTER_SECONDS = 30;
  * also usage-capped for hours would otherwise lie to the client about when
  * capacity actually returns.
  *
+ * `kind: "vision_unsupported"` overrides every per-account reason the same way
+ * and additionally drops BOTH wait signals — `Retry-After` and
+ * `next_available_at` — and answers 400 instead of 503. There is nothing to
+ * wait for: the accounts listed are not recovering, they simply cannot read the
+ * image, and a client that respects `Retry-After` would sleep and then fail
+ * identically forever.
+ *
  * @param accounts - All accounts that were considered but are unavailable
  * @param usageSnapshots - Per-account usage telemetry (id → snapshot), used
  *   to identify usage_exhausted accounts and to derive `next_available_at` /
  *   `Retry-After` when an upstream reset time is known.
  * @param kind - Which top-level cause to report. Defaults to `"pool_exhausted"`.
- * @returns 503 response with the pool-exhausted JSON shape and Retry-After header
+ * @returns 503 response with the pool-exhausted JSON shape and Retry-After
+ *   header, or a 400 with neither for `"vision_unsupported"`.
  */
 export function createPoolExhaustedResponse(
 	accounts: Account[],
@@ -3560,6 +4304,7 @@ export function createPoolExhaustedResponse(
 ): Response {
 	const now = Date.now();
 	const isCircuitOpen = kind === "circuit_open";
+	const isVisionUnsupported = kind === "vision_unsupported";
 
 	// Build account info list — usage-exhausted outranks cooldown because the
 	// client needs the longer reset horizon (weekly vs minutes-long cooldowns)
@@ -3577,20 +4322,28 @@ export function createPoolExhaustedResponse(
 				usage.extraUsageAvailable,
 			);
 
-		const reason: PoolExhaustionAccountReason = isCircuitOpen
-			? "circuit_open"
-			: account.requires_reauth
-				? "requires_reauth"
-				: account.paused
-					? "paused"
-					: usageExhausted
-						? "usage_exhausted"
-						: account.rate_limited_until && account.rate_limited_until > now
-							? "rate_limited"
-							: "unavailable";
+		const reason: PoolExhaustionAccountReason = isVisionUnsupported
+			? // The account is healthy; it simply could not read the image. It was
+				// either attempted and refused, or is already recorded as blind.
+				"vision_unsupported"
+			: isCircuitOpen
+				? "circuit_open"
+				: account.requires_reauth
+					? "requires_reauth"
+					: account.paused
+						? "paused"
+						: usageExhausted
+							? "usage_exhausted"
+							: account.rate_limited_until && account.rate_limited_until > now
+								? "rate_limited"
+								: "unavailable";
 
 		let availableAt: string | null = null;
-		if (!isCircuitOpen) {
+		// Neither override kind advertises a recovery time: the breaker's own
+		// cooldown floors `Retry-After` instead, and a blind route has no recovery
+		// at all — pairing a `vision_unsupported` reason with an `available_at`
+		// would contradict the reason in the same object.
+		if (!isCircuitOpen && !isVisionUnsupported) {
 			if (usageExhausted && usage?.resetMs && usage.resetMs > now) {
 				availableAt = new Date(usage.resetMs).toISOString();
 			} else if (
@@ -3640,7 +4393,7 @@ export function createPoolExhaustedResponse(
 		recoveryCandidates.length > 0 ? Math.min(...recoveryCandidates) : null;
 
 	const nextAvailableAt =
-		!isCircuitOpen && earliestRecoveryMs !== null
+		!isCircuitOpen && !isVisionUnsupported && earliestRecoveryMs !== null
 			? new Date(earliestRecoveryMs).toISOString()
 			: null;
 
@@ -3671,26 +4424,37 @@ export function createPoolExhaustedResponse(
 			: CIRCUIT_OPEN_RETRY_AFTER_SECONDS
 		: usageAwareRetryAfterSeconds;
 
+	// vision_unsupported is the one kind a wait cannot fix, so it carries no
+	// Retry-After and no next_available_at and answers 400. Everything else keeps
+	// the 503 transient shape SDK clients already treat as retryable.
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+		// Wire shape stays identical regardless of kind — the cause lives
+		// in `error.type`. Downstream consumers that need to differentiate
+		// (fleet reaper, capacity-state consumers) read the JSON body.
+		"x-better-ccflare-pool-status": isVisionUnsupported
+			? "vision_unsupported"
+			: "exhausted",
+	};
+	if (!isVisionUnsupported) {
+		headers["Retry-After"] = String(retryAfterSeconds);
+	}
+
 	return new Response(
 		JSON.stringify({
 			type: "error",
 			error: {
 				type: kind,
-				message: ERROR_MESSAGES.POOL_EXHAUSTED,
+				message: isVisionUnsupported
+					? VISION_UNSUPPORTED_MESSAGE
+					: ERROR_MESSAGES.POOL_EXHAUSTED,
 				next_available_at: nextAvailableAt,
 				accounts: accountInfos,
 			},
 		}),
 		{
-			status: 503,
-			headers: {
-				"Content-Type": "application/json",
-				"Retry-After": String(retryAfterSeconds),
-				// Wire shape stays identical regardless of kind — the cause lives
-				// in `error.type`. Downstream consumers that need to differentiate
-				// (fleet reaper, capacity-state consumers) read the JSON body.
-				"x-better-ccflare-pool-status": "exhausted",
-			},
+			status: isVisionUnsupported ? 400 : 503,
+			headers,
 		},
 	);
 }

@@ -96,6 +96,8 @@ function makeContext(account: Account): ProxyContext {
 		},
 		runtime: { clientId: "test" },
 		config: {
+			getWebSearchEnabled: () => false,
+			getWebSearchBypassHeader: () => true,
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
@@ -253,6 +255,8 @@ describe("handleProxy — multi-account all-suppressed pool forwards a terminal 
 				},
 				runtime: { clientId: "test" },
 				config: {
+					getWebSearchEnabled: () => false,
+					getWebSearchBypassHeader: () => true,
 					getUsageThrottlingFiveHourEnabled: () => false,
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
@@ -418,6 +422,8 @@ describe("handleProxy — combo-fallback pool all-suppressed retries ungated (de
 				},
 				runtime: { clientId: "test" },
 				config: {
+					getWebSearchEnabled: () => false,
+					getWebSearchBypassHeader: () => true,
 					getUsageThrottlingFiveHourEnabled: () => false,
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,
@@ -542,6 +548,8 @@ describe("handleProxy — front candidate attempted, later candidate suppressed 
 				},
 				runtime: { clientId: "test" },
 				config: {
+					getWebSearchEnabled: () => false,
+					getWebSearchBypassHeader: () => true,
 					getUsageThrottlingFiveHourEnabled: () => false,
 					getUsageThrottlingWeeklyEnabled: () => false,
 					getSystemPromptCacheTtl1h: () => false,

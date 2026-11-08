@@ -111,6 +111,8 @@ function makeContext(
 		},
 		runtime: { clientId: "test" },
 		config: {
+			getWebSearchEnabled: () => false,
+			getWebSearchBypassHeader: () => true,
 			getUsageThrottlingFiveHourEnabled: () => opts?.throttlingEnabled ?? false,
 			getUsageThrottlingWeeklyEnabled: () => opts?.throttlingEnabled ?? false,
 			getSystemPromptCacheTtl1h: () => false,

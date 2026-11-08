@@ -27,6 +27,9 @@ When working with Claude API at scale, rate limits can become a significant bott
 - **Session-based** (only supported strategy): Maintains conversation context with 5-hour sessions to avoid rate limits and account bans
 - **⚠️ WARNING**: Other strategies (round-robin, least-requests, weighted) have been removed as they can trigger Claude's anti-abuse systems
 
+### 🔎 Local Web Search
+- **Bring your own search** - Claude Code's `web_search` helper request is answered by your own Tavily / Exa / Parallel / DeepSeek / Serper / Brave provider, with automatic fallback and safe pass-through — see [Web Search](web-search.md)
+
 ### 📈 Real-Time Monitoring & Analytics
 - **Web Dashboard**: Interactive UI at `/dashboard` with live metrics
 - **Powerful CLI**: Comprehensive command-line interface for management and monitoring
@@ -55,6 +58,7 @@ When working with Claude API at scale, rate limits can become a significant bott
 
 ### Core Features
 - [Load Balancing Strategy](./load-balancing.md) - Session-based strategy for safe account usage
+- [Web Search](./web-search.md) - Serve Claude Code's `web_search` through your own search providers
 - [Provider System](./providers.md) - Provider abstraction and OAuth implementation
 - [Database Schema](./database.md) - SQLite structure, migrations, and maintenance
 - [Model Mappings](./models.md) - Claude AI model definitions and constants

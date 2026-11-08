@@ -383,14 +383,17 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 		expect(response.status).toBe(200);
 	});
 
-	it("META's 402 with no native failure before it is still forwarded", async () => {
+	// Upstream's out-of-credits classifier fails every 402 over, native or
+	// foreign, so the foreign-error rule's "no native failure first" case no
+	// longer forwards a 402: the next account serves the request.
+	it("META's 402 with no native failure before it still fails over to the next account", async () => {
 		const ctx = makeContext([metaAccount(0), ...anthropicAccounts()]);
 		const calls = installFetch(() => message(MODEL), metaBilling402);
 
 		const response = await send(ctx);
 
-		expect(calls.hosts).toEqual(["meta"]);
-		expect(response.status).toBe(402);
+		expect(calls.hosts).toEqual(["meta", "anthropic"]);
+		expect(response.status).toBe(200);
 	});
 
 	it("six windowless 429s with no foreign answer still end in the all-accounts-failed error", async () => {

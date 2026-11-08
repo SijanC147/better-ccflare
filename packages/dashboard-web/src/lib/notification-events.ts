@@ -346,6 +346,9 @@ export const RATE_LIMIT_REASON_KIND: Record<
 	out_of_credits: "quota",
 	extra_usage_exhausted: "quota",
 	windowless_429: "quota",
+	// Not benched (credits can return at any moment), but it is a capacity
+	// signal, not an upstream fault.
+	upstream_402_out_of_credits: "quota",
 	upstream_529_overloaded_with_reset: "bench",
 	upstream_529_overloaded_no_reset: "bench",
 	org_permission_denied: "bench",

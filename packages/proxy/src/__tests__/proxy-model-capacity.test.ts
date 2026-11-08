@@ -72,6 +72,8 @@ function makeContext(
 		},
 		runtime: { clientId: "test" },
 		config: {
+			getWebSearchEnabled: () => false,
+			getWebSearchBypassHeader: () => true,
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,
@@ -229,6 +231,8 @@ function makeComboContext(
 		},
 		runtime: { clientId: "test" },
 		config: {
+			getWebSearchEnabled: () => false,
+			getWebSearchBypassHeader: () => true,
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
 			getSystemPromptCacheTtl1h: () => false,

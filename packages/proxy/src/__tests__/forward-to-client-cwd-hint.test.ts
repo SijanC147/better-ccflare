@@ -21,7 +21,16 @@ import { join } from "node:path";
  */
 
 const SOURCE = join(import.meta.dir, "..", "handlers", "proxy-operations.ts");
-const CALLEE = "forwardToClient(";
+/**
+ * A call site, in any of the three spellings that reach the real forwarder.
+ * Since the 5xx failover tests gained an injectable override, production calls
+ * go through `resolveForwardToClient(ctx)(`; the module imports the real one as
+ * `defaultForwardToClient`, and the bare name is kept so a site written the old
+ * way is still swept. The definition, `resolveForwardToClient(ctx: ...)`, has no
+ * `)(` and is not matched.
+ */
+const CALLEE =
+	/(?:\bresolveForwardToClient\(ctx\)|\bdefaultForwardToClient|\bforwardToClient)\(/g;
 
 /**
  * Returns the source text of the first argument to each `forwardToClient` call,
@@ -37,9 +46,10 @@ function argumentObjects(source: string): string[] {
 	let from = 0;
 
 	for (;;) {
-		const call = source.indexOf(CALLEE, from);
-		if (call === -1) break;
-		from = call + CALLEE.length;
+		CALLEE.lastIndex = from;
+		const call = CALLEE.exec(source);
+		if (call === null) break;
+		from = call.index + call[0].length;
 
 		const open = source.indexOf("{", from);
 		if (open === -1) break;

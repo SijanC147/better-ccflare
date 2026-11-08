@@ -2,9 +2,13 @@ import { providerAcceptsClientModel } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, Conflict, NotFound } from "@better-ccflare/errors";
 import {
+	clearVisionCapability,
+	getModelCooldownUntil,
+} from "@better-ccflare/proxy";
+import {
 	type ComboFamily,
 	type ComboFamilyAssignment,
-	type ComboWithSlots,
+	type ComboWithSlotsWithCooldown,
 	MAX_MIN_RESET_REMAINING_MS,
 } from "@better-ccflare/types";
 import { errorResponse } from "../utils/http-error";
@@ -127,7 +131,18 @@ export function createComboGetHandler(dbOps: DatabaseOperations) {
 			}
 
 			const slots = await dbOps.getComboSlots(id);
-			const data: ComboWithSlots = { ...combo, slots };
+			// Decorates each slot with its live (account, model) cooldown deadline
+			// so the dashboard can show when a skipped slot returns. A passthrough
+			// slot's effective model is the request's, which is unknown here, so
+			// `s.model` is used as-is (an empty model simply never matches an
+			// entry). Read-only: the deadline is never persisted.
+			const data: ComboWithSlotsWithCooldown = {
+				...combo,
+				slots: slots.map((s) => ({
+					...s,
+					cooldown_until: getModelCooldownUntil(s.account_id, s.model),
+				})),
+			};
 			const response = {
 				success: true,
 				data,
@@ -184,6 +199,15 @@ export function createComboUpdateHandler(dbOps: DatabaseOperations) {
 				data: updated,
 			};
 
+			// Disabling or enabling a combo changes which (account, model) pairs
+			// this topology can route, and learned image refusals are cached per
+			// pair. Renaming a combo routes nothing new, so it leaves the cache
+			// alone — the same "only on a real change" rule the provider-defaults
+			// handler follows.
+			if (enabled !== undefined && enabled !== combo.enabled) {
+				clearVisionCapability();
+			}
+
 			return new Response(JSON.stringify(response), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -206,6 +230,11 @@ export function createComboDeleteHandler(dbOps: DatabaseOperations) {
 			}
 
 			await dbOps.deleteCombo(id);
+			// The deleted combo's slot pins are gone (cascaded), so refusals
+			// learned through them describe routing that no longer exists.
+			// Global rather than account-scoped: the slots have already been
+			// cascaded away, so there is nothing left to read account ids from.
+			clearVisionCapability();
 			const response = {
 				success: true,
 				message: "Combo deleted successfully",
@@ -283,6 +312,14 @@ export function createSlotAddHandler(dbOps: DatabaseOperations) {
 				}
 				throw error;
 			}
+
+			// Track whether a model was actually set, so the invalidation below
+			// is conditional: adding a passthrough slot introduces no new
+			// (account, model) key. And when one IS set, drop only this account's
+			// entries — they were learned from the previous topology — rather
+			// than the whole store, unlike the update handler below, which
+			// cannot always resolve the slot's account.
+			if (slotModel.length > 0) clearVisionCapability(account_id);
 
 			return new Response(JSON.stringify({ success: true, data: newSlot }), {
 				status: 201,
@@ -423,6 +460,18 @@ export function createSlotUpdateHandler(dbOps: DatabaseOperations) {
 				throw error;
 			}
 
+			// A slot's model pin is the model half of the (account, model) key the
+			// vision capability cache learns refusals under, and repinning a slot is
+			// how an operator changes which upstream answers an image request. What is
+			// cached was learned from the previous topology, so drop it and let the
+			// new routing be asked instead of skipped.
+			//
+			// Global rather than account-scoped: this handler resolves the slot by id
+			// and only loads its account on the passthrough-validation path above, so
+			// the account is not always known here — and a slot edit is rare and
+			// operator-driven, so the cost is one re-learn round-trip per blind pair.
+			clearVisionCapability();
+
 			return new Response(
 				JSON.stringify({ success: true, data: updatedSlot }),
 				{
@@ -452,7 +501,18 @@ export function createSlotRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			await dbOps.removeComboSlot(slotId);
+			const removedAccountId = await dbOps.removeComboSlot(slotId);
+			// See the delete handler above: the slot's pin is gone, so what was
+			// learned through it describes routing that no longer exists. Scoped to
+			// the removed slot's account, which is the only one whose entries can
+			// have changed — unlike the combo delete handler, the account is known
+			// here, and a slot removal leaves every other account's learned
+			// refusals perfectly true.
+			//
+			// And only when a slot was actually removed: a repeated DELETE matches
+			// nothing, so no route changed, and wiping the store would make every
+			// blind pair pay a re-learn round-trip for nothing.
+			if (removedAccountId !== null) clearVisionCapability(removedAccountId);
 
 			return new Response(
 				JSON.stringify({ success: true, message: "Slot removed" }),

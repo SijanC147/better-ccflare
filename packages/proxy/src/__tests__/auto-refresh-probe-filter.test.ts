@@ -279,6 +279,8 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 			},
 			runtime: { clientId: "test" },
 			config: {
+				getWebSearchEnabled: () => false,
+				getWebSearchBypassHeader: () => true,
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,
@@ -340,6 +342,8 @@ describe("proxy.ts — pool-exhausted path skips usageCollector for auto-refresh
 			},
 			runtime: { clientId: "test" },
 			config: {
+				getWebSearchEnabled: () => false,
+				getWebSearchBypassHeader: () => true,
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
 				getSystemPromptCacheTtl1h: () => false,

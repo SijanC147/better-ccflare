@@ -1,16 +1,19 @@
 import { mapModelName } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import type { Account } from "@better-ccflare/types";
+import { normalizeOpenAIContent } from "./content";
 import { resolveReasoningEffort } from "./reasoning";
 import type {
 	AnthropicContent,
 	AnthropicContentBlock,
+	AnthropicImageContent,
 	AnthropicRequest,
 	AnthropicResponse,
 	AnthropicTextContent,
 	AnthropicThinkingContent,
 	AnthropicToolResult,
 	AnthropicToolUse,
+	OpenAIContentPart,
 	OpenAIMessage,
 	OpenAIRequest,
 	OpenAIResponse,
@@ -42,11 +45,44 @@ export function stripCacheControlFromOpenAIRequest(body: OpenAIRequest): void {
 		if (Array.isArray(msg.content)) {
 			for (const part of msg.content) {
 				if (typeof part === "object" && part !== null) {
-					delete (part as Record<string, unknown>).cache_control;
+					delete (part as unknown as Record<string, unknown>).cache_control;
 				}
 			}
 		}
 	}
+}
+
+/**
+ * Map an Anthropic `image` block onto an OpenAI `image_url` content part.
+ *
+ * Base64 sources become a `data:` URL because that is the only shape every
+ * OpenAI-compatible gateway understands for inline bytes; URL sources are
+ * forwarded verbatim. Media type falls back to `image/png` when the client
+ * omitted it — the field is optional on the Anthropic wire type.
+ *
+ * Returns null for malformed blocks (no data, no url) so the caller can skip
+ * them instead of emitting a part the upstream will reject.
+ */
+export function toOpenAIImagePart(
+	block: AnthropicImageContent,
+): OpenAIContentPart | null {
+	const source = block.source;
+	if (!source || typeof source !== "object") return null;
+
+	if (typeof source.url === "string" && source.url.length > 0) {
+		return { type: "image_url", image_url: { url: source.url } };
+	}
+	if (typeof source.data === "string" && source.data.length > 0) {
+		const mediaType =
+			typeof source.media_type === "string" && source.media_type.length > 0
+				? source.media_type
+				: "image/png";
+		return {
+			type: "image_url",
+			image_url: { url: `data:${mediaType};base64,${source.data}` },
+		};
+	}
+	return null;
 }
 
 /**
@@ -173,6 +209,9 @@ export function convertAnthropicRequestToOpenAI(
 		});
 	}
 
+	// Images found inside tool_result blocks. OpenAI's `tool` role is text-only,
+	// so these cannot ride along with the tool output.
+
 	// Add user/assistant messages
 	if (anthropicData.messages && Array.isArray(anthropicData.messages)) {
 		for (const message of anthropicData.messages) {
@@ -195,14 +234,43 @@ export function convertAnthropicRequestToOpenAI(
 					(part): part is AnthropicThinkingContent => part.type === "thinking",
 				);
 
+				// Extract image blocks. These used to be dropped here with no trace
+				// left in the request, which silently turned a vision prompt into a
+				// text-only one. They are now emitted as `image_url` parts, in the
+				// same order the client sent them.
+				const convertedImages = new Map<string, OpenAIContentPart>();
+				for (let index = 0; index < message.content.length; index++) {
+					const part = message.content[index];
+					if (part?.type !== "image") continue;
+					const converted = toOpenAIImagePart(part);
+					if (converted) convertedImages.set(String(index), converted);
+				}
+
 				let content: OpenAIMessage["content"];
-				if (hasCacheControl) {
+				if (convertedImages.size > 0) {
+					const parts: OpenAIContentPart[] = [];
+					for (let index = 0; index < message.content.length; index++) {
+						const part = message.content[index];
+						if (!part) continue;
+						if (part.type === "text") {
+							const block: OpenAIContentPart = {
+								type: "text",
+								text: part.text,
+							};
+							if (part.cache_control) block.cache_control = part.cache_control;
+							parts.push(block);
+						} else {
+							const converted = convertedImages.get(String(index));
+							if (converted) parts.push(converted);
+						}
+					}
+					content = parts;
+				} else if (hasCacheControl) {
 					content = textBlocks.map((part) => {
-						const block: {
-							type: string;
-							text: string;
-							cache_control?: { type: string };
-						} = { type: "text", text: part.text };
+						const block: OpenAIContentPart = {
+							type: "text",
+							text: part.text,
+						};
 						if (part.cache_control) block.cache_control = part.cache_control;
 						return block;
 					});
@@ -241,20 +309,38 @@ export function convertAnthropicRequestToOpenAI(
 				const toolResults = message.content.filter(
 					(item): item is AnthropicToolResult => item.type === "tool_result",
 				);
+				// Images hoisted out of THIS message's tool results. Emitted as a
+				// user turn immediately after the tool messages and before any later
+				// turn, so a screenshot stays beside the tool result that produced it
+				// instead of drifting to the end of a long conversation.
+				const hoistedToolImages: OpenAIContentPart[] = [];
 				for (const toolResult of toolResults) {
 					let toolContent: string;
 					if (typeof toolResult.content === "string") {
 						toolContent = toolResult.content;
 					} else if (Array.isArray(toolResult.content)) {
-						// Array content: serialize non-image items; drop images (not supported in OpenAI tool messages)
+						// Array content: serialize non-image text; images are hoisted out (see below)
 						const parts: string[] = [];
 						for (const block of toolResult.content as AnthropicContent[]) {
 							if (block.type === "text") {
 								parts.push(block.text);
 							} else if (block.type === "image") {
-								// OpenAI tool messages don't support image content — drop with placeholder
+								// OpenAI tool messages don't support image content, so the
+								// tool output keeps a placeholder and the image itself is
+								// hoisted into a following user turn (below).
+								const hoisted = toOpenAIImagePart(block);
+								if (hoisted) hoistedToolImages.push(hoisted);
+								// The placeholder must describe what actually happened, so
+								// it is chosen after the mapping. A block with no usable
+								// source produces no part: claiming the image follows would
+								// point the model at a turn that either holds a sibling
+								// tool result's image or nothing at all. And when an image
+								// DOES follow, the placeholder must not read as "you cannot
+								// see this" — the model can, in the next turn.
 								parts.push(
-									"[image content not supported in OpenAI tool results]",
+									hoisted
+										? "[image attached in the following message]"
+										: "[image unavailable: the tool result carried none]",
 								);
 							} else {
 								// Other structured blocks (tool_use, tool_result, etc.) — serialize as JSON
@@ -270,6 +356,15 @@ export function convertAnthropicRequestToOpenAI(
 						content: toolContent,
 						tool_call_id: toolResult.tool_use_id,
 					});
+				}
+
+				// Emit this message's hoisted tool images now — right after its tool
+				// messages, before any later turn. Adding them to the end of the
+				// conversation instead would re-present every historical screenshot
+				// as fresh input on each subsequent request, detached from the tool
+				// result that produced it.
+				if (hoistedToolImages.length > 0) {
+					messages.push({ role: "user", content: hoistedToolImages });
 				}
 
 				if (
@@ -341,6 +436,40 @@ export function convertOpenAIResponseToAnthropic(
 				},
 			};
 		}
+		// Mistral-style rejection: pydantic validation errors in a `detail`
+		// array. Observed both top-level (`{detail: [...]}`, 2026-11-03 live)
+		// and nested under `message`; pass a flattened summary through rather
+		// than letting the object fall to the generic text (which would hide
+		// why the request was refused).
+		const envelope = openaiData as { detail?: unknown; message?: unknown };
+		const nestedMessage = envelope.message;
+		const detail = Array.isArray(envelope.detail)
+			? envelope.detail
+			: typeof nestedMessage === "object" && nestedMessage !== null
+				? (nestedMessage as { detail?: unknown }).detail
+				: undefined;
+		if (Array.isArray(detail) && detail.length > 0) {
+			const summary = detail
+				.map((entry: unknown) => {
+					if (typeof entry !== "object" || entry === null) return null;
+					const { loc, msg } = entry as { loc?: unknown; msg?: unknown };
+					const path = Array.isArray(loc) ? loc.join(".") : "";
+					const text = typeof msg === "string" ? msg : "";
+					if (!path && !text) return null;
+					return path && text ? `${path}: ${text}` : path || text;
+				})
+				.filter((line): line is string => line !== null)
+				.join("; ");
+			if (summary) {
+				return {
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message: summary,
+					},
+				};
+			}
+		}
 		return {
 			type: "error",
 			error: {
@@ -355,18 +484,37 @@ export function convertOpenAIResponseToAnthropic(
 
 	// Add thinking content first (Anthropic ordering) — DeepSeek/reasoning
 	// providers return reasoning_content on the message in non-streaming responses.
-	if (choice.message?.reasoning_content) {
+	// OpenRouter-shaped gateways (kilo, openrouter, nanogpt) use `reasoning`
+	// instead and document `reasoning_content` as the alias, so accept both in the
+	// same precedence as the streaming transform (stream.ts:546). Some gateways
+	// (Mistral/GLM) instead return `content` as an array of thinking + text
+	// blocks; an explicit reasoning field wins when both carry thinking.
+	//
+	// Missing the alias cost more than cosmetics. A reasoning model that spends
+	// its whole budget thinking returns no `content` at all, so the client saw an
+	// empty message with `stop_reason: max_tokens` (observed live against a
+	// reasoning model on an OpenRouter-shaped gateway). And whenever reasoning did
+	// accompany text, dropping it
+	// broke the round-trip: the request side maps Anthropic thinking blocks back
+	// to `reasoning_content` for providers that require them, so a client that
+	// never receives the thinking cannot echo it on the next turn.
+	const normalizedContent = normalizeOpenAIContent(choice.message?.content);
+	const thinking =
+		choice.message?.reasoning_content ||
+		choice.message?.reasoning ||
+		normalizedContent.thinking;
+	if (thinking) {
 		content.push({
 			type: "thinking",
-			thinking: choice.message.reasoning_content,
+			thinking,
 		});
 	}
 
 	// Add text content if present
-	if (choice.message?.content) {
+	if (normalizedContent.hasContent) {
 		content.push({
 			type: "text",
-			text: choice.message.content,
+			text: normalizedContent.text,
 		});
 	}
 

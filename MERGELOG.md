@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: 15cff50eec307e5bed17964dccb99de6a56f5513 -->
+<!-- last-sync-sha: 55e69473465e1561f3585202f145193e30c54660 -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-11-08 | main | `15cff50e..55e69473` | 124 (95 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-11280 |
 | 2026-10-30 | main | `ba82474c..15cff50e` | 88 (71 non-merge) | 34 files (33 UU, 1 DU) | merge --no-ff | see the entry below | see the PR for SB23-10879 |
 | 2026-10-20 | main | `b4fe14b6..ba82474c` | 26 (22 non-merge) | 15 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-9312 |
 | 2026-10-16 | main | `4f3f8b57..b4fe14b6` | 97 (84 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-8189 |
@@ -25,6 +26,102 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-11-08: `15cff50e..55e69473` (124 upstream commits, 95 non-merge)
+
+**Strategy:** `merge --no-ff` by hand (lane BTCF-11280, SB23-11280). Upstream release 3.6.5.
+**Scale:** 143 files staged by the merge, +25,047 / -198. **Conflicts:** 20 paths, all content (UU).
+Hextap files untouched: `.hextap.json` and `.hextap/tap-registration.json` both `4e1ad4a1…`.
+Manifests kept at the fork's 3.46.0. `bun.lock` unchanged and `bun install --frozen-lockfile`
+passes under the pinned Bun 1.4.4. The four inline workers regenerate byte-identical under 1.4.4
+(no worker source changed in the range).
+
+### Upstream features arriving
+
+- **Local web search** (`df2bbe97` … `f60ada1c`, `76c4878f`): Claude Code's `web_search` helper
+  requests are answered by a configured search provider (Tavily, Exa, Parallel, DeepSeek, Serper,
+  Brave, Keenable, Firecrawl, tinyfish) with a fallback chain; anything unserved goes upstream
+  unchanged. New `web_tool_calls` table (SQLite and PostgreSQL, both schema and migration paths),
+  pruned with request retention. New `search_providers.tier` column (SQLite and PostgreSQL, with
+  the PG backfill mirrored), a keyless free tier for Keenable and Firecrawl (`aed8a593`).
+- **New routes**, added to `api-catalog.ts`: `PATCH /api/search-providers/free-tier`,
+  `GET /api/web-tool-calls`, `GET /api/web-tool-calls/summary`.
+- **Upstream 402 failover** (`c3f12ea3`, `bb7131ed`, `9f9dc519`): a 402 fails over to the next
+  account without benching it, recorded as `upstream_402_out_of_credits`, and does not trip the
+  circuit breaker.
+- **Model-scoped combo 429 cooldowns** (`9c69c2b6`, `3c123de2`, `15a9c5fd`): a 429 on a combo
+  slot cools only the (account, model) pair; the dashboard shows a "Cooling" badge on the slot.
+- **Vision capability** (`b133bccf` … `d6a295d6`): image blocks pass through to OpenAI-compatible
+  providers and Codex; routes known to refuse images are skipped, and a request whose every
+  eligible route refuses the image answers 400 `vision_unsupported`.
+- **Mistral cache_control retry** (`56086e24`).
+- `CLAUDE_CLI_VERSION` 2.1.319; `.gitignore` ignores `.env*` except `.env.example`.
+
+### Resolutions
+
+- **Manifests** (`package.json`, `apps/cli/package.json`): kept the fork's version (3.46.0) and
+  the fork's build scripts (`build.ts`, `prepare-workers.ts`, `build-target.ts`). Upstream's
+  `version-define.ts` (`CCFLARE_BUILD_SUFFIX`) arrives as a file but no fork build calls it,
+  because Hextap rejects SemVer build metadata (standing resolution).
+- **`apps/cli/build-multi-arch.ts`**: kept the fork's Hextap shape. Upstream's version reads a
+  `.bun-version` file the fork does not carry (`bun-version-check.yml` stays `.disabled`).
+- **`apps/cli/README.md`**: upstream's edit reverted to the fork copy (fork-owned).
+- **Types** (`api.ts`, `search-provider.ts`): union; upstream's new optional fields written in the
+  fork's `exactOptionalPropertyTypes` style (`?: T | undefined`).
+- **`router.ts`, `handlers/index.ts`, `accounts.ts`, `database-operations.ts`**: import unions.
+- **`migrations-pg.ts`**: kept the fork's API-key role backfill and added upstream's
+  `search_providers.tier` backfill beside it.
+- **`account-selector.ts`**: upstream's new combo slot logic is replayed into the fork's
+  `collectAvailableComboSlots` helper, which gains an exclusion predicate argument and returns
+  `accountMap` and `permittedAccountIds`. Order inside it: enabled, known account, available,
+  model cooldown, slot throttle (#107/#112), capacity, exclusion. Exclusion is the fork's
+  SB23-2781 OAuth-refusal skip or upstream's `isProviderExcluded`. Upstream's deferred vision
+  candidates live in a new `recordDeferredComboSlots()` that returns `definitionSlots`. The family
+  path's old post-filter re-exclusion is gone, because it dropped accounts without their slots and
+  broke index alignment. **Behaviour change:** a gateway ladder now also skips cooling slots and
+  records vision deferrals, which neither side did before.
+- **`combos.ts`**: slot DELETE keeps the fork's "slot does not belong to combo" 400 (Codex P2)
+  first, then upstream's `removeComboSlot` (now returning the removed account id) and
+  `clearVisionCapability`. Upstream's test that expected 200 for an already-gone slot now expects
+  400: with no slot-by-id lookup the two cases cannot be told apart.
+- **`ComboSlotBuilder.tsx`**: both `comboId` and `cooldownUntil`; flex-wrap row, the disabled
+  badge and opacity, the Cooling badge and the throttle summary line.
+- **`proxy-operations.ts`, `proxy.ts`**: union. Upstream's injected `resolveForwardToClient(ctx)`
+  with every call site still passing `cwdHint` and `project`; upstream's shared no-fallback 429
+  audit row with the fork's `auditTail` columns added back. The refusal path orders the #316
+  native-failure response, then `vision_unsupported`, then `combo_session_fallback_disabled`.
+- **Upstream 402 failover and #316 (SB23-10878).** Upstream's 402 classifier runs before #316's
+  check at three sites, which would have turned #316's own incident (native 429s, then META's
+  foreign 402) back into a generic 503. The fork's foreign-model behaviour is kept and upstream's
+  402 sits next to it: the 402 branch first asks `failsOverAsForeignError()`, so a foreign 402
+  after a native failure is recorded `foreign_model_error` and the client gets the native
+  failure; every other 402 takes upstream's path (`upstream_402_out_of_credits`, not benched,
+  fails over). Deleting that check fails 4 of the 9 #316 tests.
+  **Behaviour changes:** a foreign 402 with no native failure before it now fails over instead of
+  reaching the client (the #316 test asserting the old forward is updated); a pool of only
+  foreign accounts all answering 402 ends in the generic 503 instead of the 402.
+- **#234 retry budget**: unchanged. A 402 is never retried in place; upstream added no new
+  in-place retry loop; the Mistral cache_control retry is one-shot (400 widened to 422).
+- **Five proxy test files**: union, no test dropped. Upstream's `globalThis.fetch` assignments use
+  the fork's `fetchSlot`; upstream's local `makeProxyContext` helper gives way to the fork's
+  fixture. The issue-273 discard-site count is 25 (20, plus the fork's foreign-model site, plus
+  upstream's four).
+- **Post-merge type fixes**: upstream's web-tools, web-tool-calls and search-provider types
+  widened to the fork's `?: T | undefined` style; `upstream_402_out_of_credits` added to the
+  dashboard's `RATE_LIMIT_REASON_KIND` as `quota`; the proxy test fixture gained defaults for the
+  web search config getters and a `forwardToClient` override; `ERROR_TYPES` in
+  `failover-relevance.ts` gains `402: "billing_error"` (UNVERIFIED against Anthropic's error
+  docs), since a native 402 can now be the status the client gets.
+
+### Follow-ups
+
+- The zai 1305 in-place retry (`checkZai1305`) calls `makeProxyRequest` directly, bypassing
+  `forwardUpstream`, so its stored status is stale (pre-existing at `cf019b23`).
+- The `codebuddy_gateway_rejection` audit row has no `auditTail` (pre-existing).
+- Upstream's `version-define.ts` and `.bun-version` gate in `build-multi-arch.ts` not adopted.
+- Postman collection not regenerated for the three new routes.
+- No live-database migration rehearsal for `web_tool_calls` and `search_providers.tier`; the
+  dashboard Search and Cooling changes were not rendered in a browser.
 
 ## 2026-10-30: `ba82474c..15cff50e` (88 upstream commits, 71 non-merge)
 

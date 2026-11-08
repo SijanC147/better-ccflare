@@ -121,30 +121,39 @@ describe("issue #273 — Group A: helper contract", () => {
 // branch (400 code 11128 from the CodeBuddy gateway), which discards the
 // masked flat-body response before failing over to the next account. 20 is
 // the same branch's over-cap path: a terminal rejection whose body exceeds
-// the bounded-read cap is discarded rather than buffered for a replay.
-// fails over to the next account.
+// the bounded-read cap is discarded rather than buffered for a replay. 21 is
+// the upstream_402_out_of_credits branch, which discards the 402 before
+// failing over. 22 is the combo model-scoped 429 branch: a combo-routed 429
+// that cools only its (account, model) pair still discards the response
+// before failing over to the next slot. 23 is the image-input rejection
+// branch: the classifier reads a clone, so the original is discarded before
+// failing over to the next account / combo slot. 24 is the same branch on an
+// in-place retry, where the retried response is discarded before the failover
+// return — it drains the classifier's `retried` argument rather than the
+// outer `response` binding that argument happens to alias, so the site keeps
+// draining the right body if the helper is ever called with another response.
 //
 // The windowless-429 site now drains through `drainDiscardedBodyWithPreview`,
 // which reads to the end like the plain drain and also logs the start of the
-// body (SB23-2781). It still counts as a drain site, so the total stays 18.
+// body (SB23-2781). It still counts as a drain site.
 //
-// 21 is the foreign-model error that fails over instead of reaching the
+// 25 is the foreign-model error that fails over instead of reaching the
 // client after a native account failed (SB23-10878).
 // ---------------------------------------------------------------------------
 
-const EXPECTED_SITE_COUNT = 21;
+const EXPECTED_SITE_COUNT = 25;
 
 describe("issue #273 — Group B: call-site coverage in proxy-operations.ts", () => {
-	it("proxy-operations.ts has exactly 21 drain call sites", () => {
+	it("proxy-operations.ts has exactly 25 drain call sites", () => {
 		const source = readFileSync(
 			"packages/proxy/src/handlers/proxy-operations.ts",
 			"utf-8",
 		);
 		// Match call sites only — exclude the import line. Each call is
-		// `cancelDiscardedResponseBody(rawResponse)` or
-		// `cancelDiscardedResponseBody(response)` on a line of its own.
+		// `cancelDiscardedResponseBody(rawResponse)`, `...(response)` or
+		// `...(retried)` on a line of its own.
 		const callMatches = source.match(
-			/^\s*cancelDiscardedResponseBody\((?:rawResponse|response)\);/gm,
+			/^\s*cancelDiscardedResponseBody\((?:rawResponse|response|retried)\);/gm,
 		);
 		const previewMatches = source.match(
 			/^\s*drainDiscardedBodyWithPreview\((?:rawResponse|response),/gm,
