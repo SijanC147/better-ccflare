@@ -54,7 +54,10 @@ import {
 	setXaiConvId,
 	validateProviderPath,
 } from "./handlers";
-import { createRelevantExhaustionResponse } from "./handlers/failover-relevance";
+import {
+	createAll402ExhaustionResponse,
+	createRelevantExhaustionResponse,
+} from "./handlers/failover-relevance";
 import { isSkippedAfterOAuthRefusal } from "./handlers/gateway-oauth-skip";
 import {
 	completeRateLimitProbe,
@@ -1505,7 +1508,8 @@ async function handleProxyRequest(
 			// (SB23-10878) is answered here too, since step 11 never runs. It
 			// is still recorded as this refusal, which the setting promises.
 			const relevantComboResponse =
-				createRelevantExhaustionResponse(requestMeta);
+				createRelevantExhaustionResponse(requestMeta) ??
+				createAll402ExhaustionResponse(requestMeta);
 			if (relevantComboResponse) {
 				return await returnRefusal(
 					relevantComboResponse,
@@ -1742,6 +1746,17 @@ async function handleProxyRequest(
 		);
 		cacheBodyStore.discardStaged(requestMeta.id);
 		return relevantResponse;
+	}
+
+	//     Every account answered the requested model with a 402 (SB23-11281):
+	//     replay the newest one, so the client sees the billing message.
+	const all402Response = createAll402ExhaustionResponse(requestMeta);
+	if (all402Response) {
+		log.warn(
+			"All accounts failed with 402 out of credits; returning the newest account's 402 instead of the generic 503",
+		);
+		cacheBodyStore.discardStaged(requestMeta.id);
+		return all402Response;
 	}
 
 	//     Otherwise check if OAuth token issues are the cause
