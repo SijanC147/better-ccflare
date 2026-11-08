@@ -1,16 +1,11 @@
 /**
- * SB23-11281. An all-402 pool replays the newest native 402.
- * account that serves the requested model, not a rewritten model's error.
- *
- * Reported 2026-10-30: six Anthropic accounts refused a `claude-haiku-5-5`
- * request with a windowless 429, then a META account, mapping the request to
- * `muse-spark-1.2-contributor`, answered 402 with a link to Meta's billing
- * page, and the client got the 402.
+ * SB23-11281. Since `#322` an upstream 402 fails over without benching, so a
+ * pool where every account answers 402 ended on the generic 503 and lost the
+ * provider's billing message. It now replays the newest native 402.
  *
  * Every upstream call lands on the `fetch` stub below, which records it and
  * throws for any host it does not know, so nothing here reaches a real
- * account. The real `AnthropicProvider` and `MetaProvider` run, because the
- * registry outranks `ctx.provider` for a registered provider name.
+ * account.
  */
 import {
 	afterEach,
@@ -84,30 +79,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_min_reset_remaining_ms: null,
 		...overrides,
 	};
-}
-
-/** The six Anthropic accounts of the incident. */
-const ANTHROPIC_NAMES = ["XBOX", "PRTN", "OTLK", "ICLD", "UOM", "SB23"];
-
-function anthropicAccounts(): Account[] {
-	return ANTHROPIC_NAMES.map((name, index) =>
-		makeAccount({ id: `anthropic-${name}`, name, priority: index }),
-	);
-}
-
-function metaAccount(priority = 10): Account {
-	return makeAccount({
-		id: "meta-META",
-		name: "META",
-		provider: "anthropic-compatible",
-		api_key: "compat-key",
-		refresh_token: null,
-		access_token: null,
-		expires_at: null,
-		custom_endpoint: META_ENDPOINT,
-		model_mappings: JSON.stringify({ haiku: META_MODEL }),
-		priority,
-	});
 }
 
 function makeContext(
@@ -248,6 +219,34 @@ describe("an all-402 pool replays the native 402 (SB23-11281)", () => {
 		const seen = install402();
 		const response = await send(
 			makeContext([nativeMeta("M1", 0), nativeMeta("M2", 1)]),
+		);
+		expect(seen).toEqual([MODEL, MODEL]);
+		expect(response.status).toBe(402);
+		expect(await response.text()).toBe(BILLING_BODY);
+	});
+
+	it("a combo with session fallback off: the combo terminal replays the 402", async () => {
+		const seen = install402();
+		const combo: ComboWithSlots = {
+			id: "combo-402",
+			name: "Combo402",
+			description: null,
+			enabled: true,
+			created_at: Date.now(),
+			updated_at: Date.now(),
+			slots: ["M1", "M2"].map((accountId, index) => ({
+				id: `slot-${index}`,
+				combo_id: "combo-402",
+				account_id: accountId,
+				model: MODEL,
+				priority: index,
+				enabled: true,
+				max_utilization_percent: null,
+				min_reset_remaining_ms: null,
+			})),
+		};
+		const response = await send(
+			makeContext([nativeMeta("M1", 0), nativeMeta("M2", 1)], combo),
 		);
 		expect(seen).toEqual([MODEL, MODEL]);
 		expect(response.status).toBe(402);

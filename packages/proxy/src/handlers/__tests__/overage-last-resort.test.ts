@@ -127,6 +127,38 @@ describe("overage last (SB23-8202)", () => {
 		expect(ids(ordered)).toEqual(["quota", "over"]);
 	});
 
+	it("Anthropic extra usage on, plan window unspent: the account stays a plan account", async () => {
+		setUseExtraUsage(true);
+		usageCache.set("a", {
+			seven_day: { utilization: 40, resets_at: IN_THREE_DAYS() },
+			extra_usage: { is_enabled: true, utilization: 10 },
+		} as never);
+		seedPlanQuota("b");
+		const ordered = await selectAccountsForRequest(
+			meta(),
+			ctxFor([account("a", "anthropic", 0), account("b", "anthropic", 1)]),
+		);
+		expect(ids(ordered)).toEqual(["a", "b"]);
+	});
+
+	it("the strategy sees only the plan accounts, so a session stamp lands on one that serves", async () => {
+		setUseExtraUsage(true);
+		seedAnthropicOnExtraUsage("over");
+		seedPlanQuota("quota");
+		const ctx = ctxFor([
+			account("over", "anthropic", 0),
+			account("quota", "anthropic", 1),
+		]);
+		const ordered = await selectAccountsForRequest(meta(), ctx);
+		const select = (
+			ctx.strategy as unknown as { select: ReturnType<typeof mock> }
+		).select;
+		expect(select.mock.calls.map((call) => ids(call[0] as Account[]))).toEqual([
+			["quota"],
+		]);
+		expect(ids(ordered)).toEqual(["quota", "over"]);
+	});
+
 	it("Anthropic extra usage: with no plan account left, the overage account is used", async () => {
 		setUseExtraUsage(true);
 		seedAnthropicOnExtraUsage("over");
