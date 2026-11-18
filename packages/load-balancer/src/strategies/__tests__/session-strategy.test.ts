@@ -1,4 +1,11 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	setSystemTime,
+} from "bun:test";
 import { SessionStrategy } from "@better-ccflare/load-balancer";
 import type {
 	Account,
@@ -107,6 +114,17 @@ describe("SessionStrategy", () => {
 	let strategy: SessionStrategy;
 	let mockStore: MockStrategyStore;
 	let meta: RequestMeta;
+
+	// `select` stamps session_start from meta.timestamp, which beforeEach builds
+	// before a test reads its own Date.now(). On a real clock those can differ
+	// by 1 ms, so every test runs on a frozen clock (SB23-12687).
+	beforeEach(() => {
+		setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+	});
+
+	afterEach(() => {
+		setSystemTime();
+	});
 
 	beforeEach(() => {
 		strategy = new SessionStrategy(5 * 60 * 60 * 1000); // 5 hour default duration
