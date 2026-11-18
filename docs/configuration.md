@@ -553,7 +553,7 @@ A per-account toggle (`peak_hours_pause_enabled`, set from the dashboard account
 
 - **Zai** — pause the whole account during Zai's peak window (weekdays 14:00–18:00 SGT).
 - **DeepSeek** — pause the whole account during DeepSeek's peak windows (weekdays 01:00–04:00 and 06:00–10:00 UTC), excluding Chinese public holidays.
-- **TokenHarbor** — never pause the account. Only the models the account's own `GET /v1/models` listing marks as peak-priced are skipped while their window is active, so flat-priced models keep using the account. Combos reorder peak-priced slots behind flat-priced ones rather than dropping them, and the filter fails open when no listing is cached. See [routing-architecture.md](routing-architecture.md#peak-pricing-exclusion).
+- **TokenHarbor** — never pause the account. Only the models the account's own `GET /v1/models` listing marks as peak-priced are tried after flat-priced plan accounts, and before any account serving on overage, while their window is active, so flat-priced models keep using the account. Combos reorder peak-priced slots behind flat-priced ones rather than dropping them, and the filter fails open when no listing is cached. See [routing-architecture.md](routing-architecture.md#peak-pricing-exclusion).
 
 Switching the toggle off lifts an existing peak-hours pause immediately instead of waiting for the scheduler. A manual pause is left alone.
 

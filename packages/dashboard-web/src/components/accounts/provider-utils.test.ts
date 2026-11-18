@@ -52,7 +52,7 @@ describe("peakHoursPauseTitle", () => {
 			peakPricedModels: ["deepseek-v4-pro", "deepseek-v4.1-flash"],
 		});
 		// Model-aware, NOT account-wide: the account keeps serving the rest.
-		expect(title).toContain("Skip this account for");
+		expect(title).toContain("Try this account for");
 		expect(title).toContain("deepseek-v4-pro, deepseek-v4.1-flash");
 		expect(title).toContain("Flat-priced models keep using this account");
 		expect(title).not.toContain("pause this account");

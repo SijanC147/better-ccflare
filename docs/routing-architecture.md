@@ -36,7 +36,7 @@ flowchart TD
     F --> G
     C --> H["applyUsageThrottling<br/>(5h / weekly pacing-line gate)"]
     G --> H
-    H --> H2["Peak-pricing filter<br/>(TokenHarbor, per model;<br/>fail-open)"]
+    H --> H2["Peak-pricing reorder<br/>(TokenHarbor, per model;<br/>before overage)"]
     H2 --> I{"Any account available<br/>after throttling?"}
     I -->|"No"| J{"Why is the pool empty?"}
     J -->|"Capacity filter emptied<br/>a non-empty candidate list"| K["429 rate_limit_error<br/>code: model_family_exhausted"]
@@ -95,8 +95,10 @@ The account's peak-hours toggle therefore opts it in to a per-model filter rathe
 than the whole-account pause Zai and DeepSeek use.
 
 - **Pool path** — after usage throttling, accounts for which
-  `isPeakAffected(account, model)` is true are dropped, provided at least one
-  candidate remains. The decision uses the model the account would actually call
+  `isPeakAffected(account, model)` is true are moved behind the flat-priced plan
+  accounts and ahead of every overage account (SB23-12677): non-peak plan, peak
+  plan, then overage. Nothing is dropped, and with no flat-priced account the order
+  is untouched. The decision uses the model the account would actually call
   (so a `claude-*` → DeepSeek remapping is affected correctly), and both the
   window and the model set come from the account's own listing — nothing is
   hardcoded.
