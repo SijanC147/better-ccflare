@@ -1,8 +1,9 @@
 /**
  * Combo slots honour TokenHarbor's model-aware peak pricing.
  *
- * The pool path drops peak-affected accounts in `finishSelection`, but the
- * combo branch returns before ever reaching it. A combo that pins a
+ * The pool path orders peak-affected accounts last in `finishSelection` (it
+ * dropped them before SB23-12677), but the combo branch returns before ever
+ * reaching it. A combo that pins a
  * peak-priced model to a TokenHarbor slot would therefore be chosen during
  * peak even when a flat-priced slot is available.
  *

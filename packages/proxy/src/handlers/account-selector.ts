@@ -1903,10 +1903,28 @@ export async function selectAccountsForRequest(
 			// during their peak window, so an account stays usable for the
 			// flat-priced Claude/GLM/Grok models at the same moment. A no-op for
 			// every other provider and for accounts with the toggle off.
-			const peakEligible = candidates.filter(
-				(account) => !isPeakAffected(account, model),
+			//
+			// Reorder, never drop (SB23-12677, Sean 2026-11-18: plan first, then
+			// overage). A plan account in its peak window has not used up its
+			// plan, so it comes after the flat-priced plan accounts and before
+			// any overage account, the same order the ladder gives: non-peak
+			// plan, peak plan, non-peak overage, peak overage. The sort is
+			// stable, so the strategy's order holds within each group. With no
+			// flat-priced account the order is left untouched, as before.
+			const peakAffected = new Map(
+				candidates.map((account) => [
+					account.id,
+					isPeakAffected(account, model),
+				]),
 			);
-			if (peakEligible.length > 0) candidates = peakEligible;
+			const peakValues = [...peakAffected.values()];
+			if (peakValues.some(Boolean) && peakValues.some((v) => !v)) {
+				const now = Date.now();
+				const rank = (account: Account) =>
+					(isOverage(account, now) ? 2 : 0) +
+					(peakAffected.get(account.id) ? 1 : 0);
+				candidates = candidates.slice().sort((a, b) => rank(a) - rank(b));
+			}
 			const pairs = candidates.map((account) => ({
 				accountId: account.id,
 				model: mapModelName(model, account),
