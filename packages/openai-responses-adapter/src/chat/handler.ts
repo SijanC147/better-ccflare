@@ -1,4 +1,8 @@
 import crypto from "node:crypto";
+import {
+	SERVED_ACCOUNT_HEADER,
+	SERVED_MODEL_HEADER,
+} from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
 	type InboundFormat,
@@ -384,10 +388,20 @@ export async function runChatCompletion(
 	// A different model answering is reported in a header as well as in the
 	// body's `model`, so a client sees it before the first chunk (SB23-2781).
 	// `anthropicBody.model` is the id the gateway's model set routed to.
-	const substitution = (answered: unknown) =>
-		substitutionHeaders(
+	// Upstream's serving-account and served-model headers (475c0665, 7498fb95)
+	// ride along on every translated answer, beside the substitution header,
+	// as they do on /v1/responses.
+	const served: Record<string, string> = {};
+	for (const name of [SERVED_MODEL_HEADER, SERVED_ACCOUNT_HEADER]) {
+		const value = upstream.headers.get(name);
+		if (value !== null) served[name] = value;
+	}
+	const substitution = (answered: unknown) => ({
+		...served,
+		...substitutionHeaders(
 			modelSubstitution(requestedModel, anthropicBody.model, answered),
-		);
+		),
+	});
 
 	// 6. Streaming.
 	if (wantsStream) {

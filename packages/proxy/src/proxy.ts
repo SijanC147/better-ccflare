@@ -2405,7 +2405,6 @@ async function handleProxyRequest(
 					.every(
 						(candidate) =>
 							wouldSuppressProbe(candidate) ||
-							wouldSuppressProbe(candidate) ||
 							isSkippedAfterOAuthRefusal(requestMeta, candidate) ||
 							visionSkipModel(candidate, null) !== null,
 					);

@@ -19,6 +19,10 @@ import {
 	orderOverageLast,
 	selectAccountsForRequest,
 } from "../account-selector";
+import {
+	markModelCooling,
+	resetModelCooldownsForTests,
+} from "../model-cooldown";
 import type { ProxyContext } from "../proxy-types";
 
 const IN_THREE_DAYS = () =>
@@ -109,9 +113,31 @@ const ids = (accounts: Account[]) => accounts.map((a) => a.id);
 afterEach(() => {
 	setUseExtraUsage(false);
 	usageCache.clear();
+	resetModelCooldownsForTests();
 });
 
 describe("overage last (SB23-8202)", () => {
+	// The 2026-11-18 sync added upstream's all-cooled fallback, which sorts by
+	// the soonest cooldown deadline. A sooner deadline must not lift an overage
+	// account above a cooling plan account (SB23-12667 review F2).
+	it("every route model-cooling: the overage account stays last despite a sooner deadline", async () => {
+		setUseExtraUsage(true);
+		seedAnthropicOnExtraUsage("over");
+		seedPlanQuota("quota");
+		const now = Date.now();
+		markModelCooling("over", "claude-opus-5-5", now + 60_000, now);
+		markModelCooling("quota", "claude-opus-5-5", now + 600_000, now);
+		const ordered = await selectAccountsForRequest(
+			meta(),
+			ctxFor([
+				account("over", "anthropic", 0),
+				account("quota", "anthropic", 1),
+			]),
+			"claude-opus-5-5",
+		);
+		expect(ids(ordered)).toEqual(["quota", "over"]);
+	});
+
 	it("Anthropic extra usage: the quota account is chosen first, the overage account only after it", async () => {
 		setUseExtraUsage(true);
 		seedAnthropicOnExtraUsage("over");
