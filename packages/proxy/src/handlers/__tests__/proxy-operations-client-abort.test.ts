@@ -13,6 +13,8 @@ import type { ProxyContext } from "../proxy-types";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-abort",
 		name: "abort-test",
 		// A name the provider registry does not know. proxyWithAccount resolves

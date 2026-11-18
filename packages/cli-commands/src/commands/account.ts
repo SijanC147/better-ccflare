@@ -49,6 +49,8 @@ export interface AddAccountOptionsWithAdapter {
 		| "zai"
 		| "minimax"
 		| "deepseek"
+		| "sailresearch"
+		| "opencode-go"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -71,6 +73,8 @@ export interface AddAccountOptionsWithAdapter {
 	modelFallbacks?: { [key: string]: string };
 	profile?: string | undefined;
 	crossRegionMode?: "geographic" | "global" | "regional" | undefined;
+	/** Enable the provider night window for this account (sailresearch). */
+	nightWindow?: boolean | undefined;
 	adapter?: PromptAdapter;
 }
 
@@ -85,6 +89,8 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "zai"
 		| "minimax"
 		| "deepseek"
+		| "sailresearch"
+		| "opencode-go"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -201,6 +207,76 @@ async function createDeepseekAccount(
 			now,
 			validatedPriority,
 			null, // No custom endpoint for deepseek
+		],
+	);
+}
+
+/**
+ * Create a Sail Research account in the database
+ */
+async function createSailresearchAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	apiKey: string,
+	priority: number,
+	nightWindow: boolean,
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+
+	// Validate inputs
+	const validatedApiKey = validateApiKey(apiKey, "Sail Research API key");
+	const validatedPriority = validatePriority(priority, "priority");
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint,
+			night_window_enabled
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"sailresearch",
+			validatedApiKey,
+			now,
+			validatedPriority,
+			null, // No custom endpoint for sailresearch
+			nightWindow ? 1 : 0,
+		],
+	);
+}
+
+/**
+ * Create an OpenCode Go account in the database
+ */
+async function createOpencodeGoAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	apiKey: string,
+	priority: number,
+): Promise<void> {
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+
+	// Validate inputs
+	const validatedApiKey = validateApiKey(apiKey, "OpenCode Go API key");
+	const validatedPriority = validatePriority(priority, "priority");
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint,
+			night_window_enabled
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, 0)`,
+		[
+			accountId,
+			name,
+			"opencode-go",
+			validatedApiKey,
+			now,
+			validatedPriority,
+			null, // No custom endpoint for opencode-go
 		],
 	);
 }
@@ -528,6 +604,15 @@ async function createZaiAccount(
 	console.log("Type: z.ai (API key)");
 }
 
+// AWS profile names are alphanumeric plus . _ -; anything else (e.g. ":" or
+// regex metacharacters) would corrupt the bedrock:profile:region endpoint or
+// the RegExp built from the name.
+const awsProfileName = /^[A-Za-z0-9._-]+$/;
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Check if an AWS profile exists in ~/.aws/credentials
  */
@@ -536,7 +621,7 @@ function checkAwsProfileExists(profile: string): boolean {
 		const credentialsPath = join(homedir(), ".aws", "credentials");
 		const content = readFileSync(credentialsPath, "utf-8");
 		// Match [profile] section header (handles default and named profiles)
-		const profileRegex = new RegExp(`^\\[${profile}\\]`, "m");
+		const profileRegex = new RegExp(`^\\[${escapeRegExp(profile)}\\]`, "m");
 		return profileRegex.test(content);
 	} catch {
 		return false;
@@ -553,7 +638,9 @@ function readAwsRegion(profile: string): string | null {
 		const content = readFileSync(configPath, "utf-8");
 		// In ~/.aws/config, the default profile is [default], named profiles are [profile <name>]
 		const sectionHeader =
-			profile === "default" ? "\\[default\\]" : `\\[profile ${profile}\\]`;
+			profile === "default"
+				? "\\[default\\]"
+				: `\\[profile ${escapeRegExp(profile)}\\]`;
 		const sectionRegex = new RegExp(`${sectionHeader}[\\s\\S]*?(?=\\[|$)`);
 		const sectionMatch = content.match(sectionRegex);
 		if (!sectionMatch) return null;
@@ -1316,6 +1403,8 @@ export async function addAccount(
 			{ label: "z.ai account (API key)", value: "zai" },
 			{ label: "Minimax account (API key)", value: "minimax" },
 			{ label: "DeepSeek account (API key)", value: "deepseek" },
+			{ label: "Sail Research account (API key)", value: "sailresearch" },
+			{ label: "OpenCode Go account (API key)", value: "opencode-go" },
 			{ label: "Kilo Gateway (API key)", value: "kilo" },
 			{ label: "OpenRouter (API key)", value: "openrouter" },
 			{
@@ -1350,6 +1439,12 @@ export async function addAccount(
 
 		if (!profile) {
 			throw new Error("--profile flag is required for bedrock mode");
+		}
+
+		if (!awsProfileName.test(profile)) {
+			throw new Error(
+				`Invalid AWS profile name "${profile}". Profile names can only contain letters, numbers, dots, hyphens, and underscores.`,
+			);
 		}
 
 		// Validate profile exists
@@ -1550,6 +1645,26 @@ export async function addAccount(
 		await createDeepseekAccount(dbOps, name, apiKey, providedPriority || 0);
 		console.log(`\nAccount '${name}' added successfully!`);
 		console.log("Type: DeepSeek (API key)");
+	} else if (mode === "sailresearch") {
+		// Handle Sail Research accounts with API keys
+		const apiKey = await adapter.input("\nEnter your Sail Research API key: ");
+
+		await createSailresearchAccount(
+			dbOps,
+			name,
+			apiKey,
+			providedPriority || 0,
+			options.nightWindow === true,
+		);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: Sail Research (API key)");
+	} else if (mode === "opencode-go") {
+		// Handle OpenCode Go accounts with API keys
+		const apiKey = await adapter.input("\nEnter your OpenCode Go API key: ");
+
+		await createOpencodeGoAccount(dbOps, name, apiKey, providedPriority || 0);
+		console.log(`\nAccount '${name}' added successfully!`);
+		console.log("Type: OpenCode Go (API key)");
 	} else if (mode === "nanogpt") {
 		// Handle NanoGPT accounts with API keys
 		const apiKey = await adapter.input("\nEnter your NanoGPT API key: ");
@@ -2032,6 +2147,8 @@ export async function getAccountsList(
 					account.provider === "zai" ||
 					account.provider === "minimax" ||
 					account.provider === "deepseek" ||
+					account.provider === "sailresearch" ||
+					account.provider === "opencode-go" ||
 					account.provider === "anthropic-compatible" ||
 					account.provider === "bedrock" ||
 					account.provider === "openrouter" ||
@@ -2262,6 +2379,68 @@ function parseResetHoursToken(raw: string | number | null): number | null {
 		);
 	}
 	return parseUsagePauseMinResetMs(Math.round(hours * MS_PER_HOUR));
+}
+
+/**
+ * Parse a CLI on/off token into a boolean.
+ *
+ * Accepts on/off, true/false and 1/0 (case-insensitive). Anything else is
+ * rejected rather than coerced, so a typo never silently flips a flag.
+ */
+export function parseNightWindowValue(
+	raw: string,
+): { ok: true; value: boolean } | { ok: false } {
+	switch (raw.trim().toLowerCase()) {
+		case "on":
+		case "true":
+		case "1":
+			return { ok: true, value: true };
+		case "off":
+		case "false":
+		case "0":
+			return { ok: true, value: false };
+		default:
+			return { ok: false };
+	}
+}
+
+/**
+ * Set the night-window flag of an account by name.
+ */
+export async function setAccountNightWindow(
+	dbOps: DatabaseOperations,
+	name: string,
+	rawValue: string,
+): Promise<{ success: boolean; message: string }> {
+	const parsed = parseNightWindowValue(rawValue);
+	if (!parsed.ok) {
+		return {
+			success: false,
+			message: `Invalid night-window value '${rawValue}': expected on/off, true/false or 1/0`,
+		};
+	}
+
+	const adapter = dbOps.getAdapter();
+
+	// Get account ID by name
+	const account = await adapter.get<{ id: string }>(
+		"SELECT id FROM accounts WHERE name = ?",
+		[name],
+	);
+
+	if (!account) {
+		return {
+			success: false,
+			message: `Account '${name}' not found`,
+		};
+	}
+
+	await dbOps.setNightWindowEnabled(account.id, parsed.value);
+
+	return {
+		success: true,
+		message: `Account '${name}' night window set to ${parsed.value ? "on" : "off"}`,
+	};
 }
 
 /**

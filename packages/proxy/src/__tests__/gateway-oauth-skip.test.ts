@@ -32,6 +32,7 @@ import {
 } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { clearFamilyExhaustionCache } from "../handlers/model-capacity";
+import { resetModelCooldownsForTests } from "../handlers/model-cooldown";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
@@ -45,6 +46,8 @@ const CONSOLE_KEY = "sk-ant-api-test";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-x",
 		name: "acc-x",
 		provider: "anthropic",
@@ -336,6 +339,9 @@ describe("gateway request: one OAuth call after a windowless 429 (SB23-2781)", (
 		usageCache.clear();
 		clearFamilyExhaustionCache();
 		resetRateLimitProbeGatesForTests();
+		// Windowless 429s cool (account, model) pairs process-wide (upstream
+		// windowless cooldown); the cases reuse account ids, so clear them.
+		resetModelCooldownsForTests();
 	});
 
 	it("combo of six OAuth slots plus Codex: exactly one OAuth call, answered by Codex", async () => {

@@ -28,7 +28,7 @@ When working with Claude API at scale, rate limits can become a significant bott
 - **⚠️ WARNING**: Other strategies (round-robin, least-requests, weighted) have been removed as they can trigger Claude's anti-abuse systems
 
 ### 🔎 Local Web Search
-- **Bring your own search** - Claude Code's `web_search` helper request is answered by your own Tavily / Exa / Parallel / DeepSeek / Serper / Brave provider, with automatic fallback and safe pass-through — see [Web Search](web-search.md)
+- **Bring your own search** - Claude Code's `web_search` helper request is answered by your own Tavily / Exa / Parallel / DeepSeek / Serper / Brave / Nimble / Linkup provider, with automatic fallback and safe pass-through — see [Web Search](web-search.md)
 
 ### 📈 Real-Time Monitoring & Analytics
 - **Web Dashboard**: Interactive UI at `/dashboard` with live metrics
@@ -195,7 +195,7 @@ The better-ccflare CLI provides comprehensive command-line interface for managem
 bun run apps/cli/src/main.ts [command]
 
 # Account management
-bun run apps/cli/src/main.ts --add-account <name> --mode <max|console|zai|openai-compatible> --priority <number>  # Add account
+bun run apps/cli/src/main.ts --add-account <name> --mode <claude-oauth|console|zai|openai-compatible|sailresearch|opencode-go> --priority <number>  # Add account
 bun run apps/cli/src/main.ts --list                   # List accounts
 bun run apps/cli/src/main.ts --remove <name>          # Remove account
 bun run apps/cli/src/main.ts --pause <name>           # Pause account

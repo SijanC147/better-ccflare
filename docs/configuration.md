@@ -13,9 +13,12 @@ This guide covers all configuration options for better-ccflare, including file-b
 - [OpenObserve Shipping](#openobserve-shipping)
 - [Model Catalog](#model-catalog)
 - [Editable Provider Model Defaults](#editable-provider-model-defaults)
+- [Reasoning Effort](#reasoning-effort)
 - [Web Search](#web-search)
 - [Force Account Model](#force-account-model)
 - [Use Extra Usage](#use-extra-usage)
+- [Peak Hours Pause](#peak-hours-pause)
+- [Night Window](#night-window)
 - [Runtime Configuration API](#runtime-configuration-api)
 - [Example Configurations](#example-configurations)
 - [Auto-Fallback Setup](#auto-fallback-setup)
@@ -205,6 +208,7 @@ A change to `retry_attempts`, `retry_delay_ms` or `retry_backoff` requires a res
 | `PORT` | `port` | number | `PORT=3000` |
 | `DATA_RETENTION_DAYS` | `data_retention_days` | number | `DATA_RETENTION_DAYS=3` (payloads) |
 | `REQUEST_RETENTION_DAYS` | `request_retention_days` | number | `REQUEST_RETENTION_DAYS=90` (metadata) |
+| `CCFLARE_REASONING_EFFORTS` | `reasoning_efforts` | JSON object | `CCFLARE_REASONING_EFFORTS='{"grok-4.7-build-fast":["low","medium","high","xhigh"]}'` (see [Reasoning Effort](#reasoning-effort)) |
 | `better-ccflare_CONFIG_PATH` | - | string | `better-ccflare_CONFIG_PATH=/etc/better-ccflare.json` |
 
 ### Additional Environment Variables
@@ -236,6 +240,8 @@ These environment variables are not stored in the configuration file and must be
 | `CCFLARE_SERVER_ERROR_RETRY_ENABLED` | Retry a transient upstream server error (HTTP 500/502/503/504, any provider) once in place, then bench the account briefly and fail over to the next one. Set to `false` to forward these responses straight to the client again. The attempt count and backoff are not separate knobs — they reuse `CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS` / `_BASE_MS` / `_MAX_MS` above, since both paths are "re-issue the same request once because the upstream is transiently unwell". The retry replays the same request body (Anthropic's Messages API has no idempotency key); this matches what the official Anthropic SDKs do on 5xx by default and what the proxy already does on 529 and on account failover. To keep the bench + failover but skip the in-place replay, leave this `true` and set `CCFLARE_OVERLOAD_RETRY_ENABLED=false` instead; `false` here disables the whole 5xx path (no retry, no bench, no failover). A response carrying `x-should-retry: false` skips the retry and goes straight to the bench; synthetic keepalive/auto-refresh probes are not retried or benched at all | `true` | `CCFLARE_SERVER_ERROR_RETRY_ENABLED=false` |
 | `CCFLARE_SERVER_ERROR_COOLDOWN_MS` | Bench applied after a 500/502/503/504 outlives its in-place retry. A shorter upstream `Retry-After` is honored literally; a longer one is clamped to this value. Longer than the 529 cooldown on purpose: an overload clears in seconds, whereas the 500s this exists for lasted minutes at a time on one organization while sibling accounts stayed healthy. Never ramps and never touches `consecutive_rate_limits` | `60000` (60s) | `CCFLARE_SERVER_ERROR_COOLDOWN_MS=30000` |
 | `CCFLARE_STREAM_READ_TIMEOUT_MS` | **Idle** window for reading a streaming response body while extracting usage info: how long to wait for the *next* chunk before treating the stream as dead. Deliberately **not** a budget for the whole stream — an Anthropic-compatible upstream only sends the `message_delta` frame carrying the final `output_tokens` at the very end, and agentic streams routinely run 90–180s, so a whole-stream deadline silently discarded usage for perfectly healthy streams. The default is sized for the other silent stretch on this path: a large prompt can spend minutes in prefill before the first output token. Expiry never affects the proxied response — only the usage metadata for that request is skipped, with a warning | `300000` (5min) | `CCFLARE_STREAM_READ_TIMEOUT_MS=600000` |
+| `CCFLARE_WINDOWLESS_429_COOLDOWN_MS` | Base per-(account, upstream model) cooldown for a user request receiving a windowless 429. Other models stay eligible. Doubles on repeats across expiry and resets on that pair’s next successful user response; synthetic keepalive probes are excluded | `60000` (60s) | `CCFLARE_WINDOWLESS_429_COOLDOWN_MS=30000` |
+| `CCFLARE_WINDOWLESS_429_MAX_MS` | Maximum per-model cooldown for repeated windowless 429 responses. Positive finite durations only; account-level quota fields are untouched | `900000` (15min) | `CCFLARE_WINDOWLESS_429_MAX_MS=600000` |
 | `CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS` | Base delay for adaptive per-account 429 cooldown backoff | `30000` (30s) | `CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS=15000` |
 | `CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS` | Ceiling for adaptive per-account 429 cooldown backoff | `300000` (5min) | `CCFLARE_RATE_LIMIT_BACKOFF_MAX_MS=600000` |
 | `CCFLARE_RATE_LIMIT_RESET_STABILITY_MS` | Window after which a clean streak resets the consecutive-429 counter | `300000` (5min) | `CCFLARE_RATE_LIMIT_RESET_STABILITY_MS=600000` |
@@ -265,6 +271,8 @@ These environment variables are not stored in the configuration file and must be
 | `USAGE_POLL_INTERVAL_MS` | How often the usage poller refreshes each account's quota windows from its provider's free usage endpoint (Anthropic `/api/oauth/usage`, Codex `chatgpt.com/backend-api/wham/usage`, xAI, MiniMax, …). Clamped to 10 s – 60 min. Same as the `usage_poll_interval_ms` config file field; env var takes precedence | `90000` (90 s) | `USAGE_POLL_INTERVAL_MS=60000` |
 | `CCFLARE_CODEX_MESSAGES_CONTINUATION` | Opt-in: let the Codex provider retain server-owned Responses continuation (`previous_response_id`) while serving `/v1/messages` clients, instead of replaying full translated history every turn. Requires an authenticated API key, a selected account, and a nonempty prompt cache key. State is partitioned by account, model, authenticated caller, session, and protocol; ambiguous, failed, expired, or cancelled turns never create or reuse a checkpoint, and the switch never changes model selection, fallback policy, or `store:false`. See [README](../README.md#claude-messages-continuation-on-codex-opt-in) for details | unset (off) | `CCFLARE_CODEX_MESSAGES_CONTINUATION=1` |
 | `CCFLARE_CODEX_MESSAGES_CONTINUATION_MODELS` | Restricts the above bridge to an exact, comma-separated allowlist of resolved model names. Unset enables all models (when the switch above is on); an empty string enables none | unset (all models) | `CCFLARE_CODEX_MESSAGES_CONTINUATION_MODELS=gpt-6-astra,gpt-5.6-sol` |
+| `NIGHT_WINDOW` | Time range (`HH:MM-HH:MM`, 24h, may wrap past midnight) in which accounts with the [night window](#night-window) enabled request their provider's cheaper completion tier. Same as the `night_window` config file field; a valid env value takes precedence, an invalid one is skipped so the file value still applies. Empty (`NIGHT_WINDOW=""`) switches the feature off for every account, whatever their toggle says | unset (off) | `NIGHT_WINDOW=22:00-08:00` |
+| `NIGHT_TZ` | IANA time zone `NIGHT_WINDOW` is written in. Resolved per request, so a DST-observing zone moves the window with the clock. The proxy never reads the ambient `TZ` for this. Same as the `night_tz` config file field; env takes precedence when valid | `UTC` | `NIGHT_TZ=Europe/Kyiv` |
 
 ## OpenObserve Shipping
 
@@ -307,6 +315,12 @@ If the forward proxy performs TLS interception (MITM), such as an LLM security/i
 This setting operates at the transport layer and is unrelated to a per-account `custom_endpoint`, which is a URL/routing-level override rather than a proxy.
 
 Coverage spans both the running server process and CLI-only commands that never start the server (e.g. `better-ccflare --add-account`, `--reauthenticate`) — account management and OAuth flows invoked directly from the CLI are proxied the same way; the one carve-out is the embedded database-maintenance worker threads, which run in their own global scope outside this wrapper, but they make no outbound HTTP requests themselves so no traffic escapes unproxied through them.
+
+### API key spend resets
+
+Admins can reset a key's spend against all of its limits from the dashboard or CLI. A reset clears its in-flight reservations as well as recorded spend for limit enforcement. The actual cost of an in-flight request still counts when it is recorded after the reset. Limits and usage history are preserved; reset also resolves the key's existing limit alerts so fresh warnings can appear.
+
+Production runs one replica. Within that server, the proxy observes the reset immediately. Other replicas observe a spend reset on their next synchronization (at most 2 minutes); this is not an immediate cross-replica broadcast. Continue to follow the [single-instance deployment requirement](deployment.md#multi-instance-deployment-single-instance-per-database).
 
 ## Alerts
 
@@ -434,7 +448,56 @@ The **global override** is an editable layer in between: an operator-set default
 
 Only `codex` is editable by default. `xai` and `qwen` use the same mechanism but are gated behind `CCFLARE_MODEL_DEFAULTS_PROVIDERS` (see [Additional Environment Variables](#additional-environment-variables)) since they haven't been exercised against real accounts as extensively. Disabling a provider doesn't discard its stored override — it just stops applying until the provider is re-enabled.
 
+Sail Research and OpenCode Go also register built-in maps (every Claude family → their default model). Because both upstreams serve only ids from their own listing, these providers rewrite a plain Claude model name **even when the account has no model mappings at all**. Resolution order for those two providers is, most specific first: an explicit account mapping → the operator's per-family override → what the account's own model listing implies → the provider's built-in default. With Force Account Model on, none of these apply — the requested model is sent as written.
+
 Manage this via the dashboard (Settings → Advanced → Provider Model Defaults) or directly through the API — see [api-http.md](api-http.md#get-apiconfigprovider-model-defaults).
+
+## Reasoning Effort
+
+A client picks the reasoning effort per request, or omits it to get the provider's default. better-ccflare never adds an effort the client did not send. It carries the effort to the account that serves the request, in that upstream's own field:
+
+| Upstream | Outbound field |
+|----------|----------------|
+| Anthropic and Anthropic-compatible accounts (including Vertex AI and Meta) | `output_config.effort`. A client-sent `output_config.effort` is never overridden. |
+| OpenRouter (the `openrouter` provider, an `openai-compatible` account on `openrouter.ai`, and Kilo) | `reasoning: { effort }` |
+| Other `openai-compatible` endpoints (OpenAI, xAI, CLIProxyAPI, ...) | `reasoning_effort` |
+| Codex | `reasoning.effort`. Unchanged: Codex still applies its own `medium` default. |
+| Bedrock | `(none)` — dropped; Bedrock builds its own Converse payload |
+
+Accepted values are `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. Any other value returns `400 invalid_request_error`. If the target model does not support the requested level, the effort is moved to the nearest supported level, preferring the next one down. The built-in tables cover the Claude families, some GPT-5 models and a few documented third-party models (Mistral Large 4 accepts `low`/`medium`/`high`; `zai-glm-5-3` accepts `low`/`high`/`max`). Effort is forwarded unchanged to models those tables don't know.
+
+Claude support is generation-aware, because the accepted levels differ by release:
+
+| Target | Levels accepted |
+|--------|-----------------|
+| Claude 5.x (Fable, Opus, Sonnet, Haiku), Opus 4.7 and 4.8 | all five |
+| Opus 4.6, Sonnet 4.6 | `low`/`medium`/`high`/`max` (`xhigh` clamps down to `high`) |
+| Opus 4.5 | `low`/`medium`/`high` |
+| Haiku 4.5, Sonnet 4.5 and anything older | `(none)` — the parameter is rejected outright, so the field is dropped rather than clamped |
+
+Both Anthropic model-id orders are understood (`claude-opus-4-7` and `claude-3-5-sonnet-20241022`), and a dated snapshot is not mistaken for a minor version. A bare alias (`haiku`, `sonnet`) is treated as the current generation. An operator entry overrides any row.
+
+Meta accepts `low`, `medium`, `high` and `xhigh`; `minimal` is clamped to `low` and `max` to `xhigh`.
+
+An OpenAI-compatible endpoint with a strict request schema can reject the field instead of ignoring it. When the upstream answers `400`/`422` with a strict-schema error naming `reasoning_effort` or `reasoning`, ccflare retries the request once without that field and remembers the account+model, so later requests omit it up front. Endpoints that accept the field — including Mistral's own reasoning models — keep receiving it.
+
+`reasoning_efforts` (config file) or `CCFLARE_REASONING_EFFORTS` (env var, a JSON string) lets an operator declare which levels a model supports. Use it so an unsupported level does not return 400 and break combo failover:
+
+```json
+{
+  "reasoning_efforts": {
+    "grok-4.7-build-fast": ["low", "medium", "high", "xhigh"],
+    "deepseek-v4.1-flash": ["low", "high", "max"]
+  }
+}
+```
+
+- The env var takes precedence over the config file. An env value that is not a JSON object is ignored with a warning, and the file value applies.
+- An entry overrides the built-in table for that model. Models without an entry keep the built-in behaviour.
+- Keys are matched against the model actually sent upstream, after model mapping. Matching ignores case, surrounding whitespace and any provider prefix up to the last `/`.
+- Unknown level names are dropped with a warning. An entry with no valid levels is ignored.
+- The map is loaded at startup. It can be replaced at runtime without a restart through `POST /api/config/reasoning-efforts` (see [api-http.md](api-http.md#post-apiconfigreasoning-efforts)); rejected payloads leave the map unchanged. Edits made by hand to the config file, and changes to `CCFLARE_REASONING_EFFORTS`, still need a restart.
+- `CCFLARE_REASONING_EFFORTS` outranks both the config file and `POST /api/config/reasoning-efforts`: while it is set to a non-blank value the endpoint answers `409` rather than writing a file value that would never be read.
 
 ## Web Search
 
@@ -483,6 +546,73 @@ On, the same account stays in rotation while its provider reports billed capacit
 Only admission changes. The window is still reported as it is; the account's rate-limit status reads `extra_usage (Nm)` instead of `usage_exhausted (Nm)`, it counts as routable rather than `usage_exhausted` on `/health`, and a pool-exhausted response does not name the window as the reason or wait on its reset. When the credits or the extra-usage budget run out, the provider refuses the request and the normal rate-limit handling takes the account out. The auto-refresh scheduler still skips probing an account whose window is spent, so probes never draw on extra usage.
 
 That traffic is billed, which is why this is off by default. Manage it via the dashboard (Settings → Advanced → Use Extra Usage) or the API — see [api-http.md](api-http.md#get-apiconfiguse-extra-usage). `CCFLARE_USE_EXTRA_USAGE` can seed it once on first boot.
+
+## Peak Hours Pause
+
+A per-account toggle (`peak_hours_pause_enabled`, set from the dashboard account row or `POST /api/accounts/:id/peak-hours-pause`) that avoids paying peak pricing. Its meaning depends on the provider:
+
+- **Zai** — pause the whole account during Zai's peak window (weekdays 14:00–18:00 SGT).
+- **DeepSeek** — pause the whole account during DeepSeek's peak windows (weekdays 01:00–04:00 and 06:00–10:00 UTC), excluding Chinese public holidays.
+- **TokenHarbor** — never pause the account. Only the models the account's own `GET /v1/models` listing marks as peak-priced are skipped while their window is active, so flat-priced models keep using the account. Combos reorder peak-priced slots behind flat-priced ones rather than dropping them, and the filter fails open when no listing is cached. See [routing-architecture.md](routing-architecture.md#peak-pricing-exclusion).
+
+Switching the toggle off lifts an existing peak-hours pause immediately instead of waiting for the scheduler. A manual pause is left alone.
+
+## Night Window
+
+Some providers sell a cheaper completion tier for work that can wait. Sail Research, for example, prices `balanced` well below its default `asap` tier: the same request costs less per token, at the price of a queue of roughly 5–30 seconds before the first token. The night window lets you take that trade automatically for the hours when nobody is watching, without changing what your client sends.
+
+The window is a **per-account toggle** plus a **global time range**:
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `NIGHT_WINDOW` | Time range in which enabled accounts request the cheaper tier, `HH:MM-HH:MM` (24h). The range may wrap past midnight. Resolved **env → config file → default**: a valid value in the environment wins, otherwise a valid `night_window` in the config file is used, otherwise the feature is off. An env value that is present but invalid is skipped rather than forced off, so the config file can still win. Set it to an empty string to switch the feature off outright | unset (off) | `NIGHT_WINDOW=22:00-08:00` |
+| `NIGHT_TZ` | IANA time zone the range is written in. Same env → config file → default order (`night_tz`); an empty value means UTC | `UTC` | `NIGHT_TZ=Europe/Kyiv` |
+
+Turn it on per account from the accounts list in the dashboard (the **Night window** switch, shown for providers that offer a cheaper tier), or with the CLI or the API:
+
+```bash
+# on an existing account
+bun run cli --set-night-window <name> on
+
+# or at creation
+bun run cli --add-account <name> --mode sailresearch --night-window on
+```
+
+```http
+POST /api/accounts/:id/night-window
+Content-Type: application/json
+
+{ "enabled": true }
+```
+
+### What it does
+
+Inside the window, requests to an enabled account carry the provider's tier header — for Sail, `X-Sail-Completion-Window: balanced`. Outside it, **no header is sent at all**: an explicit default tier is rejected by some providers on certain request types (Sail returns `400` for an explicit `asap` on requests using custom tools or `background: true`), so the proxy relies on the provider's own default instead.
+
+The window is resolved once per outgoing request, so it follows the clock rather than the session:
+
+- **Failover to another account** rebuilds the request and re-evaluates the window. A request that starts at 07:59 and fails over at 08:01 goes out on the default tier.
+- **An in-place retry** (529 overload, transient 5xx) reuses the headers already built, so it keeps the tier the request started with.
+
+The time zone is resolved per request rather than once at startup, so a window written in a zone that observes DST moves with the clock: `22:00-08:00` in `Europe/Kyiv` is 20:00–06:00 UTC in winter and 19:00–05:00 UTC in summer. The proxy never reads the ambient `TZ` for this — the zone you name is the zone used, whatever the container or host is set to.
+
+### Which tier actually ran
+
+Every request record stores the tier the **provider reported** applying, shown as a `Tier` badge on the request card and stored in `requests.completion_tier`. It is read from the provider's response, never inferred from what the proxy sent, so it also shows the default tier for requests that ran outside the window — and it will show the default tier if a provider ever declines the requested one. Providers that don't report a tier leave it empty.
+
+### Adding another provider
+
+The mechanism is not Sail-specific. A provider opts in by registering an adapter with its own header and tier value; the shared window logic names no provider:
+
+```ts
+registerTierAdapter({
+  provider: "someprovider",
+  header: "x-someprovider-tier",
+  tier: "eco",
+});
+```
+
+Import that module from the provider so it registers when the provider loads. The account toggle and both environment variables then apply to it unchanged — no migration and no new setting.
 
 ## Runtime Configuration API
 
@@ -883,3 +1013,10 @@ Response:
 ```json
 { "removedRequests": 0, "removedPayloads": 123, "cutoffIso": "2025-08-20T12:34:56.000Z" }
 ```
+
+
+### API key usage counts and failover
+
+The API Key Usage page lives at `/api-key-usage`. Admins can switch keys and ranges in place; both selectors keep their selections in local page state, like Usage History. The optional `?key=<id-or-encoded-name>` query parameter preselects a key, and old `/api-keys/<id-or-encoded-name>` links redirect to this page with `?key=`. Changing a selector does not update the URL. The range and custom bounds are not kept in the URL, so copied links and reloads do not preserve the selected range. API-only callers see their own key without a key selector.
+
+Request-history rows have separate IDs for failed attempts and successful failover outcomes; the session ID covers multiple concurrent requests. They cannot be joined reliably by time or session. This page therefore labels raw counts and success rates as **attempts**, and reports successful outcomes, failed attempts by account, and recovered successes separately. “Failover attempts” totals the prior-attempt count attached to successful outcomes only, so it does not double-count attempt ordinals on failure rows. Exhausted or still-in-flight failovers cannot be classified as client-visible failures from these rows. No timing-based grouping is performed.

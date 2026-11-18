@@ -1,8 +1,11 @@
 import { supportsUsagePauseThreshold } from "@better-ccflare/core";
 import type { Account } from "../../api";
 import {
+	nightWindowTitle,
+	peakHoursPauseTitle,
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
+	providerSupportsNightWindow,
 } from "../../utils/provider-utils";
 import {
 	describeUsagePauseWindow,
@@ -24,7 +27,8 @@ export type AccountMenuToggleId =
 	| "auto-refresh"
 	| "plan-billing"
 	| "auto-pause-on-overage"
-	| "peak-hours-pause";
+	| "peak-hours-pause"
+	| "night-window";
 
 export type AccountMenuActionId =
 	| "rename"
@@ -68,6 +72,7 @@ export interface AccountMenuHandlers {
 	requestTransformer: boolean;
 	autoPauseOnOverage: boolean;
 	peakHoursPause: boolean;
+	nightWindow: boolean;
 	qwenReauth: boolean;
 	anthropicReauth: boolean;
 	codexReauth: boolean;
@@ -92,6 +97,7 @@ export interface AccountMenuCallbacks {
 	onBillingTypeToggle: (account: Account) => void;
 	onAutoPauseOnOverageToggle?: ((account: Account) => void) | undefined;
 	onPeakHoursPauseToggle?: ((account: Account) => void) | undefined;
+	onNightWindowToggle?: ((account: Account) => void) | undefined;
 }
 
 /**
@@ -109,6 +115,7 @@ export function menuHandlersFrom(
 		requestTransformer: Boolean(callbacks.onRequestTransformerChange),
 		autoPauseOnOverage: Boolean(callbacks.onAutoPauseOnOverageToggle),
 		peakHoursPause: Boolean(callbacks.onPeakHoursPauseToggle),
+		nightWindow: Boolean(callbacks.onNightWindowToggle),
 		qwenReauth: Boolean(callbacks.onReauth),
 		anthropicReauth: Boolean(callbacks.onAnthropicReauth),
 		codexReauth: Boolean(callbacks.onCodexReauth),
@@ -137,6 +144,7 @@ export function bindAccountMenuHandlers(
 			"auto-pause-on-overage": () =>
 				callbacks.onAutoPauseOnOverageToggle?.(account),
 			"peak-hours-pause": () => callbacks.onPeakHoursPauseToggle?.(account),
+			"night-window": () => callbacks.onNightWindowToggle?.(account),
 		},
 		action: {
 			rename: () => callbacks.onRename(account),
@@ -201,18 +209,23 @@ export function accountMenuToggles(
 		});
 	}
 
-	if (
-		(account.provider === "zai" || account.provider === "deepseek") &&
-		handlers.peakHoursPause
-	) {
+	// The server says which providers support the pause (zai, deepseek and,
+	// since the TokenHarbor sync, peak-priced openai-compatible listings).
+	if (account.peakHoursPauseSupported && handlers.peakHoursPause) {
 		toggles.push({
 			id: "peak-hours-pause",
 			label: "Peak hours pause",
-			title:
-				account.provider === "deepseek"
-					? "Automatically pause this account during DeepSeek peak hours (01:00–04:00 and 06:00–10:00 UTC, weekdays, excluding Chinese public holidays)"
-					: "Automatically pause this account during Zai peak hours (14:00–18:00 SGT)",
+			title: peakHoursPauseTitle(account),
 			checked: account.peakHoursPauseEnabled ?? false,
+		});
+	}
+
+	if (providerSupportsNightWindow(account.provider) && handlers.nightWindow) {
+		toggles.push({
+			id: "night-window",
+			label: "Night window",
+			title: nightWindowTitle(account.provider),
+			checked: account.nightWindowEnabled ?? false,
 		});
 	}
 

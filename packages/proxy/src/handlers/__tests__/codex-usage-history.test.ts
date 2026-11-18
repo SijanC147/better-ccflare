@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type {
 	BunSqlAdapter,
 	DatabaseOperations,
@@ -15,6 +15,11 @@ import {
 	resetCodexUsageHistoryThrottle,
 } from "../../codex-usage-history";
 import { updateAccountMetadata } from "../response-processor";
+
+afterEach(() => {
+	resetCodexUsageHistoryThrottle();
+	usageCache.delete("codex-acct");
+});
 
 type SnapshotCall = {
 	accountId: string;

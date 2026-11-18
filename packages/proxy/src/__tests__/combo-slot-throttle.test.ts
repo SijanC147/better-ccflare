@@ -29,6 +29,8 @@ const HOUR = 60 * 60 * 1000;
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-x",
 		name: "acc-x",
 		provider: "anthropic",

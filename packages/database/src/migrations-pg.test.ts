@@ -31,7 +31,10 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureSchema, runMigrations } from "./migrations";
-import { ensureRequestsIndexesPg } from "./migrations-pg";
+import {
+	ensureRequestsIndexesPg,
+	NEW_REQUEST_INDEXES_PG,
+} from "./migrations-pg";
 
 const PG_SOURCE_PATH = path.join(__dirname, "migrations-pg.ts");
 
@@ -142,7 +145,7 @@ function extractColumnNames(body: string): string[] {
 		if (!trimmed) continue;
 		const firstToken = trimmed.split(/\s+/)[0];
 		if (tableLevelKeywords.has(firstToken.toUpperCase())) continue;
-		columns.push(firstToken);
+		columns.push(firstToken.replace(/^"|"$/g, ""));
 	}
 	return columns;
 }
@@ -194,6 +197,14 @@ function parsePgColumnsToAdd(
 	while ((match = entryRe.exec(arrayBody)) !== null) {
 		entries.push({ table: match[1], column: match[2] });
 	}
+	// Standalone idempotent ALTERs carry migrations that need a first-run
+	// guard (for example, budget conversion keyed on a newly added mode).
+	for (const alter of source.matchAll(
+		/ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)/g,
+	)) {
+		entries.push({ table: alter[1], column: alter[2] });
+	}
+
 	return entries;
 }
 
@@ -294,6 +305,23 @@ describe("SQLite <-> PostgreSQL migration schema parity (static)", () => {
 		);
 	});
 
+	it("spot check: night_window_enabled is on accounts in both backends", () => {
+		expect(
+			sqliteInventory.tables.get("accounts")?.has("night_window_enabled"),
+		).toBe(true);
+		expect(
+			pgInventory.tables.get("accounts")?.has("night_window_enabled"),
+		).toBe(true);
+		// Upgrade path for existing PG databases, not just the CREATE TABLE.
+		expect(parsePgColumnsToAdd(pgSource)).toContainEqual({
+			table: "accounts",
+			column: "night_window_enabled",
+		});
+		expect(pgSource).toContain(
+			"ALTER TABLE accounts ADD COLUMN night_window_enabled BOOLEAN NOT NULL DEFAULT false",
+		);
+	});
+
 	it("spot check: newly-ported performance indexes exist in migrations-pg.ts", () => {
 		expect(pgSource).toContain("idx_request_payloads_cleanup");
 		expect(pgSource).toContain("idx_requests_summary_covering");
@@ -309,6 +337,20 @@ describe("SQLite <-> PostgreSQL migration schema parity (static)", () => {
 		expect(pgSource).toContain("payload BYTEA");
 		// Existing PostgreSQL databases need the upgrade path too.
 		expect(pgSource).toContain("ADD COLUMN payload BYTEA");
+	});
+
+	it("spot check: completion_tier is on requests in both backends", () => {
+		expect(sqliteInventory.tables.get("requests")?.has("completion_tier")).toBe(
+			true,
+		);
+		expect(pgInventory.tables.get("requests")?.has("completion_tier")).toBe(
+			true,
+		);
+		// Upgrade path for existing PG databases, not just the CREATE TABLE.
+		expect(parsePgColumnsToAdd(pgSource)).toContainEqual({
+			table: "requests",
+			column: "completion_tier",
+		});
 	});
 
 	describe("redundant requests indexes", () => {
@@ -427,9 +469,12 @@ describe("SQLite <-> PostgreSQL migration schema parity (static)", () => {
 						if (q.includes("NOT i.indisvalid"))
 							return (opts.invalidNames ?? []).map((relname) => ({ relname }));
 						if (q.includes("i.indisvalid"))
-							return (opts.validNames ?? ["idx_requests_err_ts_cov"]).map(
-								(relname) => ({ relname }),
-							);
+							// Default: every migrated index exists and is valid, so the
+							// gated redundant-drop block runs. Derived from the list so
+							// adding an index doesn't silently disable the gate here.
+							return (
+								opts.validNames ?? NEW_REQUEST_INDEXES_PG.map((i) => i.name)
+							).map((relname) => ({ relname }));
 						return [];
 					},
 					release: () => {
@@ -472,7 +517,7 @@ describe("SQLite <-> PostgreSQL migration schema parity (static)", () => {
 				);
 				expect(
 					st.filter((q) => q.startsWith("CREATE INDEX CONCURRENTLY")).length,
-				).toBe(1);
+				).toBe(NEW_REQUEST_INDEXES_PG.length);
 				expect(st.at(-2)).toBe("RESET lock_timeout");
 				expect(f.isReleased()).toBe(true);
 			});
@@ -494,8 +539,10 @@ describe("SQLite <-> PostgreSQL migration schema parity (static)", () => {
 							q.startsWith("CREATE INDEX CONCURRENTLY") ||
 							q.startsWith("DROP INDEX"),
 					);
-				// invalid SELECT + invalid DROP + 1 CREATE + redundant drops + client_session drop
-				expect(ddlOrSelect.length).toBe(3 + dropped.length + 1);
+				// invalid SELECT + invalid DROP + every CREATE + redundant drops + client_session drop
+				expect(ddlOrSelect.length).toBe(
+					2 + NEW_REQUEST_INDEXES_PG.length + dropped.length + 1,
+				);
 				for (const { i } of ddlOrSelect) expect(lock).toBeLessThan(i);
 			});
 
@@ -554,6 +601,15 @@ describe("SQLite <-> PostgreSQL migration schema parity (static)", () => {
 			);
 			expect(pgSource).not.toMatch(
 				/CREATE INDEX[^`]*idx_requests_client_session/,
+			);
+		});
+
+		it("creates the Combo Flow per-combo index concurrently", () => {
+			// CONCURRENTLY, like every other requests index added by this
+			// migration: a plain CREATE INDEX would lock writes on the hottest
+			// table while it builds.
+			expect(pgSource).toMatch(
+				/CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_requests_combo_timestamp\s+ON requests\(combo_name, timestamp DESC\)\s+WHERE combo_name IS NOT NULL/,
 			);
 		});
 

@@ -12,6 +12,8 @@ import { createAccountTokenHealthHandler } from "../token-health";
 // Mock database operations for testing
 const mockAccounts: Account[] = [
 	{
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "1",
 		name: "test-account-1",
 		provider: "anthropic",
@@ -57,6 +59,8 @@ const mockAccounts: Account[] = [
 		usage_pause_weekly_min_reset_remaining_ms: null,
 	},
 	{
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "2",
 		name: "test-account-2",
 		provider: "anthropic",
@@ -102,6 +106,8 @@ const mockAccounts: Account[] = [
 		usage_pause_weekly_min_reset_remaining_ms: null,
 	},
 	{
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "3",
 		name: "test-account-3",
 		provider: "anthropic",
@@ -333,6 +339,8 @@ describe("Error Handling", () => {
 				usage_pause_weekly_enabled: false,
 				usage_pause_five_hour_min_reset_remaining_ms: null,
 				usage_pause_weekly_min_reset_remaining_ms: null,
+				night_window_enabled: false,
+				plan_monthly_usd: null,
 			},
 		];
 

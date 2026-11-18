@@ -34,6 +34,7 @@ export const queryKeys = {
 	projectsAll: () => [...queryKeys.all, "projects", "all"] as const,
 	worktreeRules: () => [...queryKeys.all, "worktree-rules"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,
+	comboFlow: () => [...queryKeys.all, "combos", "flow"] as const,
 	families: () => [...queryKeys.all, "families"] as const,
 	apiKeys: () => [...queryKeys.all, "api-keys"] as const,
 	storage: () => [...queryKeys.all, "storage"] as const,
@@ -42,6 +43,10 @@ export const queryKeys = {
 		[...queryKeys.all, "routing", "observations"] as const,
 	usageHistory: (account?: string, range?: string) =>
 		[...queryKeys.all, "usage-history", { account, range }] as const,
+	// Deliberately NOT under apiKeys(): invalidating the key LIST after an
+	// edit must not also throw away every window of usage already fetched.
+	apiKeyUsage: (keyId?: string, range?: string, from?: string, to?: string) =>
+		[...queryKeys.all, "api-key-usage", { keyId, range, from, to }] as const,
 	models: () => [...queryKeys.all, "models"] as const,
 	// Deliberately kept under the 'models' key: invalidating models() also
 	// invalidates the per-provider lists.

@@ -8,7 +8,9 @@ import {
 	isUsageExhausted,
 	logError,
 	type ModelRouting,
+	mapModelName,
 	ProviderError,
+	parseNightWindow,
 	type RetrySettings,
 	retryDelayMs,
 	splitModelRouting,
@@ -24,21 +26,29 @@ import { Logger } from "@better-ccflare/logger";
 import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-formats";
 import {
 	type AnyUsageData,
+	applyMistralAffinityHeader,
+	applyNightWindowHeader,
 	applyXaiConvIdHeader,
 	CODEX_INTERNAL_REPLAY_HEADER,
+	deriveMistralAffinityId,
 	getProvider,
 	isAnthropicExtraUsageExhausted,
 	isAnthropicOrgPermissionDenied,
 	isAnthropicOutOfCredits,
+	isMistralEndpoint,
 	type Provider,
 	type ProviderRequestContext,
 	readCodeBuddyGatewayRejection,
+	readRequestJson,
+	reclampReasoningEffort,
 	recoverCodexMessagesContinuation,
+	restoreReasoningEffort,
 	UPSTREAM_402_OUT_OF_CREDITS_REASON,
 	usageCache,
 } from "@better-ccflare/providers";
 import type {
 	Account,
+	ApiKeyRestrictions,
 	RateLimitReason,
 	RequestMeta,
 } from "@better-ccflare/types";
@@ -54,10 +64,22 @@ import {
 	readOutgoingBody,
 	resolveSlotRouting,
 } from "../request-body-context";
-import { forwardToClient as defaultForwardToClient } from "../response-handler";
+import {
+	forwardToClient as defaultForwardToClient,
+	withServedResponseHeaders,
+} from "../response-handler";
 import { isModelRewrite } from "../worker-messages";
 import { applyAccountRequestTransformer } from "./account-request-transformer";
-import { getComboSlotInfo, getXaiConvId } from "./account-selector";
+import {
+	getComboSlotInfo,
+	getXaiConvId,
+	isModelCooldownFallback,
+} from "./account-selector";
+import { isModelAllowedForApiKey } from "./api-key-restrictions";
+import {
+	ApiKeyRoutedSpendRefusal,
+	getApiKeyRoutedSpendCheck,
+} from "./api-key-spend-routing";
 import {
 	noteNative402Body,
 	noteUpstreamAnswer,
@@ -67,7 +89,10 @@ import { noteWindowlessOAuthRefusal } from "./gateway-oauth-skip";
 import { markFamilyExhausted } from "./model-capacity";
 import {
 	DEFAULT_MODEL_COOLDOWN_TTL_MS,
+	getModelCooldownUntil,
 	markModelCooling,
+	markWindowlessModelCooling,
+	recoverWindowlessModel,
 } from "./model-cooldown";
 import { forwardObservedUpstream } from "./observed-upstream";
 import {
@@ -87,6 +112,53 @@ import { markVisionUnsupported } from "./vision-capability";
 import { peekSseForZai1305 } from "./zai-1305";
 
 const log = new Logger("ProxyOperations");
+
+/** Internal control flow: skip a cooled pair without an upstream attempt. */
+class ModelCooldownSkip extends Error {}
+
+/** Failover attempts share metadata, so a second account can identify a
+ * request-scoped refusal without penalizing any other request on this model. */
+const windowlessRejections = new WeakMap<
+	RequestMeta,
+	{
+		accounts: Set<string>;
+		pairs: Set<string>;
+		rollbacks: Array<() => void>;
+		requestScoped: boolean;
+	}
+>();
+
+function recordWindowlessModelRejection(
+	meta: RequestMeta,
+	accountId: string,
+	model: string,
+): void {
+	model = stripModelRouting(model).trim();
+	if (!model) return;
+	let state = windowlessRejections.get(meta);
+	if (!state) {
+		state = {
+			accounts: new Set(),
+			pairs: new Set(),
+			rollbacks: [],
+			requestScoped: false,
+		};
+		windowlessRejections.set(meta, state);
+	}
+	if (state.requestScoped) return;
+	state.accounts.add(accountId);
+	if (state.accounts.size > 1) {
+		state.requestScoped = true;
+		for (const rollback of state.rollbacks) rollback();
+		state.rollbacks = [];
+		return;
+	}
+	const pair = `${accountId}:${model}`;
+	if (state.pairs.has(pair)) return;
+	state.pairs.add(pair);
+	const rollback = markWindowlessModelCooling(accountId, model);
+	if (rollback) state.rollbacks.push(rollback);
+}
 
 /**
  * Resolve the forwarding step for this context.
@@ -686,6 +758,145 @@ function hasCacheControlDetail(detail: unknown[]): boolean {
 	});
 }
 
+/**
+ * The two outbound fields that carry the client's reasoning effort to an
+ * OpenAI-compatible upstream: the standard Chat Completions `reasoning_effort`
+ * and OpenRouter's `reasoning: { effort }`.
+ */
+export type RejectedReasoningField = "reasoning_effort" | "reasoning";
+
+/**
+ * In-memory set of (accountId, model) pairs known to reject the reasoning
+ * effort field. Populated on first 400/422 rejection; cleared on server
+ * restart (fast re-learn). Learned rather than hardcoded because the field is
+ * a legitimate, widely supported extension: Mistral accepts it on several
+ * models, so stripping it up front would delete a working feature.
+ */
+const reasoningFieldRejectors = new Set<string>();
+
+function reasoningFieldRejectorKey(accountId: string, model: string): string {
+	return `${accountId}:${model}`;
+}
+
+/**
+ * Matches a field name as a whole token, never as a substring.
+ * `reasoning` is a substring of both `reasoning_effort` and
+ * `reasoning_content`; the latter is a different field that the Mistral
+ * transform rewrites on its own, so a rejection naming it must not be treated
+ * as a rejection of the effort.
+ */
+function reasoningFieldToken(text: string): RejectedReasoningField | null {
+	const tokens = text.split(/[^A-Za-z0-9_]+/);
+	if (tokens.includes("reasoning_effort")) return "reasoning_effort";
+	if (tokens.includes("reasoning")) return "reasoning";
+	return null;
+}
+
+/**
+ * The field a pydantic entry names. The short loc shape ends with the field
+ * itself (`["body", "reasoning_effort"]`); the long union-branch shape puts
+ * the name only in `msg`. Only the LAST loc element counts: e.g.
+ * `["body", "messages", 0, "reasoning_content"]` does not name the effort.
+ */
+function reasoningFieldFromDetail(
+	loc: unknown,
+	msg: string,
+): RejectedReasoningField | null {
+	if (Array.isArray(loc) && loc.length > 0) {
+		const last = String(loc[loc.length - 1]);
+		if (last === "reasoning_effort" || last === "reasoning") return last;
+	}
+	return reasoningFieldToken(msg);
+}
+
+/**
+ * True when any pydantic entry is the strict-schema rejection of one of the
+ * reasoning fields. As with cache_control, the retry strip is keyed on the
+ * field, not on where pydantic reports it.
+ */
+function findRejectedReasoningFieldInDetail(
+	detail: unknown[],
+): RejectedReasoningField | null {
+	for (const entry of detail) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const { loc, msg } = entry as { loc?: unknown; msg?: unknown };
+		const msgText = typeof msg === "string" ? msg : "";
+		if (!msgText.includes("Extra inputs are not permitted")) continue;
+		const field = reasoningFieldFromDetail(loc, msgText);
+		if (field) return field;
+	}
+	return null;
+}
+
+/**
+ * The flat GLM-style message. `reasoning` is only accepted as a whole token,
+ * so `reasoning_content` can never match. Markers are compared
+ * case-insensitively (`Unknown field` is as common as `unknown field`); the
+ * field token itself is a JSON key and is compared exactly.
+ */
+function findRejectedReasoningFieldInMessage(
+	message: string,
+): RejectedReasoningField | null {
+	const lower = message.toLowerCase();
+	if (
+		!lower.includes("extra inputs are not permitted") &&
+		!lower.includes("unknown field")
+	) {
+		return null;
+	}
+	return reasoningFieldToken(message);
+}
+
+/**
+ * Checks if a response is caused by an upstream provider's strict schema
+ * rejecting the client's reasoning effort. Two shapes are seen in practice,
+ * the same two as cache_control:
+ *   - GLM-style: HTTP 400, a flat string message (e.g. "Extra inputs are not
+ *     permitted: reasoning_effort is not a valid field").
+ *   - Mistral-style: HTTP 422, pydantic `extra_forbidden` errors whose `loc`
+ *     (or, on the union branch, `msg`) names the field.
+ *
+ * A retry without the named field is the correct recovery for either shape:
+ * unlike cache_control the field is a real optional extension, so it is only
+ * removed after the upstream has actually rejected it. `reasoning_content` is
+ * explicitly excluded - it is not the effort and stripping the effort would
+ * leave that error in place.
+ */
+export async function getRejectedReasoningField(
+	response: Response,
+): Promise<RejectedReasoningField | null> {
+	if (response.status !== 400 && response.status !== 422) return null;
+
+	try {
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return null;
+
+		// Cloned only here, after the content-type gate. Cloning before it teed
+		// the body and then returned early for every non-JSON body, stranding
+		// that copy unread — the tee keeps buffering for whoever consumes the
+		// original. Reachable in normal operation: providers such as Qwen do
+		// return non-JSON error bodies. See issue #356.
+		const json = await response.clone().json();
+		// Mistral nests the pydantic errors under a top-level `detail` array and
+		// wraps the same array in `message` only on some paths; check both.
+		const detail = Array.isArray(json.detail)
+			? json.detail
+			: (json.error?.message ?? json.message)?.detail;
+		if (Array.isArray(detail) && detail.length > 0) {
+			const field = findRejectedReasoningFieldInDetail(detail);
+			if (field) return field;
+		}
+		// Flat string message (GLM-style).
+		const message = json.error?.message ?? json.message ?? "";
+		if (typeof message === "string") {
+			return findRejectedReasoningFieldInMessage(message);
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
 /** Words for the image input the request carried. */
 const IMAGE_INPUT_NOUNS = [
 	"image",
@@ -1272,10 +1483,12 @@ export async function proxyUnauthenticated(
 				projectAttributionSource: requestMeta.projectAttributionSource ?? null,
 				response,
 				timestamp: requestMeta.timestamp,
+				costTrackingEpoch: requestMeta.costTrackingEpoch,
 				retryAttempt: 0,
 				failoverAttempts: 0,
 				agentUsed: requestMeta.agentUsed,
 				originalModel: requestMeta.originalModel,
+				limitModel: requestMeta.limitModel,
 				appliedModel: requestMeta.appliedModel,
 				agentAttributionSource: requestMeta.agentAttributionSource ?? null,
 				comboName: requestMeta.comboName,
@@ -1484,7 +1697,52 @@ function comboHasSiblingModel(
 	);
 }
 
+/**
+ * What one account attempt actually sent upstream, read when the attempt
+ * returns. `resolveModel` is set once the outgoing request exists and reads
+ * the live `outgoing` descriptor, so every in-attempt recovery that changes
+ * the model (model-list fallback) or rebuilds the request is reflected.
+ */
+interface ServedTarget {
+	resolveModel?: () => string | null;
+}
+
+type ProxyWithAccountArgs =
+	Parameters<typeof proxyWithAccountAttempt> extends [
+		ServedTarget,
+		...infer Rest,
+	]
+		? Rest
+		: never;
+
+/**
+ * Proxies one request through one account, and stamps the response with the
+ * served-model / served-account headers.
+ *
+ * Decorating here, around the whole attempt, rather than in forwardToClient
+ * is deliberate: several upstream-error paths inside the attempt hand the
+ * upstream response straight back without going through forwardToClient, and
+ * they must carry the headers too. proxy.ts returns the first non-null
+ * response of its candidate loop, so the response decorated here is always
+ * the final attempt's. No headers are added when the attempt built no
+ * outgoing request (nothing was served) or returned null (failover).
+ */
 export async function proxyWithAccount(
+	...args: ProxyWithAccountArgs
+): Promise<Response | null> {
+	const served: ServedTarget = {};
+	const response = await proxyWithAccountAttempt(served, ...args);
+	if (!response || !served.resolveModel) return response;
+	const account = args[2];
+	return withServedResponseHeaders(
+		response,
+		account.name,
+		served.resolveModel(),
+	);
+}
+
+async function proxyWithAccountAttempt(
+	served: ServedTarget,
 	req: Request,
 	url: URL,
 	account: Account,
@@ -1507,6 +1765,16 @@ export async function proxyWithAccount(
 	 * returning it would stop failover.
 	 */
 	onTerminalRejection?: (capture: () => Promise<Response | null>) => void,
+	/**
+	 * The calling API key's restrictions. Only the model allowlist is consulted
+	 * here, and only for per-account fallback entries: a key allowed exactly
+	 * `claude-haiku-4-5` must not be served `gpt-4o` just because the account's
+	 * `model_mappings` lists it as a fallback. The primary entry (what the
+	 * client asked for, or its slot override) was already authorized by the
+	 * caller, so it is not re-checked. `null`/`undefined` means unrestricted and
+	 * makes the guard inert.
+	 */
+	keyRestrictions?: ApiKeyRestrictions | null,
 ): Promise<Response | null> {
 	try {
 		// Extracted once for the whole call: every direct `saveRequest` audit
@@ -1515,10 +1783,16 @@ export async function proxyWithAccount(
 		// itself does from the `StartMessage` header map (usage-collector.ts).
 		const gatewayHint = extractGatewayHintHeadersFromRequest(req.headers);
 		const inbound = extractInboundMarkerFromRequest(req.headers);
-		// The tail every audit `saveRequest` below ends with: projectId and
-		// worktreePath, which these paths do not resolve, then the inbound
-		// marker (SB23-2727). One tuple, so no site can drop or swap it.
+		// The tail every audit `saveRequest` below ends with: upstream's
+		// timestamp, limitModel and spendRecordedAt (defaulted by saveRequest),
+		// then the fork's projectId and worktreePath, which these paths do not
+		// resolve, then the inbound marker (SB23-2727). One tuple, so no site
+		// can drop or swap it. The order follows DatabaseOperations.saveRequest,
+		// where upstream's parameters stay a contiguous prefix of the fork's.
 		const auditTail = [
+			undefined,
+			undefined,
+			undefined,
 			undefined,
 			undefined,
 			inbound.format,
@@ -1601,14 +1875,39 @@ export async function proxyWithAccount(
 		// invariant that every provider has to remember. Merged with
 		// drainAbortController so the terminal-recovery drain deadline can also
 		// abort this same fetch later.
-		// `model` labels the answer for failover-relevance.ts (SB23-10878). It
-		// defaults to the model in flight, read at call time (`outgoing` is
+		// `labelModel` labels the answer for failover-relevance.ts (SB23-10878).
+		// It defaults to the model in flight, read at call time (`outgoing` is
 		// declared below and every call comes after it); a caller sending a
-		// different model than `outgoing` holds passes that model.
-		const forwardUpstream = async (
-			target: Request,
-			model: string = outgoing.model,
-		) => {
+		// different model than `outgoing` holds passes that model. Upstream's
+		// cooldown and per-key spend checks below derive their own `model` from
+		// the target's body, independently of this label.
+		const forwardUpstream = async (target: Request, labelModel?: string) => {
+			const checkSpend = getApiKeyRoutedSpendCheck(requestMeta);
+			// The buffered descriptor avoids another clone/parse on the healthy path.
+			// Rebuilt fallback requests may not have been adopted yet, so inspect
+			// their own body safely; a non-JSON endpoint still passes through.
+			const model =
+				target === outgoing.request
+					? outgoing.model
+					: target.body
+						? (
+								await readRequestJson<{ model?: unknown }>(target).catch(
+									() => null,
+								)
+							)?.model
+						: null;
+			if (target.body && typeof model === "string") {
+				if (
+					model.trim().length > 0 &&
+					!isInternalProbe(req.headers, ctx) &&
+					getModelCooldownUntil(account.id, model) !== null &&
+					!isModelCooldownFallback(requestMeta, account.id, model)
+				) {
+					throw new ModelCooldownSkip();
+				}
+				const refusal = await checkSpend?.(model);
+				if (refusal) throw new ApiKeyRoutedSpendRefusal(refusal);
+			}
 			const signal = AbortSignal.any([req.signal, drainAbortController.signal]);
 			const attemptOnce = (attemptTarget: Request) =>
 				forwardObservedUpstream(
@@ -1645,7 +1944,12 @@ export async function proxyWithAccount(
 					);
 				},
 			});
-			noteUpstreamAnswer(requestMeta, account, answer, model);
+			noteUpstreamAnswer(
+				requestMeta,
+				account,
+				answer,
+				labelModel ?? outgoing.model,
+			);
 			return answer;
 		};
 		if (
@@ -1840,7 +2144,9 @@ export async function proxyWithAccount(
 			? ""
 			: await getValidAccessToken(account, ctx);
 
-		// Pre-process request if provider supports it (e.g., to extract model for URL)
+		// Pre-process request if provider supports it (e.g., to extract model for URL).
+		// Anything the provider derives here is keyed on this attempt's
+		// `providerContext`, never on the shared account object (SB23-2508).
 		if (provider.prepareRequest) {
 			provider.prepareRequest(
 				req,
@@ -1904,12 +2210,50 @@ export async function proxyWithAccount(
 			account,
 			getXaiConvId(requestMeta),
 		);
+
+		// Mistral pod-affinity routing hint. Mistral's prompt cache lives on
+		// individual inference pods, so a conversation that lands on a different pod
+		// misses a byte-identical prefix. Mirrors Mistral's own CLI, which stamps
+		// x-affinity with the session's root id on every request. Same reasoning as
+		// the xAI conv id above for living here rather than in prepareHeaders.
+		applyMistralAffinityHeader(
+			headers,
+			account,
+			deriveMistralAffinityId(requestMeta.clientSessionId),
+		);
+
+		// Night-window completion tier (providers with a registered TierAdapter).
+		// Applied here for the same reason as the conv id above: the window
+		// depends on the selected account's opt-in flag, which prepareHeaders
+		// never sees. The window is resolved from config on every build, so a
+		// failover to another account re-evaluates it, while an in-place retry
+		// (reissueRequestInPlace) keeps the tier resolved at first build. A
+		// no-op for providers without an adapter, for accounts without the
+		// flag, and outside the window; any client-supplied tier header is
+		// stripped by applyNightWindowHeader.
+		// Config is a real Config instance in production; the optional-call
+		// guard only tolerates partial config doubles in tests.
+		applyNightWindowHeader(
+			headers,
+			provider.name,
+			account,
+			parseNightWindow(
+				ctx.config.getNightWindow?.() ?? "",
+				ctx.config.getNightTz?.() ?? "",
+			),
+		);
 		const targetUrl = provider.buildUrl(
 			url.pathname,
 			url.search,
 			account,
 			providerContext,
 		);
+		// Captured right after buildUrl, which reads the same per-attempt
+		// carrier: a provider that removes body.model (Vertex) addresses the
+		// model in the URL, so the carrier, not the outgoing body, is the only
+		// record of it.
+		const providerTargetModel =
+			provider.getTargetModel?.(account, providerContext) ?? null;
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
 			method: req.method,
@@ -1993,11 +2337,110 @@ export async function proxyWithAccount(
 			if (model !== undefined) outgoing.model = model;
 		};
 
-		const transformedBodyJson =
-			transformedModel &&
+		/**
+		 * Rebuilds the in-flight request around a mutated JSON body, reusing its
+		 * url/method/headers. Returns the new request and the exact text it
+		 * carries; the caller decides when to adopt it (the retry paths adopt
+		 * only after their await, so a throw leaves the descriptor with the
+		 * response actually in hand). A URL-based rebuild drops the signal, so
+		 * it is carried over from the client request.
+		 */
+		const rebuildOutgoingRequest = (
+			bodyJson: Record<string, unknown>,
+		): { request: Request; bodyText: string } => {
+			const bodyText = JSON.stringify(bodyJson);
+			return {
+				request: new Request(outgoing.request.url, {
+					method: outgoing.request.method,
+					headers: outgoing.request.headers,
+					body: bodyText,
+					signal: req.signal,
+				}),
+				bodyText,
+			};
+		};
+		// The model this account is being asked for, for the served-model
+		// response header. Read lazily so the final value of `outgoing` wins.
+		// The body's model can be absent for providers that address the model in
+		// the URL; the effective (post-override) request model is the best
+		// remaining answer there.
+		served.resolveModel = () =>
+			outgoing.model ||
+			providerTargetModel ||
+			effectiveBodyContext.getModel() ||
+			null;
+
+		/**
+		 * Retry without the reasoning effort field if the upstream's strict
+		 * schema rejected it (Mistral-style 422, GLM-style 400), and return the
+		 * response the client should see. Mark (accountId, `model`) so later
+		 * requests for that pair pre-strip it instead of spending another failed
+		 * round trip. `model` is the model the response belongs to — the
+		 * transformed primary model on the first response, the fallback model
+		 * inside the model-fallback loop — so the learned pair is the one that
+		 * actually rejected the field.
+		 *
+		 * Performs at most ONE bounded retry per response and never loops.
+		 */
+		const recoverRejectedReasoningField = async (
+			response: Response,
+			model: string,
+		): Promise<Response> => {
+			const rejectedReasoningField = await getRejectedReasoningField(response);
+			if (!rejectedReasoningField) return response;
+
+			const rejectorKey = reasoningFieldRejectorKey(account.id, model);
+			if (!reasoningFieldRejectors.has(rejectorKey)) {
+				// Mark before retry so subsequent requests pre-strip without a
+				// round-trip. The current caller still receives the retried
+				// response (or the original error if the retry also fails).
+				reasoningFieldRejectors.add(rejectorKey);
+				log.info(
+					`Provider rejected ${rejectedReasoningField} for account=${account.name} model=${model}, retrying without it`,
+				);
+			}
+
+			try {
+				// Strip from the body CURRENTLY in flight, not from the original
+				// transform: the cache_control recovery may already have replaced
+				// it. The fallback keeps the pre-descriptor behaviour for the
+				// (unreachable) case of a recovery that could not buffer its own
+				// body.
+				const retryBodyJson = JSON.parse(
+					outgoing.bodyText ?? transformedBodyText,
+				);
+				delete retryBodyJson[rejectedReasoningField];
+				const { request: retryRequest, bodyText: strippedBodyText } =
+					rebuildOutgoingRequest(retryBodyJson);
+				// The original response stays untouched until the retry has
+				// produced its replacement: a throwing send is swallowed below and
+				// leaves the original in hand, so its error body must still be
+				// readable for the client.
+				const discarded = response;
+				const replaced = isSyntheticProviderResponse(retryRequest)
+					? materializeSyntheticResponse(retryRequest)
+					: await forwardUpstream(retryRequest);
+				cancelDiscardedResponseBody(discarded);
+				// The replacement belongs to retryRequest, whose body is missing
+				// the rejected field. Anything downstream that replays must
+				// re-issue THIS body.
+				adoptOutgoingRequest(retryRequest, strippedBodyText);
+				return replaced;
+			} catch (err) {
+				log.warn(`Failed to retry without ${rejectedReasoningField}:`, err);
+				return response;
+			}
+		};
+
+		const knownCacheControlRejector =
+			Boolean(transformedModel) &&
 			cacheControlRejectors.has(
-				cacheControlRejectorKey(account.id, transformedModel),
-			)
+				cacheControlRejectorKey(account.id, transformedModel as string),
+			);
+		// Mistral's strict schema never accepts Anthropic's cache_control (HTTP 422),
+		// so strip it up front instead of spending a failed request to learn it.
+		const transformedBodyJson =
+			knownCacheControlRejector || isMistralEndpoint(account)
 				? outgoingBody.getJson()
 				: null;
 		if (transformedBodyJson) {
@@ -2018,8 +2461,43 @@ export async function proxyWithAccount(
 				preStrippedBodyText,
 			);
 			log.debug(
-				`Pre-stripped cache_control for known rejector: account=${account.name} model=${transformedModel}`,
+				`Pre-stripped cache_control: account=${account.name} model=${transformedModel} mistral=${isMistralEndpoint(account)}`,
 			);
+		}
+
+		// Reasoning effort is only stripped once this pair has actually rejected
+		// it. Unlike cache_control it is a real optional extension, so a working
+		// upstream must keep receiving it; the learned set is what separates the
+		// two. Runs after the cache_control block so it sees the body that block
+		// adopted (getJson() returns the same mutated object on that path).
+		// A pair learned from a fallback model is stripped in the fallback loop
+		// instead (it has to leave the primary's body alone).
+		const knownReasoningFieldRejector =
+			Boolean(transformedModel) &&
+			reasoningFieldRejectors.has(
+				reasoningFieldRejectorKey(account.id, transformedModel as string),
+			);
+		/** Remove whatever effort field `bodyJson` carries, in place. */
+		const stripReasoningEffortFields = (
+			bodyJson: Record<string, unknown>,
+		): boolean => {
+			if (!("reasoning_effort" in bodyJson || "reasoning" in bodyJson)) {
+				return false;
+			}
+			delete bodyJson.reasoning_effort;
+			delete bodyJson.reasoning;
+			return true;
+		};
+		if (knownReasoningFieldRejector) {
+			const reasoningBodyJson = outgoingBody.getJson();
+			if (reasoningBodyJson && stripReasoningEffortFields(reasoningBodyJson)) {
+				const { request: preStrippedRequest, bodyText: preStrippedBodyText } =
+					rebuildOutgoingRequest(reasoningBodyJson);
+				adoptOutgoingRequest(preStrippedRequest, preStrippedBodyText);
+				log.debug(
+					`Pre-stripped reasoning effort: account=${account.name} model=${transformedModel}`,
+				);
+			}
 		}
 
 		// Make the request (or unwrap a synthetic provider response)
@@ -2108,11 +2586,26 @@ export async function proxyWithAccount(
 					);
 				}
 
-				// Make the retry request (or unwrap a synthetic provider response)
-				cancelDiscardedResponseBody(rawResponse);
-				rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
-					? materializeSyntheticResponse(retryTransformedRequest)
-					: await forwardUpstream(retryTransformedRequest);
+				// Make the retry request (or unwrap a synthetic provider response).
+				// The original response is discarded only once the replacement
+				// exists, so a throwing send leaves it readable. Unlike the
+				// cache_control and reasoning recoveries below, this block has no
+				// local catch: a throwing send unwinds to the attempt's outer catch,
+				// which returns null without draining. Release the original here
+				// then, or its native buffer is retained for a request nobody will
+				// read (#273).
+				const discarded = rawResponse;
+				let replaced: Response;
+				try {
+					replaced = isSyntheticProviderResponse(retryTransformedRequest)
+						? materializeSyntheticResponse(retryTransformedRequest)
+						: await forwardUpstream(retryTransformedRequest);
+				} catch (err) {
+					cancelDiscardedResponseBody(discarded);
+					throw err;
+				}
+				cancelDiscardedResponseBody(discarded);
+				rawResponse = replaced;
 			} else {
 				log.warn(
 					"Failed to filter thinking blocks or no changes made, proceeding with original error response",
@@ -2154,23 +2647,37 @@ export async function proxyWithAccount(
 					// A URL-based rebuild drops the signal — carry it over.
 					signal: req.signal,
 				});
-				cancelDiscardedResponseBody(rawResponse);
-				rawResponse = isSyntheticProviderResponse(retryRequest)
+				// The original response stays untouched until the retry has
+				// produced its replacement: a throwing send is swallowed below and
+				// leaves the original in hand, so its body must still be readable
+				// for the client instead of having been discarded up front.
+				const discarded = rawResponse;
+				const replaced = isSyntheticProviderResponse(retryRequest)
 					? materializeSyntheticResponse(retryRequest)
 					: await forwardUpstream(retryRequest);
+				cancelDiscardedResponseBody(discarded);
+				rawResponse = replaced;
 				// rawResponse now belongs to retryRequest (cache_control stripped),
 				// not to the request that was rejected — anything downstream that
 				// replays (checkZai1305, the in-place 529/5xx retries) must re-issue
 				// this request, BODY INCLUDED. Adopting only the Request, as this
 				// line used to, left the buffered body still carrying the rejected
-				// field for every replay. Kept after the await on purpose: a
-				// throwing re-issue is swallowed below and leaves the original
-				// response in hand, so the descriptor must stay with it.
+				// field for every replay.
 				adoptOutgoingRequest(retryRequest, strippedBodyText);
 			} catch (err) {
 				log.warn("Failed to retry without cache_control:", err);
 			}
 		}
+
+		// Retry without the reasoning effort field if the upstream's strict schema
+		// rejected it (Mistral-style 422, GLM-style 400). Kept after the
+		// cache_control recovery so a body carrying both fields is fixed one
+		// rejected field at a time, each step seeing what the previous one left.
+		// The model-fallback loop runs the same recovery on its own response.
+		rawResponse = await recoverRejectedReasoningField(
+			rawResponse,
+			transformedModel,
+		);
 
 		// ── Upstream-error classification ───────────────────────────────────
 		// Each handler below was inline on the first-response path and is now a
@@ -2566,7 +3073,7 @@ export async function proxyWithAccount(
 
 		/**
 		 * The 429 branch taken when this account has no fallback model to cycle
-		 * to: keepalive burst, windowless (request-scoped) 429, or a genuine
+		 * to: keepalive burst, windowless (model-scoped) 429, or a genuine
 		 * window that benches the account. Answers NOT_CLASSIFIED for any other
 		 * status so the caller can fall through to its model-not-found handling.
 		 */
@@ -2591,40 +3098,15 @@ export async function proxyWithAccount(
 					return null;
 				}
 
-				// ── windowless 429: request-scoped, NOT account-wide (issue #301) ──
-				// Anthropic 429s some requests with `x-should-retry: true` and no
-				// rate-limit metadata whatsoever — no `retry-after`, not one
-				// `anthropic-ratelimit-*` / `x-ratelimit-*` header. Live measurement
-				// on a production install showed this to be scoped to the REQUEST,
-				// not the account: the same account served 200s two seconds before
-				// and 38 seconds after on the same model, three in-place retries
-				// spanning 11.2s returned three identical bare 429s (never once a
-				// success), and the NEXT account rejected the same client request
-				// the same way. The rejected requests are session-initialising ones
-				// with no project attribution; ordinary conversation turns on the
-				// same account succeed throughout.
-				//
-				// So benching is simply the wrong response: it drains the pool one
-				// account per attempt until the operator has to force-reset every
-				// account before ordinary traffic works again. Treat it exactly like
-				// out_of_credits above (issue #261) — fail over per request with NO
-				// cooldown and NO consecutive-429 increment, leaving the account in
-				// rotation. Placed after the keepalive check so a synthetic probe
-				// still records nothing at all.
-				//
-				// The predicate is `isRetryable429` (header-only, synchronous,
-				// fail-closed: `x-should-retry: true`, no `retry-after`, and no
-				// header under either rate-limit prefix). Its name is now a slight
-				// misnomer — nothing is retried any more — but it is exactly the
-				// right discriminator and its module is reviewed and tested, so it
-				// keeps its name.
+				// No quota window was reported. Cool only the upstream model
+				// this account was asked for; other models remain healthy.
 				if (isRetryable429(rawResponse, isClaudeProvider)) {
 					const reason: RateLimitReason = "windowless_429";
-					log.warn(
-						`Account ${account.name} returned a windowless 429 (${
-							requestedModel ? `model=${requestedModel}, ` : ""
-						}x-should-retry with no rate-limit window) — request-scoped, ` +
-							`NOT benching account; failing over to next account`,
+					recordWindowlessModelRejection(
+						requestMeta,
+						account.id,
+						outgoing.model ||
+							(requestedModel ? mapModelName(requestedModel, account) : ""),
 					);
 					// A gateway request refused this way by an OAuth account is refused
 					// by every OAuth account; proxy.ts skips the rest (SB23-2781).
@@ -2772,7 +3254,7 @@ export async function proxyWithAccount(
 				) {
 					markModelCooling(
 						account.id,
-						requestedModel,
+						outgoing.model || mapModelName(requestedModel, account),
 						resetIsInferred ? null : cooldown.until,
 					);
 					log.warn(
@@ -2882,6 +3364,7 @@ export async function proxyWithAccount(
 						gatewayHint.prevToolDurations,
 						gatewayHint.compaction,
 						gatewayHint.contextCompacted,
+						...auditTail,
 					),
 				);
 			}
@@ -2924,8 +3407,12 @@ export async function proxyWithAccount(
 				capturedHeaders.set("x-better-ccflare-request-id", requestMeta.id);
 				capturedHeaders.set("x-better-ccflare-request-path", requestMeta.path);
 				const capturedModel = effectiveBodyContext.getModel();
-				onTerminalRejection?.(() =>
-					provider.processResponse(
+				onTerminalRejection?.(async () => {
+					// This attempt's carrier, so a provider that keyed state on it
+					// in prepareRequest (Vertex's original model) can finish the
+					// replay. The attempt has returned, so nothing mutates it now.
+					providerContext.requestModel = capturedModel;
+					const replayed = await provider.processResponse(
 						new Response(terminalBody, {
 							status: capturedStatus,
 							statusText: capturedStatusText,
@@ -2934,9 +3421,19 @@ export async function proxyWithAccount(
 						account,
 						req.headers,
 						drainAbortController,
-						{ requestModel: capturedModel },
-					),
-				);
+						providerContext,
+					);
+					// The caller returns this to the client when every candidate
+					// failed, and it never passes through proxyWithAccount's
+					// decoration (the attempt returned null), so stamp it here.
+					return replayed
+						? withServedResponseHeaders(
+								replayed,
+								account.name,
+								served.resolveModel?.() ?? capturedModel,
+							)
+						: replayed;
+				});
 				return null;
 			}
 			cancelDiscardedResponseBody(response);
@@ -3106,6 +3603,9 @@ export async function proxyWithAccount(
 			// is not re-entered here. Practically unreachable anyway — /v1/messages
 			// rejects a body without `model`.
 			if (!requestedModel) return NOT_CLASSIFIED;
+			if (isRetryable429(retried, isClaudeProvider)) {
+				return classifyNoFallback429(retried, requestedModel);
+			}
 			const modelList = getModelList(requestedModel, account);
 			if (modelList && modelList.length > 1) return NOT_CLASSIFIED;
 			return classifyNoFallback429(retried, requestedModel);
@@ -3198,6 +3698,16 @@ export async function proxyWithAccount(
 			if (!visionRoutingUnrepresentedInKey) {
 				markVisionUnsupported(account.id, visionKeyModel);
 			}
+		}
+
+		// Windowless errors fail over immediately even when this account has a
+		// model fallback list. A fallback success says nothing about the failed pair.
+		if (isRetryable429(rawResponse, isClaudeProvider)) {
+			const windowlessOutcome = await classifyNoFallback429(
+				rawResponse,
+				effectiveBodyContext.getModel(),
+			);
+			if (windowlessOutcome !== NOT_CLASSIFIED) return windowlessOutcome;
 		}
 
 		if (visionUnsupported || (await isModelUnavailableError(rawResponse))) {
@@ -3299,6 +3809,21 @@ export async function proxyWithAccount(
 					// provider.
 					const nextSplit = splitModelRouting(nextModel);
 					const nextBareModel = nextSplit.model;
+					// The allowlist has to gate fallback entries too. A key pinned to an
+					// exact model id would otherwise be served a different model from
+					// this account's fallback list the moment the primary 429s. The
+					// primary (index 0 / the slot override) was already authorized by
+					// the caller, so this deliberately starts at the first fallback.
+					// A skipped entry mutates nothing: `rawResponse` still belongs to
+					// the previous attempt, so if every entry is skipped the loop falls
+					// through to the post-loop exhaustion path and fails over to the
+					// next account exactly as an exhausted list does.
+					if (!isModelAllowedForApiKey(nextBareModel, keyRestrictions)) {
+						log.info(
+							`Skipping fallback model '${nextBareModel}' on account ${account.name}: not permitted for this API key`,
+						);
+						continue;
+					}
 					const patchedContext = patchModelAndRouting(
 						effectiveBodyContext,
 						nextBareModel,
@@ -3311,6 +3836,31 @@ export async function proxyWithAccount(
 						log.warn("Failed to patch request body for model retry");
 						break;
 					}
+
+					// The client's reasoning effort as it entered the transform (the
+					// internal `reasoning.effort` carrier), read from the pre-transform
+					// body. The transform clamps it against the model MAPPING produces,
+					// but the re-patch below sends `nextBareModel`, so the effort is
+					// re-resolved from this original value against that model. A
+					// client-native `output_config.effort` is passed through verbatim
+					// by the Anthropic-shaped transform and must stay untouched.
+					const preTransformBody = patchedContext?.getParsedJson() as
+						| Record<string, unknown>
+						| null
+						| undefined;
+					const preReasoning = preTransformBody?.reasoning;
+					const originalEffort =
+						preReasoning &&
+						typeof preReasoning === "object" &&
+						!Array.isArray(preReasoning)
+							? (preReasoning as Record<string, unknown>).effort
+							: undefined;
+					const preOutputConfig = preTransformBody?.output_config;
+					const clientSentNativeOutputEffort =
+						!!preOutputConfig &&
+						typeof preOutputConfig === "object" &&
+						!Array.isArray(preOutputConfig) &&
+						(preOutputConfig as Record<string, unknown>).effort !== undefined;
 
 					const retryRequestInit: RequestInit & { duplex?: "half" } = {
 						method: req.method,
@@ -3367,15 +3917,77 @@ export async function proxyWithAccount(
 							// the provider took the model out of (vertex-ai puts it in the
 							// URL) must not get it back (SB23-3971); an empty model makes
 							// applyModelAndRouting leave `model` alone and patch routing only.
-							if (
-								applyModelAndRouting(
+							const routingChanged = applyModelAndRouting(
+								transformedBody,
+								Object.hasOwn(transformedBody, "model") ? nextBareModel : "",
+								nextSplit.routing,
+								slotRouting,
+								accountSupportsRouting,
+							);
+							// Always re-clamp, even when the re-patch changed nothing: the
+							// transform may have clamped against a different (mapped)
+							// model while the body already names `nextBareModel`.
+							let effortChanged = false;
+							try {
+								effortChanged = reclampReasoningEffort(
 									transformedBody,
-									Object.hasOwn(transformedBody, "model") ? nextBareModel : "",
-									nextSplit.routing,
-									slotRouting,
-									accountSupportsRouting,
-								)
+									nextBareModel,
+									originalEffort,
+									{ preserveOutputConfigEffort: clientSentNativeOutputEffort },
+								);
+							} catch (err) {
+								// The transform already validated the effort; keep the
+								// transformed value rather than dropping the re-patch.
+								log.warn(
+									"Failed to re-clamp reasoning effort for model fallback:",
+									err,
+								);
+							}
+							// The transform clamps against the model the ACCOUNT MAPPING
+							// produced, which may reject the parameter outright (e.g. a
+							// Haiku 4.5 mapping): the field then never reached the body,
+							// and the re-clamp above can only rewrite an existing one.
+							// Put the client's effort back in the provider's native shape
+							// for the model actually sent. A client-native
+							// `output_config.effort` is still on the body (the transform
+							// passes it through verbatim), so its "already present" check
+							// no-ops there — same guarantee as preserveOutputConfigEffort.
+							if (originalEffort !== undefined) {
+								const effortTarget = provider.reasoningEffortTarget?.(account);
+								if (effortTarget) {
+									try {
+										// OR, not assign: the re-clamp above may already have
+										// changed the body, and its change must still trigger
+										// the rebuild when the restore is a no-op.
+										effortChanged ||= restoreReasoningEffort(
+											transformedBody,
+											effortTarget,
+											originalEffort,
+											nextBareModel,
+										);
+									} catch (err) {
+										log.warn(
+											"Failed to restore reasoning effort for model fallback:",
+											err,
+										);
+									}
+								}
+							}
+							// The fallback pair may already be a known rejector (learned
+							// from an earlier request): strip up front instead of
+							// spending the failed round trip the recovery exists to
+							// avoid. Skipped when the client sent a native effort, which
+							// the transform passes through verbatim.
+							if (
+								!clientSentNativeOutputEffort &&
+								reasoningFieldRejectors.has(
+									reasoningFieldRejectorKey(account.id, nextBareModel),
+								) &&
+								stripReasoningEffortFields(transformedBody)
 							) {
+								effortChanged = true;
+							}
+							if (routingChanged || effortChanged) {
 								const repatchedBodyText = JSON.stringify(transformedBody);
 								const repatchedHeaders = new Headers(
 									retryTransformedRequest.headers,
@@ -3435,6 +4047,18 @@ export async function proxyWithAccount(
 					// model the request asked for. See `modelCycledTo`.
 					modelCycledTo = true;
 
+					// The fallback model can reject the effort field just as the
+					// primary could (strict schema, 422/400). The first-response
+					// recovery never saw this response, so run it here, keyed on the
+					// fallback model the response belongs to, and let it re-issue the
+					// adopted request with the field stripped. Runs before
+					// checkZai1305 so that peek reads the response the client will
+					// actually get, and adopts its own request/body when it retries.
+					rawResponse = await recoverRejectedReasoningField(
+						rawResponse,
+						nextBareModel,
+					);
+
 					rawResponse = await checkZai1305(
 						rawResponse,
 						account,
@@ -3444,6 +4068,13 @@ export async function proxyWithAccount(
 						inPlaceRetryBudget,
 					);
 					zai1305AlreadyChecked = true;
+					if (isRetryable429(rawResponse, isClaudeProvider)) {
+						const windowlessOutcome = await classifyNoFallback429(
+							rawResponse,
+							outgoing.model,
+						);
+						if (windowlessOutcome !== NOT_CLASSIFIED) return windowlessOutcome;
+					}
 					if (!(await isModelUnavailableError(rawResponse.clone()))) {
 						break; // Success — stop cycling
 					}
@@ -4059,6 +4690,10 @@ export async function proxyWithAccount(
 			}
 		}
 
+		if (response.ok && !isSyntheticInternal) {
+			recoverWindowlessModel(account.id, outgoing.model);
+		}
+
 		// Check for rate limit using account-specific provider.
 		//
 		// The clone exists only for the terminal-529 path, where `response`
@@ -4121,10 +4756,12 @@ export async function proxyWithAccount(
 							requestMeta.projectAttributionSource ?? null,
 						response,
 						timestamp: requestMeta.timestamp,
+						costTrackingEpoch: requestMeta.costTrackingEpoch,
 						retryAttempt: 0,
 						failoverAttempts,
 						agentUsed: requestMeta.agentUsed,
 						originalModel: requestMeta.originalModel,
+						limitModel: requestMeta.limitModel,
 						appliedModel: requestMeta.appliedModel,
 						agentAttributionSource: requestMeta.agentAttributionSource ?? null,
 						comboName: requestMeta.comboName,
@@ -4160,10 +4797,12 @@ export async function proxyWithAccount(
 				projectAttributionSource: requestMeta.projectAttributionSource ?? null,
 				response,
 				timestamp: requestMeta.timestamp,
+				costTrackingEpoch: requestMeta.costTrackingEpoch,
 				retryAttempt: 0,
 				failoverAttempts,
 				agentUsed: requestMeta.agentUsed,
 				originalModel: requestMeta.originalModel,
+				limitModel: requestMeta.limitModel,
 				appliedModel: requestMeta.appliedModel,
 				agentAttributionSource: requestMeta.agentAttributionSource ?? null,
 				comboName: requestMeta.comboName,
@@ -4174,6 +4813,8 @@ export async function proxyWithAccount(
 			{ ...ctx, provider },
 		);
 	} catch (err) {
+		if (err instanceof ModelCooldownSkip) return null;
+		if (err instanceof ApiKeyRoutedSpendRefusal) return err.response;
 		// A client disconnect now aborts the upstream fetch by design. That is
 		// not an account failure: returning null would send the proxy through
 		// every remaining account and every fallback route for a request nobody
@@ -4255,6 +4896,7 @@ export type PoolExhaustionAccountReason =
 	| "paused"
 	| "usage_exhausted"
 	| "rate_limited"
+	| "model_cooling"
 	| "circuit_open"
 	| "vision_unsupported"
 	| "unavailable";
@@ -4308,6 +4950,7 @@ export function createPoolExhaustedResponse(
 	accounts: Account[],
 	usageSnapshots?: ReadonlyMap<string, AccountUsageSnapshot>,
 	kind: PoolExhaustionKind = "pool_exhausted",
+	requestedModel?: string | null,
 ): Response {
 	const now = Date.now();
 	const isCircuitOpen = kind === "circuit_open";
@@ -4320,6 +4963,13 @@ export function createPoolExhaustedResponse(
 	// the account's own state is irrelevant to why this request was refused.
 	const accountInfos = accounts.map((account) => {
 		const usage = usageSnapshots?.get(account.id);
+		const modelCooldown = requestedModel
+			? getModelCooldownUntil(
+					account.id,
+					mapModelName(requestedModel, account),
+					now,
+				)
+			: null;
 		const usageExhausted =
 			usage !== undefined &&
 			isUsageExhausted(
@@ -4343,7 +4993,9 @@ export function createPoolExhaustedResponse(
 							? "usage_exhausted"
 							: account.rate_limited_until && account.rate_limited_until > now
 								? "rate_limited"
-								: "unavailable";
+								: modelCooldown !== null
+									? "model_cooling"
+									: "unavailable";
 
 		let availableAt: string | null = null;
 		// Neither override kind advertises a recovery time: the breaker's own
@@ -4358,6 +5010,13 @@ export function createPoolExhaustedResponse(
 				account.rate_limited_until > now
 			) {
 				availableAt = new Date(account.rate_limited_until).toISOString();
+			} else if (modelCooldown !== null) {
+				availableAt = new Date(modelCooldown).toISOString();
+			}
+			if (modelCooldown !== null && availableAt !== null) {
+				availableAt = new Date(
+					Math.max(Date.parse(availableAt), modelCooldown),
+				).toISOString();
 			}
 		}
 
@@ -4378,6 +5037,32 @@ export function createPoolExhaustedResponse(
 	// usage cap).
 	const recoveryCandidates: number[] = [];
 	for (const account of accounts) {
+		const modelCooldown = requestedModel
+			? getModelCooldownUntil(
+					account.id,
+					mapModelName(requestedModel, account),
+					now,
+				)
+			: null;
+		// Every gate on this pair must recover before it is available. Choose
+		// the later gate within a route, then the earliest route across accounts.
+		if (modelCooldown !== null) {
+			const usage = usageSnapshots?.get(account.id);
+			const usageReset =
+				usage &&
+				isUsageExhausted(
+					usage.utilization,
+					usage.resetMs,
+					now,
+					usage.extraUsageAvailable,
+				)
+					? (usage.resetMs ?? 0)
+					: 0;
+			recoveryCandidates.push(
+				Math.max(modelCooldown, account.rate_limited_until ?? 0, usageReset),
+			);
+			continue;
+		}
 		if (account.rate_limited_until && account.rate_limited_until > now) {
 			recoveryCandidates.push(account.rate_limited_until);
 		}

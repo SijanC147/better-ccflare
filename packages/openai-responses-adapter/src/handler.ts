@@ -1,6 +1,14 @@
 import crypto from "node:crypto";
+import {
+	SERVED_ACCOUNT_HEADER,
+	SERVED_MODEL_HEADER,
+	ValidationError,
+} from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
+	type ApiKeyLimitWindowMode,
+	type ApiKeyRestrictions,
+	type ApiKeySpendLimit,
 	type OpenAIGatewayModelEntry,
 	REPORT_UPSTREAM_MODEL_HEADER,
 } from "@better-ccflare/types";
@@ -37,6 +45,7 @@ const TERMINAL_RESPONSE_EVENT_TYPES = new Set([
 ]);
 
 const NATIVE_RESPONSES_HEADER = "x-better-ccflare-native-responses";
+const SERVED_HEADERS = [SERVED_MODEL_HEADER, SERVED_ACCOUNT_HEADER] as const;
 const CONTINUATION_HEADER = "x-better-ccflare-codex-continuation";
 const CACHE_MODE_HEADER = "x-better-ccflare-prompt-cache-mode";
 const CACHE_TTL_HEADER = "x-better-ccflare-prompt-cache-ttl";
@@ -417,6 +426,27 @@ function answeringModel(respBody: unknown, requested: string): string {
 	return typeof model === "string" && model.length > 0 ? model : requested;
 }
 
+/**
+ * Copies the proxy's served-model / served-account headers from the proxied
+ * /v1/messages response onto a Response this adapter built itself. The
+ * translated paths construct fresh headers, so without this the only record
+ * of which account and model answered would be dropped for Responses
+ * clients. A no-op when the proxy set neither header.
+ */
+function withServedHeaders(response: Response, upstream: Headers): Response {
+	if (!SERVED_HEADERS.some((name) => upstream.has(name))) return response;
+	const headers = new Headers(response.headers);
+	for (const name of SERVED_HEADERS) {
+		const value = upstream.get(name);
+		if (value !== null) headers.set(name, value);
+	}
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 export async function handleResponsesRequest(
 	req: Request,
 	url: URL,
@@ -427,9 +457,19 @@ export async function handleResponsesRequest(
 	/**
 	 * Set only when a named gateway serves the request (SB23-3469): its
 	 * exclusions join this handler's own, its model set is enforced, and the
-	 * answer reports the model that answered. The plain path passes nothing.
+	 * answer reports the model that answered. The plain path passes undefined.
 	 */
 	gateway?: OpenAIGatewayOptions,
+	/** The calling API key's restrictions, forwarded straight to handleProxy so
+	 * /v1/responses enforces them identically to /v1/messages. */
+	restrictions?: ApiKeyRestrictions | null,
+	/** The calling API key's spend limit, forwarded for the same reason:
+	 * leaving it out would make the Codex endpoint an unmetered bypass. */
+	spendLimit?: ApiKeySpendLimit | null,
+	keyPolicy?: {
+		limitWindowMode?: ApiKeyLimitWindowMode;
+		familyComboOverrides?: Record<string, string> | null;
+	},
 ): Promise<Response> {
 	// 1. Parse body — Codex CLI compresses request bodies (zstd, gzip, deflate).
 	// Bun decompresses response bodies automatically but not request bodies,
@@ -587,9 +627,19 @@ export async function handleResponsesRequest(
 	const responseId = `resp_${crypto.randomBytes(12).toString("hex")}`;
 
 	// 4. Translate to Anthropic format
-	const anthropicBody = translateRequestToAnthropic(
-		body as TranslatableRequest,
-	);
+	let anthropicBody: ReturnType<typeof translateRequestToAnthropic>;
+	try {
+		anthropicBody = translateRequestToAnthropic(body as TranslatableRequest);
+	} catch (error) {
+		if (!(error instanceof ValidationError)) throw error;
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: { type: "invalid_request_error", message: error.message },
+			}),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+	}
 	// A gateway entry names its upstream model outright. The selector routes
 	// on the synthetic body's model, so it must see that id for the entry's
 	// ladder and model filter, not the Claude family the translator maps
@@ -737,7 +787,16 @@ export async function handleResponsesRequest(
 			ctx,
 			apiKeyId,
 			apiKeyName,
-			{ trustedNativeResponses: true },
+			{
+				trustedNativeResponses: true,
+				trustedRequestedModel: body.model,
+				// The proxy reads both as "no policy" when null, the same as
+				// absent; null keeps them assignable under
+				// exactOptionalPropertyTypes.
+				restrictions: restrictions ?? null,
+				spendLimit: spendLimit ?? null,
+				...keyPolicy,
+			},
 		);
 	} catch (err) {
 		const statusCode =
@@ -892,12 +951,15 @@ export async function handleResponsesRequest(
 	// 8. Stream path
 	if (body.stream) {
 		if (!gateway || !anthropicResp.body) {
-			return translateAnthropicStreamToResponses(
-				anthropicResp,
-				responseId,
-				clientModel,
-				getRequestTools(body),
-				{ reportUpstreamModel: gateway !== undefined },
+			return withServedHeaders(
+				translateAnthropicStreamToResponses(
+					anthropicResp,
+					responseId,
+					clientModel,
+					getRequestTools(body),
+					{ reportUpstreamModel: gateway !== undefined },
+				),
+				anthropicResp.headers,
 			);
 		}
 		const peeked = await peekSseModel(
@@ -918,10 +980,13 @@ export async function handleResponsesRequest(
 		for (const [name, value] of Object.entries(substitution(peeked.model))) {
 			headers.set(name, value);
 		}
-		return new Response(translatedStream.body, {
-			status: translatedStream.status,
-			headers,
-		});
+		return withServedHeaders(
+			new Response(translatedStream.body, {
+				status: translatedStream.status,
+				headers,
+			}),
+			anthropicResp.headers,
+		);
 	}
 
 	// 9. Non-stream path
@@ -929,15 +994,18 @@ export async function handleResponsesRequest(
 	try {
 		respBody = await anthropicResp.json();
 	} catch {
-		return new Response(
-			JSON.stringify({
-				error: {
-					message: "Failed to parse upstream response",
-					type: "api_error",
-					code: "api_error",
-				},
-			}),
-			{ status: 502, headers: { "Content-Type": "application/json" } },
+		return withServedHeaders(
+			new Response(
+				JSON.stringify({
+					error: {
+						message: "Failed to parse upstream response",
+						type: "api_error",
+						code: "api_error",
+					},
+				}),
+				{ status: 502, headers: { "Content-Type": "application/json" } },
+			),
+			anthropicResp.headers,
 		);
 	}
 	let translated: ReturnType<typeof translateAnthropicResponseToResponses>;
@@ -949,27 +1017,33 @@ export async function handleResponsesRequest(
 			getRequestTools(body),
 		);
 	} catch {
-		return new Response(
-			JSON.stringify({
-				error: {
-					message:
-						"Failed to translate upstream response: invalid tool input or response body",
-					type: "invalid_response_error",
-					code: "invalid_response_error",
-				},
-			}),
-			{ status: 502, headers: { "Content-Type": "application/json" } },
+		return withServedHeaders(
+			new Response(
+				JSON.stringify({
+					error: {
+						message:
+							"Failed to translate upstream response: invalid tool input or response body",
+						type: "invalid_response_error",
+						code: "invalid_response_error",
+					},
+				}),
+				{ status: 502, headers: { "Content-Type": "application/json" } },
+			),
+			anthropicResp.headers,
 		);
 	}
-	return new Response(JSON.stringify(translated), {
-		status: 200,
-		headers: {
-			"Content-Type": "application/json",
-			...substitution(
-				respBody !== null && typeof respBody === "object"
-					? (respBody as { model?: unknown }).model
-					: undefined,
-			),
-		},
-	});
+	return withServedHeaders(
+		new Response(JSON.stringify(translated), {
+			status: 200,
+			headers: {
+				"Content-Type": "application/json",
+				...substitution(
+					respBody !== null && typeof respBody === "object"
+						? (respBody as { model?: unknown }).model
+						: undefined,
+				),
+			},
+		}),
+		anthropicResp.headers,
+	);
 }

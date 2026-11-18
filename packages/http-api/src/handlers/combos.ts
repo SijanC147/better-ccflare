@@ -1,6 +1,7 @@
-import { providerAcceptsClientModel } from "@better-ccflare/core";
+import { mapModelName, providerAcceptsClientModel } from "@better-ccflare/core";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import { BadRequest, Conflict, NotFound } from "@better-ccflare/errors";
+import { Logger } from "@better-ccflare/logger";
 import {
 	clearVisionCapability,
 	getModelCooldownUntil,
@@ -12,6 +13,8 @@ import {
 	MAX_MIN_RESET_REMAINING_MS,
 } from "@better-ccflare/types";
 import { errorResponse } from "../utils/http-error";
+
+const log = new Logger("CombosHandler");
 
 /**
  * A slot without a model (passthrough) only makes sense on a provider whose
@@ -130,18 +133,31 @@ export function createComboGetHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Combo not found"));
 			}
 
-			const slots = await dbOps.getComboSlots(id);
+			const [slots, accounts] = await Promise.all([
+				dbOps.getComboSlots(id),
+				dbOps.getAllAccounts(),
+			]);
+			const accountById = new Map(
+				accounts.map((account) => [account.id, account]),
+			);
 			// Decorates each slot with its live (account, model) cooldown deadline
 			// so the dashboard can show when a skipped slot returns. A passthrough
 			// slot's effective model is the request's, which is unknown here, so
-			// `s.model` is used as-is (an empty model simply never matches an
-			// entry). Read-only: the deadline is never persisted.
+			// its deadline stays null. Other slots use the mapped upstream id,
+			// matching the cooldown writer. The deadline is never persisted.
 			const data: ComboWithSlotsWithCooldown = {
 				...combo,
-				slots: slots.map((s) => ({
-					...s,
-					cooldown_until: getModelCooldownUntil(s.account_id, s.model),
-				})),
+				slots: slots.map((s) => {
+					const account = accountById.get(s.account_id);
+					const model =
+						s.model && account ? mapModelName(s.model, account) : s.model;
+					return {
+						...s,
+						cooldown_until: model
+							? getModelCooldownUntil(s.account_id, model)
+							: null,
+					};
+				}),
 			};
 			const response = {
 				success: true,
@@ -198,6 +214,25 @@ export function createComboUpdateHandler(dbOps: DatabaseOperations) {
 				success: true,
 				data: updated,
 			};
+
+			// Request history is tagged with the combo's NAME, not its id, so a
+			// rename must re-tag existing rows or the flow view loses the combo's
+			// totals. Best-effort: a failure here must never fail the rename.
+			if (fields.name !== undefined && fields.name !== combo.name) {
+				try {
+					const migrated = await dbOps.updateComboTags(
+						combo.name,
+						updated.name,
+					);
+					log.info(
+						`Re-tagged ${migrated} request(s) from combo "${combo.name}" to "${updated.name}"`,
+					);
+				} catch (error) {
+					log.error(
+						`Failed to re-tag requests for combo rename "${combo.name}" → "${updated.name}": ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
 
 			// Disabling or enabling a combo changes which (account, model) pairs
 			// this topology can route, and learned image refusals are cached per

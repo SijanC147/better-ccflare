@@ -4,6 +4,7 @@ import type { Account } from "@better-ccflare/types";
 import { GoogleAuth } from "google-auth-library";
 import type { ProviderRequestContext, TokenRefreshResult } from "../../types";
 import { getModelName } from "../../utils/model-mapping";
+import { applyAnthropicReasoningEffort } from "../../utils/reasoning-effort";
 import {
 	type AnthropicCompatibleConfig,
 	BaseAnthropicCompatibleProvider,
@@ -29,6 +30,11 @@ interface VertexRequestState {
  * (SB23-2457).
  */
 const requestState = new WeakMap<ProviderRequestContext, VertexRequestState>();
+
+/** Anthropic-format model assumed when the request body names none. */
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929";
+/** Vertex-format counterpart, used when no per-attempt state is available. */
+const DEFAULT_VERTEX_MODEL = "claude-sonnet-4-5@20250929";
 
 // Vertex AI configuration stored in custom_endpoint field
 export interface VertexAIConfig {
@@ -56,6 +62,32 @@ function convertToVertexAIModel(anthropicModel: string): string {
 	}
 
 	return vertexModel;
+}
+
+/**
+ * Resolve the models for one attempt: the client's model (or the default when
+ * the body names none), run through the account's mappings and then into
+ * Vertex's `@date` format.
+ *
+ * Pure, so `prepareRequest` (for the URL) and `transformRequestBody` (for the
+ * reasoning-effort clamp, when it has no state for the attempt) derive the
+ * same model. `skipMapping` is set on a model-fallback attempt, whose body
+ * already names a mapped model (SB23-3971).
+ */
+function resolveVertexModels(
+	bodyModel: string | undefined,
+	account: Account | undefined,
+	skipMapping: boolean,
+): VertexRequestState {
+	const originalModel = bodyModel || DEFAULT_ANTHROPIC_MODEL;
+	const transformedModel =
+		account?.model_mappings && !skipMapping
+			? getModelName(originalModel, account)
+			: originalModel;
+	return {
+		vertexModel: convertToVertexAIModel(transformedModel),
+		originalModel,
+	};
 }
 
 export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
@@ -164,26 +196,19 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 			// Extract model from request body
 			const bodyText = new TextDecoder().decode(requestBodyBuffer);
 			const body = JSON.parse(bodyText);
-			const originalModel = body.model || "claude-sonnet-4-5-20250929";
-
-			console.log(
-				`[Vertex AI] prepareRequest - extracted model: ${originalModel}`,
-			);
+			const bodyModel = typeof body.model === "string" ? body.model : undefined;
 
 			// Apply custom model mappings if configured. A model-fallback body
 			// already names a mapped model (SB23-3971): mapping it again can turn
 			// a fallback in the primary's family back into the primary.
-			let transformedModel = originalModel;
-			if (account?.model_mappings && !context.fallbackModel) {
-				transformedModel = getModelName(originalModel, account);
-				console.log(
-					`[Vertex AI] prepareRequest - after mapping: ${transformedModel}`,
-				);
-			}
-
-			// Convert to Vertex AI format
-			const vertexModel = convertToVertexAIModel(transformedModel);
-			console.log(`[Vertex AI] prepareRequest - Vertex format: ${vertexModel}`);
+			const { vertexModel, originalModel } = resolveVertexModels(
+				bodyModel,
+				account,
+				Boolean(context.fallbackModel),
+			);
+			console.log(
+				`[Vertex AI] prepareRequest - extracted model: ${originalModel}, Vertex format: ${vertexModel}`,
+			);
 
 			// For buildUrl and processResponse on this attempt only.
 			requestState.set(context, { vertexModel, originalModel });
@@ -193,6 +218,19 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 				error,
 			);
 		}
+	}
+
+	/**
+	 * The Vertex-formatted model this attempt chose, i.e. the one buildUrl puts
+	 * in the request path. body.model is removed before the request leaves, so
+	 * this is the only record of which model is actually called. Read from the
+	 * attempt's carrier, so a concurrent request cannot change it.
+	 */
+	getTargetModel(
+		_account: Account,
+		context?: ProviderRequestContext,
+	): string | undefined {
+		return context ? requestState.get(context)?.vertexModel : undefined;
 	}
 
 	/**
@@ -220,7 +258,7 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 		// Fallback to sonnet in Vertex AI format if not set
 		const model =
 			(context && requestState.get(context)?.vertexModel) ||
-			"claude-sonnet-4-5@20250929";
+			DEFAULT_VERTEX_MODEL;
 
 		console.log(`[Vertex AI] buildUrl called - using model: ${model}`);
 
@@ -245,17 +283,33 @@ export class VertexAIProvider extends BaseAnthropicCompatibleProvider {
 
 	/**
 	 * Transform request body for Vertex AI:
-	 * 1. Remove model from body (it goes in URL instead, already extracted by prepareRequest)
-	 * 2. Add anthropic_version field to body
+	 * 1. Rewrite the internal reasoning effort into Claude's native
+	 *    output_config.effort, clamped against the model Vertex actually calls
+	 * 2. Remove model from body (it goes in URL instead, already extracted by prepareRequest)
+	 * 3. Add anthropic_version field to body
 	 *
 	 * Note: prepareRequest is called before this to extract and store the model
 	 */
 	async transformRequestBody(
 		request: Request,
-		_account?: Account,
+		account?: Account,
+		context?: ProviderRequestContext,
 	): Promise<Request> {
 		try {
 			const body = await request.json();
+
+			// Clamp against the model in this attempt's URL. Without state for
+			// the attempt, derive it with the same pure helper prepareRequest
+			// uses, so the two cannot disagree.
+			const stateModel = context
+				? requestState.get(context)?.vertexModel
+				: undefined;
+			const bodyModel = typeof body.model === "string" ? body.model : undefined;
+			const clampModel =
+				stateModel ??
+				resolveVertexModels(bodyModel, account, Boolean(context?.fallbackModel))
+					.vertexModel;
+			applyAnthropicReasoningEffort(body, "output_config", clampModel);
 
 			console.log(
 				`[Vertex AI] transformRequestBody - removing model from body`,

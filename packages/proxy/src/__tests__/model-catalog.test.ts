@@ -18,6 +18,8 @@ import { makeProxyContext } from "./proxy-context-fixture";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-1",
 		name: "test-console-account",
 		// Console (API-key) accounts are the default-eligible provider for

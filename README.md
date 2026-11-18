@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/c859872f-ca5e-4f8b-b6a0-7cc7461fe62a
 ## Why better-ccflare?
 
 - **🚀 Zero Rate Limit Errors** - Automatically distribute requests across multiple accounts
-- **🤖 Multi-Provider Support** - Claude OAuth, Claude API console, Vertex AI, AWS Bedrock, NanoGPT, z.ai, Minimax, DeepSeek, Meta, OpenRouter, Kilo, Codex (OpenAI OAuth), xAI/Grok, Anthropic-compatible, and OpenAI-compatible providers
+- **🤖 Multi-Provider Support** - Claude OAuth, Claude API console, Vertex AI, AWS Bedrock, NanoGPT, z.ai, Minimax, DeepSeek, Meta, OpenRouter, Kilo, Codex (OpenAI OAuth), xAI/Grok, OpenCode Go, Sail Research, Mistral, Anthropic-compatible, and OpenAI-compatible providers
 - **🔒 OAuth Token Health** - Real-time monitoring of OAuth token status with automatic refresh and health indicators
 - **🔗 Custom API Endpoints** - Configure custom endpoints for Anthropic accounts for enterprise deployments
 - **☁️ OpenAI-Compatible Support** - Use OpenAI-compatible providers like OpenRouter, Together AI, and more with Claude API format
@@ -44,7 +44,7 @@ This project builds upon the excellent foundation of [snipeship/ccflare](https:/
 **🎯 Core Improvements (v3.0.0):**
 - **Enhanced Security** - Critical fixes for authentication bypass, command injection, and PKCE implementation
 - **OAuth Token Health Monitoring** - Real-time status indicators and automatic token refresh with 30-minute buffer
-- **Extended Provider Support** - AWS Bedrock, NanoGPT (with dynamic pricing), Minimax, DeepSeek, Meta, OpenRouter, Kilo, Codex (OpenAI OAuth), xAI/Grok, Anthropic-compatible, and OpenAI-compatible providers
+- **Extended Provider Support** - AWS Bedrock, NanoGPT (with dynamic pricing), Minimax, DeepSeek, Meta, OpenRouter, Kilo, Codex (OpenAI OAuth), xAI/Grok, OpenCode Go, Sail Research, Mistral, Anthropic-compatible, and OpenAI-compatible providers
 - **Simplified Load Balancing** - Removed tier system for O(1) priority-based selection
 - **Real-time Analytics Dashboard** - Beautiful web UI with fixed request history (no disappearing requests)
 - **Package Distribution** - Available via npm and bun for easy installation
@@ -238,6 +238,9 @@ BETTER_CCFLARE_GITHUB_TOKEN=           # Raises GitHub's rate limit for the rele
 BETTER_CCFLARE_ENABLE_SELF_UPDATE=     # Set to 1 to allow the dashboard to run `brew upgrade better-ccflare`; requires an API key and a Homebrew install
 BETTER_CCFLARE_UPSTREAM_MAINTAINER_TOKEN=  # Controller token that lets the dashboard request an upstream sync. Normally set as
                                        # `upstream_maintainer_token` in the config file; its presence is the only switch
+# Night Window (cheaper completion tier for enabled accounts during these hours)
+NIGHT_WINDOW=22:00-08:00               # HH:MM-HH:MM, may wrap past midnight (unset = off)
+NIGHT_TZ=Europe/Berlin                 # IANA zone the window is written in (default: UTC)
 ```
 
 **Security Notes**:
@@ -864,7 +867,9 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 - **Auto-fallback** - Automatically switch back to higher priority Claude OAuth accounts when their usage windows reset
 - **Auto-refresh** - Automatically start new usage windows when they reset
 - **Usage Window Alignment** - Sessions automatically align with Claude OAuth usage window resets for optimal resource utilization
-- **Usage Throttling** - Configurable monthly token/cost limits per account with peak-hours auto-pause for Zai accounts
+- **Usage Throttling** - Configurable monthly token/cost limits per account with peak-hours auto-pause for Zai and DeepSeek accounts, and per-model peak-hours skipping for TokenHarbor accounts (only the models its own listing marks as peak-priced are avoided; flat-priced models keep using the account, and combos reorder peak-priced slots behind flat-priced ones instead of dropping them)
+- **Per-API-Key Governance** - Restrict a key to selected accounts, models and providers, override its combo routing per model family, and cap its spend over calendar or rolling hour/day/week/month windows — blocking with a `429` or warning through Insights — plus a per-key usage page that separates API cost from plan value
+- **Served-Request Headers** - Every account-served response carries `x-better-ccflare-served-model` and `x-better-ccflare-served-account`, so a client can see which model and account a combo alias actually resolved to
 - **503 on Pool Exhaustion** - Returns HTTP 503 when all accounts are rate-limited or paused, enabling client-side retry logic
 - **Rate Limit Audit Trail** - Tracks when and why each account became rate-limited (`rate_limited_reason`, `rate_limited_at`)
 
@@ -878,7 +883,7 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 
 ### 🔎 Local Web Search
 - **Serve `web_search` yourself** - Claude Code's built-in web search sub-request is answered by your own search provider instead of Anthropic, so it is billed at your provider's price
-- **Provider fallback chain** - Tavily, Exa, Parallel, DeepSeek, Serper and Brave, tried in priority order with automatic cooldown on credentials/quota failures
+- **Provider fallback chain** - Tavily, Exa, Parallel, DeepSeek, Serper, Brave, Nimble and Linkup, tried in priority order with automatic cooldown on credentials/quota failures
 - **Safe fall-through** - if no provider can serve a search, the request goes upstream unchanged; a missed interception never breaks the tool
 - **Search traces** - every search is recorded (provider, result count, latency, status) and shown under **Search** in the dashboard
 - See [Web Search](docs/web-search.md)
@@ -920,6 +925,9 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 - **OpenRouter** - OpenRouter integration with native API support and model mapping
 - **xAI/Grok** - Native Grok CLI OAuth import/refresh with per-request token accounting and Grok Build credits usage polling via grok.com gRPC-web
 - **Kilo** - Kilo API integration with usage tracking
+- **OpenCode Go** - OpenCode's $10/month coding subscription; every text model on the plan is reachable through the Anthropic Messages API because OpenCode Console translates between API families. Authenticate with a Console API key. Usage is polled from OpenCode and shown as its rolling 5-hour, weekly and monthly windows
+- **Sail Research** - Open-model inference at `api.sailresearch.com` over the Anthropic Messages protocol (Bearer key); all Claude model families map to `deepseek-ai/DeepSeek-V4.1-Flash-1017` by default. Supports the account-level [night window](docs/configuration.md#night-window) to request Sail's cheaper `balanced` completion tier during off-hours
+- **Mistral** - Mistral AI's models via an `openai-compatible` account pointed at `api.mistral.ai` (or the EU/US regional hosts). Mistral-specific handling — reasoning rewrite into typed thinking chunks, up-front `cache_control` strip, and the `x-affinity` pod-affinity header that keeps a conversation's prompt cache on one inference pod — activates automatically on those exact hosts
 - **Anthropic-Compatible** - Custom Anthropic-compatible providers with pay-as-you-go model
 - **Ollama** - Local Ollama instance (v0.14.0+) via native Anthropic-compatible API at `/v1/messages`, no API key required
 - **OpenAI-Compatible** - OpenAI-compatible providers (Together AI, etc.) with Claude API format
@@ -1049,11 +1057,12 @@ Inspired by [snipeship/ccflare](https://github.com/snipeship/ccflare) - thanks f
 - [@vansh2408](https://github.com/vansh2408) — [#359](https://github.com/tombii/better-ccflare/pull/359)
 - [@aaapl](https://github.com/aaapl) — [#433](https://github.com/tombii/better-ccflare/pull/433)
 - [@mjonuschat](https://github.com/mjonuschat) — [#436](https://github.com/tombii/better-ccflare/pull/436)
-- [@anony253](https://github.com/anony253) — [#452](https://github.com/tombii/better-ccflare/pull/452), [#460](https://github.com/tombii/better-ccflare/pull/460)
+- [@anony253](https://github.com/anony253) — [#452](https://github.com/tombii/better-ccflare/pull/452), [#460](https://github.com/tombii/better-ccflare/pull/460), [#556](https://github.com/tombii/better-ccflare/pull/556)
 - [@valentinyanakiev](https://github.com/valentinyanakiev) — [#450](https://github.com/tombii/better-ccflare/pull/450), [#454](https://github.com/tombii/better-ccflare/pull/454), [#459](https://github.com/tombii/better-ccflare/pull/459), [#482](https://github.com/tombii/better-ccflare/pull/482)
 - [@flex-minhyeok](https://github.com/flex-minhyeok) — [#466](https://github.com/tombii/better-ccflare/pull/466)
 - [@omcdowell](https://github.com/omcdowell) — [#493](https://github.com/tombii/better-ccflare/pull/493)
-- [@chatoo2412](https://github.com/chatoo2412) — [#504](https://github.com/tombii/better-ccflare/pull/504)
+- [@chatoo2412](https://github.com/chatoo2412) — [#504](https://github.com/tombii/better-ccflare/pull/504), [#558](https://github.com/tombii/better-ccflare/pull/558)
+- [@csmithington](https://github.com/csmithington) — [#559](https://github.com/tombii/better-ccflare/pull/559)
 
 ## Contributing
 

@@ -12,6 +12,7 @@ import {
 	TokenSpeedAnalytics,
 	TokenUsageBreakdown,
 } from "./analytics";
+import { CostTrackingNotice } from "./CostTrackingNotice";
 
 export const AnalyticsTab = React.memo(() => {
 	const {
@@ -214,6 +215,7 @@ export const AnalyticsTab = React.memo(() => {
 
 	return (
 		<div className="space-y-6">
+			<CostTrackingNotice />
 			{/* Controls */}
 			<AnalyticsControls
 				timeRange={timeRange}

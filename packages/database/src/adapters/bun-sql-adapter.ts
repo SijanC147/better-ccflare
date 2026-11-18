@@ -5,13 +5,14 @@ import type { SQL } from "bun";
  * Convert SQLite-style `?` and `?N` placeholders to PostgreSQL-style `$N` placeholders.
  * Handles both `?` (sequential) and `?1`, `?2` (positional) styles.
  *
- * Two regions are copied through untouched:
+ * Three regions are copied through untouched:
  *
  *   1. Single-quoted string literals, so a `?` a caller meant as data is not
  *      renumbered. Escaped quotes (`''`) fall out of the toggle naturally: the
  *      first closes the literal and the second reopens it.
  *   2. `--` line comments, up to and including the end of the line.
- *   3. `/* *\/` block comments, up to and including the closing marker.
+ *   3. `/* *\/` block comments, up to and including the matching closing
+ *      marker. PostgreSQL nests block comments, so depth is tracked.
  *
  * Case 2 is not cosmetic. Before it existed, one apostrophe in a comment left
  * the scanner believing a string literal was open, so every `?` after it stayed
@@ -46,6 +47,36 @@ export function convertPlaceholders(sql: string): string {
 	for (let i = 0; i < sql.length; i++) {
 		const ch = sql[i];
 
+		// `--` runs to the end of the line. Copy it through verbatim.
+		if (!inString && ch === "-" && sql[i + 1] === "-") {
+			const end = sql.indexOf("\n", i);
+			const stop = end === -1 ? sql.length : end + 1;
+			result += sql.slice(i, stop);
+			i = stop - 1;
+			continue;
+		}
+
+		// `/* ... */` may nest in PostgreSQL, so track depth rather than
+		// stopping at the first `*/`.
+		if (!inString && ch === "/" && sql[i + 1] === "*") {
+			let j = i + 2;
+			let depth = 1;
+			while (j < sql.length && depth > 0) {
+				if (sql[j] === "/" && sql[j + 1] === "*") {
+					depth++;
+					j += 2;
+				} else if (sql[j] === "*" && sql[j + 1] === "/") {
+					depth--;
+					j += 2;
+				} else {
+					j++;
+				}
+			}
+			result += sql.slice(i, j);
+			i = j - 1;
+			continue;
+		}
+
 		// Toggle string literal tracking (handle escaped quotes '')
 		if (ch === "'") {
 			inString = !inString;
@@ -55,33 +86,6 @@ export function convertPlaceholders(sql: string): string {
 
 		if (inString) {
 			result += ch;
-			continue;
-		}
-
-		// Copy a `--` line comment through verbatim. This runs only outside a
-		// string literal, so a legitimate `'--'` operand is unaffected: the
-		// inString branch above has already consumed it.
-		if (ch === "-" && sql[i + 1] === "-") {
-			const nl = sql.indexOf("\n", i);
-			const end = nl === -1 ? sql.length : nl;
-			result += sql.slice(i, end);
-			i = end - 1;
-			continue;
-		}
-
-		// Copy a `/* */` block comment through verbatim. Like the `--` branch
-		// this runs only outside a string literal, so a `'/*'` operand is
-		// unaffected: the inString branch above has already consumed it.
-		//
-		// Nesting is not tracked. PostgreSQL nests block comments, so a nested
-		// one closes early here and leaves a stray `*/` in the statement. That
-		// fails loudly at Parse time rather than misnumbering a placeholder,
-		// which is the failure mode this function exists to prevent.
-		if (ch === "/" && sql[i + 1] === "*") {
-			const close = sql.indexOf("*/", i + 2);
-			const end = close === -1 ? sql.length : close + 2;
-			result += sql.slice(i, end);
-			i = end - 1;
 			continue;
 		}
 
@@ -403,6 +407,34 @@ export class BunSqlAdapter {
 		// count against getCleanupBatchSize() to detect the last batch would
 		// stop after one batch on every PostgreSQL install, silently.
 		return (result as unknown as { count: number }).count ?? 0;
+	}
+
+	/** Execute parameterized statements atomically on one connection. */
+	async atomicStatements(
+		statements: Array<{ sql: string; params: unknown[] }>,
+	): Promise<number[]> {
+		if (this.isSQLite && this.sqliteDb) {
+			const db = this.sqliteDb;
+			return db.transaction(() =>
+				statements.map((statement) => {
+					// biome-ignore lint/suspicious/noExplicitAny: SQLite binding types are checked by the driver
+					return db.prepare(statement.sql).run(...(statement.params as any[]))
+						.changes;
+				}),
+			)();
+		}
+		if (!this.sql) throw new Error("SQL client not available for transaction");
+		return this.sql.begin(async (tx) => {
+			const changes: number[] = [];
+			for (const statement of statements) {
+				const result = await tx.unsafe(
+					convertPlaceholders(statement.sql),
+					statement.params as never[],
+				);
+				changes.push((result as unknown as { count: number }).count ?? 0);
+			}
+			return changes;
+		});
 	}
 
 	/**

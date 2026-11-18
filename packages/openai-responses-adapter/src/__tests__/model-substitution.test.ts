@@ -7,6 +7,10 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	SERVED_ACCOUNT_HEADER,
+	SERVED_MODEL_HEADER,
+} from "@better-ccflare/core";
+import {
 	MODEL_SUBSTITUTED_HEADER,
 	matchOpenAIGatewayPath,
 	type OpenAIGateways,
@@ -389,6 +393,57 @@ describe("chat completions report a substituted model (SB23-2781)", () => {
 		expect(resp.headers.get(MODEL_SUBSTITUTED_HEADER)).toBe(
 			"standard -> claude-sonnet-4-5",
 		);
+	});
+});
+
+/** `proxyAnswering`, with upstream's served headers on every answer. */
+function proxyServing(
+	model: string,
+	options: { jsonForStream?: boolean } = {},
+): HandleProxyFn {
+	const inner = proxyAnswering(model, options);
+	return async (req, ...rest) => {
+		const resp = await inner(req, ...rest);
+		const headers = new Headers(resp.headers);
+		headers.set(SERVED_MODEL_HEADER, model);
+		headers.set(SERVED_ACCOUNT_HEADER, "acct-7");
+		return new Response(resp.body, { status: resp.status, headers });
+	};
+}
+
+// The 2026-11-18 sync brought upstream's served-model and serving-account
+// headers. /v1/responses copied them; the chat core built its own headers
+// and dropped them, on all three response sites (SB23-12667 review F1).
+describe("chat completions carry the served headers", () => {
+	for (const [label, stream, jsonForStream] of [
+		["JSON", false, false],
+		["SSE", true, false],
+		["SSE from a JSON answer", true, true],
+	] as const) {
+		test(`${label}: both served headers reach the client beside the substitution`, async () => {
+			const resp = await chat(
+				proxyServing("gpt-5.6-sol", { jsonForStream }),
+				"claude-opus-5-5",
+				stream,
+			);
+			expect(resp.status).toBe(200);
+			expect(resp.headers.get(SERVED_MODEL_HEADER)).toBe("gpt-5.6-sol");
+			expect(resp.headers.get(SERVED_ACCOUNT_HEADER)).toBe("acct-7");
+			expect(resp.headers.get(MODEL_SUBSTITUTED_HEADER)).toBe(
+				"claude-opus-5-5 -> gpt-5.6-sol",
+			);
+			await resp.text();
+		});
+	}
+
+	test("an answer without them sets neither", async () => {
+		const resp = await chat(
+			proxyAnswering("claude-opus-5-5"),
+			"claude-opus-5-5",
+		);
+		expect(resp.headers.get(SERVED_MODEL_HEADER)).toBeNull();
+		expect(resp.headers.get(SERVED_ACCOUNT_HEADER)).toBeNull();
+		await resp.text();
 	});
 });
 

@@ -5,11 +5,8 @@
  * Reference calendar (2026-09, UTC): 23 Wed, 26 Sat
  */
 import { beforeEach, describe, expect, it } from "bun:test";
-import {
-	getPeakHoursState,
-	isAnthropicPeakHour,
-} from "../auto-refresh-scheduler";
 import { resetChineseHolidayCache } from "../chinese-holidays";
+import { getPeakHoursState, isAnthropicPeakHour } from "../peak-hours";
 
 describe("isAnthropicPeakHour", () => {
 	// The window is 5am-11am in Los Angeles (SB23-1867, #93, SB23-8195), so

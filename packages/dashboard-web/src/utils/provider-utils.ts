@@ -110,7 +110,11 @@ export function providerShowsWeeklyUsage(provider: string): boolean {
 		// this entry AccountListItem passes showWeekly=false and both 5h
 		// and 7d windows collapse to a single fallback bar — the bug
 		// fixed in this branch.
-		provider === PROVIDER_NAMES.MINIMAX
+		provider === PROVIDER_NAMES.MINIMAX ||
+		// OpenCode Go has a rolling 5-hour allowance plus a weekly cap. Its
+		// fetcher normalises Go's rolling/weekly percent meters into the
+		// canonical five_hour/seven_day keys, so both windows render.
+		provider === PROVIDER_NAMES.OPENCODE_GO
 	);
 }
 
@@ -200,6 +204,62 @@ function isWithinPeakWindow(window: PeakWindow, ts: number): boolean {
 }
 
 /**
+ * Per-provider description of what the night window actually requests, keyed
+ * by the provider that registers a tier adapter on the server. Keep in sync
+ * with the `registerTierAdapter` calls under packages/providers/src.
+ */
+const NIGHT_WINDOW_TIERS: Record<string, string> = {
+	[PROVIDER_NAMES.SAILRESEARCH]: "balanced",
+};
+
+/**
+ * Check if a provider offers a cheaper completion tier the night window can
+ * request. Only these providers show the toggle.
+ */
+export function providerSupportsNightWindow(provider: string): boolean {
+	return provider in NIGHT_WINDOW_TIERS;
+}
+
+/**
+ * Tooltip for the night-window toggle: names the tier that will be requested.
+ * The window itself is server-side (NIGHT_WINDOW / NIGHT_TZ), so it is
+ * deliberately not restated here.
+ */
+export function nightWindowTitle(provider: string): string {
+	const tier = NIGHT_WINDOW_TIERS[provider];
+	const tierText = tier
+		? `the cheaper "${tier}" completion tier`
+		: "a cheaper completion tier";
+	return `During the configured night window (server NIGHT_WINDOW / NIGHT_TZ), request ${tierText} from this account instead of the default. No header is sent outside the window.`;
+}
+
+/**
+ * Tooltip for the peak-hours pause toggle.
+ *
+ * Zai and DeepSeek pause the whole account during a fixed window. TokenHarbor
+ * has no provider-wide window: only the models its listing marks as
+ * peak-priced are avoided, and only during their own peak window, so the
+ * account keeps serving the flat-priced models at the same moment.
+ */
+export function peakHoursPauseTitle(account: {
+	provider: string;
+	peakPricedModels?: string[] | null;
+}): string {
+	if (account.provider === "deepseek") {
+		return "Automatically pause this account during DeepSeek peak hours (01:00–04:00 and 06:00–10:00 UTC, weekdays, excluding Chinese public holidays)";
+	}
+	if (account.provider === "zai") {
+		return "Automatically pause this account during Zai peak hours (14:00–18:00 SGT)";
+	}
+	const models = account.peakPricedModels;
+	const which =
+		models && models.length > 0
+			? `the models this account lists as peak-priced (${models.join(", ")})`
+			: "the models this account lists as peak-priced";
+	return `Skip this account for ${which} during their peak hours, when those models cost full price. Flat-priced models keep using this account. The window and model list come from the account's own /v1/models listing.`;
+}
+
+/**
  * Check if a given timestamp (default: now) falls within Zai peak hours.
  * Zai peak hours are 14:00–18:00 Singapore time, Monday to Friday there.
  */
@@ -208,13 +268,34 @@ export function isZaiPeakHour(ts?: number): boolean {
 }
 
 /**
+ * Check if a given timestamp (default: now) falls within DeepSeek peak hours.
+ * DeepSeek peak hours are 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday,
+ * excluding Chinese public holidays.
+ *
+ * Keep in sync with isDeepseekPeakHour in packages/proxy/src/peak-hours.ts.
+ * This copy exists for RequestsTab's historical timestamps; live state comes
+ * from the server (`peakHours` on /api/accounts and on each request summary).
+ *
+ * Known gap: the holiday calendar is server-side only, so a request on a
+ * Chinese public holiday that falls on a weekday is shown as peak here. The
+ * server-computed `summary.peakHours` is preferred wherever it is available.
+ */
+export function isDeepseekPeakHour(ts?: number): boolean {
+	const d = new Date(ts ?? Date.now());
+	const day = d.getUTCDay();
+	if (day === 0 || day === 6) return false;
+	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
+	return (utcHour >= 1 && utcHour < 4) || (utcHour >= 6 && utcHour < 10);
+}
+
+/**
  * Check if a given timestamp (default: now) falls within Anthropic OAuth peak hours.
  * Peak hours are 5am–11am in Los Angeles, Monday–Friday there. That is 13:00–19:00
  * UTC while PDT is in effect and 14:00–20:00 UTC the rest of the year.
  * During these windows, 5-hour sessions consume a larger share of the weekly budget.
  * Keep in sync with isAnthropicPeakHour in
- * packages/proxy/src/auto-refresh-scheduler.ts. This copy exists for
- * RequestsTab's historical timestamps; live state comes from /api/accounts.
+ * packages/proxy/src/peak-hours.ts. This copy exists for RequestsTab's
+ * historical timestamps; live state comes from /api/accounts.
  */
 export function isAnthropicPeakHour(ts?: number): boolean {
 	return isWithinPeakWindow(ANTHROPIC_PEAK_WINDOW, ts ?? Date.now());

@@ -4,6 +4,10 @@ import {
 	validateNumber,
 } from "@better-ccflare/core";
 import { BadRequest, Forbidden, Unauthorized } from "@better-ccflare/errors";
+import {
+	getPeakHoursState,
+	getTokenHarborPeakState,
+} from "@better-ccflare/proxy";
 import { API_ROUTES } from "@better-ccflare/types/api-catalog";
 import {
 	createAccountAddHandler,
@@ -15,8 +19,10 @@ import {
 	createAccountForceResetRateLimitHandler,
 	createAccountModelFallbacksUpdateHandler,
 	createAccountModelMappingsUpdateHandler,
+	createAccountNightWindowHandler,
 	createAccountPauseHandler,
 	createAccountPeakHoursPauseHandler,
+	createAccountPlanPriceHandler,
 	createAccountPriorityUpdateHandler,
 	createAccountProviderSettingsUpdateHandler,
 	createAccountRefreshUsageHandler,
@@ -62,14 +68,23 @@ import {
 } from "./handlers/alerts";
 import { createAnalyticsHandler } from "./handlers/analytics";
 import { createAnalyticsModelsHandler } from "./handlers/analytics-models";
+import { createApiKeyUsageHandler } from "./handlers/api-key-usage";
 import {
 	createApiKeyDeleteHandler,
 	createApiKeyDisableHandler,
 	createApiKeyEnableHandler,
+	createApiKeyGetHandler,
+	createApiKeyLimitsGetHandler,
+	createApiKeyLimitsPutHandler,
+	createApiKeyReloadSpendHandler,
+	createApiKeyResetSpendHandler,
+	createApiKeyRoutingUpdateHandler,
 	createApiKeysGenerateHandler,
 	createApiKeysListHandler,
 	createApiKeysStatsHandler,
+	createApiKeyUpdateRestrictionsHandler,
 	createApiKeyUpdateRoleHandler,
+	createApiKeyUpdateSpendLimitHandler,
 } from "./handlers/api-keys";
 import { createClaudeCodeEndpointHandlers } from "./handlers/claude-code-endpoints";
 import {
@@ -85,6 +100,7 @@ import {
 	createSlotReorderHandler,
 	createSlotUpdateHandler,
 } from "./handlers/combos";
+import { createComboFlowHandler } from "./handlers/combos-flow";
 import { createConfigHandlers } from "./handlers/config";
 import { createGithubTokenConfigHandlers } from "./handlers/config-github-token";
 import { createOpenObserveConfigHandlers } from "./handlers/config-openobserve";
@@ -106,6 +122,7 @@ import {
 import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
+import { modelPricesHandler } from "./handlers/model-prices";
 import {
 	createModelsHandler,
 	createModelsPreviewHandler,
@@ -142,7 +159,10 @@ import {
 	createRequestsSummaryHandler,
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
-import { createRoutingObservationsHandler } from "./handlers/routing-observations";
+import {
+	createRoutingObservationsHandler,
+	getRoutingObservations,
+} from "./handlers/routing-observations";
 import { createSearchProviderHandlers } from "./handlers/search-providers";
 import { createServiceStatusHandler } from "./handlers/service-status";
 import { createSessionAccountHandler } from "./handlers/sessions";
@@ -273,6 +293,13 @@ export class APIRouter {
 		const _accountRemoveHandler = createAccountRemoveHandler(dbOps);
 		const requestsSummaryHandler = createRequestsSummaryHandler(
 			dbOps.getAdapter(),
+			// Provider-wide windows (zai/deepseek/anthropic) first; TokenHarbor
+			// has no provider-level window, so its state is resolved per account
+			// and per model from that account's cached listing. A request whose
+			// account has no listing stays null, exactly as before.
+			(provider, ts, accountId, model) =>
+				getPeakHoursState(provider, ts) ??
+				(accountId ? getTokenHarborPeakState(accountId, model, ts) : null),
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(
@@ -574,6 +601,12 @@ export class APIRouter {
 		this.handlers.set("POST:/api/config/provider-model-defaults", (req) =>
 			configHandlers.setProviderModelDefaults(req),
 		);
+		this.handlers.set("GET:/api/config/reasoning-efforts", () =>
+			configHandlers.getReasoningEfforts(),
+		);
+		this.handlers.set("POST:/api/config/reasoning-efforts", (req) =>
+			configHandlers.setReasoningEfforts(req),
+		);
 		this.handlers.set("GET:/api/config/model-capacity-routing", () =>
 			configHandlers.getModelCapacityRouting(),
 		);
@@ -606,6 +639,18 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/admin/restart", (req) =>
 			adminRestartHandler(req),
+		);
+		this.handlers.set("GET:/api/config/cost-tracking", () =>
+			configHandlers.getCostTracking(),
+		);
+		this.handlers.set("POST:/api/config/cost-tracking", (req) =>
+			configHandlers.setCostTracking(req),
+		);
+		this.handlers.set("PUT:/api/config/cost-tracking", (req) =>
+			configHandlers.setCostTracking(req),
+		);
+		this.handlers.set("POST:/api/config/cost-tracking/reload", () =>
+			configHandlers.reloadCostTracking(),
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
@@ -776,6 +821,7 @@ export class APIRouter {
 		);
 
 		// Model catalog routes
+		this.handlers.set("GET:/api/model-prices", () => modelPricesHandler());
 		const modelsHandler = createModelsHandler(this.context);
 		const modelsRefreshHandler = createModelsRefreshHandler(this.context);
 		const modelsPreviewHandler = createModelsPreviewHandler();
@@ -861,6 +907,25 @@ export class APIRouter {
 		// 401 would tell the client (RFC 9110). 401 stays for a missing or
 		// invalid key, above. The proxy path in apps/server already answers
 		// 403 for the same refusal (SB23-3746).
+		const keyActionParts = path.split("/");
+		const isSpendResetAction =
+			method === "POST" &&
+			keyActionParts.length === 5 &&
+			keyActionParts[1] === "api" &&
+			keyActionParts[2] === "api-keys" &&
+			(keyActionParts[4] === "reset-spend" ||
+				keyActionParts[4] === "reload-spend");
+		if (
+			isSpendResetAction &&
+			authResult.apiKeyId &&
+			authResult.role !== "admin"
+		)
+			return errorResponse(
+				Forbidden(
+					`Only admins can ${keyActionParts[4] === "reload-spend" ? "reload" : "reset"} API key spend`,
+				),
+			);
+
 		if (authResult.apiKey) {
 			const authzResult = await this.authService.authorizeEndpoint(
 				authResult.apiKey,
@@ -887,6 +952,13 @@ export class APIRouter {
 				);
 				return jsonResponse({ token });
 			})(req, url);
+		}
+
+		if (path === "/api/auth/session" && method === "GET") {
+			return jsonResponse({
+				canManage: !authResult.apiKeyId || authResult.role === "admin",
+				apiKeyId: authResult.apiKeyId ?? null,
+			});
 		}
 
 		// Check for exact match
@@ -1021,13 +1093,23 @@ export class APIRouter {
 				)(req, url);
 			}
 
-			// Account peak-hours-pause toggle (Zai accounts only)
+			// Account peak-hours-pause toggle (Zai, DeepSeek and TokenHarbor)
 			if (path.endsWith("/peak-hours-pause") && method === "POST") {
 				const peakHoursPauseHandler = createAccountPeakHoursPauseHandler(
 					this.context.dbOps,
 				);
 				return await this.wrapHandler((req) =>
 					peakHoursPauseHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Account night-window toggle (provider-agnostic)
+			if (path.endsWith("/night-window") && method === "POST") {
+				const nightWindowHandler = createAccountNightWindowHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					nightWindowHandler(req, accountId),
 				)(req, url);
 			}
 
@@ -1038,6 +1120,16 @@ export class APIRouter {
 				);
 				return await this.wrapHandler((req) =>
 					billingTypeHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Account monthly plan price
+			if (path.endsWith("/plan-price") && method === "POST") {
+				const planPriceHandler = createAccountPlanPriceHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					planPriceHandler(req, accountId),
 				)(req, url);
 			}
 
@@ -1157,6 +1249,58 @@ export class APIRouter {
 		if (path.startsWith("/api/api-keys/")) {
 			const parts = path.split("/");
 			const keyIdOrName = decodeURIComponent(parts[3]); // Decode URL-encoded IDs/names
+			if (parts.length === 5 && method === "POST" && parts[4] === "reset-spend")
+				return await createApiKeyResetSpendHandler(this.context.dbOps)(
+					keyIdOrName,
+					authResult.apiKeyName
+						? `API key ${authResult.apiKeyName} (${authResult.apiKeyId})`
+						: "dashboard session",
+				);
+			if (
+				parts.length === 5 &&
+				method === "POST" &&
+				parts[4] === "reload-spend"
+			)
+				return await createApiKeyReloadSpendHandler(this.context.dbOps)(
+					keyIdOrName,
+				);
+			if (parts.length === 4 && method === "GET") {
+				return await createApiKeyGetHandler(this.context.dbOps)(keyIdOrName);
+			}
+
+			// The handler verifies ownership after resolving either an id or name.
+			if (path.endsWith("/usage") && method === "GET") {
+				const usageHandler = createApiKeyUsageHandler(this.context);
+				return await this.wrapHandler((_req, reqUrl) =>
+					usageHandler(keyIdOrName, reqUrl.searchParams, authResult),
+				)(req, url);
+			}
+
+			if (
+				(parts.length === 5 &&
+					parts[4] === "limits" &&
+					(method === "GET" || method === "PUT")) ||
+				(parts.length === 5 && parts[4] === "routing" && method === "PATCH")
+			) {
+				if (authResult.apiKeyId && authResult.role !== "admin") {
+					return errorResponse(
+						Forbidden("Only admin keys can manage API key limits and routing"),
+					);
+				}
+				if (parts[4] === "routing")
+					return await createApiKeyRoutingUpdateHandler(this.context.dbOps)(
+						req,
+						keyIdOrName,
+					);
+				if (method === "PUT")
+					return await createApiKeyLimitsPutHandler(this.context.dbOps)(
+						req,
+						keyIdOrName,
+					);
+				return await createApiKeyLimitsGetHandler(this.context.dbOps)(
+					keyIdOrName,
+				);
+			}
 
 			// API key role update - Only admin keys can update roles
 			if (path.endsWith("/role") && method === "PATCH") {
@@ -1173,6 +1317,44 @@ export class APIRouter {
 				);
 				return await this.wrapHandler((req) =>
 					updateRoleHandler(req, keyIdOrName, authResult.apiKeyId),
+				)(req, url);
+			}
+
+			// API key restrictions update - Only admin keys can change which
+			// accounts, models and providers another key may use. Same gate,
+			// and the same 403, as the role update above (SB23-3746).
+			if (path.endsWith("/restrictions") && method === "PATCH") {
+				if (authResult.role !== "admin") {
+					return errorResponse(
+						Forbidden(
+							"Only admin keys can update API key restrictions. Your key has api-only access.",
+						),
+					);
+				}
+				const updateRestrictionsHandler = createApiKeyUpdateRestrictionsHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					updateRestrictionsHandler(req, keyIdOrName),
+				)(req, url);
+			}
+
+			// API key spend limit update - Only admin keys can set or clear
+			// another key's budget. Same gate, and the same 403, as the role and
+			// restrictions routes above (SB23-3746).
+			if (path.endsWith("/limit") && method === "PATCH") {
+				if (authResult.role !== "admin") {
+					return errorResponse(
+						Forbidden(
+							"Only admin keys can update API key spend limits. Your key has api-only access.",
+						),
+					);
+				}
+				const updateSpendLimitHandler = createApiKeyUpdateSpendLimitHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					updateSpendLimitHandler(req, keyIdOrName),
 				)(req, url);
 			}
 
@@ -1201,6 +1383,22 @@ export class APIRouter {
 					url,
 				);
 			}
+		}
+
+		// GET /api/combos/flow — must precede the /api/combos/:id handler below,
+		// which would otherwise read "flow" as a combo id.
+		if (path === "/api/combos/flow" && method === "GET") {
+			const flowHandler = createComboFlowHandler(
+				this.context.dbOps,
+				getRoutingObservations,
+				{
+					getRoutingFlags: () => ({
+						combosEnabled: this.context.config.getCombosEnabled(),
+						forceAccountModel: this.context.config.getForceAccountModel(),
+					}),
+				},
+			);
+			return await this.wrapHandler(() => flowHandler())(req, url);
 		}
 
 		// Check for dynamic combo endpoints

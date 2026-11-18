@@ -37,6 +37,8 @@ afterAll(() => {
 
 function makeAccount(id: string, overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id,
 		name: "test-account",
 		provider: "fake-refresh-provider",

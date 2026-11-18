@@ -1,4 +1,9 @@
-import { requestEvents, TIME_CONSTANTS } from "@better-ccflare/core";
+import {
+	requestEvents,
+	SERVED_ACCOUNT_HEADER,
+	SERVED_MODEL_HEADER,
+	TIME_CONSTANTS,
+} from "@better-ccflare/core";
 import {
 	sanitizeRequestHeaders,
 	sanitizeResponseHeaders,
@@ -83,6 +88,84 @@ function withModelRewriteHeader(
 	return result;
 }
 
+const HEADER_UNRESERVED_BYTES = new Set([
+	// A-Z
+	...Array.from({ length: 26 }, (_, i) => 0x41 + i),
+	// a-z
+	...Array.from({ length: 26 }, (_, i) => 0x61 + i),
+	// 0-9
+	...Array.from({ length: 10 }, (_, i) => 0x30 + i),
+	// - _ . ~
+	0x2d,
+	0x5f,
+	0x2e,
+	0x7e,
+]);
+
+/**
+ * Header values must be visible ASCII. An account name (operator-chosen) or a
+ * model id outside that range would make `Headers.set` throw and take the
+ * whole response down with it, so such a value is percent-encoded instead.
+ *
+ * Encoding goes through `TextEncoder` rather than `encodeURIComponent` because
+ * the served model is client-controlled: `encodeURIComponent` throws URIError
+ * on a lone surrogate (`"m\ud800del"`), and that throw escaped this helper and
+ * turned the response into a 500. TextEncoder substitutes U+FFFD instead, so
+ * this can never throw. Bytes are escaped one at a time against RFC 3986
+ * unreserved characters; `é` becomes `%C3%A9`.
+ */
+function toServedHeaderValue(value: string): string {
+	const trimmed = value.trim();
+	if (/^[\x20-\x7e]*$/.test(trimmed)) return trimmed;
+
+	const bytes = new TextEncoder().encode(trimmed);
+	let encoded = "";
+	for (const byte of bytes) {
+		encoded += HEADER_UNRESERVED_BYTES.has(byte)
+			? String.fromCharCode(byte)
+			: `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+	}
+	return encoded;
+}
+
+/**
+ * Returns the response with the served-model / served-account headers set to
+ * the account and upstream model of the attempt that produced it. Any copy an
+ * upstream sent (a chained better-ccflare, say) is overwritten: only this
+ * process knows which of its own accounts answered. The model header is
+ * omitted when the outgoing model is unknown rather than guessed. Account
+ * names only — the account id and credentials never reach a header.
+ */
+export function withServedResponseHeaders(
+	response: Response,
+	accountName: string,
+	servedModel: string | null,
+): Response {
+	const apply = (headers: Headers) => {
+		headers.set(SERVED_ACCOUNT_HEADER, toServedHeaderValue(accountName));
+		if (servedModel) {
+			headers.set(SERVED_MODEL_HEADER, toServedHeaderValue(servedModel));
+		} else {
+			headers.delete(SERVED_MODEL_HEADER);
+		}
+	};
+	// In place when the headers are mutable (every Response this proxy builds
+	// or receives from fetch): re-wrapping would move the body into a new
+	// Response and strand any reference a caller still holds to this one.
+	try {
+		apply(response.headers);
+		return response;
+	} catch {
+		const headers = new Headers(response.headers);
+		apply(headers);
+		return new Response(response.body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
+	}
+}
+
 /**
  * Check if a response should be considered successful/expected
  * Treats certain well-known paths that return 404 as expected
@@ -98,6 +181,7 @@ function isExpectedResponse(path: string, response: Response): boolean {
 }
 
 export interface ResponseHandlerOptions {
+	costTrackingEpoch?: number | null | undefined;
 	requestId: string;
 	method: string;
 	path: string;
@@ -122,6 +206,7 @@ export interface ResponseHandlerOptions {
 	apiKeyName?: string | null | undefined;
 	comboName?: string | null | undefined;
 	originalModel?: string | null | undefined;
+	limitModel?: string | null | undefined;
 	appliedModel?: string | null | undefined;
 	/**
 	 * Controller whose signal was merged into the upstream fetch's
@@ -163,6 +248,7 @@ export async function forwardToClient(
 		apiKeyName,
 		comboName,
 		originalModel,
+		limitModel,
 		appliedModel,
 		drainAbort,
 	} = options;
@@ -240,6 +326,7 @@ export async function forwardToClient(
 	// Send START message immediately if not filtered
 	if (shouldProcessRequest) {
 		const startMessage: StartMessage = {
+			costTrackingEpoch: options.costTrackingEpoch,
 			type: "start",
 			messageId: crypto.randomUUID(),
 			requestId,
@@ -278,6 +365,7 @@ export async function forwardToClient(
 			accountName: account?.name ?? null,
 			agentUsed: agentUsed || null,
 			clientSessionId: clientSessionId ?? null,
+			limitModel: limitModel ?? null,
 			// Persist the pair only for an actual swap — an agent-detected but
 			// unmodified request would otherwise record two equal values that
 			// downstream cannot distinguish from a real rewrite.

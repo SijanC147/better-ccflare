@@ -14,6 +14,8 @@ import type { ProxyContext } from "../proxy-types";
 // Anthropic account fixture — the out_of_credits header is Anthropic-specific.
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-anthropic-1",
 		name: "claude-pro",
 		provider: "anthropic",

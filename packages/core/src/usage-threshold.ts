@@ -633,10 +633,10 @@ export function parseUsagePauseThreshold(value: unknown): number | null {
  * `readUsageUtilization` now understands anthropic and codex (the shared
  * flat `five_hour`/`seven_day`/`limits[]` shape), zai, nanogpt and xai (their
  * own dedicated payload shapes; xai's single `credits` window is the weekly
- * slot, see {@link usagePauseWindowsForProvider}), and minimax (whose fetcher
+ * slot, see {@link usagePauseWindowsForProvider}), minimax (whose fetcher
  * already normalizes its response to the same flat shape before it reaches
  * `readUsageUtilization`, so it rides the anthropic/codex path with no
- * dedicated branch).
+ * dedicated branch), and opencode-go (same flat shape as minimax).
  *
  * Two providers remain excluded, for different reasons:
  *   - `kilo` reports a dollar-credits balance, not a percentage window —
@@ -660,6 +660,7 @@ export function supportsUsagePauseThreshold(
 		provider === "xai" ||
 		provider === "zai" ||
 		provider === "nanogpt" ||
-		provider === "minimax"
+		provider === "minimax" ||
+		provider === "opencode-go"
 	);
 }

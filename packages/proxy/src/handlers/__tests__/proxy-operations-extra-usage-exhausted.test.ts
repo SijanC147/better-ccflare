@@ -8,6 +8,8 @@ import type { ProxyContext } from "../proxy-types";
 // Anthropic account fixture — the extra_usage_exhausted body is Anthropic-specific.
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-anthropic-1",
 		name: "claude-pro",
 		provider: "anthropic",
@@ -327,13 +329,18 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 		expect(args[24]).toBe("[12,34]");
 		expect(args[25]).toBe("auto");
 		expect(args[26]).toBe("true");
-		// 0-indexed 29 and 30 are the inbound marker (SB23-2727), after
-		// projectId and worktreePath, which this audit path does not resolve.
+		// 27-29 are upstream's timestamp, limitModel and spendRecordedAt (the
+		// 2026-11 sync), unset on this audit row. 32 and 33 are the inbound
+		// marker (SB23-2727), after projectId and worktreePath, which this
+		// audit path does not resolve.
 		expect(args[27]).toBeUndefined();
 		expect(args[28]).toBeUndefined();
-		expect(args[29]).toBe("openai-chat");
-		expect(args[30]).toBe("work");
-		expect(args).toHaveLength(31);
+		expect(args[29]).toBeUndefined();
+		expect(args[30]).toBeUndefined();
+		expect(args[31]).toBeUndefined();
+		expect(args[32]).toBe("openai-chat");
+		expect(args[33]).toBe("work");
+		expect(args).toHaveLength(34);
 	});
 
 	it("persists null gateway hint fields when the request carries none of the headers", async () => {
@@ -363,7 +370,7 @@ describe("proxyWithAccount — extra_usage_exhausted (issue #293)", () => {
 		expect(args[24]).toBeNull();
 		expect(args[25]).toBeNull();
 		expect(args[26]).toBeNull();
-		expect(args[29]).toBeNull();
-		expect(args[30]).toBeNull();
+		expect(args[32]).toBeNull();
+		expect(args[33]).toBeNull();
 	});
 });

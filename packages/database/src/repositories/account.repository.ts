@@ -48,6 +48,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 				COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 				COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
+				night_window_enabled,
 				usage_pause_five_hour_threshold,
 				usage_pause_weekly_threshold,
 				COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
@@ -60,6 +61,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				cross_region_mode,
 				model_fallbacks,
 				billing_type,
+				plan_monthly_usd,
 				pause_reason,
 				refresh_token_issued_at,
 				last_manual_reauth_at,
@@ -86,6 +88,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 				COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 				COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
+				night_window_enabled,
 				usage_pause_five_hour_threshold,
 				usage_pause_weekly_threshold,
 				COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
@@ -98,6 +101,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				cross_region_mode,
 				model_fallbacks,
 				billing_type,
+				plan_monthly_usd,
 				pause_reason,
 				refresh_token_issued_at,
 				last_manual_reauth_at,
@@ -231,11 +235,26 @@ export class AccountRepository extends BaseRepository<Account> {
 		return changes > 0;
 	}
 
+	/**
+	 * Record one request against an account.
+	 *
+	 * `startedAt` is when the request started. Callers should pass it: the
+	 * write runs after the response, so stamping `session_start` with the write
+	 * time puts the boundary a little AFTER the opening request's own row
+	 * timestamp. `getSessionStats` counts rows with `timestamp >= session_start`,
+	 * which would then omit the request that opened the session. It also keeps
+	 * the expiry decision anchored to when the request actually happened.
+	 *
+	 * `last_used` deliberately keeps the write time: it is a display/tiebreak
+	 * value, and anchoring it to request start would let an in-flight long
+	 * request finishing late move it BACKWARDS past a newer request.
+	 */
 	async incrementUsage(
 		accountId: string,
 		sessionDurationMs: number,
+		startedAt?: number,
 	): Promise<void> {
-		const now = Date.now();
+		const sessionAt = startedAt ?? Date.now();
 		await this.run(
 			`
 			UPDATE accounts
@@ -247,13 +266,30 @@ export class AccountRepository extends BaseRepository<Account> {
 					WHEN session_start IS NULL OR ? - COALESCE(session_start, 0) >= ? THEN ?
 					ELSE session_start
 				END,
+				-- Only count this request in the session it belongs to. A request
+				-- that started before the current session opened (an in-flight
+				-- request finishing late, or writes landing out of order) is
+				-- excluded by the getSessionStats window (timestamp >=
+				-- session_start), so counting it here would make the request
+				-- count disagree with the token/cost totals computed from that
+				-- same window.
 				session_request_count = CASE
 					WHEN session_start IS NULL OR ? - COALESCE(session_start, 0) >= ? THEN 1
-					ELSE COALESCE(session_request_count, 0) + 1
+					WHEN ? >= COALESCE(session_start, 0) THEN COALESCE(session_request_count, 0) + 1
+					ELSE COALESCE(session_request_count, 0)
 				END
 			WHERE id = ?
 		`,
-			[now, now, sessionDurationMs, now, now, sessionDurationMs, accountId],
+			[
+				Date.now(),
+				sessionAt,
+				sessionDurationMs,
+				sessionAt,
+				sessionAt,
+				sessionDurationMs,
+				sessionAt,
+				accountId,
+			],
 		);
 	}
 
@@ -564,6 +600,20 @@ export class AccountRepository extends BaseRepository<Account> {
 	): Promise<void> {
 		await this.run(`UPDATE accounts SET billing_type = ? WHERE id = ?`, [
 			billingType,
+			accountId,
+		]);
+	}
+
+	/**
+	 * Set the monthly subscription price (USD) for an account.
+	 * `null` clears it back to unknown / not a paid plan.
+	 */
+	async setPlanMonthlyUsd(
+		accountId: string,
+		planMonthlyUsd: number | null,
+	): Promise<void> {
+		await this.run(`UPDATE accounts SET plan_monthly_usd = ? WHERE id = ?`, [
+			planMonthlyUsd,
 			accountId,
 		]);
 	}

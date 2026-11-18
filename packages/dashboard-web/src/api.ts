@@ -10,11 +10,13 @@ import type {
 	AgentWorkspace,
 	AnalyticsResponse,
 	AnomalyInsightsResponse,
+	ApiKeyUsageResponse,
 	CacheInsightsResponse,
 	ClaudeCodeEndpointConfig,
 	ClaudeCodeEndpointListing,
 	Combo,
 	ComboFamilyAssignment,
+	ComboFlowResponse,
 	ComboSlot,
 	ComboWithSlotsWithCooldown,
 	ContextInsightsResponse,
@@ -48,6 +50,13 @@ export type RequestSummary = RequestResponse;
 export type {
 	Agent,
 	AgentWorkspace,
+	ComboFlowCombo,
+	ComboFlowFamily,
+	ComboFlowPairing,
+	ComboFlowRecentRequest,
+	ComboFlowResponse,
+	ComboFlowSlot,
+	ComboFlowStats,
 	Project,
 	ProjectWithChildren,
 	RequestPayload,
@@ -335,6 +344,42 @@ class API extends HttpClient {
 		},
 	};
 
+	/**
+	 * Redact credential-bearing fields from a request body before it is logged.
+	 * The debug log goes to console.debug, which people paste into bug reports,
+	 * so no account key, token or OAuth code may reach it. Works recursively so
+	 * nested objects (e.g. `{ modelMappings, auth: { apiKey } }`) are covered.
+	 */
+	private static redactForLog(value: unknown): unknown {
+		const SENSITIVE_KEYS = new Set([
+			"apikey",
+			"api_key",
+			"token",
+			"accesstoken",
+			"access_token",
+			"refreshtoken",
+			"refresh_token",
+			"secret",
+			"password",
+			"code",
+			"authorization",
+		]);
+		if (Array.isArray(value)) {
+			return value.map((item) => API.redactForLog(item));
+		}
+		if (value && typeof value === "object") {
+			return Object.fromEntries(
+				Object.entries(value as Record<string, unknown>).map(([key, v]) => [
+					key,
+					SENSITIVE_KEYS.has(key.toLowerCase())
+						? "[REDACTED]"
+						: API.redactForLog(v),
+				]),
+			);
+		}
+		return value;
+	}
+
 	constructor() {
 		super({
 			baseUrl: "",
@@ -571,6 +616,8 @@ class API extends HttpClient {
 			| "zai"
 			| "minimax"
 			| "deepseek"
+			| "sailresearch"
+			| "opencode-go"
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
@@ -590,7 +637,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/oauth/init";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ authUrl: string; sessionId: string }>(
@@ -620,7 +669,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/oauth/callback";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{
@@ -653,7 +704,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/zai";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -686,7 +739,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/openai-compatible";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -721,7 +776,8 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/models/preview";
 
-		this.logger.debug(`→ POST ${url}`, { data: { endpoint: data.endpoint } });
+		// Endpoint only: the request also carries `apiKey`.
+		this.logger.debug(`→ POST ${url}`, { endpoint: data.endpoint });
 
 		try {
 			const response = await this.post<{
@@ -755,7 +811,9 @@ class API extends HttpClient {
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/nanogpt";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
 				url,
@@ -785,7 +843,9 @@ class API extends HttpClient {
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/alibaba-coding-plan";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
 				url,
@@ -815,7 +875,9 @@ class API extends HttpClient {
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/kilo";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
 				url,
@@ -845,7 +907,9 @@ class API extends HttpClient {
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/openrouter";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
 				url,
@@ -875,7 +939,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/minimax";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -907,13 +973,101 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/deepseek";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
 				url,
 				data,
 			);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Sail Research has no dedicated POST /api/accounts/sailresearch route; the
+	 * generic POST /api/accounts handler accepts any known provider (and the
+	 * `mode` alias), stores the key in api_key and leaves the endpoint at the
+	 * provider's fixed default.
+	 */
+	async addSailResearchAccount(data: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}): Promise<{ message: string; success: boolean; accountId: string }> {
+		const startTime = Date.now();
+		const url = "/api/accounts";
+
+		// Never log the key: this goes to console.debug, which people paste
+		// into bug reports.
+		this.logger.debug(`→ POST ${url}`, {
+			name: data.name,
+			priority: data.priority,
+		});
+
+		try {
+			const response = await this.post<{
+				message: string;
+				success: boolean;
+				accountId: string;
+			}>(url, { ...data, mode: "sailresearch" });
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * OpenCode Go has no dedicated POST /api/accounts/opencode-go route; the
+	 * generic POST /api/accounts handler accepts the `opencode-go` mode alias,
+	 * stores the key in api_key and leaves the endpoint at the provider's
+	 * fixed default (https://opencode.ai/inference/go/anthropic).
+	 */
+	async addOpencodeGoAccount(data: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}): Promise<{ message: string; success: boolean; accountId: string }> {
+		const startTime = Date.now();
+		const url = "/api/accounts";
+
+		// Never log the key: this goes to console.debug, which people paste
+		// into bug reports.
+		this.logger.debug(`→ POST ${url}`, {
+			name: data.name,
+			priority: data.priority,
+		});
+
+		try {
+			const response = await this.post<{
+				message: string;
+				success: boolean;
+				accountId: string;
+			}>(url, { ...data, mode: "opencode-go" });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
 			return response;
@@ -939,7 +1093,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/vertex-ai";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -997,7 +1153,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/bedrock";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -1030,7 +1188,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/anthropic-compatible";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -1063,7 +1223,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/meta";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -1095,7 +1257,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/ollama";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -1127,7 +1291,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/accounts/ollama-cloud";
 
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 
 		try {
 			const response = await this.post<{ message: string; account: Account }>(
@@ -1484,6 +1650,25 @@ class API extends HttpClient {
 		);
 	}
 
+	/**
+	 * Per-key usage for the monitoring page. `keyIdOrName` is sent as the id;
+	 * the endpoint accepts either, but the id is what the dropdown holds and
+	 * what the requests table is indexed on.
+	 */
+	async getApiKeyUsage(
+		keyIdOrName: string,
+		range = "24h",
+		from?: string,
+		to?: string,
+	): Promise<ApiKeyUsageResponse> {
+		const params = new URLSearchParams({ range });
+		if (from) params.set("from", from);
+		if (to) params.set("to", to);
+		return this.get<ApiKeyUsageResponse>(
+			`/api/api-keys/${encodeURIComponent(keyIdOrName)}/usage?${params.toString()}`,
+		);
+	}
+
 	async getContextInsights(range = "24h"): Promise<ContextInsightsResponse> {
 		const params = new URLSearchParams({ range });
 
@@ -1807,6 +1992,32 @@ class API extends HttpClient {
 		}
 	}
 
+	async updateAccountPlanPrice(
+		accountId: string,
+		planMonthlyUsd: number | null,
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/plan-price`;
+
+		this.logger.debug(`→ POST ${url}`, { planMonthlyUsd });
+
+		try {
+			await this.post(url, { planMonthlyUsd });
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async updateAccountAutoPauseOnOverage(
 		accountId: string,
 		enabled: boolean,
@@ -2095,7 +2306,10 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = `/api/agents/${agentId}`;
 
-		this.logger.debug(`→ PATCH ${url}`, { agentId, payload });
+		this.logger.debug(`→ PATCH ${url}`, {
+			agentId,
+			payload: API.redactForLog(payload),
+		});
 
 		try {
 			const response = await this.patch<{ success: boolean; agent: Agent }>(
@@ -2275,7 +2489,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/config/retention";
 
-		this.logger.debug(`→ POST ${url}`, { partial });
+		this.logger.debug(`→ POST ${url}`, {
+			partial: API.redactForLog(partial),
+		});
 
 		try {
 			await this.post(url, partial);
@@ -2316,7 +2532,7 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/config/request-storage";
 
-		this.logger.debug(`→ POST ${url}`, { body });
+		this.logger.debug(`→ POST ${url}`, { body: API.redactForLog(body) });
 
 		try {
 			await this.post(url, body);
@@ -2357,7 +2573,9 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/config/keepalive";
 
-		this.logger.debug(`→ POST ${url}`, { body });
+		this.logger.debug(`→ POST ${url}`, {
+			body: API.redactForLog(body),
+		});
 
 		try {
 			await this.post(url, body);
@@ -2450,7 +2668,7 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/config/usage-throttling";
 
-		this.logger.debug(`→ POST ${url}`, settings);
+		this.logger.debug(`→ POST ${url}`, API.redactForLog(settings));
 
 		try {
 			await this.post(url, settings);
@@ -2687,6 +2905,17 @@ class API extends HttpClient {
 		});
 	}
 
+	/**
+	 * GET /api/combos/flow — family → combo → slot flow view with 24h stats.
+	 * The endpoint path is matched before `/api/combos/:id` on the server.
+	 */
+	async getComboFlow(): Promise<ComboFlowResponse> {
+		const res = await this.get<{ success: boolean; data: ComboFlowResponse }>(
+			"/api/combos/flow",
+		);
+		return res.data;
+	}
+
 	async getCombo(id: string): Promise<{ combo: ComboWithSlotsWithCooldown }> {
 		const res = await this.get<{
 			success: boolean;
@@ -2740,7 +2969,9 @@ class API extends HttpClient {
 		userCode: string;
 	}> {
 		const url = "/api/oauth/codex/init";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{
 				sessionId: string;
@@ -2781,7 +3012,9 @@ class API extends HttpClient {
 		authUrl: string;
 	}> {
 		const url = "/api/oauth/codebuddy/init";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{
 				sessionId: string;
@@ -2820,7 +3053,9 @@ class API extends HttpClient {
 		authUrl: string;
 	}> {
 		const url = "/api/oauth/codebuddy/reauth";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{
 				sessionId: string;
@@ -2840,7 +3075,9 @@ class API extends HttpClient {
 		priority: number;
 	}): Promise<{ sessionId: string; authUrl: string; userCode: string }> {
 		const url = "/api/oauth/qwen/init";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{
 				sessionId: string;
@@ -2860,7 +3097,9 @@ class API extends HttpClient {
 		accountId: string;
 	}): Promise<{ sessionId: string; authUrl: string; userCode: string }> {
 		const url = "/api/oauth/qwen/reauth";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{
 				sessionId: string;
@@ -2882,7 +3121,9 @@ class API extends HttpClient {
 		userCode: string;
 	}> {
 		const url = "/api/oauth/codex/reauth";
-		this.logger.debug(`→ POST ${url}`, { data });
+		this.logger.debug(`→ POST ${url}`, {
+			data: API.redactForLog(data),
+		});
 		try {
 			const response = await this.post<{
 				sessionId: string;
@@ -2944,6 +3185,15 @@ class API extends HttpClient {
 		await this.post(`/api/accounts/${accountId}/peak-hours-pause`, {
 			enabled: enabled ? 1 : 0,
 		});
+	}
+
+	async updateAccountNightWindow(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		// The handler validates a strict boolean, unlike the other account
+		// toggles, so send `enabled` as-is rather than 1/0.
+		await this.post(`/api/accounts/${accountId}/night-window`, { enabled });
 	}
 
 	async getQwenAuthStatus(sessionId: string): Promise<{
@@ -3327,7 +3577,7 @@ class API extends HttpClient {
 		const startTime = Date.now();
 		const url = "/api/config/postgres";
 
-		this.logger.debug(`→ POST ${url}`, { body });
+		this.logger.debug(`→ POST ${url}`, { body: API.redactForLog(body) });
 
 		try {
 			await this.post(url, body);
@@ -3449,3 +3699,5 @@ export interface VersionStatusResponse {
 }
 
 export const api = new API();
+
+export { API };

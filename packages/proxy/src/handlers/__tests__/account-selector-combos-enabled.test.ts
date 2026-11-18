@@ -16,6 +16,8 @@ import type { ProxyContext } from "../proxy-types";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-1",
 		name: "test-account",
 		provider: "anthropic",
@@ -186,4 +188,34 @@ describe("selectAccountsForRequest — combos switch", () => {
 
 		expect(getActiveComboForFamily).toHaveBeenCalled();
 	});
+});
+
+describe("selectAccountsForRequest stale key routing overrides", () => {
+	for (const disabled of [false, true]) {
+		it(`uses the global combo when an override is ${disabled ? "disabled" : "deleted"}`, async () => {
+			const account = makeAccount({ id: "global-account" });
+			const { ctx, getActiveComboForFamily } = makeCtx({
+				accounts: [account],
+				combo: makeCombo(account.id, "claude-opus-4"),
+				combosEnabled: true,
+			});
+			Object.assign(ctx.dbOps, {
+				getCombo: mock(async () =>
+					disabled
+						? {
+								...makeCombo(account.id, "claude-opus-4"),
+								id: "stale",
+								enabled: false,
+							}
+						: null,
+				),
+			});
+			const meta = makeRequestMeta();
+			await selectAccountsForRequest(meta, ctx, "claude-opus-4", {
+				familyComboOverrides: { opus: "stale" },
+			});
+			expect(getActiveComboForFamily).toHaveBeenCalledWith("opus");
+			expect(getComboSlotInfo(meta)?.comboName).toBe("Opus Combo");
+		});
+	}
 });

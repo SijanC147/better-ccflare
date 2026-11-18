@@ -1,4 +1,5 @@
 import type { Account } from "@better-ccflare/types";
+import type { ReasoningEffortTarget } from "./utils/reasoning-effort";
 
 export interface TokenRefreshResult {
 	accessToken: string;
@@ -60,6 +61,8 @@ export type ProviderResponseContext = ProviderRequestContext;
 
 export interface Provider {
 	name: string;
+	/** A configured native fallback model, available without an upstream lookup. */
+	getDefaultModel?(): string | undefined;
 	/** Passive request coverage, including refusal before an upstream dispatch. */
 	observeRequest?(
 		headers: Headers,
@@ -111,6 +114,18 @@ export interface Provider {
 	): void;
 
 	/**
+	 * Optional: the model the provider addressed in the URL it just built, for
+	 * providers that remove `model` from the request body (Vertex AI). Lets the
+	 * proxy report the model actually called upstream (the served-model
+	 * response header) instead of the client's requested alias. Call it right
+	 * after `buildUrl` with the same attempt's carrier.
+	 */
+	getTargetModel?(
+		account: Account,
+		context?: ProviderRequestContext,
+	): string | undefined;
+
+	/**
 	 * Prepare headers for the provider request
 	 * @param headers - Original request headers
 	 * @param accessToken - OAuth access token (for Bearer authentication)
@@ -158,6 +173,14 @@ export interface Provider {
 	 * (e.g. NanoGPT on a third-party custom endpoint is not NanoGPT).
 	 */
 	supportsProviderRoutingFor?(account?: Account): boolean;
+
+	/**
+	 * The native outbound field this provider uses for the client's reasoning
+	 * effort; lets the proxy restore a dropped effort after a model fallback.
+	 * Optional: a provider whose transform keeps the client's native shape
+	 * untouched (Codex passthrough) leaves it unset.
+	 */
+	reasoningEffortTarget?(account?: Account): ReasoningEffortTarget | undefined;
 
 	/**
 	 * Extract tier information from response if available

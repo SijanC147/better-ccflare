@@ -137,6 +137,8 @@ export function AccountsTab() {
 			| "zai"
 			| "minimax"
 			| "deepseek"
+			| "sailresearch"
+			| "opencode-go"
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
@@ -273,6 +275,38 @@ export function AccountsTab() {
 	}) => {
 		try {
 			await api.addDeepseekAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddSailResearchAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => {
+		try {
+			await api.addSailResearchAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddOpencodeGoAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => {
+		try {
+			await api.addOpencodeGoAccount(params);
 			await loadAccounts();
 			setAdding(false);
 			setActionError(null);
@@ -588,6 +622,18 @@ export function AccountsTab() {
 		}
 	};
 
+	const handlePlanPriceChange = async (
+		account: Account,
+		planMonthlyUsd: number | null,
+	) => {
+		try {
+			await api.updateAccountPlanPrice(account.id, planMonthlyUsd);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleAutoPauseOnOverageToggle = async (account: Account) => {
 		try {
 			await api.updateAccountAutoPauseOnOverage(
@@ -662,6 +708,18 @@ export function AccountsTab() {
 			await api.updateAccountPeakHoursPause(
 				account.id,
 				!account.peakHoursPauseEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
+	const handleNightWindowToggle = async (account: Account) => {
+		try {
+			await api.updateAccountNightWindow(
+				account.id,
+				!account.nightWindowEnabled,
 			);
 			await loadAccounts();
 		} catch (err) {
@@ -759,6 +817,8 @@ export function AccountsTab() {
 							onAddZaiAccount={handleAddZaiAccount}
 							onAddMinimaxAccount={handleAddMinimaxAccount}
 							onAddDeepseekAccount={handleAddDeepseekAccount}
+							onAddSailResearchAccount={handleAddSailResearchAccount}
+							onAddOpencodeGoAccount={handleAddOpencodeGoAccount}
 							onAddNanoGPTAccount={handleAddNanoGPTAccount}
 							onAddAlibabaCodingPlanAccount={handleAddAlibabaCodingPlanAccount}
 							onAddKiloAccount={handleAddKiloAccount}
@@ -793,8 +853,10 @@ export function AccountsTab() {
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
 						onBillingTypeToggle={handleBillingTypeToggle}
+						onPlanPriceChange={handlePlanPriceChange}
 						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onPeakHoursPauseToggle={handlePeakHoursPauseToggle}
+						onNightWindowToggle={handleNightWindowToggle}
 						onUsageThresholdsChange={handleUsageThresholdsChange}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}

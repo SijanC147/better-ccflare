@@ -8,6 +8,8 @@ import type {
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	const base: Account = {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "a",
 		name: "a",
 		provider: "anthropic",

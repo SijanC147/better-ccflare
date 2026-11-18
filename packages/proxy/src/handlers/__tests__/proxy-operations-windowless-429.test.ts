@@ -5,6 +5,7 @@ import {
 	expect,
 	it,
 	mock,
+	setSystemTime,
 	spyOn,
 } from "bun:test";
 import { Logger } from "@better-ccflare/logger";
@@ -13,7 +14,13 @@ import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
 import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import * as usageCollectorModule from "../../usage-collector";
+import { selectAccountsForRequest } from "../account-selector";
 import { clearFamilyExhaustionCache } from "../model-capacity";
+import {
+	getModelCooldownUntil,
+	markModelCooling,
+	resetModelCooldownsForTests,
+} from "../model-cooldown";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -70,6 +77,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_enabled: false,
 		usage_pause_five_hour_min_reset_remaining_ms: null,
 		usage_pause_weekly_min_reset_remaining_ms: null,
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		...overrides,
 	};
 }
@@ -86,10 +95,11 @@ function makeRequestMeta(): RequestMeta {
 }
 
 /**
- * clientSessionId sits ten positional arguments from the end of saveRequest:
- * the five gatewayHint* fields (requestClass, agentType, prevToolDurations,
- * compaction, contextCompacted), projectId, worktreePath and the two inbound
- * marker fields (SB23-2727) follow it. Asserting from the tail rather
+ * clientSessionId sits thirteen positional arguments from the end of
+ * saveRequest: the five gatewayHint* fields (requestClass, agentType,
+ * prevToolDurations, compaction, contextCompacted), upstream's timestamp,
+ * limitModel and spendRecordedAt, then projectId, worktreePath and the two
+ * inbound marker fields (SB23-2727) follow it. Asserting from the tail rather
  * than a fixed index is deliberate: this branch originally dropped trailing
  * arguments because it was copied from a sibling 429 path that later grew
  * them, and a hardcoded index would not have caught that.
@@ -97,7 +107,7 @@ function makeRequestMeta(): RequestMeta {
 const lastSaveArg = (ctx: ProxyContext) => {
 	const calls = (ctx.dbOps.saveRequest as ReturnType<typeof mock>).mock.calls;
 	const args = calls[calls.length - 1] as unknown[];
-	return args[args.length - 10];
+	return args[args.length - 13];
 };
 
 function makeRequestBody(model = "claude-sonnet-4-5") {
@@ -171,6 +181,7 @@ function makeCtx(): ProxyContext {
 			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
+			resetConsecutiveRateLimits: mock(() => Promise.resolve()),
 		},
 		runtime: { clientId: "test" },
 		// NOTE: getProvider("anthropic") from the registry wins over this, by
@@ -181,7 +192,17 @@ function makeCtx(): ProxyContext {
 				await job();
 			}),
 		},
-		config: { getStorePayloads: () => true },
+		// The fallbacks account-selector.ts uses when a config omits these, so
+		// the strict fixture can serve upstream's selection-path cases.
+		config: {
+			getStorePayloads: () => true,
+			getModelScopedCapacityRouting: () => "off",
+			getCombosEnabled: () => true,
+			getForceAccountModel: () => false,
+			getComboSessionFallback: () => true,
+			getUsageThrottlingFiveHourEnabled: () => false,
+			getUsageThrottlingWeeklyEnabled: () => false,
+		},
 		internalProbeSecret: "test-secret",
 	});
 }
@@ -191,12 +212,13 @@ async function runProxy(
 	ctx: ProxyContext,
 	req: Request,
 	body: ArrayBuffer,
+	meta = makeRequestMeta(),
 ) {
 	return proxyWithAccount(
 		req,
 		new URL("https://proxy.local/v1/messages"),
 		account,
-		makeRequestMeta(),
+		meta,
 		body,
 		() => undefined,
 		0,
@@ -216,13 +238,14 @@ const markCalls = (ctx: ProxyContext) =>
 	(ctx.dbOps.markAccountRateLimited as ReturnType<typeof mock>).mock
 		.calls as unknown as [string, number, string, boolean][];
 
-describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () => {
+describe("proxyWithAccount — windowless 429 cooldown", () => {
 	let originalFetch: typeof globalThis.fetch;
 	let collectorSpy: ReturnType<typeof stubUsageCollector>;
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		collectorSpy = stubUsageCollector();
+		resetModelCooldownsForTests();
 	});
 
 	afterEach(() => {
@@ -230,12 +253,15 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 		collectorSpy.mockRestore();
 		usageCache.clear();
 		clearFamilyExhaustionCache();
+		resetModelCooldownsForTests();
+		setSystemTime();
 	});
 
-	// The core claim. A bare 429 is request-scoped, so it must fail over per
-	// request WITHOUT a cooldown, without touching the consecutive-429 counter,
-	// and without a second upstream attempt — three retries spanning 11.2s were
-	// measured returning three identical bare 429s, and not once did one succeed.
+	// A bare 429 is request-scoped: it fails over at once, with no in-place
+	// retry, no account bench and no consecutive-429 increment. Three retries
+	// spanning 11.2s were measured returning three identical bare 429s, and not
+	// once did one succeed. Only the (account, upstream model) pair is cooled,
+	// which the cooldown tests below cover.
 	it("fails over without benching on a bare 429", async () => {
 		let calls = 0;
 		fetchSlot.fetch = mock(async () => {
@@ -287,26 +313,306 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 		}
 	});
 
-	// The operational point of not benching: the account is immediately routable
-	// again, exactly as production showed it to be (200s two seconds either side
-	// of the rejected request).
-	it("leaves the account routable for the very next request", async () => {
-		let calls = 0;
-		fetchSlot.fetch = mock(async () => {
-			calls++;
-			return calls === 1 ? burst429() : ok200();
-		});
-
-		const ctx = makeCtx();
-		const account = makeAccount();
+	it("undoes this request's cooldown after a second account rejects and stops cooling later accounts", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const meta = makeRequestMeta();
 		const body = makeRequestBody();
+		const ctx = makeCtx();
+		const first = makeAccount({ id: "first" });
+		const second = makeAccount({ id: "second" });
+		const third = makeAccount({ id: "third" });
+		markModelCooling(first.id, "another-model", Date.now() + 300_000);
+		await runProxy(first, ctx, makeRequest(body), body, meta);
+		expect(getModelCooldownUntil(first.id, "claude-sonnet-4-5")).not.toBeNull();
+		await runProxy(second, ctx, makeRequest(body), body, meta);
+		await runProxy(third, ctx, makeRequest(body), body, meta);
+		for (const account of [first, second, third]) {
+			expect(getModelCooldownUntil(account.id, "claude-sonnet-4-5")).toBeNull();
+		}
+		expect(getModelCooldownUntil(first.id, "another-model")).not.toBeNull();
+		expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+	});
 
+	it("counts distinct accounts and rolls back every model this request cooled on its first account", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const meta = makeRequestMeta();
+		const ctx = makeCtx();
+		const first = makeAccount({ id: "first" });
+		const body = makeRequestBody();
+		const otherBody = makeRequestBody("claude-haiku-5-5");
+		await runProxy(first, ctx, makeRequest(body), body, meta);
+		await runProxy(first, ctx, makeRequest(otherBody), otherBody, meta);
+		expect(getModelCooldownUntil(first.id, "claude-sonnet-4-5")).not.toBeNull();
+		expect(getModelCooldownUntil(first.id, "claude-haiku-5-5")).not.toBeNull();
+		await runProxy(
+			makeAccount({ id: "second" }),
+			ctx,
+			makeRequest(body),
+			body,
+			meta,
+		);
+		expect(getModelCooldownUntil(first.id, "claude-sonnet-4-5")).toBeNull();
+		expect(getModelCooldownUntil(first.id, "claude-haiku-5-5")).toBeNull();
+	});
+
+	it("preserves a same-pair cooldown that predates the request", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const meta = makeRequestMeta();
+		const ctx = makeCtx();
+		const first = makeAccount({ id: "first" });
+		ctx.strategy = { select: () => [first] } as never;
+		ctx.dbOps.getAllAccounts = async () => [first];
+		ctx.dbOps.getActiveComboForFamily = async () => null;
+		const body = makeRequestBody();
+		const until = Date.now() + 60_000;
+		markModelCooling(first.id, "claude-sonnet-4-5", until);
+		await selectAccountsForRequest(meta, ctx, "claude-sonnet-4-5");
+		await runProxy(first, ctx, makeRequest(body), body, meta);
+		await runProxy(
+			makeAccount({ id: "second" }),
+			ctx,
+			makeRequest(body),
+			body,
+			meta,
+		);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+		expect(getModelCooldownUntil(first.id, "claude-sonnet-4-5")).toBe(until);
+		expect(getModelCooldownUntil("second", "claude-sonnet-4-5")).toBeNull();
+	});
+
+	it("preserves an explicit cooldown installed after this request's first rejection", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const meta = makeRequestMeta();
+		const body = makeRequestBody();
+		const ctx = makeCtx();
+		const first = makeAccount({ id: "first" });
+		await runProxy(first, ctx, makeRequest(body), body, meta);
+		const explicitUntil = Date.now() + 600_000;
+		markModelCooling(first.id, "claude-sonnet-4-5", explicitUntil);
+		await runProxy(
+			makeAccount({ id: "second" }),
+			ctx,
+			makeRequest(body),
+			body,
+			meta,
+		);
+		expect(getModelCooldownUntil(first.id, "claude-sonnet-4-5")).toBe(
+			explicitUntil,
+		);
+		expect(getModelCooldownUntil("second", "claude-sonnet-4-5")).toBeNull();
+	});
+
+	it.each([
+		false,
+		true,
+	])("tries a single cooled account selected as fallback (cooldown added after selection: %s)", async (afterSelection) => {
+		const account = makeAccount();
+		const meta = makeRequestMeta();
+		const ctx = makeCtx();
+		ctx.strategy = { select: () => [account] } as never;
+		ctx.dbOps.getAllAccounts = async () => [account];
+		ctx.dbOps.getActiveComboForFamily = async () => null;
+		const body = makeRequestBody();
+		if (!afterSelection)
+			markModelCooling(account.id, "claude-sonnet-4-5", Date.now() + 60_000);
+		const selected = await selectAccountsForRequest(
+			meta,
+			ctx,
+			"claude-sonnet-4-5",
+		);
+		if (afterSelection)
+			markModelCooling(account.id, "claude-sonnet-4-5", Date.now() + 60_000);
+		fetchSlot.fetch = mock(async () => ok200());
+		expect(selected).toHaveLength(1);
+		expect(
+			(await runProxy(selected[0], ctx, makeRequest(body), body, meta))?.status,
+		).toBe(200);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+	});
+
+	it("cools only the upstream model and leaves every account quota field untouched", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const ctx = makeCtx();
+		const account = makeAccount({
+			consecutive_rate_limits: 3,
+			rate_limited_until: Date.now() + 3_600_000,
+			rate_limited_reason: "upstream_429_with_reset",
+			rate_limited_at: Date.now() - 1_000,
+			rate_limit_reset: Date.now() + 3_600_000,
+			rate_limit_status: "allowed",
+			rate_limit_remaining: 42,
+		});
+		const before = { ...account };
+		const body = makeRequestBody("claude-haiku-5-5");
 		expect(await runProxy(account, ctx, makeRequest(body), body)).toBeNull();
-
-		const second = await runProxy(account, ctx, makeRequest(body), body);
-		expect(second?.status).toBe(200);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 		expect(marks(ctx)).toBe(0);
+		for (const field of [
+			"rate_limited_until",
+			"rate_limited_reason",
+			"rate_limited_at",
+			"rate_limit_reset",
+			"rate_limit_status",
+			"rate_limit_remaining",
+			"consecutive_rate_limits",
+		] as const) {
+			expect(account[field]).toBe(before[field]);
+		}
+		expect(
+			(getModelCooldownUntil(account.id, "claude-haiku-5-5") ?? 0) - Date.now(),
+		).toBeGreaterThan(59_000);
+		expect(getModelCooldownUntil(account.id, "claude-opus-5-5")).toBeNull();
+		expect(saveReasons(ctx)).toContain("windowless_429");
+		expect(lastSaveArg(ctx)).toBe("sess-1");
+	});
+
+	it("skips the cooled mapped haiku pair without an upstream call while opus still uses the account", async () => {
+		const now = Date.now();
+		setSystemTime(now);
+		const sent: string[] = [];
+		fetchSlot.fetch = mock(async (input: Request | string | URL) => {
+			const model = (await (input as Request).json()).model as string;
+			sent.push(model);
+			return model === "claude-haiku-5-5" ? burst429() : ok200();
+		});
+		const account = makeAccount({
+			model_mappings: JSON.stringify({ haiku: "claude-haiku-5-5" }),
+		});
+		const ctx = makeCtx();
+		const body = makeRequestBody("claude-haiku-alias");
+		expect(await runProxy(account, ctx, makeRequest(body), body)).toBeNull();
+		expect(getModelCooldownUntil(account.id, "claude-haiku-alias")).toBeNull();
+		expect(
+			getModelCooldownUntil(account.id, "claude-haiku-5-5"),
+		).not.toBeNull();
+		expect(await runProxy(account, ctx, makeRequest(body), body)).toBeNull();
+		const opusBody = makeRequestBody("claude-opus-5-5");
+		expect(
+			(await runProxy(account, ctx, makeRequest(opusBody), opusBody))?.status,
+		).toBe(200);
+		expect(sent).toEqual(["claude-haiku-5-5", "claude-opus-5-5"]);
+		expect(
+			getModelCooldownUntil(account.id, "claude-haiku-5-5"),
+		).not.toBeNull();
+		setSystemTime(now + 60_000);
+		await runProxy(account, ctx, makeRequest(body), body);
+		// Opus succeeded, but Haiku's own consecutive streak still doubles.
+		expect(getModelCooldownUntil(account.id, "claude-haiku-5-5")).toBe(
+			now + 180_000,
+		);
+	});
+
+	it("fails over immediately and records the mapped pair even with configured model fallbacks", async () => {
+		fetchSlot.fetch = mock(async () => burst429());
+		const account = makeAccount({
+			model_mappings: JSON.stringify({
+				haiku: ["claude-haiku-5-5", "claude-opus-5-5"],
+			}),
+		});
+		const body = makeRequestBody("claude-haiku-alias");
+		expect(
+			await runProxy(account, makeCtx(), makeRequest(body), body),
+		).toBeNull();
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(
+			getModelCooldownUntil(account.id, "claude-haiku-5-5"),
+		).not.toBeNull();
 		expect(account.rate_limited_until).toBeNull();
+	});
+
+	it("scopes a windowless 429 reached after a model-not-found fallback to that fallback model", async () => {
+		let calls = 0;
+		fetchSlot.fetch = mock(async () =>
+			++calls === 1
+				? new Response(
+						JSON.stringify({
+							error: { type: "not_found_error", message: "model not found" },
+						}),
+						{ status: 404, headers: { "content-type": "application/json" } },
+					)
+				: burst429(),
+		);
+		const account = makeAccount({
+			model_mappings: JSON.stringify({
+				haiku: ["claude-haiku-missing", "claude-haiku-5-5"],
+			}),
+		});
+		const body = makeRequestBody("claude-haiku-alias");
+		const ctx = makeCtx();
+		expect(await runProxy(account, ctx, makeRequest(body), body)).toBeNull();
+		expect(calls).toBe(2);
+		expect(
+			getModelCooldownUntil(account.id, "claude-haiku-5-5"),
+		).not.toBeNull();
+		expect(
+			getModelCooldownUntil(account.id, "claude-haiku-missing"),
+		).toBeNull();
+		expect(marks(ctx)).toBe(0);
+		expect(account.consecutive_rate_limits).toBe(0);
+	});
+
+	it("logs one bench and one recovery while cooled requests stay silent", async () => {
+		const warn = spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+		const info = spyOn(Logger.prototype, "info").mockImplementation(() => {});
+		try {
+			const account = makeAccount();
+			const body = makeRequestBody("claude-haiku-5-5");
+			const ctx = makeCtx();
+			let now = Date.now();
+			setSystemTime(now);
+			fetchSlot.fetch = mock(async () => burst429());
+			await runProxy(account, ctx, makeRequest(body), body);
+			await runProxy(account, ctx, makeRequest(body), body);
+			expect(
+				warn.mock.calls.filter(([message]) =>
+					String(message).includes("windowless_429 paused"),
+				),
+			).toHaveLength(1);
+			now += 60_000;
+			setSystemTime(now);
+			fetchSlot.fetch = mock(async () => ok200());
+			await runProxy(account, ctx, makeRequest(body), body);
+			await runProxy(account, ctx, makeRequest(body), body);
+			expect(
+				info.mock.calls.filter(([message]) =>
+					String(message).includes("recovered from windowless_429"),
+				),
+			).toHaveLength(1);
+		} finally {
+			warn.mockRestore();
+			info.mockRestore();
+		}
+	});
+
+	it("doubles across natural expiry, caps at fifteen minutes, and resets only on that pair's success", async () => {
+		let now = Date.now();
+		setSystemTime(now);
+		const account = makeAccount();
+		const ctx = makeCtx();
+		const body = makeRequestBody("claude-haiku-5-5");
+		fetchSlot.fetch = mock(async () => burst429());
+		for (const expectedMs of [
+			60_000, 120_000, 240_000, 480_000, 900_000, 900_000,
+		]) {
+			await runProxy(account, ctx, makeRequest(body), body);
+			expect(getModelCooldownUntil(account.id, "claude-haiku-5-5")).toBe(
+				now + expectedMs,
+			);
+			now += expectedMs;
+			setSystemTime(now);
+			expect(getModelCooldownUntil(account.id, "claude-haiku-5-5")).toBeNull();
+		}
+		fetchSlot.fetch = mock(async () => ok200());
+		expect(
+			(await runProxy(account, ctx, makeRequest(body), body))?.status,
+		).toBe(200);
+		fetchSlot.fetch = mock(async () => burst429());
+		await runProxy(account, ctx, makeRequest(body), body);
+		expect(getModelCooldownUntil(account.id, "claude-haiku-5-5")).toBe(
+			now + 60_000,
+		);
+		expect(marks(ctx)).toBe(0);
+		expect(account.consecutive_rate_limits).toBe(0);
 	});
 
 	// Regression guard: a 429 that reports a reset is a REAL window limit and
@@ -438,5 +744,6 @@ describe("proxyWithAccount — windowless 429 is not benched (issue #301)", () =
 		expect(marks(ctx)).toBe(0);
 		expect(account.rate_limited_until).toBeNull();
 		expect(saveReasons(ctx)).toHaveLength(0);
+		expect(getModelCooldownUntil(account.id, "claude-sonnet-4-5")).toBeNull();
 	});
 });

@@ -39,6 +39,22 @@ function sanitizeClientSessionId(
 		: cleaned;
 }
 
+/** One grouped row of the combo-flow aggregate: a (combo, original model,
+ * applied model, account) bucket with its 24h counts. Raw snake_case columns,
+ * dialect-neutral (see getComboRoutingAggregates). */
+export interface ComboRoutingAggregateRow {
+	combo_name: string;
+	original_model: string | null;
+	applied_model: string | null;
+	/** Model the upstream response reported (post combo-slot override). */
+	model: string | null;
+	account_used: string | null;
+	cnt: number;
+	ok: number;
+	failovers: number;
+	avg_rt: number | null;
+}
+
 // Source-authority ranks for the UPSERT conflict resolution below. Higher
 // number = higher authority. NULL and "none" both fall through to the ELSE
 // branch (rank 0) since neither is an explicit attribution.
@@ -103,6 +119,18 @@ async function decryptForList(
 
 export interface RequestData {
 	id: string;
+	/**
+	 * When the request STARTED, in epoch ms. Callers that know the true start
+	 * (the usage collector, from its start message) should pass it: the row is
+	 * written after the response finishes, so defaulting to "now" would stamp a
+	 * long request with its completion time. Anything derived from the row
+	 * timestamp then disagrees with what the live SSE summary reported for the
+	 * same request — e.g. the peak/off-peak badge when a stream crosses a
+	 * pricing-window boundary. Defaults to `Date.now()`.
+	 */
+	timestamp?: number | undefined;
+	/** When final cost became known, independently of request start/latency. */
+	spendRecordedAt?: number | undefined;
 	method: string;
 	path: string;
 	accountUsed: string | null;
@@ -126,6 +154,8 @@ export interface RequestData {
 	 * column with an unchanged value.
 	 */
 	originalModel?: string | null | undefined;
+	/** Original requested model, retained even when a combo serves another model. */
+	limitModel?: string | null | undefined;
 	appliedModel?: string | null | undefined;
 	projectAttributionSource?: ProjectAttributionSource | null | undefined;
 	agentAttributionSource?: AgentAttributionSource | null | undefined;
@@ -186,6 +216,12 @@ export interface RequestData {
 				 * that do not state it; persisted through `updateRequestUsage`.
 				 */
 				providerServed?: string | undefined;
+				/**
+				 * The tier the provider reports it actually ran the request on
+				 * (response `usage.service_tier`, e.g. Sail Research "balanced").
+				 * Absent when the provider reports no tier.
+				 */
+				completionTier?: string | undefined;
 		  }
 		| undefined;
 }
@@ -225,9 +261,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_prev_tool_durations, gateway_hint_compaction,
 				gateway_hint_context_compacted,
 				project_id, worktree_path,
-				inbound_format, inbound_gateway, provider_served
+				inbound_format, inbound_gateway, provider_served,
+				completion_tier, limit_model, spend_recorded_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -253,6 +290,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				billing_type = COALESCE(EXCLUDED.billing_type, requests.billing_type),
 				combo_name = COALESCE(EXCLUDED.combo_name, requests.combo_name),
 				original_model = COALESCE(EXCLUDED.original_model, requests.original_model),
+				limit_model = COALESCE(EXCLUDED.limit_model, requests.limit_model),
+				spend_recorded_at = COALESCE(EXCLUDED.spend_recorded_at, requests.spend_recorded_at),
 				applied_model = COALESCE(EXCLUDED.applied_model, requests.applied_model),
 				-- (project, project_attribution_source) and (agent_used, agent_attribution_source)
 				-- move in LOCKSTEP and are resolved by SOURCE AUTHORITY, not preserve-first or
@@ -293,11 +332,14 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				-- Preserve-first like the columns above: provider_served is
 				-- recorded after the fact by updateRequestUsage, and a re-save
 				-- without it must not blank it out.
-				provider_served = COALESCE(EXCLUDED.provider_served, requests.provider_served)
+				provider_served = COALESCE(EXCLUDED.provider_served, requests.provider_served),
+				-- Same preserve-first reasoning: completion_tier is written by the
+				-- main save path, and a later re-save without it must not blank it.
+				completion_tier = COALESCE(EXCLUDED.completion_tier, requests.completion_tier)
 		`,
 			[
 				data.id,
-				Date.now(),
+				data.timestamp ?? Date.now(),
 				data.method,
 				data.path,
 				data.accountUsed,
@@ -310,7 +352,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage?.promptTokens || null,
 				usage?.completionTokens || null,
 				usage?.totalTokens || null,
-				usage?.costUsd || null,
+				// `??`, not `||`: a provider-reported zero is a real cost.
+				usage?.costUsd ?? null,
 				usage?.inputTokens || null,
 				usage?.cacheReadInputTokens || null,
 				usage?.cacheCreationInputTokens || null,
@@ -338,6 +381,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.inboundFormat || null,
 				data.inboundGateway || null,
 				usage?.providerServed || null,
+				usage?.completionTier || null,
+				data.limitModel || null,
+				data.spendRecordedAt ?? null,
 			],
 		);
 	}
@@ -362,7 +408,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				cache_creation_input_tokens = COALESCE(?, cache_creation_input_tokens),
 				output_tokens = COALESCE(?, output_tokens),
 				output_tokens_per_second = COALESCE(?, output_tokens_per_second),
-				provider_served = COALESCE(?, provider_served)
+				provider_served = COALESCE(?, provider_served),
+				completion_tier = COALESCE(?, completion_tier)
 			WHERE id = ?
 		`,
 			[
@@ -370,13 +417,14 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage.promptTokens || null,
 				usage.completionTokens || null,
 				usage.totalTokens || null,
-				usage.costUsd || null,
+				usage.costUsd ?? null,
 				usage.inputTokens || null,
 				usage.cacheReadInputTokens || null,
 				usage.cacheCreationInputTokens || null,
 				usage.outputTokens || null,
 				usage.tokensPerSecond || null,
 				usage.providerServed || null,
+				usage.completionTier || null,
 				requestId,
 			],
 		);
@@ -617,6 +665,59 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	/**
+	 * Per-(combo, original model, applied model, served model, account) counts
+	 * since `sinceMs` — the raw material for the Combo Flow view's stats and
+	 * resolution matrix. Dialect-neutral: only COUNT/SUM/AVG, comparisons with
+	 * `= TRUE` / `> 0` and scalar column references (no strftime, no json_*).
+	 * `requests.success` may be stored as 0/1 or a boolean depending on the
+	 * dialect; `success = TRUE` is accepted by both backends. Bun.SQL returns
+	 * COUNT/SUM as strings on PostgreSQL, so consumers must coerce to Number.
+	 *
+	 * `model` is the model the upstream response reported. It is the only
+	 * column that reflects a COMBO SLOT override: `original_model`/
+	 * `applied_model` are written only for agent-preference rewrites
+	 * (proxy-operations' `isModelRewrite` guard), so a combo that pins a slot
+	 * model leaves both NULL while `model` carries the pinned model.
+	 */
+	async getComboRoutingAggregates(
+		sinceMs: number,
+	): Promise<ComboRoutingAggregateRow[]> {
+		return this.query<ComboRoutingAggregateRow>(
+			`
+			SELECT r.combo_name AS combo_name,
+				r.original_model AS original_model,
+				r.applied_model AS applied_model,
+				r.model AS model,
+				r.account_used AS account_used,
+				COUNT(*) AS cnt,
+				SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) AS ok,
+				SUM(CASE WHEN r.failover_attempts > 0 THEN 1 ELSE 0 END) AS failovers,
+				AVG(r.response_time_ms) AS avg_rt
+			FROM requests r
+			WHERE r.combo_name IS NOT NULL AND r.timestamp >= ?
+			GROUP BY r.combo_name, r.original_model, r.applied_model, r.model, r.account_used
+		`,
+			[sinceMs],
+		);
+	}
+
+	/**
+	 * Re-points every request tagged with `oldComboName` at `newComboName`.
+	 * Called after a combo rename so the flow view's 24h totals survive it —
+	 * stats are derived from the `combo_name` tag, not from a combo id.
+	 * Dialect-neutral single UPDATE; resolves to the number of affected rows.
+	 */
+	async updateComboTags(
+		oldComboName: string,
+		newComboName: string,
+	): Promise<number> {
+		return this.runWithChanges(
+			"UPDATE requests SET combo_name = ? WHERE combo_name = ?",
+			[newComboName, oldComboName],
+		);
+	}
+
+	/**
 	 * Aggregate statistics with optional time range
 	 * Consolidates duplicate SQL queries from stats handlers
 	 */
@@ -677,106 +778,6 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			cacheCreationInputTokens: result?.cache_creation_input_tokens || 0,
 			avgTokensPerSecond: result?.avg_tokens_per_second || null,
 		};
-	}
-
-	/**
-	 * Get top models by usage
-	 *
-	 * @deprecated No production callers — `/api/stats` uses
-	 * `StatsRepository.getTopModels`, which is deliberately lifetime-scoped.
-	 * Retained for the `DatabaseOperations` passthrough and the live-PG test
-	 * suite.
-	 * Has no time bound (the `LIMIT` only caps the number of models). Do not
-	 * wire this to a request path without adding one.
-	 */
-	async getTopModels(
-		limit = 10,
-	): Promise<Array<{ model: string; count: number }>> {
-		return this.query<{ model: string; count: number }>(
-			`
-			SELECT model, COUNT(*) as count
-			FROM requests
-			WHERE model IS NOT NULL
-			GROUP BY model
-			ORDER BY count DESC
-			LIMIT ?
-		`,
-			[limit],
-		);
-	}
-
-	/**
-	 * Get recent error messages
-	 *
-	 * @deprecated No production callers. Retained for the `DatabaseOperations`
-	 * passthrough and the live-PG test suite.
-	 * The query itself IS bounded (`ORDER BY timestamp DESC LIMIT ?`); this is
-	 * deprecated for being dead, not unbounded.
-	 */
-	async getRecentErrors(limit = 10): Promise<string[]> {
-		const errors = await this.query<{ error_message: string }>(
-			`
-			SELECT error_message
-			FROM requests
-			WHERE success = FALSE AND error_message IS NOT NULL
-			ORDER BY timestamp DESC
-			LIMIT ?
-		`,
-			[limit],
-		);
-		return errors.map((e: { error_message: string }) => e.error_message);
-	}
-
-	/**
-	 * @deprecated No production callers. Retained for the `DatabaseOperations`
-	 * passthrough and the live-PG test suite.
-	 * Has no LIMIT (only `GROUP BY account_used` keeps the row count down) and
-	 * an optional `since`; without it the whole `requests` table is scanned.
-	 * Do not wire this to a request path without adding a time bound and a
-	 * LIMIT.
-	 */
-	async getRequestsByAccount(since?: number): Promise<
-		Array<{
-			accountId: string;
-			accountName: string | null;
-			requestCount: number;
-			successRate: number;
-		}>
-	> {
-		const whereClause = since ? "WHERE r.timestamp > ?" : "";
-		const params = since ? [since] : [];
-
-		// a.name must be named in GROUP BY: SQLite tolerates a bare
-		// non-aggregated column and picks an arbitrary row, PostgreSQL rejects
-		// the statement with 42803. Group cardinality is unchanged because the
-		// join is on accounts.id, the primary key, so at most one accounts row
-		// matches each r.account_used value, NULL included.
-		const rows = await this.query<{
-			account_id: string;
-			account_name: string | null;
-			request_count: number;
-			success_rate: number;
-		}>(
-			`
-			SELECT
-				r.account_used as account_id,
-				a.name as account_name,
-				COUNT(*) as request_count,
-				SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate
-			FROM requests r
-			LEFT JOIN accounts a ON r.account_used = a.id
-			${whereClause}
-			GROUP BY r.account_used, a.name
-			ORDER BY request_count DESC
-		`,
-			params,
-		);
-		return rows.map((row) => ({
-			accountId: row.account_id,
-			accountName: row.account_name,
-			requestCount: row.request_count,
-			successRate: row.success_rate,
-		}));
 	}
 
 	async deleteOlderThan(cutoffTs: number): Promise<number> {

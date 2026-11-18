@@ -38,6 +38,8 @@ const PAID_MODEL = "deepseek-v4.1-flash-sg";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-cb",
 		name: "codebuddy",
 		provider: "anthropic",

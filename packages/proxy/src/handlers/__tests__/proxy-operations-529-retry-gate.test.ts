@@ -18,6 +18,8 @@ import type { ProxyContext } from "../proxy-types";
 
 function makeAccount(): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-1",
 		name: "retry-gate-test",
 		// Unregistered name so the stub provider below is used

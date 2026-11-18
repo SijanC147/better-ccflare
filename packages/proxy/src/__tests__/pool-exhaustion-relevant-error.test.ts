@@ -25,6 +25,7 @@ import { AnthropicProvider, usageCache } from "@better-ccflare/providers";
 import type { Account, ComboWithSlots } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
 import { clearFamilyExhaustionCache } from "../handlers/model-capacity";
+import { resetModelCooldownsForTests } from "../handlers/model-cooldown";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
@@ -38,6 +39,8 @@ const META_ENDPOINT = "http://127.0.0.1:9";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-x",
 		name: "acc-x",
 		provider: "anthropic",
@@ -335,6 +338,9 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 		usageCache.clear();
 		clearFamilyExhaustionCache();
 		resetRateLimitProbeGatesForTests();
+		// Windowless 429s cool (account, model) pairs process-wide (upstream
+		// windowless cooldown); the cases reuse account ids, so clear them.
+		resetModelCooldownsForTests();
 	});
 
 	it("six windowless 429s then META's 402: the client gets the 429", async () => {
@@ -427,7 +433,14 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 		});
 		const ctx = makeContext([native, mapped]);
 		const seen = installModelFetch(
-			[windowless429, windowless429, () => errorResponse(402, "billing_error")],
+			[
+				windowless429,
+				// The mapped account's primary answers a model-not-found 404: since
+				// the upstream sync a windowless 429 fails over without cycling the
+				// account's model list, and this case needs the cycle to happen.
+				() => errorResponse(404, "not_found_error"),
+				() => errorResponse(402, "billing_error"),
+			],
 			metaBilling402,
 		);
 
@@ -453,7 +466,10 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 		const seen = installModelFetch(
 			[
 				windowless429,
-				windowless429,
+				// The mapped account's primary answers a model-not-found 404: since
+				// the upstream sync a windowless 429 fails over without cycling the
+				// account's model list, and this case needs the cycle to happen.
+				() => errorResponse(404, "not_found_error"),
 				() => errorResponse(413, "request_too_large"),
 			],
 			metaBilling402,

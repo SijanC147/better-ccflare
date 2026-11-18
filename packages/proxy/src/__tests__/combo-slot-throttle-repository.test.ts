@@ -50,6 +50,8 @@ const SECOND = "acc-repo-2";
 
 function makeAccount(id: string): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id,
 		name: id,
 		provider: "anthropic",

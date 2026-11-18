@@ -58,6 +58,15 @@ function makeFakeAdapter(roleColumnExists: boolean): {
 			state.executed.push(sql.replace(/\s+/g, " ").trim());
 			return 0;
 		},
+		// migrateApiKeyLimitsPg (upstream) runs its DDL through atomicStatements.
+		async atomicStatements(
+			statements: Array<{ sql: string }>,
+		): Promise<number[]> {
+			for (const s of statements) {
+				state.executed.push(s.sql.replace(/\s+/g, " ").trim());
+			}
+			return statements.map(() => 0);
+		},
 	} as unknown as BunSqlAdapter;
 
 	return { adapter, state };
@@ -140,6 +149,15 @@ function makeColumnAdapter(missing: ReadonlySet<string>): {
 		async runWithChanges(sql: string): Promise<number> {
 			executed.push(sql.replace(/\s+/g, " ").trim());
 			return 0;
+		},
+		// migrateApiKeyLimitsPg (upstream) runs its DDL through atomicStatements.
+		async atomicStatements(
+			statements: Array<{ sql: string }>,
+		): Promise<number[]> {
+			for (const s of statements) {
+				executed.push(s.sql.replace(/\s+/g, " ").trim());
+			}
+			return statements.map(() => 0);
 		},
 	} as unknown as BunSqlAdapter;
 	return { adapter, executed };

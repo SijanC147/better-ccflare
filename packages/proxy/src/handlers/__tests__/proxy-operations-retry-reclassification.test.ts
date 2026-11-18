@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { preserveTestEnv } from "../../__tests__/preserve-test-env";
 import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { clearFamilyExhaustionCache } from "../model-capacity";
+import { resetModelCooldownsForTests } from "../model-cooldown";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { resetRateLimitProbeGatesForTests } from "../rate-limit-cooldown";
@@ -69,6 +71,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_enabled: false,
 		usage_pause_five_hour_min_reset_remaining_ms: null,
 		usage_pause_weekly_min_reset_remaining_ms: null,
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		...overrides,
 	};
 }
@@ -244,9 +248,8 @@ function ok200() {
 }
 
 /**
- * Runs proxyWithAccount, swallowing only the UsageCollector error that
- * forwardToClient throws in unit tests. Reaching it proves the response was
- * forwarded to the client rather than failed over.
+ * Observe forwarding through a per-attempt seam. Whether another test already
+ * initialized the process-wide UsageCollector must not affect this harness.
  */
 async function runProxy(
 	req: Request,
@@ -256,6 +259,11 @@ async function runProxy(
 ): Promise<{ result: Response | null; forwarded: boolean }> {
 	let forwarded = false;
 	let result: Response | null = null;
+	const forwardedResponse = Symbol("forwarded response");
+	ctx.forwardToClient = async () => {
+		forwarded = true;
+		throw forwardedResponse;
+	};
 	try {
 		result = await proxyWithAccount(
 			req,
@@ -268,9 +276,7 @@ async function runProxy(
 			ctx,
 		);
 	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		if (!msg.includes("UsageCollector not initialized")) throw e;
-		forwarded = true;
+		if (e !== forwardedResponse) throw e;
 	}
 	return { result, forwarded };
 }
@@ -290,6 +296,7 @@ const markCalls = (ctx: ProxyContext) =>
  * responses and returns everything the classification is observable through.
  */
 async function runSequence(responses: Array<() => Response>) {
+	resetModelCooldownsForTests();
 	let callCount = 0;
 	fetchSlot.fetch = mock(async () => {
 		const factory = responses[Math.min(callCount, responses.length - 1)];
@@ -311,6 +318,14 @@ async function runSequence(responses: Array<() => Response>) {
 
 describe("proxyWithAccount — a retried response is classified like a first response", () => {
 	let originalFetch: typeof fetchSlot.fetch;
+	preserveTestEnv([
+		"CCFLARE_OVERLOAD_RETRY_BASE_MS",
+		"CCFLARE_OVERLOAD_RETRY_MAX_MS",
+		"CCFLARE_OVERLOAD_RETRY_ENABLED",
+		"CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS",
+		"CCFLARE_SERVER_ERROR_RETRY_ENABLED",
+		"CCFLARE_SERVER_ERROR_COOLDOWN_MS",
+	]);
 
 	beforeEach(() => {
 		originalFetch = fetchSlot.fetch;
@@ -323,18 +338,14 @@ describe("proxyWithAccount — a retried response is classified like a first res
 		delete process.env.CCFLARE_SERVER_ERROR_COOLDOWN_MS;
 		clearFamilyExhaustionCache();
 		resetRateLimitProbeGatesForTests();
+		resetModelCooldownsForTests();
 	});
 
 	afterEach(() => {
 		fetchSlot.fetch = originalFetch;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS;
-		delete process.env.CCFLARE_SERVER_ERROR_RETRY_ENABLED;
-		delete process.env.CCFLARE_SERVER_ERROR_COOLDOWN_MS;
 		clearFamilyExhaustionCache();
 		resetRateLimitProbeGatesForTests();
+		resetModelCooldownsForTests();
 	});
 
 	it("benches org_permission_denied and fails over when a 500 retry answers 403", async () => {
@@ -498,7 +509,9 @@ describe("proxyWithAccount — a retried response is classified like a first res
 		expect(args[25]).toBe("auto");
 		expect(args[26]).toBe("true");
 		// The inbound marker (SB23-2727) rides the same audit row.
-		expect(args[29]).toBe("openai-responses");
-		expect(args[30]).toBe("gpt");
+		// Upstream's timestamp, limitModel and spendRecordedAt (27-29) and the
+		// fork's projectId and worktreePath (30-31) sit between them.
+		expect(args[32]).toBe("openai-responses");
+		expect(args[33]).toBe("gpt");
 	});
 });

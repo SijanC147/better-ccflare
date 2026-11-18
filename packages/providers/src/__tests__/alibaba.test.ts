@@ -26,10 +26,11 @@ class TestOpenAICompatibleProvider extends OpenAICompatibleProvider {
 
 	public override afterConvert(
 		body: OpenAIRequest,
+		account?: Account,
 		endpoint?: string,
 		model?: string,
 	): void {
-		super.afterConvert(body, endpoint, model);
+		super.afterConvert(body, account, endpoint, model);
 	}
 
 	public override injectDashScopeReasoning(
@@ -89,6 +90,7 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			// Call afterConvert to inject caching
 			provider.afterConvert(
 				openaiBody,
+				mockAccount,
 				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
@@ -137,6 +139,7 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 
 			provider.afterConvert(
 				openaiBody,
+				mockAccount,
 				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
@@ -169,6 +172,7 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 
 			provider.afterConvert(
 				openaiBody,
+				mockAccount,
 				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
@@ -199,6 +203,7 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			// Call afterConvert first (injects caching)
 			provider.afterConvert(
 				openaiBody,
+				mockAccount,
 				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);
@@ -235,6 +240,7 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 
 			provider.afterConvert(
 				openaiBody,
+				mockAccount,
 				mockAccount.custom_endpoint ?? undefined,
 				anthropicBody.model,
 			);

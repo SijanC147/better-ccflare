@@ -163,6 +163,8 @@ interface RateLimitProgressProps {
 	// badges are computed here from ZAI_PEAK_WINDOW / ANTHROPIC_PEAK_WINDOW in
 	// the vendor's own zone, with a countdown.
 	peakHours?: { active: boolean } | null | undefined;
+	// TokenHarbor: models the account's listing marks peak-priced
+	peakPricedModels?: string[] | null | undefined;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	pauseThresholdFiveHour?: number | null; // Pause at this percent of the 5-hour window; null = off
@@ -346,6 +348,42 @@ function DeepseekPeakBadge({ isPeak }: { isPeak: boolean }) {
 	);
 }
 
+/**
+ * TokenHarbor's peak pricing is per model, so the badge says which models it
+ * refers to rather than naming a provider-wide window.
+ *
+ * The wording is deliberately neutral ("pricing", not "skipped"): the listing
+ * stays cached with the toggle off, and the selector's non-empty-pool fallback
+ * still routes to a peak-priced slot when nothing else is usable, so the badge
+ * cannot promise that a request was avoided.
+ */
+function TokenHarborPeakBadge({
+	isPeak,
+	models,
+}: {
+	isPeak: boolean;
+	models?: string[] | null;
+}) {
+	const which =
+		models && models.length > 0 ? models.join(", ") : "peak-priced models";
+	return (
+		<div className="flex items-center gap-2">
+			<span
+				className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+					isPeak
+						? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+						: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+				}`}
+			>
+				<span
+					className={`h-1.5 w-1.5 rounded-full ${isPeak ? "bg-orange-500" : "bg-green-500"}`}
+				/>
+				{isPeak ? `Peak pricing: ${which}` : "Off-peak pricing"}
+			</span>
+		</div>
+	);
+}
+
 export function RateLimitProgress({
 	resetIso,
 	usageUtilization,
@@ -356,6 +394,7 @@ export function RateLimitProgress({
 	usageThrottledWindows = [],
 	provider,
 	peakHours = null,
+	peakPricedModels = null,
 	className,
 	showWeekly = false,
 	pauseThresholdFiveHour = null,
@@ -390,6 +429,19 @@ export function RateLimitProgress({
 			return (
 				<div className={cn("space-y-3", className)}>
 					<DeepseekPeakBadge isPeak={peakHours.active} />
+				</div>
+			);
+		}
+		// TokenHarbor has no usage windows either, so this early return is its
+		// normal path. Its peak pricing is per model, so the badge names the
+		// affected models rather than a provider-wide window.
+		if (provider === "anthropic-compatible" && peakHours) {
+			return (
+				<div className={cn("space-y-3", className)}>
+					<TokenHarborPeakBadge
+						isPeak={peakHours.active}
+						models={peakPricedModels}
+					/>
 				</div>
 			);
 		}
@@ -552,6 +604,34 @@ export function RateLimitProgress({
 		return true;
 	})();
 
+	// OpenCode Go usage data: `{ five_hour, seven_day, monthly }`, each a
+	// `{ utilization, resets_at }` window (see opencode-go-usage-fetcher.ts).
+	// Go's monthly window is the binding cap and must be rendered alongside the
+	// 5-hour and weekly bars, which the Anthropic-style branch would drop.
+	//
+	// The discriminator is the monthly window's `utilization` key, which is what
+	// keeps this shape apart from every other provider:
+	// - Anthropic / Codex: no `monthly` key at all (legacy windows or limits[]).
+	// - Alibaba Coding Plan: has five_hour/weekly/monthly, but the inner windows
+	//   carry `percentUsed` (not `utilization`) and there is no `seven_day`.
+	// - MiniMax: `resetAt` (camelCase) windows, no `monthly`.
+	// - Zai: `tokens_limit` / `time_limit` keys, no monthly window object.
+	// - NanoGPT: top-level `active` / `daily` / `monthly`, where `monthly` is a
+	//   `{ percentUsed, resetAt }` object without `utilization`.
+	const isOpencodeGoData = (() => {
+		if (!usageData || typeof usageData !== "object") return false;
+		if (!("five_hour" in usageData) || !("seven_day" in usageData)) {
+			return false;
+		}
+		if (!("monthly" in usageData)) return false;
+		const monthly = (usageData as { monthly?: unknown }).monthly;
+		return (
+			monthly !== null &&
+			typeof monthly === "object" &&
+			"utilization" in monthly
+		);
+	})();
+
 	// Anthropic-style quota data is shared by Anthropic and Codex; detect by shape, not provider name.
 	const hasAnthropicStyleData =
 		usageData != null &&
@@ -566,7 +646,8 @@ export function RateLimitProgress({
 		!isAlibabaData &&
 		!isMinimaxData &&
 		!isZaiData &&
-		!isNanoGPTData;
+		!isNanoGPTData &&
+		!isOpencodeGoData;
 
 	if (isAlibabaData && showWeekly) {
 		const alibabaData = usageData as {
@@ -595,6 +676,25 @@ export function RateLimitProgress({
 				? new Date(alibabaData.monthly.resetAt).toISOString()
 				: null,
 		});
+	} else if (isOpencodeGoData && showWeekly) {
+		// OpenCode Go: one row per non-null window, each with its own
+		// utilization and `resets_at`. The monthly window is the binding cap
+		// (100% of the shared pool) and is often the highest percentage, so all
+		// three bars are shown rather than collapsing to `usageUtilization`.
+		const goData = usageData as {
+			five_hour?: { utilization?: unknown; resets_at?: unknown } | null;
+			seven_day?: { utilization?: unknown; resets_at?: unknown } | null;
+			monthly?: { utilization?: unknown; resets_at?: unknown } | null;
+		};
+		for (const window of ["five_hour", "seven_day", "monthly"] as const) {
+			const w = goData[window];
+			if (!w || typeof w.utilization !== "number") continue;
+			usages.push({
+				utilization: w.utilization,
+				window,
+				resetTime: typeof w.resets_at === "string" ? w.resets_at : null,
+			});
+		}
 	} else if (isMinimaxData && showWeekly) {
 		// MiniMax Token Plan usage data — show 5-hour and 7-day windows from
 		// each window's own `utilization` and `resetAt` (camelCase, epoch ms).
@@ -805,6 +905,13 @@ export function RateLimitProgress({
 			: null;
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
+	// Pay-as-you-go copy is NanoGPT-only: a reset-less daily/monthly row means
+	// "no subscription" for NanoGPT, but for other providers (e.g. OpenCode Go,
+	// whose monthly reset can be missing) it must still render as a normal bar.
+	const isNanoGPT = provider === PROVIDER_NAMES.NANOGPT;
+	const isNanoGPTPayGRow = (window: string | null | undefined) =>
+		isNanoGPT && (window === "daily" || window === "monthly");
+
 	// The throttle notice normally rides along inside the throttled window's row.
 	// Codex renders its 5-hour row only when the account reports one, and
 	// throttling on that window still delays real requests — so surface any
@@ -828,6 +935,12 @@ export function RateLimitProgress({
 			{anthropicPeak && <PeakHoursBadge label={anthropicPeak} />}
 			{provider === "deepseek" && peakHours && (
 				<DeepseekPeakBadge isPeak={peakHours.active} />
+			)}
+			{provider === "anthropic-compatible" && peakHours && (
+				<TokenHarborPeakBadge
+					isPeak={peakHours.active}
+					models={peakPricedModels}
+				/>
 			)}
 			{hasOrphanThrottledWindow && usageThrottledUntil != null && (
 				<div className="flex items-center justify-between">
@@ -886,16 +999,13 @@ export function RateLimitProgress({
 					// Weekly account/tier windows (seven_day, seven_day_opus,
 					// seven_day_sonnet, seven_day_fable, …) when reset time is unavailable.
 					windowTimeText = "Data unavailable";
-				} else if (usage.window === "daily" || usage.window === "monthly") {
+				} else if (isNanoGPTPayGRow(usage.window)) {
 					// Special handling for NanoGPT when no subscription is active (PayG mode)
 					windowTimeText = "No subscription (PayG mode)";
 				}
 
 				// Special rendering for PayG mode - just show message without progress bar
-				if (
-					(usage.window === "daily" || usage.window === "monthly") &&
-					!usage.resetTime
-				) {
+				if (isNanoGPTPayGRow(usage.window) && !usage.resetTime) {
 					return (
 						<div
 							key={`${usage.window ?? "row"}:${usage.label ?? "default"}`}
@@ -1184,7 +1294,7 @@ export function RateLimitProgress({
 										{windowTimeText}
 									</span>
 									<span className="text-xs text-muted-foreground">
-										{usage.window === "daily" || usage.window === "monthly"
+										{isNanoGPTPayGRow(usage.window)
 											? "Using pay-as-you-go"
 											: "No reset data available"}
 									</span>

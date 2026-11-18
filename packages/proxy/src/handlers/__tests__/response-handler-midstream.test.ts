@@ -31,6 +31,8 @@ function encodeRequestBody(json: string): ArrayBuffer {
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acct-mid-1",
 		name: "mid-stream-test",
 		provider: "anthropic",

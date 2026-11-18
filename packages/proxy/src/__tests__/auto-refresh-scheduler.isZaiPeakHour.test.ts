@@ -1,5 +1,5 @@
 /**
- * Tests for the internal isZaiPeakHour() helper in auto-refresh-scheduler.ts.
+ * Tests for isZaiPeakHour() in peak-hours.ts.
  *
  * Z.ai's peak pricing window is 14:00-18:00 Singapore time (UTC+8), Monday to
  * Friday in Singapore, per Z.ai's docs (read 2026-09-30). This mirrors the
@@ -9,9 +9,9 @@
  * every-day rule (SB23-1867) predates Z.ai's announcement and is superseded;
  * these tests pin that weekends in Singapore are off-peak.
  *
- * isZaiPeakHour is exported solely for testability; it is not otherwise part
- * of the module's public surface and has no other callers outside this
- * file's AutoRefreshScheduler.checkPeakHoursPause().
+ * The helper lives in peak-hours.ts (split out of auto-refresh-scheduler.ts)
+ * so the scheduler's auto-pause, /api/accounts and the request summaries all
+ * share one definition.
  *
  * All timestamps are constructed with Date.UTC(...) so the tests are
  * deterministic regardless of the machine's local timezone.
@@ -20,7 +20,7 @@
  *   21 Mon, 22 Tue, 23 Wed, 24 Thu, 25 Fri, 26 Sat, 27 Sun, 28 Mon
  */
 import { describe, expect, it } from "bun:test";
-import { isZaiPeakHour } from "../auto-refresh-scheduler";
+import { isZaiPeakHour } from "../peak-hours";
 
 describe("isZaiPeakHour", () => {
 	it("returns true for a weekday inside the peak window (Wed 15:00 SGT)", () => {

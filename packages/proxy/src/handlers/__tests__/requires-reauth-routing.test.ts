@@ -6,6 +6,8 @@ import { createPoolExhaustedResponse } from "../proxy-operations";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "account-1",
 		name: "Account 1",
 		provider: "anthropic",

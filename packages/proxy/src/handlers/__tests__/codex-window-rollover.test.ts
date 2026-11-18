@@ -12,6 +12,8 @@ const NEXT_WEEKLY_RESET = "2026-07-27T00:00:00.000Z";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acct-codex-1",
 		name: "codex-test-account",
 		provider: "codex",
@@ -218,6 +220,37 @@ describe("Codex usage-window session rollover", () => {
 		await flush();
 
 		expect(calls.resetAccountSession).toHaveLength(1);
+	});
+
+	it("anchors the rolled-over session at the request's start timestamp", async () => {
+		const account = makeAccount();
+		const elapsedReset = new Date(Date.now() - 60_000).toISOString();
+		const nextReset = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+		seedUsage(account.id, {
+			five_hour: { utilization: 90, resets_at: elapsedReset },
+			seven_day: { utilization: 15, resets_at: NEXT_WEEKLY_RESET },
+		});
+		const { ctx, calls, flush } = makeCtx();
+		const requestStartedAt = Date.now() - 5_000;
+
+		updateAccountMetadata(
+			account,
+			makeCodexResponse({
+				fiveHourReset: nextReset,
+				weeklyReset: NEXT_WEEKLY_RESET,
+			}),
+			ctx,
+			undefined, // requestId
+			false, // bypassSession
+			requestStartedAt,
+		);
+		await flush();
+
+		expect(calls.resetAccountSession).toHaveLength(1);
+		// Rows carry the request's start, and getSessionStats counts
+		// timestamp >= session_start; a boundary taken here would exclude the
+		// request that discovered the rollover.
+		expect(calls.resetAccountSession[0]?.now).toBe(requestStartedAt);
 	});
 
 	it("resets the session from the weekly window when the default flag is false and no 5-hour window is reported", async () => {
