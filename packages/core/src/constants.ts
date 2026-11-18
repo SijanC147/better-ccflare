@@ -197,6 +197,22 @@ export function computeRateLimitBackoffMs(consecutiveCount: number): number {
 	return Math.min(base * 2 ** exponent, max);
 }
 
+/** Short per-model bench for a windowless 429; resets on that pair’s success. */
+export function computeWindowless429CooldownMs(
+	consecutiveCount: number,
+): number {
+	const base = readDurationOverrideMs(
+		process.env.CCFLARE_WINDOWLESS_429_COOLDOWN_MS,
+		60_000,
+	);
+	const max = readDurationOverrideMs(
+		process.env.CCFLARE_WINDOWLESS_429_MAX_MS,
+		15 * 60_000,
+	);
+	const exponent = Math.min(Math.max(0, consecutiveCount - 1), 52);
+	return Math.min(base * 2 ** exponent, max);
+}
+
 /**
  * Whether a 429 that names a real reset window benches the account until that
  * reset. Reads CCFLARE_RATE_LIMIT_HONOR_EXPLICIT_RESET (default true).
@@ -614,6 +630,17 @@ export const LIMITS = {
 		STATUS: 20,
 	},
 } as const;
+
+/**
+ * Response headers naming who actually served a proxied request. The body's
+ * `model` echoes the model the client asked for (a combo can remap that alias
+ * to another provider's model), so these are the only place a client can see
+ * the upstream model and account of the attempt that produced the response.
+ * Set by proxy-operations (proxyWithAccount) and carried through the
+ * /v1/responses adapter. Account names only — never ids or credentials.
+ */
+export const SERVED_MODEL_HEADER = "x-better-ccflare-served-model";
+export const SERVED_ACCOUNT_HEADER = "x-better-ccflare-served-account";
 
 // HTTP status codes
 export const HTTP_STATUS = {

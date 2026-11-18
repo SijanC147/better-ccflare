@@ -19,6 +19,8 @@ import { INTERNAL_PROBE_SECRET_HEADER } from "../proxy-types";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-1",
 		name: "account",
 		provider: "anthropic",

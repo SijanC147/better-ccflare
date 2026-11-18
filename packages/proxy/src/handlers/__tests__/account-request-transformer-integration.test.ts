@@ -12,6 +12,8 @@ import { proxyWithAccount } from "../proxy-operations";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "account-request-transformer-integration",
 		name: "OpenAI integration",
 		provider: "openai-compatible",

@@ -51,11 +51,16 @@ import {
 	clearModelCooldownsForAccount,
 	clearOpenAICompatibleModelCacheForAccount,
 	clearPendingRotation,
+	clearTokenHarborPeakCacheForAccount,
 	clearVisionCapability,
 	getPeakHoursState,
+	getPeakPricedModelIds,
+	getTokenHarborPeakState,
 	getUsageThrottleStatus,
+	isTokenHarborEndpoint,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
+	TOKENHARBOR_PROVIDER,
 } from "@better-ccflare/proxy";
 import type {
 	Account,
@@ -388,6 +393,8 @@ export function createAccountsListHandler(
 			auto_refresh_enabled: 0 | 1;
 			auto_pause_on_overage_enabled: 0 | 1;
 			peak_hours_pause_enabled: 0 | 1;
+			// BOOLEAN on PostgreSQL, INTEGER on SQLite.
+			night_window_enabled: 0 | 1 | boolean;
 			usage_pause_five_hour_threshold: number | null;
 			usage_pause_weekly_threshold: number | null;
 			usage_pause_five_hour_enabled: 0 | 1;
@@ -400,6 +407,7 @@ export function createAccountsListHandler(
 			cross_region_mode: string | null;
 			model_fallbacks: string | null;
 			billing_type: string | null;
+			plan_monthly_usd: number | null;
 			pause_reason: string | null;
 			last_manual_reauth_at: number | null;
 			renewal_day: number | null;
@@ -433,6 +441,7 @@ export function createAccountsListHandler(
 					custom_endpoint,
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
+					night_window_enabled,
 					usage_pause_five_hour_threshold,
 					usage_pause_weekly_threshold,
 					COALESCE(usage_pause_five_hour_enabled, 0) as usage_pause_five_hour_enabled,
@@ -445,6 +454,7 @@ export function createAccountsListHandler(
 					cross_region_mode,
 					model_fallbacks,
 					billing_type,
+					plan_monthly_usd,
 					pause_reason,
 					last_manual_reauth_at,
 					renewal_day,
@@ -714,6 +724,27 @@ export function createAccountsListHandler(
 							);
 						}
 					}
+				} else if (account.provider === "opencode-go" && usageData) {
+					// OpenCode Go usage data — 5h/weekly/monthly windows from /zen/go/v1/usage
+					const isOpencodeGoData =
+						"five_hour" in usageData && "seven_day" in usageData;
+					if (isOpencodeGoData) {
+						try {
+							const {
+								getRepresentativeOpencodeGoUtilization,
+								getRepresentativeOpencodeGoWindow,
+							} = require("@better-ccflare/providers");
+							usageUtilization =
+								getRepresentativeOpencodeGoUtilization(usageData);
+							usageWindow = getRepresentativeOpencodeGoWindow(usageData);
+							fullUsageData = usageData as FullUsageData;
+						} catch (error) {
+							log.warn(
+								`Failed to process OpenCode Go usage data for account ${account.name}:`,
+								error,
+							);
+						}
+					}
 				}
 
 				const usageThrottleSettings = {
@@ -919,7 +950,28 @@ export function createAccountsListHandler(
 					autoPauseOnOverageEnabled:
 						account.auto_pause_on_overage_enabled === 1,
 					peakHoursPauseEnabled: account.peak_hours_pause_enabled === 1,
-					peakHours: getPeakHoursState(account.provider, now),
+					// TokenHarbor's peak pricing is per model, which the toggle
+					// supports only on its own host; every other
+					// anthropic-compatible endpoint has no peak concept at all.
+					peakHoursPauseSupported:
+						account.provider === "zai" ||
+						account.provider === "deepseek" ||
+						(account.provider === TOKENHARBOR_PROVIDER &&
+							isTokenHarborEndpoint(account as never)),
+					peakPricedModels:
+						account.provider === TOKENHARBOR_PROVIDER
+							? getPeakPricedModelIds(account.id)
+							: null,
+					// NOT NULL on both backends; `!!` normalises 1/0 and true/false.
+					nightWindowEnabled: !!account.night_window_enabled,
+					// Provider-wide windows first (zai/deepseek/anthropic), then
+					// TokenHarbor's per-model state. `null` means "no peak concept
+					// here", not "off peak".
+					peakHours:
+						getPeakHoursState(account.provider, now) ??
+						(account.provider === TOKENHARBOR_PROVIDER
+							? getTokenHarborPeakState(account.id, null, now)
+							: null),
 					usagePauseFiveHourThreshold:
 						account.usage_pause_five_hour_threshold ?? null,
 					usagePauseWeeklyThreshold:
@@ -952,6 +1004,12 @@ export function createAccountsListHandler(
 					crossRegionMode: account.cross_region_mode,
 					modelFallbacks,
 					billingType: account.billing_type,
+					// 0 is a meaningful price (free plan), so null-check rather than
+					// truthiness — `|| null` would erase it.
+					planMonthlyUsd:
+						account.plan_monthly_usd != null
+							? Number(account.plan_monthly_usd)
+							: null,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					isPrimary: account.id === primaryId,
 				};
@@ -1369,6 +1427,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			clearPendingRotation(accountId);
 			clearCodexModelCacheForAccount(accountId);
 			clearOpenAICompatibleModelCacheForAccount(accountId);
+			clearTokenHarborPeakCacheForAccount(accountId);
 			clearFamilyExhaustionForAccount(accountId);
 			clearModelCooldownsForAccount(accountId);
 			clearDerivedProviderModelDefaultsForAccount(accountId);
@@ -3483,7 +3542,11 @@ export function createAccountUsagePauseThresholdsHandler(
 }
 
 /**
- * Create an account peak-hours-pause toggle handler (Zai accounts only)
+ * Create an account peak-hours-pause toggle handler.
+ *
+ * Zai and DeepSeek pause the whole account during their peak window.
+ * TokenHarbor is model-aware instead — see tokenharbor-peak.ts — so it is
+ * accepted only on its own host, where a peak-priced model set exists.
  */
 export function createAccountPeakHoursPauseHandler(dbOps: DatabaseOperations) {
 	return async (req: Request, accountId: string): Promise<Response> => {
@@ -3511,11 +3574,34 @@ export function createAccountPeakHoursPauseHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			// Only zai and deepseek accounts support peak hours pause
-			if (account.provider !== "zai" && account.provider !== "deepseek") {
+			// Zai and DeepSeek pause the whole account at peak. TokenHarbor is
+			// model-aware instead: only the models its own listing marks as
+			// peak-priced are avoided, so the account must be on TokenHarbor's
+			// host for the toggle to mean anything. Every other
+			// anthropic-compatible endpoint has no peak concept.
+			if (account.provider === TOKENHARBOR_PROVIDER) {
+				const full = await db.get<{
+					custom_endpoint: string | null;
+					api_key: string | null;
+					model_mappings: string | null;
+				}>(
+					"SELECT custom_endpoint, api_key, model_mappings FROM accounts WHERE id = ?",
+					[accountId],
+				);
+				if (!isTokenHarborEndpoint(full as never)) {
+					return errorResponse(
+						BadRequest(
+							"Peak hours pause is only available for Zai, DeepSeek and TokenHarbor accounts",
+						),
+					);
+				}
+			} else if (
+				account.provider !== "zai" &&
+				account.provider !== "deepseek"
+			) {
 				return errorResponse(
 					BadRequest(
-						"Peak hours pause is only available for Zai and DeepSeek accounts",
+						"Peak hours pause is only available for Zai, DeepSeek and TokenHarbor accounts",
 					),
 				);
 			}
@@ -3523,7 +3609,9 @@ export function createAccountPeakHoursPauseHandler(dbOps: DatabaseOperations) {
 			// Update peak-hours-pause setting
 			await dbOps.setPeakHoursPauseEnabled(accountId, enabled === 1);
 
-			// Immediate resume when disabling — don't make users wait for scheduler
+			// Immediate resume when disabling — don't make users wait for scheduler.
+			// (TokenHarbor never pauses the account in the first place; the guard
+			// simply matches nothing for it.)
 			if (enabled === 0) {
 				await db.run(
 					"UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ? AND COALESCE(paused, 0) = 1 AND pause_reason = 'peak_hours'",
@@ -3544,6 +3632,59 @@ export function createAccountPeakHoursPauseHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to toggle peak-hours-pause"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account night-window toggle handler.
+ *
+ * The flag is provider-agnostic by design: any provider that registers a
+ * night-window tier adapter can use it, so there is deliberately no
+ * sailresearch-only gate here.
+ */
+export function createAccountNightWindowHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body: unknown = await req.json();
+
+			// Validate enabled parameter (strict boolean)
+			const enabled = (body as { enabled?: unknown } | null)?.enabled;
+
+			if (typeof enabled !== "boolean") {
+				return errorResponse(
+					BadRequest("Enabled field is required and must be a boolean"),
+				);
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Update night-window setting
+			await dbOps.setNightWindowEnabled(accountId, enabled);
+
+			const action = enabled ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Night window ${action} for account '${account.name}'`,
+				nightWindowEnabled: enabled,
+			});
+		} catch (error) {
+			log.error("Account night-window toggle error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle night window"),
 			);
 		}
 	};
@@ -3608,6 +3749,80 @@ export function createAccountBillingTypeHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to update billing type"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account monthly plan price handler
+ *
+ * Stores the ACTUAL dollar price of the account's subscription. This is not
+ * the same thing as `plan_cost_usd` on requests, which is the counterfactual
+ * "what this plan traffic would have cost at public API rates" (surfaced as
+ * "Plan Value" in the dashboard). Unlike billing-type, this is NOT restricted
+ * by provider — any account can carry a monthly price.
+ */
+export function createAccountPlanPriceHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Hand-rolled because `validateNumber` coerces numeric strings, and a
+			// price arriving as a string is a caller bug we want surfaced, not
+			// silently accepted. `null` is the documented way to clear the value;
+			// a missing field is a malformed request, not a clear.
+			const raw = body?.planMonthlyUsd;
+			if (raw === undefined) {
+				return errorResponse(BadRequest("planMonthlyUsd is required"));
+			}
+
+			let planMonthlyUsd: number | null;
+			if (raw === null) {
+				planMonthlyUsd = null;
+			} else if (typeof raw !== "number") {
+				return errorResponse(
+					BadRequest("planMonthlyUsd must be a number or null"),
+				);
+			} else if (!Number.isFinite(raw)) {
+				// Catches NaN and ±Infinity, both of which JSON.parse can produce
+				// from a JS client and neither of which SQLite/PG can store sanely.
+				return errorResponse(
+					BadRequest("planMonthlyUsd must be a finite number"),
+				);
+			} else if (raw < 0) {
+				return errorResponse(BadRequest("planMonthlyUsd must be >= 0"));
+			} else {
+				planMonthlyUsd = raw;
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			await dbOps.setAccountPlanMonthlyUsd(accountId, planMonthlyUsd);
+
+			return jsonResponse({
+				success: true,
+				message:
+					planMonthlyUsd === null
+						? `Monthly plan price cleared for account '${account.name}'`
+						: `Monthly plan price set to ${planMonthlyUsd} for account '${account.name}'`,
+				planMonthlyUsd,
+			});
+		} catch (error) {
+			log.error("Account plan price update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update plan price"),
 			);
 		}
 	};
@@ -3964,6 +4179,13 @@ export function createAccountCustomEndpointUpdateHandler(
 			// accept image input" was learned from the old one. Drop this account's
 			// learned refusals so the new endpoint is asked rather than skipped.
 			clearVisionCapability(accountId);
+
+			// Same reasoning for the TokenHarbor peak listing: it is keyed by
+			// account id and describes the OLD endpoint's prices. Dropping it
+			// means the next refresh fetches from the new endpoint rather than
+			// routing on stale prices (isPeakAffected also fails open on the
+			// mismatch, but the cache should not keep serving the old row).
+			clearTokenHarborPeakCacheForAccount(accountId);
 
 			return jsonResponse({
 				success: true,
@@ -4405,6 +4627,15 @@ export function createAccountReloadHandler(dbOps: DatabaseOperations) {
 	};
 }
 
+// AWS profile names are alphanumeric plus . _ -; anything else (e.g. ":" or
+// regex metacharacters) would corrupt the bedrock:profile:region endpoint or
+// the RegExp built from the name.
+const awsProfileName = /^[A-Za-z0-9._-]+$/;
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Check if an AWS profile exists in ~/.aws/credentials
  */
@@ -4416,7 +4647,7 @@ function checkAwsProfileExists(profile: string): boolean {
 		}
 		const content = readFileSync(credentialsPath, "utf-8");
 		// Match [profile] section header (handles default and named profiles)
-		const profileRegex = new RegExp(`^\\[${profile}\\]`, "m");
+		const profileRegex = new RegExp(`^\\[${escapeRegExp(profile)}\\]`, "m");
 		return profileRegex.test(content);
 	} catch {
 		return false;
@@ -4436,7 +4667,9 @@ function readAwsRegion(profile: string): string | null {
 		const content = readFileSync(configPath, "utf-8");
 		// In ~/.aws/config, the default profile is [default], named profiles are [profile <name>]
 		const sectionHeader =
-			profile === "default" ? "\\[default\\]" : `\\[profile ${profile}\\]`;
+			profile === "default"
+				? "\\[default\\]"
+				: `\\[profile ${escapeRegExp(profile)}\\]`;
 		const sectionRegex = new RegExp(`${sectionHeader}[\\s\\S]*?(?=\\[|$)`);
 		const sectionMatch = content.match(sectionRegex);
 		if (!sectionMatch) return null;
@@ -4513,6 +4746,9 @@ export function createBedrockAccountAddHandler(dbOps: DatabaseOperations) {
 			const profile = validateString(body.profile, "profile", {
 				required: true,
 				minLength: 1,
+				pattern: awsProfileName,
+				patternErrorMessage:
+					"can only contain letters, numbers, dots, hyphens, and underscores",
 				transform: sanitizers.trim,
 			});
 

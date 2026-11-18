@@ -9,6 +9,10 @@ import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";
+import {
+	applyAnthropicReasoningEffort,
+	type ReasoningEffortTarget,
+} from "../../utils/reasoning-effort";
 import { drainReader } from "../../utils/stream-drain";
 
 // The API version Anthropic requires on every request. Same value
@@ -258,6 +262,11 @@ export class AnthropicProvider extends BaseProvider {
 		return true;
 	}
 
+	/** The transform writes the native `output_config.effort`. */
+	reasoningEffortTarget(): ReasoningEffortTarget {
+		return "output_config";
+	}
+
 	async refreshToken(
 		account: Account,
 		clientId: string,
@@ -422,12 +431,24 @@ export class AnthropicProvider extends BaseProvider {
 		request: Request,
 		account?: Account,
 	): Promise<Request> {
-		return transformRequestBodyModel(request, account, (model, acc) => {
-			if (acc) {
-				return mapModelName(model, acc);
-			}
-			return model;
-		});
+		return transformRequestBodyModel(
+			request,
+			account,
+			(model, acc) => {
+				if (acc) {
+					return mapModelName(model, acc);
+				}
+				return model;
+			},
+			{
+				// Claude Code never sends the internal `reasoning` key, so its
+				// bodies are unchanged; a /v1/responses request routed to an API-key
+				// account gets the client's effort as native output_config.effort
+				// instead of an unknown field the Messages API rejects.
+				rewriteBody: (body) =>
+					applyAnthropicReasoningEffort(body, "output_config"),
+			},
+		);
 	}
 
 	buildUrl(path: string, query: string, account?: Account): string {

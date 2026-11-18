@@ -26,6 +26,7 @@ const allHandlers: AccountMenuHandlers = {
 	requestTransformer: true,
 	autoPauseOnOverage: true,
 	peakHoursPause: true,
+	nightWindow: true,
 	qwenReauth: true,
 	anthropicReauth: true,
 	codexReauth: true,
@@ -98,6 +99,7 @@ function renderAccount(
 			onAutoFallbackToggle={() => {}}
 			onAutoRefreshToggle={() => {}}
 			onBillingTypeToggle={() => {}}
+			onPlanPriceChange={() => {}}
 			onAnthropicReauth={() => {}}
 			onRequestTransformerChange={onRequestTransformerChange}
 		/>,
@@ -456,24 +458,67 @@ describe("AccountListItem", () => {
 		).toBe(false);
 	});
 
-	it("reads the zai peak-hours toggle in both positions and only for zai", () => {
+	it("reads the zai peak-hours toggle in both positions and only when the server supports it", () => {
+		const zai = {
+			...baseAccount,
+			provider: "zai",
+			peakHoursPauseSupported: true,
+		};
 		const zaiOn = accountMenuToggles(
-			{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: true },
+			{ ...zai, peakHoursPauseEnabled: true },
 			allHandlers,
 		).find((toggle) => toggle.id === "peak-hours-pause");
 		const zaiOff = accountMenuToggles(
-			{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: false },
+			{ ...zai, peakHoursPauseEnabled: false },
 			allHandlers,
 		).find((toggle) => toggle.id === "peak-hours-pause");
+		// The server decides support (/api/accounts peakHoursPauseSupported), so a
+		// zai account the server does not mark gets no toggle.
+		expect(
+			accountMenuToggles(
+				{ ...baseAccount, provider: "zai", peakHoursPauseEnabled: true },
+				allHandlers,
+			).some((toggle) => toggle.id === "peak-hours-pause"),
+		).toBe(false);
 
 		expect(zaiOn?.checked).toBe(true);
 		expect(zaiOff?.checked).toBe(false);
 		// An absent value is off, not on: nothing invents a pause the operator
 		// never asked for.
 		expect(
-			accountMenuToggles({ ...baseAccount, provider: "zai" }, allHandlers).find(
+			accountMenuToggles(zai, allHandlers).find(
 				(toggle) => toggle.id === "peak-hours-pause",
 			)?.checked,
+		).toBe(false);
+	});
+
+	it("reads the night-window toggle in both positions and only for a tier provider", () => {
+		const sail = { ...baseAccount, provider: "sailresearch" };
+		const on = accountMenuToggles(
+			{ ...sail, nightWindowEnabled: true },
+			allHandlers,
+		).find((toggle) => toggle.id === "night-window");
+		const off = accountMenuToggles(
+			{ ...sail, nightWindowEnabled: false },
+			allHandlers,
+		).find((toggle) => toggle.id === "night-window");
+		expect(on?.checked).toBe(true);
+		expect(off?.checked).toBe(false);
+		expect(
+			accountMenuToggles(sail, allHandlers).find(
+				(toggle) => toggle.id === "night-window",
+			)?.checked,
+		).toBe(false);
+		expect(
+			accountMenuToggles(
+				{ ...baseAccount, nightWindowEnabled: true },
+				allHandlers,
+			).some((toggle) => toggle.id === "night-window"),
+		).toBe(false);
+		expect(
+			accountMenuToggles(sail, { ...allHandlers, nightWindow: false }).some(
+				(toggle) => toggle.id === "night-window",
+			),
 		).toBe(false);
 	});
 
@@ -521,6 +566,7 @@ describe("AccountListItem", () => {
 			onBillingTypeToggle: spy("plan-billing"),
 			onAutoPauseOnOverageToggle: spy("auto-pause-on-overage"),
 			onPeakHoursPauseToggle: spy("peak-hours-pause"),
+			onNightWindowToggle: spy("night-window"),
 		});
 
 		bound.toggle["auto-fallback"]();
@@ -528,6 +574,7 @@ describe("AccountListItem", () => {
 		bound.toggle["plan-billing"]();
 		bound.toggle["auto-pause-on-overage"]();
 		bound.toggle["peak-hours-pause"]();
+		bound.toggle["night-window"]();
 
 		expect(fired).toEqual([
 			"auto-fallback",
@@ -535,6 +582,7 @@ describe("AccountListItem", () => {
 			"plan-billing",
 			"auto-pause-on-overage",
 			"peak-hours-pause",
+			"night-window",
 		]);
 	});
 

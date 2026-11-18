@@ -117,4 +117,49 @@ describe("runAuthProbe", () => {
 		await runAuthProbe(deps);
 		expect(calls).toEqual([]);
 	});
+
+	// The per-key usage pages (upstream's /api-key-usage) let an api-only key
+	// in and show a permission error themselves, so a 403 there must not open
+	// the dialog; it reaches onOtherFailure instead.
+	it("hands a 403 to onOtherFailure when repromptOn403 is false", async () => {
+		const { deps, calls } = recorder(async () => {
+			throw new HttpError(403, "forbidden");
+		}, true);
+		await runAuthProbe({
+			...deps,
+			repromptOn403: false,
+			onOtherFailure: (error) =>
+				calls.push(`other=${(error as HttpError).status}`),
+		});
+		expect(calls).toEqual(["other=403"]);
+	});
+
+	it("still reprompts on 401 when repromptOn403 is false", async () => {
+		const { deps, calls } = recorder(async () => {
+			throw new HttpError(401, "Invalid API key");
+		}, true);
+		await runAuthProbe({
+			...deps,
+			repromptOn403: false,
+			onOtherFailure: () => calls.push("other"),
+		});
+		expect(calls).toEqual([
+			"clearApiKey",
+			"authError=null",
+			"authRequired=true",
+			"showAuthDialog=true",
+		]);
+	});
+
+	it("hands a server error to onOtherFailure and never on a reprompt", async () => {
+		const { deps, calls } = recorder(async () => {
+			throw new HttpError(500, "boom");
+		}, true);
+		await runAuthProbe({
+			...deps,
+			onOtherFailure: (error) =>
+				calls.push(`other=${(error as HttpError).status}`),
+		});
+		expect(calls).toEqual(["other=500"]);
+	});
 });

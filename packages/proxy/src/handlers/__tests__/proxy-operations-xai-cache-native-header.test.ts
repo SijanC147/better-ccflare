@@ -27,6 +27,8 @@ const XAI_CONV_ID_HEADER = "x-grok-conv-id";
 
 function makeXaiAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "xai-1",
 		name: "xai-test",
 		provider: "xai",
@@ -76,6 +78,8 @@ function makeXaiAccount(overrides: Partial<Account> = {}): Account {
 
 function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "codex-1",
 		name: "codex-test",
 		provider: "codex",

@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { NanoGPTUsageData, ZaiUsageWindow } from "@better-ccflare/types";
 import { makeZaiUsage } from "../testing/zai-usage-fixture";
 import type { AnyUsageData, UsageData } from "../usage-fetcher";
@@ -323,6 +323,10 @@ describe("zai weekly token window", () => {
 // ── onWindowReset callback via usageCache.set ─────────────────────────────────
 
 describe("usageCache window-reset callback", () => {
+	afterEach(() => {
+		usageCache.clear();
+	});
+
 	it("fires onWindowReset when zai resetAt advances to a later value", () => {
 		const accountId = "zai-window-reset-test";
 		const callback = mock(() => {});

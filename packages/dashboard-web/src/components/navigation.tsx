@@ -5,6 +5,8 @@ import {
 	Bot,
 	FileText,
 	FolderOpen,
+	Gauge,
+	GitBranch,
 	History,
 	Key,
 	LayoutDashboard,
@@ -13,7 +15,6 @@ import {
 	Menu,
 	PanelLeftClose,
 	PanelLeftOpen,
-	RefreshCw,
 	Search,
 	Settings,
 	Shield,
@@ -54,6 +55,8 @@ const _navItems: NavItem[] = [
 
 interface NavigationProps {
 	onLogout?: (() => void) | undefined;
+	/** False for a key that may only read its own usage pages. */
+	canManage?: boolean | undefined;
 	isCollapsed?: boolean | undefined;
 	onToggleCollapse?: (() => void) | undefined;
 }
@@ -62,14 +65,23 @@ export function Navigation({
 	onLogout,
 	isCollapsed = false,
 	onToggleCollapse,
+	canManage = true,
 }: NavigationProps = {}) {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-	const { data: alertData } = useAlerts();
+	const { data: alertData } = useAlerts({ enabled: canManage });
 	const unacknowledgedCount = alertData?.unacknowledgedCount ?? 0;
 	const location = useLocation();
 
 	// Build nav items with the current alert badge
 	const navItems: NavItem[] = useMemo(() => {
+		if (!canManage)
+			return [
+				{
+					label: "API Key Usage",
+					icon: Gauge,
+					path: "/api-key-usage",
+				},
+			];
 		const baseItems: NavItem[] = [
 			{ label: "Overview", icon: LayoutDashboard, path: "/" },
 			{ label: "Analytics", icon: BarChart3, path: "/analytics" },
@@ -86,7 +98,18 @@ export function Navigation({
 			{ label: "Usage History", icon: History, path: "/usage-history" },
 		];
 
+		baseItems.push({
+			label: "API Key Usage",
+			icon: Gauge,
+			path: "/api-key-usage",
+		});
+
 		baseItems.push({ label: "Combos", icon: Zap, path: "/combos" });
+		baseItems.push({
+			label: "Combo Flow",
+			icon: GitBranch,
+			path: "/combo-flow",
+		});
 
 		// Add remaining items
 		baseItems.push(
@@ -104,7 +127,7 @@ export function Navigation({
 		);
 
 		return baseItems;
-	}, [unacknowledgedCount]);
+	}, [unacknowledgedCount, canManage]);
 
 	return (
 		<>
@@ -257,7 +280,7 @@ export function Navigation({
 							</div>
 
 							{/* Fork release + upstream sync status */}
-							<VersionStatusCards />
+							{canManage && <VersionStatusCards />}
 
 							{/* The identity line shows at every width: the sidebar is a
 							    fixed 256px drawer on mobile, so it has the same room

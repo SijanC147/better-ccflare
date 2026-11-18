@@ -16,6 +16,8 @@ import { mapModelName, providerAcceptsClientModel } from "./model-mappings";
 // below. Same fix as packages/load-balancer in PR #180.
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	const base: Account = {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-1",
 		name: "codex-account",
 		provider: "codex",

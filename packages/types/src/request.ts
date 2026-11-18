@@ -134,6 +134,8 @@ export function toStreamTerminalState(
 export interface RequestRow {
 	id: string;
 	timestamp: number;
+	/** Limit accounting time; legacy rows fall back to response completion. */
+	spend_recorded_at?: number | null;
 	method: string;
 	path: string;
 	account_used: string | null;
@@ -161,6 +163,7 @@ export interface RequestRow {
 	billing_type: string | null;
 	combo_name: string | null;
 	original_model: string | null;
+	limit_model?: string | null;
 	applied_model: string | null;
 	project_attribution_source: string | null;
 	agent_attribution_source: string | null;
@@ -174,6 +177,7 @@ export interface RequestRow {
 	inbound_format: string | null;
 	inbound_gateway: string | null;
 	provider_served: string | null;
+	completion_tier: string | null;
 }
 
 // Domain model
@@ -207,6 +211,7 @@ export interface Request {
 	billingType?: string | undefined;
 	comboName?: string | undefined;
 	originalModel?: string | undefined;
+	limitModel?: string | undefined;
 	appliedModel?: string | undefined;
 	projectAttributionSource?: ProjectAttributionSource | undefined;
 	agentAttributionSource?: AgentAttributionSource | undefined;
@@ -238,6 +243,13 @@ export interface Request {
 	 * for streaming responses, whose frames carry no such field.
 	 */
 	providerServed?: string | undefined;
+	/**
+	 * The tier the provider reports it actually ran the request on, from the
+	 * response `usage.service_tier` (e.g. Sail Research "balanced"). A fact
+	 * from the response, never inferred, in particular never the tier the
+	 * client asked for. Absent when the provider reports no tier.
+	 */
+	completionTier?: string | undefined;
 }
 
 // API response type
@@ -271,6 +283,7 @@ export interface RequestResponse {
 	billingType?: string | undefined;
 	comboName?: string | undefined;
 	originalModel?: string | undefined;
+	limitModel?: string | undefined;
 	appliedModel?: string | undefined;
 	// Derived from statusCode === 429 server-side so the list view can render
 	// the "Rate Limited" badge without lazy-loading the full payload.
@@ -295,6 +308,17 @@ export interface RequestResponse {
 	inboundFormat?: string | undefined;
 	inboundGateway?: string | undefined;
 	providerServed?: string | undefined;
+	/** See the matching field on `Request` above. */
+	completionTier?: string | undefined;
+	/**
+	 * Whether this request was served during its account provider's peak
+	 * pricing window, evaluated at the request's own timestamp with the same
+	 * rules that drive the peak-hours auto-pause. Computed server-side because
+	 * DeepSeek's window excludes Chinese public holidays, a calendar the
+	 * dashboard does not have. `null` for providers without a peak concept and
+	 * for requests not attributed to an account.
+	 */
+	peakHours?: { active: boolean } | null | undefined;
 }
 
 // Detailed request with payload
@@ -401,6 +425,7 @@ export function toRequest(row: RequestRow): Request {
 		billingType: row.billing_type || undefined,
 		comboName: row.combo_name || undefined,
 		originalModel: row.original_model || undefined,
+		limitModel: row.limit_model || undefined,
 		appliedModel: row.applied_model || undefined,
 		projectAttributionSource: toProjectAttributionSource(
 			row.project_attribution_source,
@@ -420,6 +445,7 @@ export function toRequest(row: RequestRow): Request {
 		inboundFormat: row.inbound_format || undefined,
 		inboundGateway: row.inbound_gateway || undefined,
 		providerServed: row.provider_served || undefined,
+		completionTier: row.completion_tier || undefined,
 	};
 }
 
@@ -454,6 +480,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		billingType: request.billingType,
 		comboName: request.comboName,
 		originalModel: request.originalModel,
+		limitModel: request.limitModel,
 		appliedModel: request.appliedModel,
 		rateLimited: request.statusCode === 429,
 		projectAttributionSource: request.projectAttributionSource,
@@ -468,6 +495,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		inboundFormat: request.inboundFormat,
 		inboundGateway: request.inboundGateway,
 		providerServed: request.providerServed,
+		completionTier: request.completionTier,
 	};
 }
 

@@ -10,8 +10,12 @@ export * from "./kilo-usage-fetcher";
 export * from "./minimax-usage-fetcher";
 // Export NanoGPT usage fetcher
 export * from "./nanogpt-usage-fetcher";
+// Export provider-agnostic night-window tier adapters
+export * from "./night-window";
 // Export OAuth utilities
 export * from "./oauth";
+// Export OpenCode Go usage fetcher
+export * from "./opencode-go-usage-fetcher";
 export * from "./openrouter-usage-fetcher";
 export * from "./provider-model-defaults";
 // Factory functions for creating providers
@@ -27,6 +31,14 @@ export {
 	CODEX_CREDITS_NOT_OBSERVED,
 } from "./providers/codex/credits";
 export * from "./providers/index";
+// Export Mistral endpoint helpers (reasoning rewrite + pod affinity)
+export {
+	applyMistralAffinityHeader,
+	deriveMistralAffinityId,
+	isMistralEndpoint,
+	MISTRAL_AFFINITY_HEADER,
+	stripMistralReasoning,
+} from "./providers/openai/mistral";
 // Export registry functions
 export {
 	getOAuthProvider,
@@ -42,6 +54,15 @@ export * from "./usage-fetcher";
 export * from "./utils/provider-request-id";
 // Export provider-named serving backend extraction (dashboard "Served by")
 export * from "./utils/provider-serving";
+// Export outbound reasoning-effort re-clamping (proxy model fallback) and
+// pre-flight validation of a client-supplied effort
+export {
+	getReasoningEffortError,
+	type ReasoningEffortTarget,
+	type ReclampReasoningEffortOptions,
+	reclampReasoningEffort,
+	restoreReasoningEffort,
+} from "./utils/reasoning-effort";
 // Export shared request-body helper (Bun 1.3.x clone().json() leak, #382)
 export * from "./utils/request-json";
 // Export shared stream-drain helpers
@@ -65,8 +86,10 @@ import { NanoGPTProvider } from "./providers/nanogpt/provider";
 import { OllamaCloudProvider } from "./providers/ollama/ollama-cloud-provider";
 import { OllamaProvider } from "./providers/ollama/provider";
 import { OpenAICompatibleProvider } from "./providers/openai/provider";
+import { OpencodeGoProvider } from "./providers/opencode-go/provider";
 import { OpenRouterProvider } from "./providers/openrouter/provider";
 import { QwenProvider } from "./providers/qwen/provider";
+import { SailresearchProvider } from "./providers/sailresearch/provider";
 import { VertexAIProvider } from "./providers/vertex-ai/provider";
 import { XaiProvider } from "./providers/xai/provider";
 import { ZaiProvider } from "./providers/zai/provider";
@@ -83,6 +106,8 @@ registry.registerProvider(new OpenRouterProvider());
 registry.registerProvider(new QwenProvider());
 registry.registerProvider(new MinimaxProvider());
 registry.registerProvider(new DeepseekProvider());
+registry.registerProvider(new SailresearchProvider());
+registry.registerProvider(new OpencodeGoProvider());
 registry.registerProvider(new NanoGPTProvider());
 registry.registerProvider(new ZaiProvider());
 registry.registerProvider(new VertexAIProvider());

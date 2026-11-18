@@ -439,6 +439,7 @@ describe("AccountListItem, extra usage", () => {
 				onAutoFallbackToggle={() => {}}
 				onAutoRefreshToggle={() => {}}
 				onBillingTypeToggle={() => {}}
+				onPlanPriceChange={() => {}}
 			/>,
 		);
 	}

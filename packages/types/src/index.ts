@@ -7,6 +7,7 @@ export * from "./alerts";
 export * from "./api";
 export * from "./api-catalog";
 export * from "./api-key";
+export * from "./api-key-usage";
 export * from "./claude-code-endpoints";
 export * from "./combo";
 export * from "./constants";

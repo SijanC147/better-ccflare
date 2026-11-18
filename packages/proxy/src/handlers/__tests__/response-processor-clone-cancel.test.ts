@@ -24,6 +24,8 @@ import { processProxyResponse } from "../response-processor";
 
 function makeAccount(): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acct-1",
 		name: "test-account",
 		provider: "anthropic",

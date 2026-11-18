@@ -190,6 +190,22 @@ const RUNTIME_PROBE_KEYS = new Set([
 	// attempt (upstream 7c274918). Absent means "no routing support", which is
 	// what a partial mock describes.
 	"supportsProviderRoutingFor",
+	// Optional Provider capabilities from the same sync, read with `?.`:
+	// the model a provider addressed in its URL (served-model header) and the
+	// native reasoning-effort field restored after a model fallback. Absent
+	// means "not this provider's concern".
+	"getTargetModel",
+	"reasoningEffortTarget",
+	// Optional Config getters the proxy and selector read with `?.` and a
+	// default (upstream 2026-11: night window, cost tracking, usage throttling
+	// in the selector, combos switch). Absent means the default, which is what
+	// a test that does not name them describes.
+	"getNightWindow",
+	"getNightTz",
+	"getCostTrackingEnabled",
+	"getUsageThrottlingFiveHourEnabled",
+	"getUsageThrottlingWeeklyEnabled",
+	"getCombosEnabled",
 ]);
 
 /**

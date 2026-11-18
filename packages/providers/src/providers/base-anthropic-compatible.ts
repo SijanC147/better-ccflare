@@ -11,6 +11,11 @@ import type { Account } from "@better-ccflare/types";
 import { BaseProvider } from "../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../types";
 import { transformRequestBodyModel } from "../utils/model-mapping";
+import {
+	type AnthropicReasoningEffortStyle,
+	applyAnthropicReasoningEffort,
+	type ReasoningEffortTarget,
+} from "../utils/reasoning-effort";
 import { drainReader } from "../utils/stream-drain";
 
 // Configuration interface for Anthropic-compatible providers
@@ -90,6 +95,10 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 			return "direct"; // sensible default
 		}
 		return authType;
+	}
+
+	getDefaultModel(): string | undefined {
+		return this.config.defaultModel;
 	}
 
 	canHandle(_path: string): boolean {
@@ -181,23 +190,56 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 		return transformRequestBodyModel(
 			request,
 			account,
-			(model, acc) => {
-				if (acc) {
-					// Use core mapModelName which handles arrays, fallbacks, env overrides, and defaults
-					return mapModelName(model, acc);
-				}
-
-				// Fall back to static config mappings for backward compatibility
-				if (this.config.modelMappings?.[model]) {
-					return this.config.modelMappings[model];
-				}
-
-				return model;
-			},
+			(model, acc) => this.mapModelForRequest(model, acc),
 			{
 				supportsProviderRouting: () => this.supportsProviderRoutingFor(account),
+				rewriteBody: (body) =>
+					applyAnthropicReasoningEffort(body, this.getReasoningEffortStyle()),
 			},
 		);
+	}
+
+	/**
+	 * Resolve the model id to send upstream for a request. Called by
+	 * {@link transformRequestBody} with the routing suffix already stripped.
+	 *
+	 * The base behaviour maps only through the account's own configuration: a
+	 * provider that registers family defaults but does not override this hook
+	 * leaves an unmapped model untouched. A provider whose upstream serves only
+	 * its own model ids overrides this to apply those defaults.
+	 */
+	protected mapModelForRequest(model: string, account?: Account): string {
+		if (account) {
+			// Use core mapModelName which handles arrays, fallbacks, env overrides, and defaults
+			return mapModelName(model, account);
+		}
+
+		// Fall back to static config mappings for backward compatibility
+		if (this.config.modelMappings?.[model]) {
+			return this.config.modelMappings[model];
+		}
+
+		return model;
+	}
+
+	/**
+	 * Native field for the client's reasoning effort on this upstream. Claude's
+	 * Messages API (and Anthropic-compatible gateways) take
+	 * `output_config.effort`; OpenRouter overrides this to keep its own
+	 * `reasoning: { effort }` object.
+	 */
+	protected getReasoningEffortStyle(): AnthropicReasoningEffortStyle {
+		return "output_config";
+	}
+
+	/**
+	 * The same field the transform writes, for the proxy's post-fallback
+	 * restore of an effort the mapped model made it drop.
+	 */
+	reasoningEffortTarget(): ReasoningEffortTarget {
+		return this.getReasoningEffortStyle() === "openrouter"
+			? "reasoning"
+			: "output_config";
 	}
 
 	/**

@@ -1,5 +1,5 @@
 import { supportsUsagePauseThreshold } from "@better-ccflare/core";
-import { AccountPresenter } from "@better-ccflare/ui-common";
+import { AccountPresenter, formatCost } from "@better-ccflare/ui-common";
 import {
 	AlertCircle,
 	CalendarClock,
@@ -39,6 +39,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { Input } from "../ui/input";
 import {
 	type AccountMenuActionId,
 	type AccountMenuCallbacks,
@@ -88,8 +89,13 @@ interface AccountListItemProps {
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
 	onBillingTypeToggle: (account: Account) => void;
+	onPlanPriceChange: (
+		account: Account,
+		planMonthlyUsd: number | null,
+	) => void | Promise<void>;
 	onAutoPauseOnOverageToggle?: ((account: Account) => void) | undefined;
 	onPeakHoursPauseToggle?: ((account: Account) => void) | undefined;
+	onNightWindowToggle?: ((account: Account) => void) | undefined;
 	onUsageThresholdsChange?: ((account: Account) => void) | undefined;
 	onCustomEndpointChange?: ((account: Account) => void) | undefined;
 	onModelMappingsChange?: ((account: Account) => void) | undefined;
@@ -114,8 +120,10 @@ export function AccountListItem({
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
 	onBillingTypeToggle,
+	onPlanPriceChange,
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
+	onNightWindowToggle,
 	onUsageThresholdsChange,
 	onCustomEndpointChange,
 	onModelMappingsChange,
@@ -126,6 +134,25 @@ export function AccountListItem({
 	onCodeBuddyReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
+	// `null` draft means "not being edited" so the field re-derives from the
+	// refetched account after a save instead of pinning a stale local string.
+	const [planPriceDraft, setPlanPriceDraft] = useState<string | null>(null);
+	const storedPlanPrice = account.planMonthlyUsd ?? null;
+	const planPriceValue =
+		planPriceDraft ?? (storedPlanPrice != null ? String(storedPlanPrice) : "");
+
+	const commitPlanPrice = () => {
+		if (planPriceDraft === null) return; // untouched
+		const trimmed = planPriceDraft.trim();
+		const next = trimmed === "" ? null : Number(trimmed);
+		setPlanPriceDraft(null);
+		if (next !== null && (!Number.isFinite(next) || next < 0)) {
+			// Don't POST something the API will 400 on — revert to the stored value.
+			return;
+		}
+		if (next === storedPlanPrice) return;
+		void onPlanPriceChange(account, next);
+	};
 	const presenter = new AccountPresenter(account);
 	// Recomputed in the browser's zone rather than read from the response, whose
 	// nextRenewalAt and daysUntilRenewal are UTC-anchored. See utils/renewal.ts.
@@ -190,6 +217,7 @@ export function AccountListItem({
 		onBillingTypeToggle,
 		onAutoPauseOnOverageToggle,
 		onPeakHoursPauseToggle,
+		onNightWindowToggle,
 	};
 	const menuHandlers = menuHandlersFrom(menuCallbacks);
 	const menuToggles = accountMenuToggles(account, menuHandlers);
@@ -226,6 +254,32 @@ export function AccountListItem({
 				{/* Provider row */}
 				<div className="flex flex-wrap items-center gap-2">
 					<p className="text-sm text-muted-foreground">{account.provider}</p>
+					{/* Any account can carry a subscription price, so this is not
+					    gated on provider the way plan billing is. */}
+					<div className="flex items-center gap-1">
+						<span className="text-xs text-muted-foreground">Plan/mo:</span>
+						<span className="text-xs text-muted-foreground">$</span>
+						<Input
+							type="number"
+							min="0"
+							step="0.01"
+							inputMode="decimal"
+							placeholder="unset"
+							aria-label={`Monthly plan price for ${account.name}`}
+							title={
+								storedPlanPrice != null
+									? `Monthly subscription price: ${formatCost(storedPlanPrice)}`
+									: "Monthly subscription price (blank = unset)"
+							}
+							className="h-7 w-24 text-xs"
+							value={planPriceValue}
+							onChange={(e) => setPlanPriceDraft(e.target.value)}
+							onBlur={commitPlanPrice}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") e.currentTarget.blur();
+							}}
+						/>
+					</div>
 					{account.provider === "bedrock" && bedrockProfile && (
 						<>
 							<span className="text-sm text-muted-foreground">•</span>
@@ -506,6 +560,9 @@ export function AccountListItem({
 				account.provider === "codex" ||
 				// DeepSeek has no usage data; mount for the peak/off-peak badge.
 				account.provider === "deepseek" ||
+				// TokenHarbor likewise: no usage windows, only a per-model
+				// peak/off-peak badge, and only once its listing has loaded.
+				account.peakPricedModels != null ||
 				providerShowsCreditsBalance(account.provider)) && (
 				<RateLimitProgress
 					resetIso={account.rateLimitReset}
@@ -517,6 +574,7 @@ export function AccountListItem({
 					usageThrottledWindows={account.usageThrottledWindows}
 					provider={account.provider}
 					peakHours={account.peakHours}
+					peakPricedModels={account.peakPricedModels}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					pauseThresholdFiveHour={
 						supportsUsagePauseThreshold(account.provider) &&

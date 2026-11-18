@@ -1,4 +1,9 @@
-import { getRateLimitResetStabilityMs, logError } from "@better-ccflare/core";
+import {
+	getCostTrackingEpoch,
+	getRateLimitResetStabilityMs,
+	isCostTrackingEnabled,
+	logError,
+} from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import {
 	codexWindowRolledOver,
@@ -18,6 +23,7 @@ import {
 } from "../codex-usage-history";
 import {
 	recordDiscoveredProviderServed,
+	recordProviderCost,
 	tryGetUsageCollector,
 } from "../usage-collector";
 import { drainBody } from "./discard-body-cancel";
@@ -77,6 +83,8 @@ export function handleRateLimitResponse(
  * @param ctx - The proxy context
  * @param requestId - The request ID for usage tracking
  * @param bypassSession - Whether to bypass session tracking (for auto-refresh)
+ * @param startedAt - When the request started (epoch ms); anchors a newly
+ *   opened session to the request instead of to this queued write's run time.
  */
 export function updateAccountMetadata(
 	account: Account,
@@ -84,12 +92,39 @@ export function updateAccountMetadata(
 	ctx: ProxyContext,
 	requestId?: string,
 	bypassSession = false,
+	startedAt?: number,
+	costTrackingEpoch: number | null = isCostTrackingEnabled()
+		? getCostTrackingEpoch()
+		: null,
 ): void {
+	// Provider parsing and the writer queue may both outlive an off/on gap.
+	// Tokens remain useful, but their cost must never fill the collector's NULL.
+	const trackedUsage = <T extends { costUsd?: number | undefined }>(
+		usage: T,
+	): T =>
+		isCostTrackingEnabled() && costTrackingEpoch === getCostTrackingEpoch()
+			? usage
+			: { ...usage, costUsd: undefined };
+	// Fallback row write for a provider cost the collector no longer tracks.
+	// Re-checks tracking at write time: the request may have started while it
+	// was off, or crossed an off/on gap before this queued job ran.
+	const recordCost = async (id: string, costUsd: number) => {
+		if (
+			!isCostTrackingEnabled() ||
+			costTrackingEpoch !== getCostTrackingEpoch()
+		)
+			return;
+		await ctx.asyncWriter.enqueue(() =>
+			ctx.dbOps.updateRequestCost(id, costUsd),
+		);
+	};
 	// Update basic usage (with optional bypass)
 	if (bypassSession) {
 		// Increment request count without updating session tracking
 		ctx.asyncWriter.enqueue(async () => {
-			// Manually increment request count and total requests without touching session
+			// Manually increment request count and total requests without touching session.
+			// `last_used` stays at the write time for the same monotonicity reason
+			// as in incrementUsage.
 			const db = ctx.dbOps.getAdapter();
 			const now = Date.now();
 			await db.run(
@@ -100,7 +135,9 @@ export function updateAccountMetadata(
 			);
 		});
 	} else {
-		ctx.asyncWriter.enqueue(() => ctx.dbOps.updateAccountUsage(account.id));
+		ctx.asyncWriter.enqueue(() =>
+			ctx.dbOps.updateAccountUsage(account.id, startedAt),
+		);
 	}
 	// Extract and update rate limit info for every response
 	const rateLimitInfo = ctx.provider.parseRateLimit(response);
@@ -189,7 +226,11 @@ export function updateAccountMetadata(
 					`Codex ${windowSlot} window rolled over for ${account.name}: ${prevResetAt} → ${newResetAt}, resetting session`,
 				);
 				ctx.dbOps
-					.resetAccountSession(account.id, Date.now())
+					// Anchor the new session to the request that discovered the
+					// rollover, not to this later response-processing pass: rows
+					// carry the request's start timestamp, so a boundary taken
+					// now would exclude the request from its own session.
+					.resetAccountSession(account.id, startedAt ?? Date.now())
 					.catch((err) =>
 						log.warn(
 							`Failed to reset Codex session for ${account.name} on window reset: ${err}`,
@@ -217,7 +258,8 @@ export function updateAccountMetadata(
 				let usageClone: Response | null = null;
 				try {
 					usageClone = response.clone();
-					const usageInfo = await parseUsage(usageClone);
+					const parsedUsage = await parseUsage(usageClone);
+					const usageInfo = parsedUsage ? trackedUsage(parsedUsage) : null;
 					if (usageInfo) {
 						log.debug(
 							`Extracted streaming usage for account ${account.name}: ${JSON.stringify(usageInfo)}`,
@@ -225,7 +267,10 @@ export function updateAccountMetadata(
 						// Store usage info in database
 						try {
 							await ctx.asyncWriter.enqueue(() =>
-								ctx.dbOps.updateRequestUsage(requestId, usageInfo),
+								ctx.dbOps.updateRequestUsage(
+									requestId,
+									trackedUsage(usageInfo),
+								),
 							);
 						} catch (error) {
 							log.warn(`Failed to save usage for request ${requestId}:`, error);
@@ -244,6 +289,19 @@ export function updateAccountMetadata(
 						}
 					}
 				}
+				// The billing header is on the response itself, so a streaming
+				// parse that bails early still knows the provider's cost.
+				const headerCostUsd = trackedUsage({
+					costUsd: providerCostHeaderUsd(response),
+				}).costUsd;
+				if (headerCostUsd !== undefined) {
+					await recordProviderCost(
+						tryGetUsageCollector(),
+						requestId,
+						headerCostUsd,
+						recordCost,
+					);
+				}
 			})();
 		} else if (ctx.provider.extractUsageInfo) {
 			const extractUsageInfo = ctx.provider.extractUsageInfo.bind(ctx.provider);
@@ -256,7 +314,8 @@ export function updateAccountMetadata(
 				let usageClone: Response | null = null;
 				try {
 					usageClone = response.clone();
-					const usageInfo = await extractUsageInfo(usageClone);
+					const parsedUsage = await extractUsageInfo(usageClone);
+					const usageInfo = parsedUsage ? trackedUsage(parsedUsage) : null;
 					// The serving backend is named only by whole JSON bodies (OpenRouter
 					// `provider`). Read it from a fresh clone here — nothing new is
 					// buffered, and only providers that state it pay for the clone.
@@ -271,10 +330,33 @@ export function updateAccountMetadata(
 						// Store usage info in database
 						try {
 							await ctx.asyncWriter.enqueue(() =>
-								ctx.dbOps.updateRequestUsage(requestId, usageInfo),
+								ctx.dbOps.updateRequestUsage(
+									requestId,
+									trackedUsage(usageInfo),
+								),
 							);
 						} catch (error) {
 							log.warn(`Failed to save usage for request ${requestId}:`, error);
+						}
+					}
+					// The provider's own cost (Anthropic billing header, OpenRouter
+					// body `usage.cost`) beats the collector's catalogue estimate.
+					// Both sources go through trackedUsage: the body cost was already
+					// filtered, but the header is read here unfiltered.
+					const providerCostUsd = trackedUsage({
+						costUsd: validCost(
+							providerCostHeaderUsd(response) ?? usageInfo?.costUsd,
+						),
+					}).costUsd;
+					if (providerCostUsd !== undefined) {
+						const handled = await recordProviderCost(
+							tryGetUsageCollector(),
+							requestId,
+							providerCostUsd,
+							recordCost,
+						);
+						if (!handled) {
+							log.warn(`Failed to save provider cost for request ${requestId}`);
 						}
 					}
 					if (providerServed) {
@@ -339,6 +421,28 @@ export function updateAccountMetadata(
 }
 
 /**
+ * A provider-reported cost, or undefined when it is not a finite non-negative
+ * number. Providers parse their own headers and bodies unchecked (Anthropic
+ * uses a bare `parseFloat`), so anything selected as the provider's cost goes
+ * through here before it can replace the catalogue estimate.
+ */
+function validCost(value: number | undefined): number | undefined {
+	return value !== undefined && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
+/**
+ * Cost the provider billed for this request, from the `anthropic-billing-cost`
+ * response header (Anthropic, streaming and non-streaming alike). Undefined
+ * when absent or invalid.
+ */
+function providerCostHeaderUsd(response: Response): number | undefined {
+	const raw = response.headers.get("anthropic-billing-cost");
+	return raw === null ? undefined : validCost(Number.parseFloat(raw));
+}
+
+/**
  * Read the provider-named serving backend from the (already-consumed) usage
  * clone. Runs only for providers that name a backend (OpenRouter), and only
  * when the response is whole JSON; a stream yields null — its `message_start`
@@ -364,7 +468,9 @@ async function readServedProvider(
  * @param account - The account used
  * @param ctx - The proxy context
  * @param requestId - The request ID for usage tracking
- * @param requestMeta - Request headers/path, used for the internal-probe checks
+ * @param requestMeta - Request headers/path, used for the internal-probe checks.
+ *   `timestamp` (when the request started) is forwarded to the account-metadata
+ *   write so a session opened by this request is anchored to it.
  * @param options - `serverErrorBenchApplied` is set by the transient-5xx
  *   failover in proxy-operations.ts on the terminal candidate account; see the
  *   guard at the top of the rate-limit branch below.
@@ -375,7 +481,12 @@ export async function processProxyResponse(
 	account: Account,
 	ctx: ProxyContext,
 	requestId?: string,
-	requestMeta?: { headers?: Headers; path?: string },
+	requestMeta?: {
+		headers?: Headers;
+		path?: string;
+		timestamp?: number;
+		costTrackingEpoch?: number | null;
+	},
 	options?: { serverErrorBenchApplied?: boolean },
 ): Promise<boolean> {
 	let rateLimitInfo = ctx.provider.parseRateLimit(response);
@@ -464,7 +575,15 @@ export async function processProxyResponse(
 			);
 			const bypassSession =
 				requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
-			updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+			updateAccountMetadata(
+				account,
+				response,
+				ctx,
+				requestId,
+				bypassSession,
+				requestMeta?.timestamp,
+				requestMeta?.costTrackingEpoch,
+			);
 			return false;
 		}
 
@@ -496,7 +615,15 @@ export async function processProxyResponse(
 		// Also update metadata for rate-limited responses
 		const bypassSession =
 			requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
-		updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+		updateAccountMetadata(
+			account,
+			response,
+			ctx,
+			requestId,
+			bypassSession,
+			requestMeta?.timestamp,
+			requestMeta?.costTrackingEpoch,
+		);
 		return true; // Signal rate limit
 	}
 
@@ -505,7 +632,15 @@ export async function processProxyResponse(
 		// Update account metadata in background
 		const bypassSession =
 			requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
-		updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+		updateAccountMetadata(
+			account,
+			response,
+			ctx,
+			requestId,
+			bypassSession,
+			requestMeta?.timestamp,
+			requestMeta?.costTrackingEpoch,
+		);
 	}
 
 	if (!rateLimitInfo.isRateLimited && !skipAccountMetadata) {

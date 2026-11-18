@@ -1,6 +1,8 @@
 import {
 	BUFFER_SIZES,
 	estimateCostUSD,
+	getCostTrackingEpoch,
+	isCostTrackingEnabled,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
 import { AsyncDbWriter, DatabaseOperations } from "@better-ccflare/database";
@@ -34,15 +36,18 @@ import {
 	extractGatewayHintHeadersFromParts,
 	type GatewayHintHeaders,
 } from "./gateway-hint-headers";
+import { tryGetApiKeySpendCounter } from "./handlers/api-key-spend";
 import {
 	extractInboundMarkerFromParts,
 	type InboundMarker,
 } from "./inbound-marker";
+import { getPeakHoursState } from "./peak-hours";
 import {
 	extractProjectAttributionFromParts,
 	sanitizeProjectName,
 } from "./project-attribution";
 import { combineChunks } from "./stream-tee";
+import { getTokenHarborPeakState } from "./tokenharbor-peak";
 import {
 	type EndMessage,
 	isModelRewrite,
@@ -50,6 +55,7 @@ import {
 } from "./worker-messages";
 
 interface RequestState {
+	costTrackingEpoch: number | null;
 	startMessage: StartMessage;
 	buffer: string;
 	streamDecoder: TextDecoder;
@@ -64,10 +70,14 @@ interface RequestState {
 		outputTokens?: number;
 		outputTokensComputed?: number | undefined;
 		totalTokens?: number;
-		costUsd?: number;
+		costUsd?: number | undefined;
+		/** Cost the provider itself reported; wins over the local estimate. */
+		providerCostUsd?: number;
 		tokensPerSecond?: number;
 		/** Backend named by the provider's own response body (non-stream only). */
 		providerServed?: string | undefined;
+		/** Provider-reported (applied) tier, from response `usage.service_tier`. */
+		completionTier?: string | undefined;
 	};
 	lastActivity: number;
 	createdAt: number; // Capacity eviction ordering
@@ -313,6 +323,18 @@ function processSSELine(line: string, state: RequestState): void {
 	}
 }
 
+/**
+ * The provider-reported (applied) completion/service tier, from a `usage`
+ * object's `service_tier`. String values only, and empty strings count as
+ * absent — this is the tier the provider says it RAN the request on, never a
+ * fallback to the tier the client asked for.
+ */
+function reportedCompletionTier(usage: unknown): string | undefined {
+	if (!usage || typeof usage !== "object") return undefined;
+	const tier = (usage as { service_tier?: unknown }).service_tier;
+	return typeof tier === "string" && tier.length > 0 ? tier : undefined;
+}
+
 // Extract usage data from non-stream JSON response bodies
 function extractUsageFromJson(
 	json: {
@@ -322,6 +344,7 @@ function extractUsageFromJson(
 			cache_read_input_tokens?: number;
 			cache_creation_input_tokens?: number;
 			output_tokens?: number;
+			service_tier?: unknown;
 		};
 	},
 	state: RequestState,
@@ -339,6 +362,9 @@ function extractUsageFromJson(
 	if (!usageObj) return;
 
 	state.usage.model = json.model ?? state.usage.model;
+
+	const completionTier = reportedCompletionTier(usageObj);
+	if (completionTier) state.usage.completionTier = completionTier;
 
 	state.usage.inputTokens = usageObj.input_tokens ?? 0;
 	state.usage.cacheReadInputTokens = usageObj.cache_read_input_tokens ?? 0;
@@ -372,6 +398,18 @@ function extractUsageFromData(
 			parsed,
 		);
 		if (served) state.usage.providerServed = served;
+
+		// The provider-reported (applied) tier rides in `usage` on both
+		// message_start (`message.usage`) and message_delta (`usage`). Read it
+		// before the branches below — message_delta returns early once it has
+		// processed its usage block. A frame that names a tier overwrites an
+		// earlier frame's value: message_delta is the last report before the
+		// stream closes, so its tier is the most current applied one.
+		const frameTier =
+			reportedCompletionTier(parsed.message?.usage) ??
+			reportedCompletionTier(parsed.response?.usage) ??
+			reportedCompletionTier(parsed.usage);
+		if (frameTier) state.usage.completionTier = frameTier;
 
 		// Handle message_start - check both parsed.type and eventType
 		// (Some providers put type in event line, Anthropic puts it in JSON)
@@ -560,6 +598,9 @@ export class UsageCollector {
 	private readonly requests = new Map<string, RequestState>();
 	private readonly missingStateWarnings = new Set<string>();
 	private readonly pendingHandleEnds = new Set<Promise<void>>();
+	private readonly pendingRequestEnds = new Map<string, number>();
+	/** States whose finalizer is running; still open to setProviderCost. */
+	private readonly finalizingRequests = new Map<string, RequestState>();
 	private readonly pendingPricingFallbacks = new Set<() => void>();
 	private cleanupInterval: Timer | null = null;
 	// Permanent once drain() is called — collector cannot estimate costs after this.
@@ -571,6 +612,8 @@ export class UsageCollector {
 	private readonly maxBufferSize: number;
 	private readonly pricingTimeoutMs: number;
 	private readonly timeoutMs: number;
+	/** Whether this collector is the one `tryGetUsageCollector()` returns. */
+	private isSingleton = false;
 
 	constructor(
 		private readonly dbOps: DatabaseOperations,
@@ -592,6 +635,10 @@ export class UsageCollector {
 			process.env.CF_STREAM_TIMEOUT_MS || TIME_CONSTANTS.STREAM_TIMEOUT_DEFAULT,
 		);
 
+		// A collector built directly (tests, embedded use) is not the global one:
+		// it must not replace or clear the singleton.
+		this.isSingleton = _usageCollector === null;
+		if (this.isSingleton) _usageCollector = this;
 		this.startCleanupInterval();
 	}
 
@@ -603,6 +650,7 @@ export class UsageCollector {
 		if (replacedState) {
 			this.freeRequestState(replacedState);
 			this.requests.delete(msg.requestId);
+			tryGetApiKeySpendCounter()?.releaseReservation(msg.requestId);
 		}
 
 		// Check if we should skip logging this request
@@ -630,6 +678,7 @@ export class UsageCollector {
 					const [id, state] = sortedByAge[i];
 					this.freeRequestState(state);
 					this.requests.delete(id);
+					tryGetApiKeySpendCounter()?.releaseReservation(id);
 				}
 			}
 		}
@@ -637,6 +686,12 @@ export class UsageCollector {
 		// Create request state
 		const now = Date.now();
 		const state: RequestState = {
+			costTrackingEpoch:
+				msg.costTrackingEpoch !== undefined
+					? msg.costTrackingEpoch
+					: isCostTrackingEnabled()
+						? getCostTrackingEpoch()
+						: null,
 			startMessage: msg,
 			buffer: "",
 			streamDecoder: new TextDecoder(),
@@ -773,11 +828,13 @@ export class UsageCollector {
 			return;
 		}
 
-		// Update account usage if authenticated
+		// Update account usage if authenticated. Hand over the request's start
+		// time so a session opened by this request is anchored to it rather than
+		// to this queued write's execution time — see incrementUsage.
 		if (msg.accountId && msg.accountId !== NO_ACCOUNT_ID) {
 			const accountId = msg.accountId; // Capture for closure
 			this.asyncWriter.enqueue(async () =>
-				this.dbOps.updateAccountUsage(accountId),
+				this.dbOps.updateAccountUsage(accountId, msg.timestamp),
 			);
 		}
 	}
@@ -829,10 +886,27 @@ export class UsageCollector {
 		processStreamChunk(data, state, this.maxBufferSize);
 	}
 
+	hasPendingRequest(requestId: string): boolean {
+		return (
+			this.requests.has(requestId) || this.pendingRequestEnds.has(requestId)
+		);
+	}
+
 	handleEnd(msg: EndMessage): Promise<void> {
+		this.pendingRequestEnds.set(
+			msg.requestId,
+			(this.pendingRequestEnds.get(msg.requestId) ?? 0) + 1,
+		);
 		const promise = this._handleEndInternal(msg);
 		this.pendingHandleEnds.add(promise);
-		const cleanup = () => this.pendingHandleEnds.delete(promise);
+		const cleanup = () => {
+			this.pendingHandleEnds.delete(promise);
+			const remaining = (this.pendingRequestEnds.get(msg.requestId) ?? 1) - 1;
+			if (remaining > 0) this.pendingRequestEnds.set(msg.requestId, remaining);
+			else this.pendingRequestEnds.delete(msg.requestId);
+			if (!this.hasPendingRequest(msg.requestId))
+				tryGetApiKeySpendCounter()?.releaseReservation(msg.requestId);
+		};
 		promise.then(cleanup, cleanup);
 		return promise;
 	}
@@ -874,6 +948,22 @@ export class UsageCollector {
 		return true;
 	}
 
+	/**
+	 * Seed the cost the provider reported for a request. The collector
+	 * estimates only when this is absent, so the provider's own number is what
+	 * the row and the per-API-key spend counter use.
+	 *
+	 * Returns false when the collector holds no state for `requestId`; the
+	 * caller then writes the row itself.
+	 */
+	setProviderCost(requestId: string, costUsd: number): boolean {
+		const state =
+			this.requests.get(requestId) ?? this.finalizingRequests.get(requestId);
+		if (!state) return false;
+		state.usage.providerCostUsd = costUsd;
+		return true;
+	}
+
 	getHealth(): UsageCollectorHealth {
 		return { state: "ready" };
 	}
@@ -891,6 +981,12 @@ export class UsageCollector {
 		// Atomically transfer ownership to this finalizer before its first await.
 		// This keeps capacity cleanup from freeing the state while pricing resolves,
 		// and prevents this lifecycle from later deleting a reused request ID.
+		// The state stays reachable until pricing and spend recording finish, so
+		// a provider cost discovered during the pricing await still lands on this
+		// request (see setProviderCost) instead of falling back to a row UPDATE
+		// that races the INSERT below. It lives in its own map, not `requests`:
+		// capacity cleanup and missing-state checks must keep treating the
+		// request as gone.
 		this.requests.delete(msg.requestId);
 
 		const { startMessage } = state;
@@ -901,6 +997,10 @@ export class UsageCollector {
 			this.freeRequestState(state);
 			return;
 		}
+
+		// Registered only past every early return: an entry left behind here is
+		// never visited by cleanup.
+		this.finalizingRequests.set(msg.requestId, state);
 
 		// Flush any incomplete multi-byte UTF-8 sequences held in the streaming decoder
 		const trailing = state.streamDecoder.decode();
@@ -933,6 +1033,7 @@ export class UsageCollector {
 		this.freeRequestState(state);
 
 		// Calculate total tokens and cost
+		let spendRecordedAt: number | undefined;
 		if (state.usage.model) {
 			const model = state.usage.model;
 			// Use provider's authoritative count if available, fallback to computed
@@ -953,17 +1054,33 @@ export class UsageCollector {
 				(state.usage.cacheCreationInputTokens || 0);
 
 			try {
-				state.usage.costUsd = await this.estimateCostWithDeadline(
-					startMessage.requestId,
-					model,
-					() =>
-						estimateCostUSD(model, {
-							inputTokens: state.usage.inputTokens,
-							outputTokens: finalOutputTokens,
-							cacheReadInputTokens: state.usage.cacheReadInputTokens,
-							cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
-						}),
-				);
+				if (
+					isCostTrackingEnabled() &&
+					state.costTrackingEpoch === getCostTrackingEpoch()
+				) {
+					// The provider's own number is authoritative; the catalogue
+					// estimate only fills in when the provider reported none. Read
+					// it after the await: the provider parser may seed it while
+					// pricing is in flight.
+					const estimate = await this.estimateCostWithDeadline(
+						startMessage.requestId,
+						model,
+						() =>
+							estimateCostUSD(model, {
+								inputTokens: state.usage.inputTokens,
+								outputTokens: finalOutputTokens,
+								cacheReadInputTokens: state.usage.cacheReadInputTokens,
+								cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
+							}),
+					);
+					state.usage.costUsd = state.usage.providerCostUsd ?? estimate;
+				}
+				if (
+					!isCostTrackingEnabled() ||
+					state.costTrackingEpoch !== getCostTrackingEpoch()
+				) {
+					state.usage.costUsd = undefined;
+				}
 			} catch (error) {
 				if (preparedPayload) {
 					this.releasePreparedPayload(preparedPayload);
@@ -971,6 +1088,35 @@ export class UsageCollector {
 				}
 				throw error;
 			}
+			// Spend becomes chargeable when pricing finishes, which can be after
+			// EOF and an operator's reset. Keep this separate from response latency
+			// and persist the same instant even when the async writer runs later.
+			spendRecordedAt =
+				state.usage.costUsd === undefined ? undefined : Date.now();
+
+			// Per-API-key spend counter: the request's cost has just become
+			// known, and this is the only place in the process where that is
+			// true. The api key id is already on the StartMessage, so the
+			// increment costs one Map lookup and no query.
+			//
+			// It runs BEFORE the row is enqueued for the async writer, on
+			// purpose: the counter is the thing the proxy enforces against and
+			// must not lag behind a write that may be queued, delayed or (under
+			// backpressure) dropped. The periodic resync is what reconciles the
+			// two afterwards.
+			//
+			// `tryGet...` and never `get...`: a key with no limit has no counter
+			// entry and a deployment with no limits at all has no counter, and
+			// neither may pay for this feature.
+			if (state.usage.costUsd !== undefined)
+				tryGetApiKeySpendCounter()?.record(
+					startMessage.apiKeyId,
+					state.usage.costUsd,
+					state.usage.model,
+					spendRecordedAt,
+					startMessage.requestId,
+					startMessage.limitModel ?? startMessage.originalModel ?? null,
+				);
 
 			// Calculate tokens per second - zai specific vs other providers
 			if (finalOutputTokens > 0) {
@@ -1070,6 +1216,28 @@ export class UsageCollector {
 			startMessage.originalModel,
 			startMessage.appliedModel,
 		);
+		// Pricing is done and the usage below is final: a later setProviderCost
+		// must fall back to a row UPDATE rather than mutate this snapshot.
+		this.finalizingRequests.delete(msg.requestId);
+
+		// A provider cost is known even when the model is not (a body the
+		// collector could not parse), and finalization below only prices inside
+		// its model branch. Charge it here so the spend counter does not miss it.
+		if (!state.usage.model && state.usage.providerCostUsd !== undefined) {
+			if (
+				isCostTrackingEnabled() &&
+				state.costTrackingEpoch === getCostTrackingEpoch()
+			) {
+				tryGetApiKeySpendCounter()?.record(
+					startMessage.apiKeyId,
+					state.usage.providerCostUsd,
+					null,
+					Date.now(),
+					startMessage.requestId,
+					startMessage.limitModel ?? startMessage.originalModel ?? null,
+				);
+			}
+		}
 		// No preliminary INSERT needed — dashboard tracks pending requests via SSE events, not DB queries.
 		this.asyncWriter.enqueue(async () => {
 			try {
@@ -1100,6 +1268,7 @@ export class UsageCollector {
 								cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
 								tokensPerSecond: state.usage.tokensPerSecond,
 								providerServed: state.usage.providerServed,
+								completionTier: state.usage.completionTier,
 							}
 						: undefined,
 					state.agentUsed,
@@ -1122,10 +1291,18 @@ export class UsageCollector {
 					state.gatewayHint.prevToolDurations,
 					state.gatewayHint.compaction,
 					state.gatewayHint.contextCompacted,
+					// Stamp the row with the request's start, not the moment this
+					// queued write runs: the live summary already reports the start
+					// timestamp, and any reload must classify the same request the
+					// same way (e.g. peak vs off-peak near a window boundary).
+					startMessage.timestamp,
+					startMessage.limitModel ?? null,
+					spendRecordedAt,
 					// Fork path-based attribution (resolver-derived project id +
-					// worktree path). Positional, and deliberately kept after
-					// upstream's parameters so upstream's list stays a contiguous
-					// prefix — see DatabaseOperations.saveRequest.
+					// worktree path) and the inbound marker. Positional, and
+					// deliberately kept after upstream's parameters so upstream's
+					// list stays a contiguous prefix — see
+					// DatabaseOperations.saveRequest.
 					startMessage.projectId ?? null,
 					startMessage.worktreePath ?? null,
 					state.inbound.format,
@@ -1200,6 +1377,7 @@ export class UsageCollector {
 			project: state.project ?? undefined,
 			billingType: state.billingType,
 			originalModel: startMessage.originalModel || undefined,
+			limitModel: startMessage.limitModel || undefined,
 			appliedModel: startMessage.appliedModel || undefined,
 			comboName: startMessage.comboName || undefined,
 			// The REST list derives this from the persisted status_code
@@ -1223,6 +1401,38 @@ export class UsageCollector {
 			inboundFormat: state.inbound.format ?? undefined,
 			inboundGateway: state.inbound.gateway ?? undefined,
 			providerServed: state.usage.providerServed,
+			completionTier: state.usage.completionTier,
+			// Peak state at the request's own timestamp, for the provider that
+			// served it — the same server-computed shape /api/accounts serves.
+			// The Requests tab badges a row from this summary alone, and the
+			// dashboard cannot compute it itself: DeepSeek's rule needs the
+			// Chinese holiday calendar, which only the server holds. A summary
+			// that disagreed with createRequestsSummaryHandler would make the
+			// badge appear on the live tick and vanish on reload.
+			// TokenHarbor has no provider-wide window: its peak state is a
+			// property of the model the account actually called, so that model
+			// narrows the question. Prefer the served model — `usage.model`,
+			// then the agent-rewritten `appliedModel` — because the persisted
+			// row is classified from the same one; using the client's model
+			// (`limitModel`/`originalModel`) here would let a rewrite show the
+			// badge live and drop it on reload, or the reverse. The helper still
+			// resolves the account's own remaps onto the listing's ids.
+			peakHours:
+				startMessage.accountId && startMessage.accountId !== NO_ACCOUNT_ID
+					? (getPeakHoursState(
+							startMessage.providerName,
+							startMessage.timestamp,
+						) ??
+						getTokenHarborPeakState(
+							startMessage.accountId,
+							state.usage.model ??
+								startMessage.appliedModel ??
+								startMessage.limitModel ??
+								startMessage.originalModel ??
+								null,
+							startMessage.timestamp,
+						))
+					: null,
 			// Same value handed to saveRequest above, so a dashboard does not have
 			// to reload before a request shows its terminal state. Note this is
 			// the value as REPORTED, not as persisted: the save is an
@@ -1557,6 +1767,7 @@ export class UsageCollector {
 				);
 				this.freeRequestState(state);
 				this.requests.delete(id);
+				tryGetApiKeySpendCounter()?.releaseReservation(id);
 				removedCount++;
 			}
 		}
@@ -1576,6 +1787,7 @@ export class UsageCollector {
 				const [id, state] = sortedByAge[i];
 				this.freeRequestState(state);
 				this.requests.delete(id);
+				tryGetApiKeySpendCounter()?.releaseReservation(id);
 				removedCount++;
 			}
 		}
@@ -1680,6 +1892,7 @@ export class UsageCollector {
 			clearInterval(this.cleanupInterval);
 			this.cleanupInterval = null;
 		}
+		if (this.isSingleton && _usageCollector === this) _usageCollector = null;
 	}
 }
 
@@ -1741,6 +1954,31 @@ export function getUsageCollector(): UsageCollector {
  */
 export function tryGetUsageCollector(): UsageCollector | null {
 	return _usageCollector;
+}
+
+/**
+ * Hand a provider-reported cost to the collector, mirroring
+ * recordDiscoveredProviderServed: seeding the state means the row `handleEnd`
+ * INSERTs and the per-API-key spend counter both use the provider's number.
+ * When the collector holds no state for the request — it already finalised it
+ * — the row is written via `write` (a COALESCE UPDATE), as the fallback only.
+ *
+ * Returns true when the value was dealt with, false when the fallback write
+ * failed (the collector never throws).
+ */
+export async function recordProviderCost(
+	collector: UsageCollector | null,
+	requestId: string,
+	costUsd: number,
+	write: (requestId: string, costUsd: number) => Promise<void>,
+): Promise<boolean> {
+	if (collector?.setProviderCost(requestId, costUsd)) return true;
+	try {
+		await write(requestId, costUsd);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**

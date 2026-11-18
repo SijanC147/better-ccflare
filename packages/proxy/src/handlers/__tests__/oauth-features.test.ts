@@ -1,4 +1,11 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import {
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "bun:test";
 import type { Config } from "@better-ccflare/config";
 import type { DatabaseOperations } from "@better-ccflare/database";
 import {
@@ -21,6 +28,15 @@ const _mockConfig = {
 
 describe("OAuth Token Health Monitoring Features", () => {
 	let oauthProvider: AnthropicOAuthProvider;
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
 
 	beforeAll(() => {
 		oauthProvider = new AnthropicOAuthProvider();
@@ -110,7 +126,6 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const pkce = await generatePKCE();
 
 			// Mock successful token response
-			const originalFetch = global.fetch;
 			fetchSlot.fetch = async () =>
 				({
 					ok: true,
@@ -135,8 +150,6 @@ describe("OAuth Token Health Monitoring Features", () => {
 				// Expected to fail in test environment, but should not fail due to code parsing
 				expect(error).not.toContain("Cannot read properties of undefined");
 			}
-
-			fetchSlot.fetch = originalFetch;
 		});
 	});
 
@@ -191,7 +204,6 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const pkce = await generatePKCE();
 
 			// Mock error response
-			const originalFetch = global.fetch;
 			fetchSlot.fetch = async () =>
 				({
 					ok: false,
@@ -213,8 +225,6 @@ describe("OAuth Token Health Monitoring Features", () => {
 					"Authorization code expired",
 				);
 			}
-
-			fetchSlot.fetch = originalFetch;
 		});
 	});
 

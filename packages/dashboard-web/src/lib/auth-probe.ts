@@ -34,6 +34,14 @@ export interface AuthProbeDeps {
 	setAuthRequired: (value: boolean) => void;
 	setAuthError: (value: string | null) => void;
 	setShowAuthDialog: (value: boolean) => void;
+	/**
+	 * Whether a 403 reprompts for a key. Defaults to true. The per-key usage
+	 * pages pass false: an api-only key may open them, and they present a
+	 * permission error themselves.
+	 */
+	repromptOn403?: boolean | undefined;
+	/** Called for any failure that does not reprompt for a key. */
+	onOtherFailure?: ((error: unknown) => void) | undefined;
 }
 
 /**
@@ -52,12 +60,21 @@ export async function runAuthProbe(deps: AuthProbeDeps): Promise<void> {
 		deps.setAuthRequired(deps.hasStoredKey());
 	} catch (error) {
 		const failure = authProbeFailure(error);
-		if (failure.reprompt) {
+		const reprompt =
+			failure.reprompt &&
+			!(
+				deps.repromptOn403 === false &&
+				error instanceof HttpError &&
+				error.status === 403
+			);
+		if (reprompt) {
 			// Clear the stored key that was refused
 			deps.clearApiKey();
 			deps.setAuthError(failure.message);
 			deps.setAuthRequired(true);
 			deps.setShowAuthDialog(true);
+		} else {
+			deps.onOtherFailure?.(error);
 		}
 	}
 }

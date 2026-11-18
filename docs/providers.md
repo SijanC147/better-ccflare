@@ -33,6 +33,9 @@
   - Supports custom endpoints (OpenRouter, Together AI, local models, etc.)
   - API key authentication only
   - Automatic format conversion between Anthropic and OpenAI APIs
+- **Mistral** - Mistral AI's models, served over the OpenAI-compatible base:
+  - Point an `openai-compatible` account at `https://api.mistral.ai/v1` (or the `api.eu.mistral.ai` / `api.us.mistral.ai` regional hosts); bearer token authentication
+  - Mistral-specific handling (reasoning rewrite, `cache_control` pre-strip, pod-affinity header) activates automatically on those exact hosts — see [Mistral Endpoint Handling](#mistral-endpoint-handling)
 - **Ollama** - Local Ollama provider (v0.14.0+):
   - Uses Ollama's Anthropic-compatible `/v1/messages` API
   - Default endpoint: `http://localhost:11434`
@@ -58,6 +61,16 @@
   - Rewrites the Claude Code system prompt to a Qwen Code identity and strips Claude-specific instructions before forwarding
   - Sends a fixed set of Stainless-SDK and DashScope headers so `portal.qwen.ai` treats requests as coming from the official client
 
+- **Sail Research** - Open-model inference at `api.sailresearch.com`, Anthropic Messages protocol:
+  - Fixed endpoint `https://api.sailresearch.com/v1`; bearer token authentication (`Authorization: Bearer`)
+  - All Claude model families map to `deepseek-ai/DeepSeek-V4.1-Flash-1017` by default
+  - Supports the account-level [night window](configuration.md#night-window): inside the configured hours an enabled account asks for Sail's cheaper `balanced` completion tier via `X-Sail-Completion-Window`, and outside them no tier header is sent
+  - The tier Sail actually applied is recorded per request as `completion_tier`
+- **OpenCode Go** - OpenCode's $10/month coding subscription, Anthropic Messages protocol:
+  - Every text model on the plan is reachable through the Anthropic Messages API because OpenCode Console translates between API families
+  - Fixed endpoint `https://opencode.ai/inference/go/anthropic`; authenticate with a Console API key (bearer token)
+  - Default model `deepseek-v4.1-flash`
+  - Usage is polled from `GET https://opencode.ai/zen/go/v1/usage` and shown as the rolling 5-hour, weekly and monthly windows Go enforces (5-hour = 20% of the monthly allowance, weekly = 50%, monthly = 100%)
 - **CodeBuddy** - Tencent's coding assistant, built on the [OI]-compatible base:
   - Browser-based external-link authentication (no PKCE, no device code, no callback): the server issues a login URL plus a `state` token and the client polls `/v2/plugin/auth/token`
   - International endpoint `https://www.codebuddy.ai`; override per account with a custom endpoint or `CCFLARE_CODEBUDDY_ENDPOINT`
@@ -68,7 +81,7 @@
 - xAI and Qwen build on the OpenAI-compatible base but support OAuth (unlike generic OpenAI-compatible accounts, which are API-key only)
 - Codex talks to OpenAI's Responses API, a different shape from OpenAI's Chat Completions API used by the other OpenAI-compatible providers
 - OAuth is available for Anthropic, Vertex AI (Google Cloud credentials), xAI, Codex, Qwen, and CodeBuddy; all other providers are API-key only
-- API key authentication for Z.ai, OpenAI-compatible, NanoGPT, Minimax, DeepSeek, and Ollama Cloud providers
+- API key authentication for Z.ai, OpenAI-compatible (including Mistral), NanoGPT, Minimax, DeepSeek, Sail Research, OpenCode Go, and Ollama Cloud providers
 - Ollama Cloud requires model mapping to translate Claude model names to Ollama models
 - Provider system supports format conversion between different API standards
 - Default OAuth client ID: `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (configurable via environment or config file) — this applies to the Anthropic provider; other OAuth providers (xAI, Codex, Qwen) use their own fixed client IDs
@@ -92,7 +105,7 @@
 
 ## Overview
 
-The better-ccflare providers system is a modular architecture designed to support multiple AI service providers through a unified interface. Currently, it implements support for Anthropic's services through a single provider that can operate in two modes:
+The better-ccflare providers system is a modular architecture designed to support multiple AI service providers through a unified interface. The core providers are:
 
 ### Supported Providers
 
@@ -176,12 +189,12 @@ The better-ccflare providers system is a modular architecture designed to suppor
     - Rewrites the Claude Code system prompt into a Qwen Code identity before forwarding
     - All Claude model families map to a single `coder-model`
 
-Other providers registered in `packages/providers/src/index.ts` but not covered in depth here (Alibaba Coding Plan, AWS Bedrock, Kilo, OpenRouter) are thin wrappers around the `AnthropicCompatibleProvider`/`OpenAICompatibleProvider`/`BaseProvider` bases described below, following the same patterns as Z.ai, Minimax, and OpenAI-Compatible respectively.
+Other providers registered in `packages/providers/src/index.ts` but not covered in depth here (Alibaba Coding Plan, AWS Bedrock, Kilo, OpenRouter, Sail Research, OpenCode Go, CodeBuddy) are thin wrappers around the `AnthropicCompatibleProvider`/`OpenAICompatibleProvider`/`BaseProvider` bases described below, following the same patterns as Z.ai, Minimax, and OpenAI-Compatible respectively. Sail Research and OpenCode Go additionally override `mapModelForRequest` so a plain Claude Code model name is translated even when the account has no model mappings of its own.
 
 The providers system handles:
 - OAuth authentication flows with PKCE security (Anthropic, and refresh-token/device-code variants for xAI, Codex, Qwen)
 - Google Cloud authentication (Vertex AI)
-- API key authentication (Z.ai, OpenAI-Compatible, NanoGPT, Minimax, DeepSeek, Ollama Cloud)
+- API key authentication (Z.ai, OpenAI-Compatible including Mistral, NanoGPT, Minimax, DeepSeek, Sail Research, OpenCode Go, Ollama Cloud)
 - Token lifecycle management (refresh, expiration)
 - Provider-specific request routing and header management
 - Rate limit detection and handling
@@ -213,7 +226,7 @@ class ProviderRegistry {
 
 ### Auto-Registration
 
-Providers are automatically registered when the package is imported. `packages/providers/src/index.ts` registers every provider (18 as of this writing: Alibaba Coding Plan, Anthropic, Codex, Bedrock, Kilo, OpenRouter, Qwen, Minimax, DeepSeek, NanoGPT, Z.ai, Vertex AI, xAI, OpenAI-Compatible, Ollama, Ollama Cloud, Anthropic-Compatible, Meta) in one place:
+Providers are automatically registered when the package is imported. `packages/providers/src/index.ts` registers every provider (21 as of this writing: Alibaba Coding Plan, Anthropic, Codex, Bedrock, CodeBuddy, Kilo, OpenRouter, Qwen, Minimax, DeepSeek, Sail Research, OpenCode Go, NanoGPT, Z.ai, Vertex AI, xAI, OpenAI-Compatible, Ollama, Ollama Cloud, Anthropic-Compatible, Meta) in one place. Mistral has no entry of its own — it is an `openai-compatible` account on Mistral's hosts, handled by the endpoint module described in [Mistral Endpoint Handling](#mistral-endpoint-handling):
 
 ```typescript
 // In packages/providers/src/index.ts
@@ -488,6 +501,20 @@ Anthropic Client → better-ccflare Proxy → OpenAI Provider (OpenRouter, etc.)
 - **Body transform**: Anthropic `{system, messages}` → OpenAI `{messages: [{role:"system"}, ...]}`
 - **Streaming**: OpenAI SSE → Anthropic SSE via `TransformStream` + state machine
 - **Auth**: API keys (stored in `refresh_token`), no OAuth
+
+### Live Model Discovery
+- `packages/proxy/src/openai-compatible-model-catalog.ts`
+
+Each `openai-compatible` account's own endpoint is queried via the standard OpenAI `GET /v1/models` shape, lazily on that account's first proxied request and on-demand via `GET /api/models?provider=openai-compatible&accountId=<id>` (see [api-http.md](api-http.md#get-apimodels)). Since every account points at an operator-chosen, arbitrary endpoint (unlike Codex, which shares one upstream across accounts), a listing is never borrowed between accounts — each account's cache answers only for itself, and is dropped when the account is removed.
+
+### Mistral Endpoint Handling
+There is no dedicated `mistral` provider mode: a Mistral account is an `openai-compatible` account whose custom endpoint points at one of Mistral's official hosts. `packages/providers/src/providers/openai/mistral.ts` holds every Mistral-specific rule, following the same endpoint-module pattern as `packages/providers/src/providers/xai/cache-native.ts`. All of it is gated on `isMistralEndpoint(account)`, which matches the **exact** hosts `api.mistral.ai` (global), `api.eu.mistral.ai` and `api.us.mistral.ai` — look-alikes (e.g. `evil-api.mistral.ai`) and custom/self-hosted endpoints are excluded, so matching is exact-host rather than suffix-based.
+
+- **Reasoning rewrite**: Mistral's schema has no top-level `reasoning_content` (sending one is a 422). Prior assistant thinking is moved into a leading `{type: "thinking", thinking: [...], closed: true}` content chunk, deterministically, so the prompt prefix stays byte-stable across turns.
+- **`cache_control` pre-strip**: Anthropic's `cache_control` markers are never valid at Mistral. They are stripped before the request is sent instead of relying on the 422-then-retry rejector path, which otherwise spends a failed round-trip on every fresh `(account, model)` pair.
+- **Pod affinity (`x-affinity`)**: Mistral's prompt cache lives on individual inference pods, so a conversation that the load balancer moves to another pod misses a byte-identical prefix even with a perfect prefix. Every request to an official Mistral host carries `x-affinity`, derived as `ccflare-mistral-<sha256[0..32]>` from the client session id (`metadata.user_id`'s `session_id`) — one-way, so the raw session id never leaves the process. A client-supplied `x-affinity` is always deleted first and never forwarded verbatim. The id is stable for the whole session, including across compaction.
+
+This mirrors Mistral's own CLI (Vibe), which stamps `x-affinity` with the session's root id on every request. It is deliberately **not** paired with the documented `prompt_cache_key` body field. Prefix stability remains the client's job: if a harness reorders tool definitions or injects dynamic content above the system prompt, no header recovers the cache. Cached tokens are reported by Mistral in `usage.prompt_tokens_details.cached_tokens` and are already surfaced as cache-read tokens by `extractUsageInfo`.
 
 ### Streaming Transformation (Key Innovation)
 Uses `TransformStream` with state tracking across chunks:
@@ -1160,7 +1187,7 @@ This section intentionally does not track individual commits — provider code c
 git log --oneline -30 -- packages/providers/
 ```
 
-At a high level, the provider set has grown well beyond the original Anthropic/Vertex/Z.ai/OpenAI-Compatible lineup: xAI, Codex (OpenAI's ChatGPT/Codex Responses API), Qwen, Alibaba Coding Plan, AWS Bedrock, Kilo, and OpenRouter are all now registered (`packages/providers/src/index.ts`). Several providers (xAI, Codex, Qwen) also gained OAuth support and a live-editable default-model-mapping override layer (`CCFLARE_MODEL_DEFAULTS_PROVIDERS`, see `docs/configuration.md`), and Codex's default model map is now derived from the account's own live model listing rather than compiled in.
+At a high level, the provider set has grown well beyond the original Anthropic/Vertex/Z.ai/OpenAI-Compatible lineup: xAI, Codex (OpenAI's ChatGPT/Codex Responses API), Qwen, Alibaba Coding Plan, AWS Bedrock, Kilo, OpenRouter, CodeBuddy, Sail Research and OpenCode Go are all now registered (`packages/providers/src/index.ts`), and Mistral is supported as an `openai-compatible` endpoint with its own request rules. The account-level night window (Sail Research today) is provider-agnostic — any provider can register a completion-tier adapter. Several providers (xAI, Codex, Qwen) also gained OAuth support and a live-editable default-model-mapping override layer (`CCFLARE_MODEL_DEFAULTS_PROVIDERS`, see `docs/configuration.md`), and Codex's default model map is now derived from the account's own live model listing rather than compiled in.
 
 ## Future Enhancements
 

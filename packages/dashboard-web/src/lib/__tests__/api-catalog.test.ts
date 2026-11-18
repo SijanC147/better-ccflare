@@ -86,11 +86,17 @@ describe("api catalog", () => {
 			(key) => !key.includes(":", key.indexOf(":") + 1),
 		);
 
-		// POST /api/logs/stream/token is real but handled inline in
-		// handleRequest (#379) rather than through the handlers map, so it is
-		// legitimately absent from the extraction.
+		// These are real but handled inline in handleRequest rather than
+		// through the handlers map, so they are legitimately absent from the
+		// extraction: the logs stream token (#379), the dashboard session probe,
+		// and the combo flow view (matched before /api/combos/:id).
+		const INLINE_STATIC_ROUTES = new Set([
+			"POST:/api/logs/stream/token",
+			"GET:/api/auth/session",
+			"GET:/api/combos/flow",
+		]);
 		const unknown = staticCatalogKeys
-			.filter((key) => key !== "POST:/api/logs/stream/token")
+			.filter((key) => !INLINE_STATIC_ROUTES.has(key))
 			.filter((key) => !routerRoutes.has(key))
 			.sort();
 

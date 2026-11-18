@@ -423,6 +423,20 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "POST",
+		path: "/api/accounts/:accountId/night-window",
+		category: "Accounts",
+		summary: "Toggle the provider night window (off-peak completion tier).",
+		bodyHint: '{ "enabled": true }',
+	},
+	{
+		method: "POST",
+		path: "/api/accounts/:accountId/plan-price",
+		category: "Accounts",
+		summary: "Set the account's monthly plan price, for cost tracking.",
+		bodyHint: '{ "planMonthlyUsd": 200 } (null clears it)',
+	},
+	{
+		method: "POST",
 		path: "/api/accounts/:accountId/auto-refresh",
 		category: "Accounts",
 		summary: "Toggle automatic token refresh.",
@@ -856,6 +870,46 @@ export const API_ROUTES: ApiRoute[] = [
 	},
 	{
 		method: "GET",
+		path: "/api/config/reasoning-efforts",
+		category: "Config",
+		summary:
+			"The per-model reasoning-effort capability overrides, and where they come from.",
+	},
+	{
+		method: "POST",
+		path: "/api/config/reasoning-efforts",
+		category: "Config",
+		summary: "Replace the per-model reasoning-effort capability overrides.",
+		bodyHint: '{ "overrides": { "<model>": ["low", "medium", "high"] } }',
+	},
+	{
+		method: "GET",
+		path: "/api/config/cost-tracking",
+		category: "Config",
+		summary: "Whether cost tracking is on, and where the setting comes from.",
+	},
+	{
+		method: "POST",
+		path: "/api/config/cost-tracking",
+		category: "Config",
+		summary: "Turn cost tracking on or off.",
+		bodyHint: '{ "enabled": true }',
+	},
+	{
+		method: "PUT",
+		path: "/api/config/cost-tracking",
+		category: "Config",
+		summary: "Turn cost tracking on or off. Same as the POST.",
+		bodyHint: '{ "enabled": true }',
+	},
+	{
+		method: "POST",
+		path: "/api/config/cost-tracking/reload",
+		category: "Config",
+		summary: "Re-read the cost-tracking setting from config. Answers 204.",
+	},
+	{
+		method: "GET",
 		path: "/api/config/github-token",
 		category: "Config",
 		summary: "Whether a GitHub token is stored. The token is never returned.",
@@ -1073,13 +1127,89 @@ export const API_ROUTES: ApiRoute[] = [
 		path: "/api/api-keys",
 		category: "API keys",
 		summary: "Generate a new API key. The secret is shown once.",
-		bodyHint: '{ "name": "my-key", "role": "admin" | "api-only" }',
+		bodyHint:
+			'{ "name": "my-key", "role": "admin" | "api-only", "allowedModels"?: [..] | null, "allowedAccounts"?: [..] | null, "allowedProviders"?: [..] | null, "limitUsd"?: 5 }',
 	},
 	{
 		method: "GET",
 		path: "/api/api-keys/stats",
 		category: "API keys",
 		summary: "Per-key usage counters.",
+	},
+	{
+		method: "GET",
+		path: "/api/auth/session",
+		category: "API keys",
+		summary:
+			"The calling key's id and whether it can manage keys. Handled inline in handleRequest.",
+	},
+	{
+		method: "GET",
+		path: "/api/api-keys/:keyIdOrName",
+		category: "API keys",
+		summary: "One key, without its secret.",
+	},
+	{
+		method: "GET",
+		path: "/api/api-keys/:keyIdOrName/usage",
+		category: "API keys",
+		summary:
+			"One key's usage over a range. A non-admin key may read only its own.",
+		query: ["range", "from", "to"],
+		note: "from and to are read only when range is custom.",
+	},
+	{
+		method: "GET",
+		path: "/api/api-keys/:keyIdOrName/limits",
+		category: "API keys",
+		summary: "A key's spend limits and window mode. Requires an admin key.",
+	},
+	{
+		method: "PUT",
+		path: "/api/api-keys/:keyIdOrName/limits",
+		category: "API keys",
+		summary: "Replace a key's spend limits. Requires an admin key.",
+		bodyHint:
+			'{ "mode": "calendar" | "rolling", "limits": [{ "window": "day", "usd": 5, "scopeModel"?: "opus" }] }',
+	},
+	{
+		method: "PATCH",
+		path: "/api/api-keys/:keyIdOrName/routing",
+		category: "API keys",
+		summary: "Set a key's per-family combo overrides. Requires an admin key.",
+		bodyHint: '{ "familyComboOverrides": { "<family>": "<comboId>" } | null }',
+	},
+	{
+		method: "PATCH",
+		path: "/api/api-keys/:keyIdOrName/restrictions",
+		category: "API keys",
+		summary:
+			"Set which accounts, models and providers a key may use. Requires an admin key.",
+		bodyHint:
+			'{ "allowedAccounts": [..] | null, "allowedModels": [..] | null, "allowedProviders": [..] | null }',
+	},
+	{
+		method: "PATCH",
+		path: "/api/api-keys/:keyIdOrName/limit",
+		category: "API keys",
+		summary: "Set or clear a key's single spend limit. Requires an admin key.",
+		bodyHint:
+			'{ "limitUsd": 5 | null, "limitWindow"?: ..., "limitEnforce"?: ... }',
+	},
+	{
+		method: "POST",
+		path: "/api/api-keys/:keyIdOrName/reset-spend",
+		category: "API keys",
+		summary:
+			"Reset spend against a key's limits, keeping the limits and history. Requires an admin key.",
+		dangerous: true,
+	},
+	{
+		method: "POST",
+		path: "/api/api-keys/:keyIdOrName/reload-spend",
+		category: "API keys",
+		summary:
+			"Re-read a key's persisted spend reset into the running server. Requires an admin key.",
 	},
 	{
 		method: "PATCH",
@@ -1277,6 +1407,13 @@ export const API_ROUTES: ApiRoute[] = [
 		summary: "Every combo with its slots.",
 	},
 	{
+		method: "GET",
+		path: "/api/combos/flow",
+		category: "Combos",
+		summary:
+			"Recent routing flow through each combo: assignments, per-slot stats and errors.",
+	},
+	{
 		method: "POST",
 		path: "/api/combos",
 		category: "Combos",
@@ -1345,6 +1482,12 @@ export const API_ROUTES: ApiRoute[] = [
 		category: "Models",
 		summary: "The model catalog.",
 		query: ["provider", "refresh"],
+	},
+	{
+		method: "GET",
+		path: "/api/model-prices",
+		category: "Models",
+		summary: "Per-model token prices, per million tokens in USD.",
 	},
 	{
 		method: "POST",

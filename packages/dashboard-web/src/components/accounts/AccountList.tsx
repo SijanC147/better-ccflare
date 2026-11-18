@@ -39,8 +39,13 @@ interface AccountListProps {
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
 	onBillingTypeToggle: (account: Account) => void;
+	onPlanPriceChange: (
+		account: Account,
+		planMonthlyUsd: number | null,
+	) => void | Promise<void>;
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
+	onNightWindowToggle?: (account: Account) => void;
 	onUsageThresholdsChange?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
@@ -63,8 +68,10 @@ export function AccountList({
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
 	onBillingTypeToggle,
+	onPlanPriceChange,
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
+	onNightWindowToggle,
 	onUsageThresholdsChange,
 	onCustomEndpointChange,
 	onModelMappingsChange,
@@ -191,8 +198,10 @@ export function AccountList({
 							onAutoFallbackToggle={onAutoFallbackToggle}
 							onAutoRefreshToggle={onAutoRefreshToggle}
 							onBillingTypeToggle={onBillingTypeToggle}
+							onPlanPriceChange={onPlanPriceChange}
 							onAutoPauseOnOverageToggle={onAutoPauseOnOverageToggle}
 							onPeakHoursPauseToggle={onPeakHoursPauseToggle}
+							onNightWindowToggle={onNightWindowToggle}
 							onCustomEndpointChange={onCustomEndpointChange}
 							onUsageThresholdsChange={onUsageThresholdsChange}
 							onModelMappingsChange={onModelMappingsChange}

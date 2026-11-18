@@ -1,6 +1,7 @@
 import { getModelDisplayName } from "@better-ccflare/core";
 import type {
 	AgentUpdatePayload,
+	ApiKeyResponse,
 	ClaudeCodeEndpointConfig,
 	OpenAIGatewayConfig,
 	Project,
@@ -15,6 +16,7 @@ import {
 	type RequestSummary,
 	type RetryConfigUpdate,
 } from "../api";
+import { REFRESH_INTERVALS } from "../constants";
 import { queryKeys } from "../lib/query-keys";
 import { getRequestsSseSeq } from "./useRequestStream";
 
@@ -189,29 +191,26 @@ export const useAgents = () => {
 	});
 };
 
-interface ApiKeyListItem {
-	id: string;
-	name: string;
-	prefixLast8: string;
-	createdAt: string;
-	lastUsed: string | null;
-	usageCount: number;
-	isActive: boolean;
-}
-
 interface ApiKeysListResponse {
 	success: boolean;
-	data: ApiKeyListItem[];
+	data: ApiKeyResponse[];
 	count: number;
 }
 
-export const useApiKeys = () => {
+/**
+ * The one reader of queryKeys.apiKeys(). Every consumer goes through it so the
+ * cache under that key always holds the same shape: ApiKeysTab used to keep a
+ * second query on a bare ["api-keys"] key returning the whole envelope, which
+ * meant two different shapes depending on which tab had loaded last.
+ */
+export const useApiKeys = (options?: { enabled?: boolean }) => {
 	return useQuery({
 		queryKey: queryKeys.apiKeys(),
 		queryFn: async () => {
 			const res = await api.get<ApiKeysListResponse>("/api/api-keys");
 			return res.data ?? [];
 		},
+		enabled: options?.enabled ?? true,
 		staleTime: 60000,
 		gcTime: 5 * 60 * 1000,
 	});
@@ -329,6 +328,30 @@ export const useUsageHistory = (account: string, range: string) => {
 		refetchIntervalInBackground: false,
 		gcTime: 15 * 60 * 1000,
 		enabled: !!account,
+	});
+};
+
+/**
+ * One key's usage over one window, for the API Key Usage page.
+ *
+ * Same cadence as useUsageHistory: this drives a chart-heavy page that an
+ * operator leaves open, and the underlying query is index-served per key
+ * rather than a scan, so a 60s refresh is cheap.
+ */
+export const useApiKeyUsage = (
+	keyId: string,
+	range: string,
+	from?: string,
+	to?: string,
+) => {
+	return useQuery({
+		queryKey: queryKeys.apiKeyUsage(keyId, range, from, to),
+		queryFn: () => api.getApiKeyUsage(keyId, range, from, to),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 15 * 60 * 1000,
+		enabled: !!keyId && (range !== "custom" || (!!from && !!to)),
 	});
 };
 
@@ -860,6 +883,24 @@ export const useCombos = () => {
 	});
 };
 
+/**
+ * Family → combo → slot flow view with 24h stats (GET /api/combos/flow).
+ *
+ * The poll refreshes topology, stats and cooldown state only, and stops while
+ * the tab is hidden. Live request rows are not this query's job: they stream
+ * through the shared request SSE (useRequestStream/useRequests), so a quiet
+ * system costs one small query set a minute and nothing when hidden.
+ */
+export const useComboFlow = () => {
+	return useQuery({
+		queryKey: queryKeys.comboFlow(),
+		queryFn: () => api.getComboFlow(),
+		staleTime: 20000,
+		refetchInterval: REFRESH_INTERVALS.slow,
+		refetchIntervalInBackground: false,
+	});
+};
+
 export const useFamilies = () => {
 	return useQuery({
 		queryKey: queryKeys.families(),
@@ -915,8 +956,11 @@ export const useUpdateCombo = () => {
 			description?: string | undefined;
 			enabled?: boolean | undefined;
 		}) => api.updateCombo(params.id, params),
-		onSuccess: () => {
+		onSuccess: (_data, { id }) => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.combos() });
+			// Refresh the detail cache too, or reopening the edit dialog seeds
+			// the pre-save name/description and a second save reverts the edit.
+			queryClient.invalidateQueries({ queryKey: ["combo", id] });
 		},
 	});
 };
@@ -1051,8 +1095,12 @@ export function alertsQueryOptions() {
 	};
 }
 
-export const useAlerts = () => {
-	return useQuery(alertsQueryOptions());
+export const useAlerts = (options?: { enabled?: boolean | undefined }) => {
+	// A key that may only read its own usage pages cannot read alerts.
+	return useQuery({
+		...alertsQueryOptions(),
+		enabled: options?.enabled ?? true,
+	});
 };
 
 /**

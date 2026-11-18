@@ -33,6 +33,8 @@ const FOUR_DAYS_MS = 4 * 24 * 60 * 60 * 1000;
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-429",
 		name: "codex-like-test",
 		provider: "stub-provider-429",

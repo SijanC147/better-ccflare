@@ -3,6 +3,7 @@ import type { RuntimeConfig } from "@better-ccflare/config";
 import { RETRY_DEFAULTS } from "@better-ccflare/core";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import { fetchSlot } from "../../__tests__/fetch-slot";
+import { preserveTestEnv } from "../../__tests__/preserve-test-env";
 import { makeProxyContext } from "../../__tests__/proxy-context-fixture";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
@@ -11,6 +12,15 @@ import {
 	clearVisionCapability,
 	isVisionUnsupported,
 } from "../vision-capability";
+
+preserveTestEnv([
+	"CCFLARE_OVERLOAD_RETRY_BASE_MS",
+	"CCFLARE_OVERLOAD_RETRY_MAX_MS",
+	"CCFLARE_OVERLOAD_RETRY_ENABLED",
+	"CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS",
+	"CCFLARE_SERVER_ERROR_RETRY_ENABLED",
+	"CCFLARE_SERVER_ERROR_COOLDOWN_MS",
+]);
 
 /**
  * Transient upstream 5xx (500/502/503/504) handling: one in-place retry on the
@@ -66,6 +76,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_enabled: false,
 		usage_pause_five_hour_min_reset_remaining_ms: null,
 		usage_pause_weekly_min_reset_remaining_ms: null,
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		...overrides,
 	};
 }
@@ -593,12 +605,6 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 	afterEach(() => {
 		fetchSlot.fetch = originalFetch;
 		restoreForwardToClient();
-		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
-		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS;
-		delete process.env.CCFLARE_SERVER_ERROR_RETRY_ENABLED;
-		delete process.env.CCFLARE_SERVER_ERROR_COOLDOWN_MS;
 		resetRateLimitProbeGatesForTests();
 	});
 
@@ -781,10 +787,11 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		expect(args[8]).toBe(2);
 		expect(args[9]).toEqual({ model: "claude-sonnet-4-5" });
 		// The tail arguments are easy to drop when copying a sibling branch.
-		// clientSessionId sits ten from the end: the five gatewayHint* fields
-		// (all null here, since the request carries none of those headers),
+		// clientSessionId sits thirteen from the end: the five gatewayHint*
+		// fields (all null here, since the request carries none of those
+		// headers), upstream's timestamp, limitModel and spendRecordedAt, then
 		// projectId, worktreePath and the two inbound marker fields follow it.
-		expect(args[args.length - 10]).toBe("sess-5xx");
+		expect(args[args.length - 13]).toBe("sess-5xx");
 	});
 
 	it("records no audit row for a synthetic probe's 5xx", async () => {
@@ -1094,7 +1101,7 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		const account = makeAccount();
 		const bodyBuffer = makeRequestBody();
 		const before = Date.now();
-		const { result } = await runProxy(
+		const { result, meta } = await runProxy(
 			makeRequest(bodyBuffer),
 			account,
 			bodyBuffer,
@@ -1137,7 +1144,9 @@ describe("proxyWithAccount — transient upstream 5xx retry and failover", () =>
 		const usageCalls = (ctx.dbOps.updateAccountUsage as ReturnType<typeof mock>)
 			.mock.calls as unknown as unknown[][];
 		expect(usageCalls).toHaveLength(1);
-		expect(usageCalls[0]).toEqual([account.id]);
+		// The request's start time rides along so a session this request opens
+		// is anchored to it rather than to the queued write's run time.
+		expect(usageCalls[0]).toEqual([account.id, meta.timestamp]);
 
 		// The parsed metadata, not just "something was written": the real
 		// AnthropicProvider turns the two headers above into

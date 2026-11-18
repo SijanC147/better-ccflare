@@ -138,8 +138,10 @@ Codex CLI (and other OpenAI Responses API clients) can target better-ccflare dir
 Note: this is distinct from the `codex` *provider*, which routes requests outbound to OpenAI's Codex endpoint.
 
 **Known Limitations (`/v1/responses`):**
-- `previous_response_id` is accepted but ignored — better-ccflare is stateless and does not store prior responses. Codex uses this field only over WebSocket (which better-ccflare does not implement); for regular HTTP requests Codex always sends the full conversation history in `input`, so this field has no effect.
-- Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are silently skipped; only `type: "function"` tools are forwarded to Anthropic.
+- Regular HTTP does not trust an arbitrary caller-supplied `previous_response_id`. On the authenticated, native outbound Codex route, an operator-controlled gateway request can enable gateway-managed continuation. The gateway retains only the last upstream response ID and cryptographic input/configuration digests; it sends a suffix with that server-owned ID only after an exact ordered-prefix and configuration match. Mismatch, expiry, or process restart safely sends the full input without a response ID. WebSocket transport is not implemented.
+- Built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) are preserved on the native outbound Codex route. Routes translated to Anthropic skip built-in tools and forward only `type: "function"` tools.
+- `reasoning.effort` is forwarded to every account type except Bedrock, which builds its own Converse payload and drops the effort. Anthropic-shaped accounts receive it as `output_config.effort`, OpenRouter as `reasoning.effort`, and other OpenAI-compatible endpoints as `reasoning_effort`. It is moved to a level the target model supports when needed. If an OpenAI-compatible upstream's strict request schema rejects the field outright (HTTP 400 or 422 naming it as an unknown input), the request is retried once without it and that rejection is remembered for the account and model, so later requests omit it up front instead of spending a failed round trip. Omitting it leaves the provider default in place. A value outside `minimal`, `low`, `medium`, `high`, `xhigh` and `max` returns `400 invalid_request_error` on both `/v1/messages` and `/v1/responses`. See [Reasoning Effort](configuration.md#reasoning-effort).
+- Unknown top-level `/v1/responses` request fields fail closed with `400 invalid_request_error`; they are never silently discarded. An explicit `max_output_tokens` also returns 400 when the selected outbound route is the canonical ChatGPT Codex subscription endpoint. Omit it for that route; custom OpenAI-compatible endpoints may support it.
 
 **Note:** `GET /v1/models` is proxied through to Claude like any other `/v1/*` request. A successful response (from a console/API-key account) is also passively captured into better-ccflare's own model catalog cache — see [Model Catalog](#model-catalog) below for the read endpoint (`GET /api/models`) and how the catalog is kept up to date.
 
@@ -152,6 +154,14 @@ Same as Claude API requirements for the specific endpoint.
 
 **Response:**
 Proxied response from Claude API, including streaming responses.
+
+**Response Headers:**
+better-ccflare adds these headers to every response an account served, on `POST /v1/messages` and `POST /v1/responses`, streaming and non-streaming, and on upstream error responses passed back to the client:
+- `x-better-ccflare-served-model` — the model actually sent upstream for the attempt that produced this response, after any combo slot override, provider model mapping and model-list fallback. The response body's `model` field keeps echoing the model you requested, so this header is the way to see what a combo alias resolved to.
+- `x-better-ccflare-served-account` — the name of the account that served the request. Only the name is exposed, never the account id or credentials. A name with characters outside printable ASCII is percent-encoded.
+- `x-better-ccflare-model-rewrite` — `<original>-><applied>`, present only when an agent model preference rewrote the requested model.
+
+Responses better-ccflare generates itself without using an account (for example "all accounts failed" or pool-exhausted errors) carry no served headers.
 
 **Automatic Failover:**
 If a request fails or an account is rate limited, better-ccflare automatically retries with the next available account according to the configured load balancing strategy. This ensures high availability and reliability.
@@ -195,12 +205,20 @@ List all configured accounts with their current status.
     "rateLimitRemaining": 100,
     "sessionInfo": "Session: 25 requests",
     "autoFallbackEnabled": false,
+    "peakHoursPauseEnabled": false,
+    "peakHoursPauseSupported": false,
+    "nightWindowEnabled": false,
+    "planMonthlyUsd": null,
     "peakHours": { "active": false }
   }
 ]
 ```
 
-`peakHours` is computed by the server on each request and is `null` for providers with no peak-hours concept. Currently `deepseek`, `zai` and `anthropic` report `{ "active": boolean }`. For DeepSeek and Zai it uses the same check as peak-hours auto-pause; Anthropic is informational only.
+Each account also reports its per-account toggles: `peakHoursPauseEnabled` (whether the peak-hours behaviour is switched on), `peakHoursPauseSupported` (`true` for Zai, DeepSeek and TokenHarbor-host accounts only — see [`POST /api/accounts/:accountId/peak-hours-pause`](#post-apiaccountsaccountidpeak-hours-pause)), `nightWindowEnabled` (see [`POST /api/accounts/:accountId/night-window`](#post-apiaccountsaccountidnight-window)), and `planMonthlyUsd` (the recorded subscription price, or `null`).
+
+`peakHours` is computed by the server on each request and is `null` for providers with no peak-hours concept. Currently `deepseek`, `zai`, `anthropic`, and TokenHarbor accounts report `{ "active": boolean }`. For DeepSeek and Zai it uses the same check as peak-hours auto-pause; Anthropic is informational only.
+
+TokenHarbor's peak pricing is per model rather than per provider, so those accounts also report `peakPricedModels` — the model ids whose `pricing.off_peak` block in the account's own `/v1/models` listing is currently set (`null` until the listing has been fetched). The window and the model set both come from that listing; no window is hardcoded. Accounts on any other `anthropic-compatible` endpoint report `null` for both fields.
 
 **Example:**
 ```bash
@@ -446,6 +464,95 @@ curl -X POST http://localhost:8080/api/accounts/uuid-here/usage-pause-thresholds
   -d '{"fiveHour": 80, "weekly": null}'
 ```
 
+#### POST /api/accounts/:accountId/peak-hours-pause
+
+Turn the peak-hours behaviour on or off for an account. What it means depends on the account's provider:
+
+- **Zai / DeepSeek** — the whole account is paused during the provider's peak pricing window and resumed when it ends.
+- **TokenHarbor** — the account is never paused. Only the models the account's own `/v1/models` listing marks as peak-priced are skipped during their peak window, so flat-priced models keep routing to it. Accepted only when the account's endpoint is TokenHarbor's host.
+
+Any other account gets `400`. `enabled` is `0` or `1`; disabling also lifts any peak-hours pause immediately rather than waiting for the scheduler.
+
+**Request:**
+```json
+{
+  "enabled": 1
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Peak hours pause enabled for account 'myaccount'",
+  "peakHoursPauseEnabled": true
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/accounts/uuid-here/peak-hours-pause \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": 1}'
+```
+
+#### POST /api/accounts/:accountId/night-window
+
+Turn the [night window](configuration.md#night-window) on or off for an account. Inside the configured hours an enabled account requests its provider's cheaper completion tier (Sail Research: the `balanced` tier via `X-Sail-Completion-Window`); outside them no tier header is sent. The toggle is provider-agnostic — it applies to any provider that registers a tier adapter — and is a no-op for providers that don't.
+
+**Request:**
+```json
+{
+  "enabled": true
+}
+```
+
+`enabled` must be a strict boolean.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Night window enabled for account 'myaccount'",
+  "nightWindowEnabled": true,
+  "account": { "id": "uuid-here", "name": "myaccount", "provider": "sailresearch" }
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/accounts/uuid-here/night-window \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+#### POST /api/accounts/:accountId/plan-price
+
+Record the account's actual monthly subscription price in US dollars, used by the dashboard's plan-value and per-key apportionment figures. `0` is a real price (a free plan); `null` clears the value (unknown or not a paid plan). Any account can carry a price, whatever its provider.
+
+**Request:**
+```json
+{
+  "planMonthlyUsd": 20
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Monthly plan price set to 20 for account 'myaccount'",
+  "planMonthlyUsd": 20
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/accounts/uuid-here/plan-price \
+  -H "Content-Type: application/json" \
+  -d '{"planMonthlyUsd": 20}'
+```
+
 #### POST /api/accounts/:accountId/force-reset-rate-limit
 
 Force-clear persisted rate-limit lock state for an account and trigger immediate usage polling when possible.
@@ -613,7 +720,8 @@ Get recent request summary.
     "agentAttributionSource": null,
     "clientSessionId": null,
     "streamTerminalState": null,
-    "rateLimited": false
+    "rateLimited": false,
+    "peakHours": { "active": false }
   }
 ]
 ```
@@ -627,6 +735,7 @@ curl "http://localhost:8080/api/requests?limit=100"
 - `streamTerminalState` — the real SSE outcome for a streaming `/v1/messages` request. One of `complete`, `recovered`, `error`, `truncated`, or `client_cancelled`; `undefined` for non-streaming requests. A response can carry `statusCode: 200` and still be `truncated` or `client_cancelled`, so this is the authoritative "did the stream actually finish?" signal. An unrecognized value (e.g. written by a newer build, surviving a rollback) surfaces as `"unknown"` rather than vanishing.
 - `clientSessionId` — the `x-claude-code-session-id` header value when the client sent one; used to attribute requests to a Claude Code session.
 - `rateLimited` — convenience flag, `true` when `statusCode === 429`.
+- `peakHours` — whether this request was served during its account provider's peak pricing window, evaluated at the request's own start timestamp with the same rules the peak-hours auto-pause uses (Zai weekdays 14:00–18:00 SGT; DeepSeek weekdays 01:00–04:00 and 06:00–10:00 UTC, excluding Chinese public holidays; Anthropic weekdays 13:00–19:00 UTC, informational; TokenHarbor per model, for models its listing marks as peak-priced). Computed server-side because DeepSeek's window needs the Chinese holiday calendar and TokenHarbor's needs the account's model listing. `null` for providers without a peak concept and for requests not attributed to an account.
 
 #### GET /api/requests/detail
 
@@ -828,6 +937,56 @@ Set or clear model-default overrides. Overrides are merged per family — updati
 curl -X POST http://localhost:8080/api/config/provider-model-defaults \
   -H "Content-Type: application/json" \
   -d '{"overrides": [{"provider": "codex", "family": "opus", "model": "gpt-5.3-codex"}]}'
+```
+
+#### GET /api/config/reasoning-efforts
+
+Get the operator reasoning-effort capability map: the levels each model is declared to support, used to clamp a client-supplied `output_config.effort` / `reasoning_effort` instead of returning `400`. See [configuration.md](configuration.md#reasoning-effort).
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "overrides": {
+      "grok-4.7-build-fast": ["low", "medium", "high", "xhigh"]
+    },
+    "source": "file",
+    "envVarSet": false
+  }
+}
+```
+
+`overrides` is the effective map. `source` is `"env"` when `CCFLARE_REASONING_EFFORTS` supplies it, `"file"` when the `reasoning_efforts` config field does, and `"default"` when neither does. `envVarSet` reports whether `CCFLARE_REASONING_EFFORTS` is set to a non-blank value.
+
+**Example:**
+```bash
+curl http://localhost:8080/api/config/reasoning-efforts
+```
+
+#### POST /api/config/reasoning-efforts
+
+Replace the whole map. Unlike the provider model defaults endpoint this is not a merge: models omitted from the payload lose their entry, and `{}` clears the map. Every level must be one of `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; an unknown level, a non-array entry, or a missing `overrides` object returns `400`.
+
+**Request:**
+```json
+{
+  "overrides": {
+    "grok-4.7-build-fast": ["low", "medium", "high", "xhigh"],
+    "deepseek-v4.1-flash": ["low", "high", "max"]
+  }
+}
+```
+
+**Response:** Same shape as `GET /api/config/reasoning-efforts`, with `source: "file"`. The change takes effect immediately — no restart required.
+
+If `CCFLARE_REASONING_EFFORTS` is set to a non-blank value the endpoint returns `409 Conflict` and writes nothing: the env var outranks the config file, so the edit would silently have no effect. Update or unset the env var (which needs a restart) instead.
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/config/reasoning-efforts \
+  -H "Content-Type: application/json" \
+  -d '{"overrides": {"grok-4.7-build-fast": ["low", "medium", "high", "xhigh"]}}'
 ```
 
 #### GET /api/config/combos-enabled
@@ -1233,6 +1392,34 @@ On failure, `success` is `false` and an `error` field describes the reason; `cat
 curl -X POST http://localhost:8080/api/models/refresh
 ```
 
+#### GET /api/model-prices
+
+List the price catalogue requests are costed with (admin only, like `/api/models`). See [cost-tracking.md](cost-tracking.md#model-prices).
+
+**Response:**
+```json
+{
+  "currency": "USD",
+  "unit": "per_million_tokens",
+  "models": [
+    {
+      "id": "claude-sonnet-4-5",
+      "name": "Claude Sonnet 4.5",
+      "provider": "anthropic",
+      "family": "sonnet",
+      "rates": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 }
+    }
+  ]
+}
+```
+
+`rates` is `null` when the price is unknown.
+
+**Example:**
+```bash
+curl http://localhost:8080/api/model-prices
+```
+
 ---
 
 ### Logs
@@ -1359,7 +1546,7 @@ Create a provider. Responds `201` with `{ "success": true, "data": <provider> }`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `provider` | string | yes | Catalog id: `tavily`, `exa`, `parallel`, `deepseek`, `serper`, `brave`, `perplexity` |
+| `provider` | string | yes | Catalog id: `tavily`, `exa`, `parallel`, `deepseek`, `serper`, `brave`, `tinyfish`, `firecrawl`, `keenable`, `nimble`, `linkup`, `perplexity` |
 | `label` | string | yes | Unique name, at most 64 characters (`409` on collision) |
 | `apiKey` | string | for keyed providers | Required unless the catalog entry has `requiresKey: false` |
 | `priority` | integer | no | 0–1000, lower tried first (default 0) |

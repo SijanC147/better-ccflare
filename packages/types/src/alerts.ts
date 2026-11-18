@@ -20,7 +20,8 @@ export type AlertType =
 	| "anomaly_model_misrouting"
 	| "auth_failure"
 	| "reauth_deadline_warning"
-	| "upstream_error";
+	| "upstream_error"
+	| "api_key_spend_limit";
 
 /** A single alert raised by the alert engine. */
 export interface AlertEvent {

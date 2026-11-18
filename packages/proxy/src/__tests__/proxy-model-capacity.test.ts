@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account, ComboWithSlots } from "@better-ccflare/types";
 import type { ProxyContext } from "../handlers";
+import { clearFamilyExhaustionCache } from "../handlers/model-capacity";
 import { handleProxy } from "../proxy";
 import * as usageCollectorModule from "../usage-collector";
 import { fetchSlot } from "./fetch-slot";
@@ -54,6 +55,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_enabled: false,
 		usage_pause_five_hour_min_reset_remaining_ms: null,
 		usage_pause_weekly_min_reset_remaining_ms: null,
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		...overrides,
 	};
 }
@@ -96,6 +99,7 @@ function makeContext(
 
 afterEach(() => {
 	usageCache.delete("acc-1");
+	clearFamilyExhaustionCache();
 	fetchSlot.fetch = originalFetch;
 });
 
@@ -303,6 +307,8 @@ function makeComboAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_enabled: false,
 		usage_pause_five_hour_min_reset_remaining_ms: null,
 		usage_pause_weekly_min_reset_remaining_ms: null,
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		...overrides,
 	};
 }
@@ -318,7 +324,6 @@ describe("handleProxy Step-10 combo-fallback control flow (v3 Fix3)", () => {
 	afterEach(() => {
 		fetchSlot.fetch = originalFetch;
 		usageCache.clear();
-		delete process.env.CCFLARE_DISABLE_COMBO_SESSION_FALLBACK;
 	});
 
 	it("does not re-attempt the just-failed combo accounts unfiltered — the Step-10 fallback re-selection applies the capacity filter and returns the structured model_family_exhausted response instead of a generic failure", async () => {

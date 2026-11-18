@@ -61,7 +61,19 @@ if (process.argv[1]) {
 }
 
 const rawArguments = process.argv.slice(2);
-const parsedArguments = parseArgs(rawArguments);
+// parseArgs throws for an invalid option value (an API key limit spec, a
+// lone --cost-tracking). It runs here, outside main()'s catch, so report it
+// the way main() reports its own errors instead of as an uncaught exception.
+let parsedArguments: ParsedArgs;
+try {
+	parsedArguments = parseArgs(rawArguments);
+} catch (error) {
+	console.error(
+		"Error:",
+		error instanceof Error ? error.message : String(error),
+	);
+	fastExit(1);
+}
 const isInformationalCommand = parsedArguments.version || parsedArguments.help;
 
 // Version/help must be side-effect free: do not inspect user configuration.
@@ -75,10 +87,13 @@ if (!isInformationalCommand) {
 }
 
 import {
+	type ApiKeyOptions,
 	addAccount,
 	analyzePerformance,
 	clearRequestHistory,
 	compactDatabase,
+	configureApiKey,
+	configureCostTracking,
 	defaultTuiDeps,
 	deleteApiKey,
 	disableApiKey,
@@ -86,24 +101,35 @@ import {
 	forceResetRateLimit,
 	formatApiKeyForDisplay,
 	formatApiKeyGenerationResult,
-	generateApiKey,
+	generateConfiguredApiKey,
 	getAccountsList,
 	getApiKeyStats,
 	handleRepairCommand,
 	listApiKeys,
+	parseApiKeyAllowList,
+	parseApiKeyLimit,
+	parseApiKeyLimitMode,
+	parseApiKeyRouting,
+	parseCostTrackingValue,
+	parseNightWindowValue,
 	parseTuiArgs,
 	pauseAccount,
 	reauthenticateAccount,
 	removeAccount,
 	resetAllStats,
+	resetApiKeySpend,
 	resumeAccount,
 	runDoctor,
 	runTui,
+	setAccountNightWindow,
 	setAccountPriority,
 	setUsagePauseThresholds,
 	type TuiOptions,
 } from "@better-ccflare/cli-commands";
-import { Config } from "@better-ccflare/config";
+import {
+	Config,
+	filterEnabledProviderModelDefaultOverrides,
+} from "@better-ccflare/config";
 import {
 	CLAUDE_MODEL_IDS,
 	getBuildIdentitySync,
@@ -115,7 +141,6 @@ import {
 } from "@better-ccflare/core";
 import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
 import { DatabaseFactory } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
 import { parseBedrockConfig } from "@better-ccflare/providers";
 // Import server
 import startServer from "@better-ccflare/server";
@@ -125,6 +150,7 @@ import {
 } from "./unknown-argument";
 
 interface ParsedArgs {
+	costTracking: string | null;
 	version: boolean;
 	help: boolean;
 	serve: boolean;
@@ -153,6 +179,8 @@ interface ParsedArgs {
 		| "xai"
 		| "ollama"
 		| "ollama-cloud"
+		| "sailresearch"
+		| "opencode-go"
 		| null;
 	priority: number | null;
 	profile: string | null;
@@ -162,6 +190,8 @@ interface ParsedArgs {
 	pause: string | null;
 	resume: string | null;
 	setPriority: [string, number] | null;
+	setNightWindow: [string, string] | null;
+	nightWindow: boolean | null;
 	setUsagePauseThresholds:
 		| [string, string | null, string | null, [string | null, string | null]?]
 		| null;
@@ -177,6 +207,9 @@ interface ParsedArgs {
 	getModel: boolean;
 	setModel: string | null;
 	generateApiKey: string | null;
+	updateApiKey: string | null;
+	resetSpend: string | null;
+	apiKeyOptions: ApiKeyOptions;
 	listApiKeys: boolean;
 	disableApiKey: string | null;
 	enableApiKey: string | null;
@@ -541,7 +574,14 @@ Legend:
  * Parse command line arguments
  */
 function parseArgs(args: string[]): ParsedArgs {
+	if (
+		args.includes("--cost-tracking") &&
+		(args.length > 2 || args[0] !== "--cost-tracking")
+	) {
+		throw new Error("--cost-tracking cannot be combined with other flags");
+	}
 	const parsed: ParsedArgs = {
+		costTracking: null,
 		version: false,
 		help: false,
 		serve: false, // Keep for backwards compatibility but treat as no-op
@@ -559,6 +599,8 @@ function parseArgs(args: string[]): ParsedArgs {
 		pause: null,
 		resume: null,
 		setPriority: null,
+		setNightWindow: null,
+		nightWindow: null,
 		setUsagePauseThresholds: null,
 		reauthenticate: null,
 		analyze: false,
@@ -572,6 +614,9 @@ function parseArgs(args: string[]): ParsedArgs {
 		getModel: false,
 		setModel: null,
 		generateApiKey: null,
+		updateApiKey: null,
+		resetSpend: null,
+		apiKeyOptions: {},
 		listApiKeys: false,
 		disableApiKey: null,
 		enableApiKey: null,
@@ -599,6 +644,10 @@ function parseArgs(args: string[]): ParsedArgs {
 		const arg = args[i];
 
 		switch (arg) {
+			case "--cost-tracking":
+				parseCostTrackingValue(args[i + 1]);
+				parsed.costTracking = args[++i];
+				break;
 			case "--version":
 			case "-v":
 				parsed.version = true;
@@ -678,6 +727,8 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "codebuddy"
 					| "xai"
 					| "ollama"
+					| "sailresearch"
+					| "opencode-go"
 					| "max";
 
 				// Handle deprecated "max" mode with warning
@@ -707,7 +758,9 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "codebuddy"
 					| "xai"
 					| "ollama"
-					| "ollama-cloud";
+					| "ollama-cloud"
+					| "sailresearch"
+					| "opencode-go";
 				const validModes: Array<
 					| "claude-oauth"
 					| "console"
@@ -728,6 +781,8 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "xai"
 					| "ollama"
 					| "ollama-cloud"
+					| "sailresearch"
+					| "opencode-go"
 				> = [
 					"claude-oauth",
 					"console",
@@ -748,6 +803,8 @@ function parseArgs(args: string[]): ParsedArgs {
 					"xai",
 					"ollama",
 					"ollama-cloud",
+					"sailresearch",
+					"opencode-go",
 				];
 				if (!validModes.includes(modeValue)) {
 					console.error(`❌ Invalid mode: ${modeValue}`);
@@ -870,6 +927,37 @@ function parseArgs(args: string[]): ParsedArgs {
 				parsed.setPriority = [name, priority];
 				break;
 			}
+			case "--set-night-window": {
+				if (
+					i + 2 >= args.length ||
+					args[i + 1].startsWith("--") ||
+					args[i + 2].startsWith("--")
+				) {
+					console.error(
+						"❌ --set-night-window requires an account name and on|off",
+					);
+					fastExit(1);
+				}
+				const name = args[++i];
+				parsed.setNightWindow = [name, args[++i]];
+				break;
+			}
+			case "--night-window": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --night-window requires on|off");
+					fastExit(1);
+				}
+				const raw = args[++i];
+				const parsedValue = parseNightWindowValue(raw);
+				if (!parsedValue.ok) {
+					console.error(
+						`❌ Invalid --night-window value '${raw}': expected on/off, true/false or 1/0`,
+					);
+					fastExit(1);
+				}
+				parsed.nightWindow = parsedValue.value;
+				break;
+			}
 			case "--set-usage-pause-thresholds": {
 				if (
 					i + 3 >= args.length ||
@@ -962,8 +1050,54 @@ function parseArgs(args: string[]): ParsedArgs {
 			case "--admin":
 				parsed.admin = true;
 				break;
+			case "--update-api-key":
+			case "--allow-models":
+			case "--allow-accounts":
+			case "--allow-providers":
+			case "--limit":
+			case "--limit-mode":
+			case "--routing": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					throw new Error(`${arg} requires a value`);
+				}
+				const value = args[++i];
+				if (arg === "--update-api-key") parsed.updateApiKey = value;
+				else if (arg === "--limit") {
+					parsed.apiKeyOptions.limits ??= [];
+					parsed.apiKeyOptions.limits.push(parseApiKeyLimit(value));
+				} else if (arg === "--limit-mode") {
+					parsed.apiKeyOptions.limitMode = parseApiKeyLimitMode(value);
+				} else if (arg === "--routing") {
+					const [family, comboId] = parseApiKeyRouting(value);
+					parsed.apiKeyOptions.familyComboOverrides ??= {};
+					parsed.apiKeyOptions.familyComboOverrides[family] = comboId;
+				} else {
+					const field =
+						arg === "--allow-models"
+							? "allowedModels"
+							: arg === "--allow-accounts"
+								? "allowedAccounts"
+								: "allowedProviders";
+					parsed.apiKeyOptions.restrictions ??= {};
+					parsed.apiKeyOptions.restrictions[field] =
+						parseApiKeyAllowList(value);
+				}
+				break;
+			}
+			case "--clear-limits":
+				parsed.apiKeyOptions.limits = [];
+				break;
+			case "--clear-routing":
+				parsed.apiKeyOptions.familyComboOverrides = null;
+				break;
 			case "--list-api-keys":
 				parsed.listApiKeys = true;
+				break;
+			case "--reset-spend":
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					throw new Error("--reset-spend requires an API key name or ID");
+				}
+				parsed.resetSpend = args[++i];
 				break;
 			case "--disable-api-key":
 				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
@@ -1017,6 +1151,16 @@ function parseArgs(args: string[]): ParsedArgs {
 
 async function main() {
 	const parsed = parsedArguments;
+	if (parsed.costTracking !== null) {
+		const result = await configureCostTracking(
+			new Config(),
+			parsed.costTracking,
+		);
+		console.log(
+			`Cost tracking ${result.enabled ? "enabled" : "disabled"}. ${result.notified ? "Local server updated." : "Saved; applies when the local server next starts."}`,
+		);
+		fastExit(0);
+	}
 
 	// Handle version - check before any expensive initializations
 	if (parsed.version) {
@@ -1057,6 +1201,7 @@ async function main() {
 Usage: better-ccflare [options]
 
 Options:
+	--cost-tracking <on|off> Persist cost tracking and notify the local server (use alone)
   --version, -v       Show version number
   --serve              Start API server with dashboard
   --port <number>      Server port (default: 8080, or PORT env var)
@@ -1064,7 +1209,7 @@ Options:
   --ssl-cert <path>    Path to SSL certificate file (enables HTTPS)
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
-    --mode <claude-oauth|console|zai|minimax|deepseek|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|codebuddy|xai|ollama>  Account mode (default: claude-oauth)
+    --mode <claude-oauth|console|zai|minimax|deepseek|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex|codebuddy|xai|ollama|sailresearch|opencode-go>  Account mode (default: claude-oauth)
       claude-oauth: Claude CLI account (OAuth)
       console: Claude API account (OAuth)
       zai: z.ai account (API key)
@@ -1081,7 +1226,10 @@ Options:
       codex: Codex (OpenAI OAuth) provider
       xai: xAI/Grok provider (imports local Grok CLI OAuth credentials)
       ollama: Ollama local provider (no API key required)
+      sailresearch: Sail Research provider (API key)
+      opencode-go: OpenCode Go subscription (API key)
     --priority <number>   Account priority (default: 0)
+    --night-window <on|off>  Enable the provider night window (sailresearch)
   --list               List all accounts
   --remove <name>      Remove an account
   --reauthenticate <name> Re-authenticate an account (preserves metadata)
@@ -1089,6 +1237,7 @@ Options:
   --resume <name>      Resume an account
   --force-reset-rate-limit <name> Force-clear stale rate-limit lock for an account
   --set-priority <name> <priority>  Set account priority
+  --set-night-window <name> <on|off>  Enable/disable the provider night window for an account
   --set-usage-pause-thresholds <name> <5h%|off> <weekly%|off> [<5h-hours|off> <weekly-hours|off>]
                         Pause the account when a usage window reaches the given percentage;
                         the optional hours add "and its reset is still at least this far away"
@@ -1106,7 +1255,17 @@ Options:
 API Key Management:
   --generate-api-key <name>  Generate a new API key
     --admin                  Grant admin privileges (dashboard access)
+  --update-api-key <name>    Update settings on an existing key
+    --allow-models <list>     Comma-separated model IDs/families; '*' = any, none = deny all
+    --allow-accounts <list>   Comma-separated account IDs; '*' = any, none = deny all
+    --allow-providers <list>  Comma-separated providers; '*' = any, none = deny all
+    --limit <spec>            Repeat: window=day,usd=5[,model=opus][,warn]; replaces limits
+    --limit-mode <mode>       calendar (Europe/Dublin, default) or rolling
+    --clear-limits            Remove every limit
+    --routing <family=id>     Repeat: family=combo-id; replaces routing overrides
+    --clear-routing           Use global routing assignments
   --list-api-keys            List all API keys
+  --reset-spend <key>        Reset spend against a key's limits; keep limits and history
   --disable-api-key <name>   Disable an API key
   --enable-api-key <name>    Enable a disabled API key
   --delete-api-key <name>    Delete an API key permanently
@@ -1139,6 +1298,8 @@ Examples:
   better-ccflare --stats                # View stats
   better-ccflare --generate-api-key "My App"  # Generate API-only key
   better-ccflare --generate-api-key "Admin Key" --admin  # Generate admin key
+  better-ccflare --generate-api-key app --allow-models opus --limit window=day,usd=5 --limit-mode calendar
+  better-ccflare --update-api-key app --routing opus=combo-id
   better-ccflare --list-api-keys               # List all API keys
   better-ccflare --disable-api-key "My App"    # Disable an API key
   better-ccflare tui                    # Live usage overview in the terminal
@@ -1187,9 +1348,24 @@ Examples:
 	}
 
 	// Initialize DI container and services for commands that need them
+	if (
+		Object.keys(parsed.apiKeyOptions).length > 0 &&
+		!parsed.generateApiKey &&
+		!parsed.updateApiKey
+	) {
+		throw new Error(
+			"API key settings require --generate-api-key or --update-api-key",
+		);
+	}
+	if (parsed.generateApiKey && parsed.updateApiKey) {
+		throw new Error("Choose --generate-api-key or --update-api-key");
+	}
 	const cliConfig = new Config();
+	const providerModelDefaults = filterEnabledProviderModelDefaultOverrides(
+		cliConfig.getEnabledProviderModelDefaultProviders(),
+		cliConfig.getProviderModelDefaultOverrides(),
+	);
 	container.registerInstance(SERVICE_KEYS.Config, cliConfig);
-	container.registerInstance(SERVICE_KEYS.Logger, new Logger("CLI"));
 
 	// Route CLI outbound fetches (OAuth exchange, API key validation, etc.)
 	// through the configured forward proxy, same as the server process.
@@ -1286,6 +1462,12 @@ Examples:
 			console.error(
 				"  --mode ollama              Ollama local provider (no API key required)",
 			);
+			console.error(
+				"  --mode sailresearch        Sail Research provider (API key)",
+			);
+			console.error(
+				"  --mode opencode-go         OpenCode Go subscription (API key)",
+			);
 			console.error("\nExample:");
 			console.error(
 				"  better-ccflare --add-account work --mode claude-oauth --priority 0",
@@ -1315,6 +1497,69 @@ Examples:
 					mode,
 					priority,
 					adapter: stdPromptAdapter,
+				});
+			} else if (mode === "sailresearch") {
+				// Sail Research: API key from the CLI env vars, or a prompt
+				let apiKey =
+					process.env[
+						`BETTER_CCFLARE_API_KEY_${parsed.addAccount.toUpperCase()}`
+					] ||
+					process.env[`API_KEY_${parsed.addAccount.toUpperCase()}`] ||
+					"";
+
+				if (!apiKey) {
+					const { stdPromptAdapter } = await import(
+						"@better-ccflare/cli-commands"
+					);
+					apiKey = await stdPromptAdapter.input(
+						`Enter API key for ${parsed.addAccount}: `,
+					);
+				}
+
+				await addAccount(dbOps, new Config(), {
+					name: parsed.addAccount,
+					mode: "sailresearch",
+					priority,
+					nightWindow: parsed.nightWindow ?? undefined,
+					adapter: {
+						select: async <T extends string | number>(
+							_prompt: string,
+							_options: Array<{ label: string; value: T }>,
+						) => (_options[0]?.value as T) || ("yes" as T),
+						input: async () => apiKey,
+						confirm: async () => true,
+					},
+				});
+			} else if (mode === "opencode-go") {
+				// OpenCode Go: API key from the CLI env vars, or a prompt
+				let apiKey =
+					process.env[
+						`BETTER_CCFLARE_API_KEY_${parsed.addAccount.toUpperCase()}`
+					] ||
+					process.env[`API_KEY_${parsed.addAccount.toUpperCase()}`] ||
+					"";
+
+				if (!apiKey) {
+					const { stdPromptAdapter } = await import(
+						"@better-ccflare/cli-commands"
+					);
+					apiKey = await stdPromptAdapter.input(
+						`Enter API key for ${parsed.addAccount}: `,
+					);
+				}
+
+				await addAccount(dbOps, new Config(), {
+					name: parsed.addAccount,
+					mode: "opencode-go",
+					priority,
+					adapter: {
+						select: async <T extends string | number>(
+							_prompt: string,
+							_options: Array<{ label: string; value: T }>,
+						) => (_options[0]?.value as T) || ("yes" as T),
+						input: async () => apiKey,
+						confirm: async () => true,
+					},
 				});
 			} else if (mode === "bedrock") {
 				// Bedrock uses AWS profiles, not API keys
@@ -1554,6 +1799,17 @@ Examples:
 		await exitGracefully(0);
 	}
 
+	if (parsed.setNightWindow) {
+		const [name, value] = parsed.setNightWindow;
+
+		const result = await setAccountNightWindow(dbOps, name, value);
+		console.log(result.message);
+		if (!result.success) {
+			await exitGracefully(1);
+		}
+		await exitGracefully(0);
+	}
+
 	if (parsed.setUsagePauseThresholds) {
 		const [name, fiveHour, weekly, resetHours] = parsed.setUsagePauseThresholds;
 
@@ -1578,7 +1834,13 @@ Examples:
 			const defaultRole =
 				(await dbOps.countActiveApiKeys()) === 0 ? "admin" : "api-only";
 			const role = parsed.admin ? ("admin" as const) : defaultRole;
-			const result = await generateApiKey(dbOps, parsed.generateApiKey, role);
+			const result = await generateConfiguredApiKey(
+				dbOps,
+				parsed.generateApiKey,
+				role,
+				parsed.apiKeyOptions,
+				providerModelDefaults,
+			);
 			console.log(formatApiKeyGenerationResult(result));
 			await exitGracefully(0);
 		} catch (error: unknown) {
@@ -1589,15 +1851,31 @@ Examples:
 		}
 	}
 
+	if (parsed.updateApiKey) {
+		await configureApiKey(
+			dbOps,
+			parsed.updateApiKey,
+			parsed.apiKeyOptions,
+			providerModelDefaults,
+		);
+		console.log(`✅ API key '${parsed.updateApiKey}' updated successfully`);
+		await exitGracefully(0);
+	}
+
 	if (parsed.listApiKeys) {
 		const apiKeys = await listApiKeys(dbOps);
 		if (apiKeys.length === 0) {
 			console.log("No API keys configured");
 		} else {
 			console.log("\nAPI Keys:");
-			apiKeys.forEach((apiKey) => {
-				console.log(formatApiKeyForDisplay(apiKey));
-			});
+			for (const apiKey of apiKeys) {
+				console.log(
+					formatApiKeyForDisplay(
+						apiKey,
+						await dbOps.getApiKeyLimits(apiKey.id),
+					),
+				);
+			}
 
 			// Show statistics
 			const stats = await getApiKeyStats(dbOps);
@@ -1607,6 +1885,29 @@ Examples:
 			console.log(`  Inactive: ${stats.inactive}`);
 		}
 		await exitGracefully(0);
+	}
+
+	if (parsed.resetSpend) {
+		try {
+			const result = await resetApiKeySpend(
+				dbOps,
+				parsed.resetSpend,
+				cliConfig,
+			);
+			console.log(
+				`✅ Spend reset for API key '${parsed.resetSpend}'. Limits and usage history kept.`,
+			);
+			if (!result.notified)
+				console.log(
+					"No running local server accepted the reset notification; the persisted reset will apply when it starts.",
+				);
+			await exitGracefully(0);
+		} catch (error: unknown) {
+			console.error(
+				`❌ Failed to reset API key spend: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			await exitGracefully(1);
+		}
 	}
 
 	if (parsed.disableApiKey) {

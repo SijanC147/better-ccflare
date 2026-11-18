@@ -40,6 +40,8 @@ function stubUsageCollector() {
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		// "anthropic" on purpose: it speaks Claude model ids, so the force-mode
 		// compatibility filter keeps it. Whatever empties the pool below is
 		// therefore capacity, never capability.

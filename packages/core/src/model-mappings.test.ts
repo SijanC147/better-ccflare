@@ -18,6 +18,8 @@ import type { Account } from "@better-ccflare/types";
 // PR #180.
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	const base: Account = {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "test",
 		name: "test-account",
 		provider: "openai-compatible",

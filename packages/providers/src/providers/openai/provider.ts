@@ -20,6 +20,7 @@ import type {
 	TokenRefreshResult,
 } from "../../types";
 import { drainReader } from "../../utils/stream-drain";
+import { isMistralEndpoint, stripMistralReasoning } from "./mistral";
 
 const log = new Logger("OpenAICompatibleProvider");
 
@@ -242,8 +243,9 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			const openaiBody = convertAnthropicRequestToOpenAI(
 				body,
 				effectiveAccount,
+				{ reasoningEffortField: this.getReasoningEffortField(account) },
 			);
-			this.afterConvert(openaiBody, endpoint, model);
+			this.afterConvert(openaiBody, account, endpoint, model);
 
 			// Inject enable_thinking for reasoning models on DashScope
 			this.injectDashScopeReasoning(openaiBody, body, endpoint, model);
@@ -301,6 +303,8 @@ export class OpenAICompatibleProvider extends BaseProvider {
 						completion_tokens?: number;
 						total_tokens?: number;
 						prompt_tokens_details?: Record<string, unknown>;
+						/** OpenRouter: the provider's own billed cost in USD. */
+						cost?: number;
 					};
 				};
 
@@ -323,12 +327,14 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					promptTokensDetails?.cache_creation_input_tokens || 0;
 				const cacheReadInputTokens = promptTokensDetails?.cached_tokens || 0;
 
-				// Calculate cost using OpenAI-compatible pricing
-				const costUsd = this.calculateCost(
-					json.model,
-					promptTokens,
-					completionTokens,
-				);
+				// Only a cost the provider states is reported; the collector's
+				// catalogue estimate is the fallback for everything else.
+				const costUsd =
+					typeof json.usage.cost === "number" &&
+					Number.isFinite(json.usage.cost) &&
+					json.usage.cost >= 0
+						? json.usage.cost
+						: undefined;
 
 				return {
 					model: json.model,
@@ -349,43 +355,6 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	}
 
 	/**
-	 * Calculate cost based on model and token usage
-	 */
-	protected calculateCost(
-		model?: string,
-		promptTokens: number = 0,
-		completionTokens: number = 0,
-	): number {
-		if (!model) return 0;
-
-		// Basic OpenAI-compatible pricing (can be enhanced based on provider)
-		const pricing: Record<string, { input: number; output: number }> = {
-			"gpt-3.5-turbo": { input: 0.0005, output: 0.0015 },
-			"gpt-4": { input: 0.03, output: 0.06 },
-			"gpt-4-turbo": { input: 0.01, output: 0.03 },
-			"gpt-4o": { input: 0.005, output: 0.015 },
-			"gpt-4o-mini": { input: 0.00015, output: 0.0006 },
-			// Default pricing for unknown models
-			default: { input: 0.001, output: 0.002 },
-		};
-
-		// Find matching pricing (use exact match or default)
-		let modelPricing = pricing[model];
-		if (!modelPricing) {
-			// Try to match prefix (e.g., "gpt-4o-*" models)
-			const prefix = Object.keys(pricing).find((key) =>
-				model.includes(key.split("*")[0]),
-			);
-			modelPricing = pricing[prefix || "default"];
-		}
-
-		const inputCost = (promptTokens / 1000) * modelPricing.input;
-		const outputCost = (completionTokens / 1000) * modelPricing.output;
-
-		return Number((inputCost + outputCost).toFixed(6));
-	}
-
-	/**
 	 * Check if this provider supports OAuth
 	 */
 	supportsOAuth(): boolean {
@@ -402,9 +371,13 @@ export class OpenAICompatibleProvider extends BaseProvider {
 	/**
 	 * Hook called after converting Anthropic request to OpenAI format.
 	 * Override to inject provider-specific fields (e.g., cache_control, vision flags).
+	 * `account` is the per-request account: the provider is a singleton shared by
+	 * every openai-compatible account, so endpoint-dependent rewrites must use
+	 * this rather than shared instance state.
 	 */
 	protected afterConvert(
 		body: OpenAIRequest,
+		account?: Account,
 		endpoint?: string,
 		model?: string,
 	): void {
@@ -412,6 +385,43 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		if (this.shouldInjectAlibabaCaching(endpoint, model)) {
 			this.injectAlibabaCaching(body);
 		}
+
+		// Mistral rejects top-level `reasoning_content`; carry thinking as a
+		// typed content chunk instead. Only ever rewritten on the Mistral
+		// endpoint so every other provider keeps its bytes unchanged.
+		if (isMistralEndpoint(account)) {
+			stripMistralReasoning(body);
+		}
+	}
+
+	/**
+	 * Outbound field for the client's reasoning effort. Generic Chat
+	 * Completions upstreams (OpenAI, xAI, CLIProxyAPI, ...) read the standard
+	 * `reasoning_effort`; OpenRouter reads `reasoning: { effort }`, so an
+	 * openrouter.ai endpoint keeps that shape. Subclasses fronting an
+	 * OpenRouter-shaped gateway override this.
+	 */
+	protected getReasoningEffortField(
+		account?: Account,
+	): "reasoning_effort" | "reasoning" {
+		if (!account) return "reasoning_effort";
+		try {
+			const host = new URL(getEndpointUrl(account)).hostname.toLowerCase();
+			if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) {
+				return "reasoning";
+			}
+		} catch {
+			// Unparseable endpoint: buildUrl falls back to api.openai.com.
+		}
+		return "reasoning_effort";
+	}
+
+	/**
+	 * The same field the transform writes, for the proxy's post-fallback
+	 * restore of an effort the mapped model made it drop.
+	 */
+	reasoningEffortTarget(account?: Account): "reasoning_effort" | "reasoning" {
+		return this.getReasoningEffortField(account);
 	}
 
 	/**

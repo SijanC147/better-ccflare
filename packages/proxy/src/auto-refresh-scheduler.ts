@@ -25,7 +25,6 @@ import {
 } from "./auto-refresh-prompt-pool";
 import {
 	hasChineseHolidayCalendar,
-	isChinesePublicHoliday,
 	refreshChineseHolidays,
 } from "./chinese-holidays";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
@@ -40,7 +39,13 @@ import {
 	getPendingRotation,
 	recordPendingRotation,
 } from "./handlers/pending-rotation-registry";
+import { PEAK_HOUR_CHECKS } from "./peak-hours";
 import type { ProxyContext } from "./proxy";
+import {
+	getTokenHarborPeakListing,
+	isTokenHarborEndpoint,
+	TOKENHARBOR_PROVIDER,
+} from "./tokenharbor-peak";
 
 const log = new Logger("AutoRefreshScheduler");
 
@@ -79,104 +84,8 @@ function isLocalRefusal(status: number, body: string | null): boolean {
 	}
 }
 
-/**
- * Zai peak pricing window: 14:00-18:00 Singapore time (UTC+8), Monday to
- * Friday in Singapore. Z.ai's own docs, read 2026-09-30: "Peak hours: Monday to Friday, 14:00–18:00 Singapore Standard Time (UTC+8)" (docs.z.ai/devpack/overview, and the 2026-07-30 plan update at docs.z.ai/devpack/notice/usage-revision). Weekends are off-peak and billed at 50%, so
- * pausing an account then wastes the cheapest capacity. This supersedes the
- * every-day rule of SB23-1867, which predates that announcement. The
- * dashboard's ZAI_PEAK_WINDOW in packages/dashboard-web/src/utils/provider-utils.ts
- * states the same rule.
- */
-export function isZaiPeakHour(ts = Date.now()): boolean {
-	// Singapore has no DST, so shifting by a fixed 8 hours gives its wall
-	// clock, and the weekday is Singapore's own rather than UTC's.
-	const sgt = new Date(ts + 8 * 60 * 60 * 1000);
-	const day = sgt.getUTCDay();
-	if (day === 0 || day === 6) return false;
-	const sgtHour = sgt.getUTCHours() + sgt.getUTCMinutes() / 60;
-	return sgtHour >= 14 && sgtHour < 18;
-}
-
-/**
- * DeepSeek peak hours: 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday,
- * excluding Chinese public holidays. Both windows fall on the same UTC and
- * Beijing calendar day (09:00-12:00 / 14:00-18:00 CST), so the UTC date is
- * used for the weekday and holiday checks.
- */
-export function isDeepseekPeakHour(ts = Date.now()): boolean {
-	const d = new Date(ts);
-	const day = d.getUTCDay();
-	if (day === 0 || day === 6) return false;
-	const date = d.toISOString().slice(0, 10);
-	if (isChinesePublicHoliday(date)) return false;
-	const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
-	return (utcHour >= 1 && utcHour < 4) || (utcHour >= 6 && utcHour < 10);
-}
-
-/**
- * Wall-clock weekday and hour in Los Angeles. `hourCycle: "h23"` so midnight
- * reads 0, never 24.
- */
-const LOS_ANGELES_CLOCK = new Intl.DateTimeFormat("en-US", {
-	timeZone: "America/Los_Angeles",
-	weekday: "short",
-	hour: "numeric",
-	minute: "numeric",
-	hourCycle: "h23",
-});
-
-/**
- * Anthropic OAuth peak hours: weekdays 5am-11am in Los Angeles, the vendor's
- * own timezone and its own weekend. That is 12:00-18:00 UTC while PDT is in
- * effect and 13:00-19:00 UTC the rest of the year. During these windows 5-hour
- * sessions consume a larger share of the weekly budget. Informational only:
- * not part of the peak-hours auto-pause.
- *
- * Upstream states this as a fixed 13:00-19:00 UTC, which is an hour late
- * through PDT; the fork fixed that in the dashboard in #93 (SB23-1867), and the
- * 2026-10-16 sync brings the same rule here because this now feeds `peakHours`
- * on /api/accounts (SB23-8195). Keep in sync with ANTHROPIC_PEAK_WINDOW in
- * packages/dashboard-web/src/utils/provider-utils.ts.
- */
-export function isAnthropicPeakHour(ts = Date.now()): boolean {
-	const parts = LOS_ANGELES_CLOCK.formatToParts(new Date(ts));
-	const part = (type: Intl.DateTimeFormatPartTypes) =>
-		parts.find((p) => p.type === type)?.value ?? "";
-	const weekday = part("weekday");
-	if (weekday === "Sat" || weekday === "Sun") return false;
-	const hour = Number(part("hour")) + Number(part("minute")) / 60;
-	return hour >= 5 && hour < 11;
-}
-
 const HOLIDAY_REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOLIDAY_RETRY_INTERVAL_MS = 60 * 60 * 1000;
-
-/** Providers whose accounts support opt-in peak-hours auto-pause. */
-const PEAK_HOUR_CHECKS: Record<string, (ts?: number) => boolean> = {
-	zai: isZaiPeakHour,
-	deepseek: isDeepseekPeakHour,
-};
-
-/**
- * Server-side peak-hours state for an account's provider, served on
- * /api/accounts so the dashboard never recomputes it. Uses the same check
- * functions as the scheduler's peak-hours auto-pause. `null` for providers
- * without a peak concept.
- */
-export function getPeakHoursState(
-	provider: string | null | undefined,
-	ts = Date.now(),
-): { active: boolean } | null {
-	// Own-property lookup: "__proto__"/"constructor" must not hit inherited props
-	const key = provider ?? "";
-	const check =
-		key === "anthropic"
-			? isAnthropicPeakHour
-			: Object.hasOwn(PEAK_HOUR_CHECKS, key)
-				? PEAK_HOUR_CHECKS[key]
-				: undefined;
-	return check ? { active: check(ts) } : null;
-}
 
 /**
  * Auto-refresh scheduler that monitors accounts with auto-refresh enabled
@@ -190,6 +99,8 @@ export class AutoRefreshScheduler {
 	// Last Chinese holiday feed refresh attempt (DeepSeek peak-hours exemption)
 	private lastHolidayRefreshAt = 0;
 	private holidayRefresh: Promise<unknown> | null = null;
+	// In-flight TokenHarbor listing refresh, so ticks don't stack them
+	private tokenHarborPeakRefresh: Promise<void> | null = null;
 	// Track the rate_limit_reset timestamp for each account when we last refreshed it
 	// This allows us to detect when a new window has started (different rate_limit_reset)
 	private lastRefreshResetTime: Map<string, number> = new Map();
@@ -586,6 +497,7 @@ export class AutoRefreshScheduler {
 				cross_region_mode: null,
 				model_fallbacks: null,
 				billing_type: null,
+				plan_monthly_usd: null,
 				pause_reason: null,
 				refresh_token_issued_at: null,
 				consecutive_rate_limits: 0,
@@ -593,6 +505,7 @@ export class AutoRefreshScheduler {
 				// This minimal object exists only to drive a token refresh; the renewal
 				// day is billing metadata the refresh path never reads.
 				renewal_day: null,
+				night_window_enabled: false,
 			};
 
 			// Emit request start event for analytics
@@ -1224,6 +1137,7 @@ export class AutoRefreshScheduler {
 					cross_region_mode: null,
 					model_fallbacks: null,
 					billing_type: null,
+					plan_monthly_usd: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
@@ -1231,6 +1145,7 @@ export class AutoRefreshScheduler {
 					// This minimal object exists only to drive a token refresh; the renewal
 					// day is billing metadata the refresh path never reads.
 					renewal_day: null,
+					night_window_enabled: false,
 				};
 
 				// Use refreshAccessTokenSafe to get deduplication and backoff handling
@@ -1425,6 +1340,7 @@ export class AutoRefreshScheduler {
 					cross_region_mode: null,
 					model_fallbacks: null,
 					billing_type: null,
+					plan_monthly_usd: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
@@ -1432,6 +1348,7 @@ export class AutoRefreshScheduler {
 					// This minimal object exists only to drive a token refresh; the renewal
 					// day is billing metadata the refresh path never reads.
 					renewal_day: null,
+					night_window_enabled: false,
 				};
 
 				// Register in refreshInFlight so concurrent request-triggered refreshes join this one
@@ -1706,6 +1623,19 @@ export class AutoRefreshScheduler {
 					this.holidayRefresh = null;
 				});
 		}
+		// TokenHarbor's listing refresh can take up to 15s per account, and it
+		// feeds the selector rather than any pause decision here. Fire-and-forget
+		// like the holiday feed, so a slow TokenHarbor never delays the zai and
+		// deepseek checks. The listing module applies its own TTL and dedupes
+		// concurrent fetches, so calling it every tick is cheap; the field only
+		// stops a second pass starting while one is still running.
+		if (!this.tokenHarborPeakRefresh) {
+			this.tokenHarborPeakRefresh = this.refreshTokenHarborPeakListings()
+				.catch(() => {})
+				.finally(() => {
+					this.tokenHarborPeakRefresh = null;
+				});
+		}
 		for (const [provider, isPeak] of Object.entries(PEAK_HOUR_CHECKS)) {
 			// DeepSeek's decision depends on the holiday calendar. If no calendar
 			// covers this year yet (e.g. first tick after startup in 2027+), wait for
@@ -1719,6 +1649,52 @@ export class AutoRefreshScheduler {
 				await this.holidayRefresh;
 			}
 			await this.checkPeakHoursPauseForProvider(provider, isPeak());
+		}
+	}
+
+	/**
+	 * Keep each opted-in TokenHarbor account's model listing warm.
+	 *
+	 * TokenHarbor peak pricing is per model, so unlike Zai and DeepSeek there is
+	 * nothing to pause: the toggle only opts the account in, and the selector
+	 * skips it for the specific peak-priced models during their window (see
+	 * tokenharbor-peak.ts). This tick exists so the listing is already cached
+	 * when a request arrives — the request path never waits on the network. The
+	 * module applies its own TTL and failure backoff, so calling it every minute
+	 * costs one fetch per hour per account.
+	 *
+	 * Failures are logged and ignored: an account with no listing routes
+	 * unconstrained, which is the safe direction.
+	 */
+	private async refreshTokenHarborPeakListings(): Promise<void> {
+		const accounts = await this.db.query<{
+			id: string;
+			name: string;
+			provider: string;
+			custom_endpoint: string | null;
+			api_key: string | null;
+			peak_hours_pause_enabled: number;
+			model_mappings: string | null;
+			model_fallbacks: string | null;
+		}>(
+			// model_mappings/model_fallbacks/custom_endpoint are what
+			// `mapModelName` reads: the listing keeps the account row so the
+			// request summary can resolve a client model onto the upstream one.
+			`SELECT id, name, provider, custom_endpoint, api_key, COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled, model_mappings, model_fallbacks
+			 FROM accounts WHERE provider = ? AND peak_hours_pause_enabled = 1`,
+			[TOKENHARBOR_PROVIDER],
+		);
+
+		for (const row of accounts) {
+			const account = row as unknown as Account;
+			if (!isTokenHarborEndpoint(account)) continue;
+			try {
+				await getTokenHarborPeakListing(account);
+			} catch (error) {
+				log.warn(
+					`TokenHarbor peak listing refresh failed for '${row.name}': ${error}`,
+				);
+			}
 		}
 	}
 

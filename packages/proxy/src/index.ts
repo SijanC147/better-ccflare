@@ -9,10 +9,7 @@ export {
 	listProviders,
 	registerProvider,
 } from "@better-ccflare/providers";
-export {
-	AutoRefreshScheduler,
-	getPeakHoursState,
-} from "./auto-refresh-scheduler";
+export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export {
 	CircuitBreaker,
@@ -46,6 +43,7 @@ export {
 } from "./codex-usage-history";
 export { DiscoveryScheduler, type ScanResult } from "./discovery-scheduler";
 export {
+	ApiKeySpendCounter,
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
 	checkReauthDeadline,
@@ -60,6 +58,7 @@ export {
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
+	getApiKeySpendCounter,
 	getModelCooldownUntil,
 	getRoutingObservations,
 	getUsageThrottleStatus,
@@ -76,17 +75,22 @@ export {
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
+	resetApiKeySpendCounter,
 	restartUsagePollingForAccount,
+	SPEND_RESYNC_TTL_MS,
+	type SpendSnapshot,
 	startGlobalTokenHealthChecks,
 	stopGlobalTokenHealthChecks,
 	type TokenHealthReport,
 	type TokenHealthStatus,
+	tryGetApiKeySpendCounter,
 	unregisterAutoRefreshTrackingClearer,
 	unregisterCodexUsageRefresher,
 	unregisterPollingRestarter,
 	unregisterRefreshClearer,
 } from "./handlers";
 export {
+	getModelCooldownsForAccount,
 	markModelCooling,
 	resetModelCooldownsForTests,
 } from "./handlers/model-cooldown";
@@ -114,6 +118,7 @@ export {
 	fetchOpenAICompatibleModelsPreview,
 	getOpenAICompatibleModels,
 } from "./openai-compatible-model-catalog";
+export { getPeakHoursState } from "./peak-hours";
 export {
 	drainUsageCollector,
 	getUsageCollectorHealth,
@@ -125,6 +130,13 @@ export {
 	forwardToClient,
 	type ResponseHandlerOptions,
 } from "./response-handler";
+export {
+	clearTokenHarborPeakCacheForAccount,
+	getPeakPricedModelIds,
+	getTokenHarborPeakState,
+	isTokenHarborEndpoint,
+	TOKENHARBOR_PROVIDER,
+} from "./tokenharbor-peak";
 export type { ProxyRequest, ProxyResponse } from "./types";
 export type { UsageCollectorHealth } from "./usage-collector";
 export {

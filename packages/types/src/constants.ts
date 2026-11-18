@@ -32,6 +32,8 @@ export const ACCOUNT_MODES = {
 	ZAI: "zai", // z.ai account (API key)
 	MINIMAX: "minimax", // Minimax account (API key)
 	DEEPSEEK: "deepseek", // DeepSeek account (API key)
+	SAILRESEARCH: "sailresearch", // Sail Research account (API key, Bearer auth)
+	OPENCODE_GO: "opencode-go", // OpenCode Go subscription (API key, Anthropic Messages API)
 	ANTHROPIC_COMPATIBLE: "anthropic-compatible", // Anthropic-compatible provider (API key)
 	OPENAI_COMPATIBLE: "openai-compatible", // OpenAI-compatible provider (API key)
 	NANOGPT: "nanogpt", // NanoGPT provider (API key)
@@ -68,6 +70,10 @@ export function getProviderFromMode(mode: AccountMode): ProviderName {
 			return PROVIDER_NAMES.MINIMAX;
 		case ACCOUNT_MODES.DEEPSEEK:
 			return PROVIDER_NAMES.DEEPSEEK;
+		case ACCOUNT_MODES.SAILRESEARCH:
+			return PROVIDER_NAMES.SAILRESEARCH;
+		case ACCOUNT_MODES.OPENCODE_GO:
+			return PROVIDER_NAMES.OPENCODE_GO;
 		case ACCOUNT_MODES.ANTHROPIC_COMPATIBLE:
 			return PROVIDER_NAMES.ANTHROPIC_COMPATIBLE;
 		case ACCOUNT_MODES.OPENAI_COMPATIBLE:

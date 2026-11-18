@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: 55e69473465e1561f3585202f145193e30c54660 -->
+<!-- last-sync-sha: 9c444e45b9ae682a57131bba2c280254f1660b87 -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-11-18 | main | `55e69473..9c444e45` | 111 (non-merge) | 68 files (66 UU, 2 DU) | merge --no-ff | see the entry below | see the PR for SB23-12667 |
 | 2026-11-08 | main | `15cff50e..55e69473` | 124 (95 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-11280 |
 | 2026-10-30 | main | `ba82474c..15cff50e` | 88 (71 non-merge) | 34 files (33 UU, 1 DU) | merge --no-ff | see the entry below | see the PR for SB23-10879 |
 | 2026-10-20 | main | `b4fe14b6..ba82474c` | 26 (22 non-merge) | 15 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-9312 |
@@ -26,6 +27,72 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-11-18: `55e69473..9c444e45` (111 upstream commits)
+
+**Strategy:** `merge --no-ff` by hand (lane BTCF-12667, SB23-12667), four helper sub-agents on disjoint
+file sets (proxy core, database/config/core/types, server/http-api/providers/cli, proxy tests), the lead on
+docs, manifests and the dashboard. **Conflicts:** 68 paths, 66 content (UU) and 2 modify/delete (DU).
+Hextap files untouched. Manifests kept at the fork's 3.48.0; upstream's `version` not adopted.
+`bun install --frozen-lockfile` passes under Bun 1.4.4 with the auto-merged `bun.lock`.
+
+### Upstream features arriving
+
+- **Per-API-key controls** (`3664fa51` … `97ecd0ce`): restrict a key to accounts, models and providers;
+  spend limits per hour/day/week/month (calendar or rolling), blocking or warning; spend reset; routing
+  overrides (family combo per key); per-key usage pages (`/api-key-usage`). New `api_key_limits` table and
+  `api_keys` columns `limit_window_mode`, `family_combo_overrides`, `spend_reset_at`, `spend_reset_by`
+  (PG also gains `allowed_*` and `limit_*` ALTERs it lacked).
+- **Cost tracking** switch and a model prices page; "prefer the provider's reported cost" (`de5f8751`).
+- **Accounts**: `plan_monthly_usd` (monthly subscription price) and `night_window_enabled` (Sail Research
+  cheaper completion tier inside `NIGHT_WINDOW` / `NIGHT_TZ`). Requests: `completion_tier`, `limit_model`,
+  `spend_recorded_at`; index `idx_requests_combo_timestamp`.
+- **Providers**: OpenCode Go, Sail Research, Mistral pod affinity and US endpoint, Nimble and Linkup search,
+  TokenHarbor model-aware peak-hours pause.
+- **Proxy**: reasoning effort forwarded to every account in its native form, clamped per model, retried
+  without the field on rejection; served-model and serving-account response headers; model allowlist on
+  account-fallback retries; windowless 429s benched with bounded backoff, scoped to the upstream model.
+- **Dashboard**: Combo Flow view, combo rename, API key usage pages, cost tracking card, model prices.
+- `CLAUDE_CLI_VERSION` 2.1.326. `debug_usage.ts` deleted upstream too.
+
+### Resolutions
+
+- `help.ts`, `runner.ts` (DU): kept the fork's deletion (#296); upstream's `cli-options.test.ts`, which only
+  tests the dead runner, removed with them. Their new flags (`--set-night-window`, `--night-window`,
+  opencode-go) already live in `apps/cli/src/main.ts`; `unknown-argument.ts` `KNOWN_FLAGS` gained 13 flags.
+- **Vertex** (`299290aa`): kept the fork's per-attempt `ProviderRequestContext` (#301/#304) and dropped
+  upstream's `ProviderRequestState`; adopted `getTargetModel(account, context)` so the served-model header
+  works through the carrier. `vertex-target-model.test.ts` ported to the carrier.
+- **#316 / #323**: `failsOverAsForeignError` sites, the all-402 native replay and `selectOverageLast` /
+  `orderOverageLast` are unchanged. Overage-last runs on upstream's key-permitted pool, after the TokenHarbor
+  peak reorder, and wraps upstream's all-cooled fallback sort. Gateway ladders now also apply key restrictions
+  (additive; upstream has no ladders).
+- **#234** shared retry budget threaded through every in-place loop; upstream's reasoning retry added beside it.
+- **Served headers vs `x-better-ccflare-model-substituted`**: distinct names, both emitted on translated
+  responses.
+- **saveRequest** positional tail: upstream's `timestamp, limitModel, spendRecordedAt` first, then the fork's
+  `projectId, worktreePath, inboundFormat, inboundGateway`. The `codebuddy_gateway_rejection` audit row now
+  spreads `auditTail` too (a pre-existing fork omission).
+- **Accounts columns**: both new columns in all ten places; `plan_monthly_usd`'s ALTER moved above both
+  rebuilds so the SB23-3919 gate holds. Dedup merge: `night_window_enabled` MAX / `bool_or`,
+  `plan_monthly_usd` own-then-freshest.
+- **Anthropic peak hours**: upstream moved the peak checks to `peak-hours.ts` with a fixed 13:00-19:00 UTC
+  rule; the fork's Los Angeles wall-clock rule (#93, SB23-8195) moved there with them.
+- **Role gates**: upstream's four new admin-only checks answer 403, not 401 (SB23-3746).
+- **Dashboard**: the account card keeps the fork's overflow menu; night window joins it as a toggle and the
+  peak-hours toggle keys on the server's `peakHoursPauseSupported`; the plan price input sits in the provider
+  row (never rendered in a browser). The auth probe keeps `runAuthProbe` and gains the usage-page session
+  check (`repromptOn403: false`). Upstream's update checker in the sidebar dropped in favour of the fork's
+  version cards.
+- **Fork gates on upstream code**: 15 shared temp DB paths gained `process.pid`; 3 silent-skip `?.` replaced
+  by throws; 6 new hour formatters pinned to `hourCycle: "h23"`; two unredacted body logs in `api.ts` now go
+  through `redactForLog`; `exactOptionalPropertyTypes` fallout widened to `?: T | undefined`.
+
+### Follow-ups
+
+- SB23-12668: per-key restrictions and spend limits do not reach `/v1/chat/completions`, `/v1/completions`,
+  named gateways or Claude Code endpoints (combination gap; auth is off on the host).
+- SB23-12669: regenerate and push the Postman collection for the 22 new catalog routes.
 
 ## 2026-11-08: `15cff50e..55e69473` (124 upstream commits, 95 non-merge)
 

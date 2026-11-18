@@ -71,6 +71,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		usage_pause_weekly_enabled: false,
 		usage_pause_five_hour_min_reset_remaining_ms: null,
 		usage_pause_weekly_min_reset_remaining_ms: null,
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		...overrides,
 	};
 }
@@ -151,6 +153,7 @@ afterEach(() => {
 	// An unrestored spy leaves getUsageCollector stubbed for every test file that
 	// runs later in the process (SB23-2776).
 	collectorSpy.mockRestore();
+	mock.restore();
 	clearVisionCapability();
 	if (savedPassthrough === undefined) {
 		delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;

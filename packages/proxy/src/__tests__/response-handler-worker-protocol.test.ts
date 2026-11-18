@@ -1,4 +1,12 @@
-import { describe, expect, it, mock, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { requestEvents } from "@better-ccflare/core";
 import type { Account } from "@better-ccflare/types";
 import * as modelCatalogModule from "../model-catalog";
@@ -17,6 +25,34 @@ function encodeRequestBody(json: string): ArrayBuffer {
 	return new TextEncoder().encode(json).buffer;
 }
 
+function createMockCollector() {
+	const starts: Record<string, unknown>[] = [];
+	const chunks: Array<{ requestId: string; data: Uint8Array }> = [];
+	const ends: Record<string, unknown>[] = [];
+
+	const collector = {
+		handleStart: mock((msg: Record<string, unknown>) => {
+			starts.push(msg);
+		}),
+		handleChunk: mock((requestId: string, data: Uint8Array) => {
+			chunks.push({ requestId, data });
+		}),
+		handleEnd: mock((msg: Record<string, unknown>) => {
+			ends.push(msg);
+			return Promise.resolve();
+		}),
+	};
+
+	// Spy on getUsageCollector to return our mock
+	const spy = spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue(
+		collector as unknown as usageCollectorModule.UsageCollector,
+	);
+
+	return { collector, starts, chunks, ends, spy };
+}
+
+afterEach(() => mock.restore());
+
 describe("forwardToClient usage-collector protocol", () => {
 	async function waitFor(
 		predicate: () => boolean,
@@ -29,35 +65,6 @@ describe("forwardToClient usage-collector protocol", () => {
 			}
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
-	}
-
-	function createMockCollector() {
-		const starts: Record<string, unknown>[] = [];
-		const chunks: Array<{ requestId: string; data: Uint8Array }> = [];
-		const ends: Record<string, unknown>[] = [];
-
-		const collector = {
-			handleStart: mock((msg: Record<string, unknown>) => {
-				starts.push(msg);
-			}),
-			handleChunk: mock((requestId: string, data: Uint8Array) => {
-				chunks.push({ requestId, data });
-			}),
-			handleEnd: mock((msg: Record<string, unknown>) => {
-				ends.push(msg);
-				return Promise.resolve();
-			}),
-		};
-
-		// Spy on getUsageCollector to return our mock
-		const spy = spyOn(
-			usageCollectorModule,
-			"getUsageCollector",
-		).mockReturnValue(
-			collector as unknown as usageCollectorModule.UsageCollector,
-		);
-
-		return { collector, starts, chunks, ends, spy };
 	}
 
 	function createCtx(storePayloads = true) {
@@ -103,6 +110,7 @@ describe("forwardToClient usage-collector protocol", () => {
 				// Equal original/applied metadata is intentional: a provider can map
 				// this alias later, without an agent-preference rewrite.
 				originalModel: "claude-opus-4-6",
+				limitModel: "claude-opus-4-6",
 				appliedModel: "claude-opus-4-6",
 			},
 			ctx,
@@ -111,6 +119,7 @@ describe("forwardToClient usage-collector protocol", () => {
 		const clientJson = await response.json();
 		expect(clientJson.model).toBe("claude-opus-4-6");
 		expect(starts[0].originalModel).toBeNull();
+		expect(starts[0].limitModel).toBe("claude-opus-4-6");
 		expect(starts[0].appliedModel).toBeNull();
 		await waitFor(() => ends.length === 1);
 		expect(
@@ -691,6 +700,10 @@ describe("forwardToClient usage-collector protocol", () => {
 });
 
 describe("forwardToClient passive model-catalog capture", () => {
+	beforeEach(() => {
+		createMockCollector();
+	});
+
 	function createIngestSpy() {
 		return spyOn(modelCatalogModule, "ingestModelsListing").mockResolvedValue(
 			undefined,
@@ -699,6 +712,8 @@ describe("forwardToClient passive model-catalog capture", () => {
 
 	function makeAccount(overrides: Partial<Account> = {}): Account {
 		return {
+			night_window_enabled: false,
+			plan_monthly_usd: null,
 			id: "acc-1",
 			name: "test-console-account",
 			provider: "claude-console-api",

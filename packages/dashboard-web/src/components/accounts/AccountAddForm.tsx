@@ -20,6 +20,8 @@ interface AccountAddFormProps {
 			| "zai"
 			| "minimax"
 			| "deepseek"
+			| "sailresearch"
+			| "opencode-go"
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
@@ -56,6 +58,16 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 		modelMappings?: { [key: string]: string } | undefined;
+	}) => Promise<void>;
+	onAddSailResearchAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => Promise<void>;
+	onAddOpencodeGoAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
 	}) => Promise<void>;
 	onAddAnthropicCompatibleAccount: (params: {
 		name: string;
@@ -140,6 +152,8 @@ export function AccountAddForm({
 	onAddZaiAccount,
 	onAddMinimaxAccount,
 	onAddDeepseekAccount,
+	onAddSailResearchAccount,
+	onAddOpencodeGoAccount,
 	onAddAnthropicCompatibleAccount,
 	onAddNanoGPTAccount,
 	onAddOpenAIAccount,
@@ -166,6 +180,8 @@ export function AccountAddForm({
 			| "zai"
 			| "minimax"
 			| "deepseek"
+			| "sailresearch"
+			| "opencode-go"
 			| "anthropic-compatible"
 			| "openai-compatible"
 			| "nanogpt"
@@ -853,6 +869,74 @@ export function AccountAddForm({
 			return;
 		}
 
+		if (newAccount.mode === "sailresearch") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for Sail Research accounts");
+				return;
+			}
+			// Fixed endpoint, no OAuth flow. The generic /api/accounts handler
+			// (there is no dedicated sailresearch route) stores only the key and
+			// priority, so no model mappings are collected here.
+			await onAddSailResearchAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
+				opusModel: "",
+				sonnetModel: "",
+				haikuModel: "",
+				fableModel: "",
+			});
+			onSuccess();
+			return;
+		}
+
+		if (newAccount.mode === "opencode-go") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for OpenCode Go accounts");
+				return;
+			}
+			// Fixed endpoint, no OAuth flow. The generic /api/accounts handler
+			// (there is no dedicated opencode-go route) stores only the key and
+			// priority, so no model mappings are collected here.
+			await onAddOpencodeGoAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+				crossRegionMode: "geographic",
+				customBedrockModel: "",
+				opusModel: "",
+				sonnetModel: "",
+				haikuModel: "",
+				fableModel: "",
+			});
+			onSuccess();
+			return;
+		}
+
 		if (newAccount.mode === "nanogpt") {
 			if (!newAccount.apiKey) {
 				onError("API key is required for NanoGPT accounts");
@@ -1341,6 +1425,8 @@ export function AccountAddForm({
 									| "zai"
 									| "minimax"
 									| "deepseek"
+									| "sailresearch"
+									| "opencode-go"
 									| "anthropic-compatible"
 									| "openai-compatible"
 									| "bedrock"
@@ -1371,6 +1457,12 @@ export function AccountAddForm({
 								<SelectItem value="zai">z.ai (API Key)</SelectItem>
 								<SelectItem value="minimax">Minimax (API Key)</SelectItem>
 								<SelectItem value="deepseek">DeepSeek (API Key)</SelectItem>
+								<SelectItem value="sailresearch">
+									Sail Research (API Key)
+								</SelectItem>
+								<SelectItem value="opencode-go">
+									OpenCode Go (API Key)
+								</SelectItem>
 								<SelectItem value="nanogpt">NanoGPT (API Key)</SelectItem>
 								<SelectItem value="anthropic-compatible">
 									Anthropic-Compatible (API Key)
@@ -1969,6 +2061,48 @@ export function AccountAddForm({
 								</div>
 							</div>
 						</>
+					)}
+					{newAccount.mode === "sailresearch" && (
+						<div className="space-y-2">
+							<Label htmlFor="apiKey">Sail Research API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									setNewAccount({
+										...newAccount,
+										apiKey: (e.target as HTMLInputElement).value,
+									})
+								}
+								placeholder="Enter your Sail Research API key"
+							/>
+							<p className="text-xs text-muted-foreground">
+								Uses the fixed Sail Research endpoint
+								(https://api.sailresearch.com/v1).
+							</p>
+						</div>
+					)}
+					{newAccount.mode === "opencode-go" && (
+						<div className="space-y-2">
+							<Label htmlFor="apiKey">OpenCode Go API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									setNewAccount({
+										...newAccount,
+										apiKey: (e.target as HTMLInputElement).value,
+									})
+								}
+								placeholder="Enter your OpenCode Console API key"
+							/>
+							<p className="text-xs text-muted-foreground">
+								Uses the fixed OpenCode Go endpoint
+								(https://opencode.ai/inference/go/anthropic).
+							</p>
+						</div>
 					)}
 					{newAccount.mode === "nanogpt" && (
 						<>

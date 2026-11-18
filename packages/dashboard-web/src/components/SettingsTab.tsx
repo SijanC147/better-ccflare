@@ -2,6 +2,7 @@ import React from "react";
 import { AdvancedSettingsCard } from "./overview/AdvancedSettingsCard";
 import { CacheKeepaliveCard } from "./overview/CacheKeepaliveCard";
 import { ClaudeCodeEndpointsCard } from "./overview/ClaudeCodeEndpointsCard";
+import { CostTrackingCard } from "./overview/CostTrackingCard";
 import { DataRetentionCard } from "./overview/DataRetentionCard";
 import { GithubTokenCard } from "./overview/GithubTokenCard";
 import { OpenAIGatewaysCard } from "./overview/OpenAIGatewaysCard";
@@ -22,6 +23,7 @@ export const SettingsTab = React.memo(() => {
 				<CacheKeepaliveCard />
 				<SystemCacheTtlCard />
 				<UsageThrottlingCard />
+				<CostTrackingCard />
 				<DataRetentionCard />
 				<RequestStorageCard />
 				<RetryCard />

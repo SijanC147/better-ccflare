@@ -26,6 +26,8 @@ import type { ProxyContext } from "../proxy-types";
  */
 
 const BASE_ACCOUNT: Account = {
+	night_window_enabled: false,
+	plan_monthly_usd: null,
 	id: "acc-1",
 	name: "provider-context-test",
 	// Unregistered name: proxyWithAccount resolves getProvider(account.provider)

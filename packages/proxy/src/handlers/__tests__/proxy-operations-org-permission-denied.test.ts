@@ -28,6 +28,8 @@ function stubUsageCollector() {
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-anthropic-1",
 		name: "claude-pro",
 		provider: "anthropic",
@@ -247,7 +249,7 @@ describe("proxyWithAccount — org_permission_denied (403 permission_error)", ()
 		// clientSessionId sits ten from the end: the five gatewayHint* fields
 		// (all null here, since the request carries none of those headers),
 		// projectId, worktreePath and the two inbound marker fields follow it.
-		expect(args[args.length - 10]).toBe("sess-1");
+		expect(args[args.length - 13]).toBe("sess-1");
 	});
 
 	it("matches on error.type, not on the message wording", async () => {

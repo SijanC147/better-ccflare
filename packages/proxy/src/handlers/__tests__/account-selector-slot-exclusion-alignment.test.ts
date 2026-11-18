@@ -48,6 +48,8 @@ function pinFor(accountId: string): string {
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
+		night_window_enabled: false,
+		plan_monthly_usd: null,
 		id: "acc-a",
 		name: "account-a",
 		provider: "anthropic",

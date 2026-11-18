@@ -26,8 +26,10 @@ import {
 	DEFAULT_STRATEGY,
 	isValidStrategy,
 	NETWORK,
+	parseNightWindow,
 	RETRY_DEFAULTS,
 	type StrategyName,
+	setCostTrackingEnabled as setCostTrackingFlag,
 	TIME_CONSTANTS,
 	ValidationError,
 	validateEndpointUrl,
@@ -770,6 +772,27 @@ function isValidModelScopedCapacityRoutingMode(
 	return value === "off" || value === "exhausted";
 }
 
+/**
+ * A night-window spec is empty (feature off) or a "HH:MM-HH:MM" pair the
+ * shared core parser accepts in UTC. Delegating to parseNightWindow keeps
+ * the config layer and the request-time consumer on one grammar.
+ */
+function isValidNightWindow(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	if (value === "") return true;
+	return parseNightWindow(value, "UTC") !== null;
+}
+
+/**
+ * A zone is empty (UTC) or an IANA name Intl accepts. A trivial window is
+ * parsed with the candidate zone purely to reuse the parser's zone check.
+ */
+function isValidNightTz(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	if (value === "") return true;
+	return parseNightWindow("00:00-00:01", value) !== null;
+}
+
 export interface RuntimeConfig {
 	clientId: string;
 	retry: { attempts: number; delayMs: number; backoff: number };
@@ -812,6 +835,36 @@ export type ProviderModelDefaultOverrides = Record<
  * ...) keep translating models exactly as before; nothing here
  * touches model resolution itself.
  */
+/**
+ * Reasoning-effort capability overrides: a JSON object mapping a model name
+ * to the effort levels it accepts, e.g.
+ * `{"grok-4.7-build-fast":["low","medium","high","xhigh"]}`. The env var
+ * wins over the `reasoning_efforts` config-file field. Level names are
+ * validated where they are applied (@better-ccflare/openai-formats).
+ */
+export const REASONING_EFFORTS_ENV_VAR = "CCFLARE_REASONING_EFFORTS";
+
+export type ReasoningEffortOverrides = Record<string, string[]>;
+
+/**
+ * Keep only entries whose value is a non-empty array of strings (non-string
+ * items are dropped). Returns null when `raw` is not a plain object.
+ */
+function sanitizeReasoningEffortOverrides(
+	raw: unknown,
+): ReasoningEffortOverrides | null {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+	const overrides: ReasoningEffortOverrides = {};
+	for (const [model, levels] of Object.entries(raw)) {
+		if (!Array.isArray(levels)) continue;
+		const values = levels.filter(
+			(level): level is string => typeof level === "string",
+		);
+		if (values.length > 0) overrides[model] = values;
+	}
+	return overrides;
+}
+
 export const PROVIDER_MODEL_DEFAULTS_ENV_VAR =
 	"CCFLARE_MODEL_DEFAULTS_PROVIDERS";
 
@@ -861,14 +914,22 @@ export interface ConfigData {
 	usage_throttling_weekly_enabled?: boolean;
 	codex_five_hour_window_enabled?: boolean;
 	model_scoped_capacity_routing?: ModelScopedCapacityRoutingMode;
+	// sailresearch night window: "HH:MM-HH:MM" in `night_tz` (empty = off),
+	// and an IANA zone name (empty = UTC). See getNightWindow()/getNightTz().
+	night_window?: string;
+	night_tz?: string;
 	combos_enabled?: boolean;
 	combo_session_fallback?: boolean;
 	force_account_model?: boolean;
 	use_extra_usage?: boolean;
+	cost_tracking_enabled?: boolean | undefined;
 	web_search_enabled?: boolean;
 	web_search_max_result_chars?: number;
 	web_search_bypass_header?: boolean;
 	provider_model_default_overrides?: ProviderModelDefaultOverrides;
+	// Operator capability map for reasoning effort clamping: model -> levels.
+	// See getReasoningEffortOverrides().
+	reasoning_efforts?: ReasoningEffortOverrides;
 	agent_frontmatter_model_fallback?: boolean;
 	model_catalog_oauth_refresh_enabled?: boolean;
 	health_detail_enabled?: boolean;
@@ -955,6 +1016,7 @@ export interface ConfigData {
 		| number
 		| boolean
 		| ProviderModelDefaultOverrides
+		| ReasoningEffortOverrides
 		| undefined;
 }
 
@@ -3662,6 +3724,68 @@ export class Config extends EventEmitter {
 		this.set("model_scoped_capacity_routing", mode);
 	}
 
+	private resolveNightWindow(): {
+		value: string;
+		source: "env" | "file" | "default";
+	} {
+		return this.resolveEnvFileSetting(
+			process.env.NIGHT_WINDOW,
+			this.data.night_window,
+			isValidNightWindow,
+			"",
+		);
+	}
+
+	private resolveNightTz(): {
+		value: string;
+		source: "env" | "file" | "default";
+	} {
+		return this.resolveEnvFileSetting(
+			process.env.NIGHT_TZ,
+			this.data.night_tz,
+			isValidNightTz,
+			"",
+		);
+	}
+
+	/**
+	 * Effective sailresearch night window ("HH:MM-HH:MM", local to
+	 * getNightTz()), resolved as NIGHT_WINDOW env > file > default. An empty
+	 * string means the feature is off; invalid values resolve to "" rather
+	 * than throwing, so a typo can never take the proxy down.
+	 */
+	getNightWindow(): string {
+		return this.resolveNightWindow().value;
+	}
+
+	/**
+	 * Effective IANA zone for the night window, resolved as NIGHT_TZ env >
+	 * file > default. An empty string means UTC (the parser's default).
+	 */
+	getNightTz(): string {
+		return this.resolveNightTz().value;
+	}
+
+	setNightWindow(value: string): void {
+		if (!isValidNightWindow(value)) {
+			throw new ValidationError(
+				`Invalid night_window: ${value} (expected HH:MM-HH:MM or empty)`,
+				"night_window",
+			);
+		}
+		this.set("night_window", value);
+	}
+
+	setNightTz(value: string): void {
+		if (!isValidNightTz(value)) {
+			throw new ValidationError(
+				`Invalid night_tz: ${value} (expected an IANA zone name or empty)`,
+				"night_tz",
+			);
+		}
+		this.set("night_tz", value);
+	}
+
 	/**
 	 * Whether combos take part in routing at all.
 	 *
@@ -3738,6 +3862,29 @@ export class Config extends EventEmitter {
 
 	setForceAccountModel(value: boolean): void {
 		this.set("force_account_model", value);
+	}
+
+	/** Whether new requests receive cost estimates and budget enforcement. */
+	getCostTrackingEnabled(): boolean {
+		return this.resolveFlag(this.data.cost_tracking_enabled, true).value;
+	}
+
+	getCostTrackingEnabledSource(): "file" | "default" {
+		return this.resolveFlag(this.data.cost_tracking_enabled, true).source;
+	}
+
+	setCostTrackingEnabled(value: boolean): void {
+		this.set("cost_tracking_enabled", value);
+		setCostTrackingFlag(this.getCostTrackingEnabled());
+	}
+
+	/** CLI notification: reload this flag only, keeping other live settings intact. */
+	reloadCostTrackingEnabled(): void {
+		const latest = JSON.parse(
+			readFileSync(this.configPath, "utf8"),
+		) as ConfigData;
+		this.data.cost_tracking_enabled = latest.cost_tracking_enabled;
+		setCostTrackingFlag(this.getCostTrackingEnabled());
 	}
 
 	/**
@@ -3880,6 +4027,38 @@ export class Config extends EventEmitter {
 		(this.data as Record<string, unknown>)[key] = value;
 		this.saveConfig();
 		this.emit("change", { key, oldValue, newValue: value });
+	}
+
+	/**
+	 * Operator reasoning-effort capability map (model -> supported levels),
+	 * used only to clamp a client-supplied effort. Precedence: the
+	 * CCFLARE_REASONING_EFFORTS env var (JSON object), then the
+	 * `reasoning_efforts` config-file field, then an empty map. An env value
+	 * that is blank, not valid JSON or not an object is ignored (with a
+	 * warning for the latter two) and the file value applies.
+	 */
+	getReasoningEffortOverrides(): ReasoningEffortOverrides {
+		const fromEnv = process.env[REASONING_EFFORTS_ENV_VAR];
+		if (fromEnv?.trim()) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(fromEnv);
+			} catch {
+				parsed = undefined;
+			}
+			const overrides = sanitizeReasoningEffortOverrides(parsed);
+			if (overrides) return overrides;
+			log.warn(
+				`${REASONING_EFFORTS_ENV_VAR} must be a JSON object of model -> levels; ignoring it`,
+			);
+		}
+		return sanitizeReasoningEffortOverrides(this.data.reasoning_efforts) ?? {};
+	}
+
+	setReasoningEffortOverrides(overrides: ReasoningEffortOverrides): void {
+		this.data.reasoning_efforts = overrides;
+		this.saveConfig();
+		this.emit("change", { key: "reasoning_efforts", newValue: overrides });
 	}
 
 	/**
@@ -4394,7 +4573,12 @@ export class Config extends EventEmitter {
 
 	getAllSettings(): Record<
 		string,
-		string | number | boolean | ProviderModelDefaultOverrides | undefined
+		| string
+		| number
+		| boolean
+		| ProviderModelDefaultOverrides
+		| ReasoningEffortOverrides
+		| undefined
 	> {
 		// Secrets are stripped rather than spread. Today's only caller
 		// (handlers/config.ts getConfig) copies named fields into an allowlisted
@@ -4431,6 +4615,8 @@ export class Config extends EventEmitter {
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
 			codex_five_hour_window_enabled: this.getCodexFiveHourWindowEnabled(),
 			model_scoped_capacity_routing: this.getModelScopedCapacityRouting(),
+			night_window: this.getNightWindow(),
+			night_tz: this.getNightTz(),
 			combos_enabled: this.getCombosEnabled(),
 			combo_session_fallback: this.getComboSessionFallback(),
 			force_account_model: this.getForceAccountModel(),

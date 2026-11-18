@@ -243,14 +243,11 @@ export type RateLimitReason =
 	 *  the time this is detected the response has typically already been passed
 	 *  through to the client. */
 	| "extra_usage_exhausted"
-	/** Anthropic 429 that reports no rate-limit window at all — `x-should-retry:
-	 *  true` and not a single `anthropic-ratelimit-*` / `x-ratelimit-*` header or
-	 *  `retry-after`. Live measurement showed this to be request-scoped rather
-	 *  than account-wide: the same account served 200s seconds either side of the
-	 *  rejection on the same model, while every other account rejected the same
-	 *  request identically, and retries spanning 11s never once cleared it. The
-	 *  account is NOT benched — the request fails over and the account stays in
-	 *  rotation. */
+	/** Anthropic 429 without a quota window (`x-should-retry: true` and no
+	 *  `anthropic-ratelimit-*`, `x-ratelimit-*` or `retry-after` metadata).
+	 *  The rejected (account, upstream model) pair receives a short adaptive
+	 *  cooldown and fails over. Other models stay eligible on the account;
+	 *  account-wide rate-limit fields and the account streak are untouched. */
 	| "windowless_429"
 	/** Anthropic 403 `permission_error` — the account's ORGANIZATION forbids the
 	 *  request (OAuth disabled org-wide, Claude Code subscription access turned
@@ -576,6 +573,7 @@ export interface AccountRow {
 	auto_refresh_enabled?: boolean | number | null;
 	auto_pause_on_overage_enabled?: boolean | number | null;
 	peak_hours_pause_enabled?: boolean | number | null;
+	night_window_enabled?: boolean | number | null;
 	usage_pause_five_hour_threshold?: number | null;
 	usage_pause_weekly_threshold?: number | null;
 	usage_pause_five_hour_enabled?: boolean | number | null;
@@ -588,6 +586,7 @@ export interface AccountRow {
 	cross_region_mode?: string | null; // Bedrock cross-region inference mode
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
+	plan_monthly_usd?: number | null; // Actual monthly price of the account's subscription in USD; NULL = unknown / not a paid plan
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	last_manual_reauth_at?: number | null; // Timestamp of the last MANUAL reauthentication (CLI --reauthenticate or dashboard OAuth callback); NOT updated by automatic token refresh
@@ -623,6 +622,8 @@ export interface Account {
 	auto_refresh_enabled: boolean;
 	auto_pause_on_overage_enabled: boolean;
 	peak_hours_pause_enabled: boolean;
+	/** Add the Sail "balanced" completion-window header during the configured night window. */
+	night_window_enabled: boolean;
 	/** Pause the account when 5-hour utilization reaches this percent. null = unset. */
 	usage_pause_five_hour_threshold: number | null;
 	/** Pause the account when weekly utilization reaches this percent. null = unset. */
@@ -645,6 +646,7 @@ export interface Account {
 	cross_region_mode: string | null; // Bedrock cross-region inference mode
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
+	plan_monthly_usd: number | null; // Actual monthly price of the account's subscription in USD; null = unknown / not a paid plan
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	last_manual_reauth_at: number | null; // Timestamp of the last MANUAL reauthentication; NOT updated by automatic token refresh
@@ -691,6 +693,18 @@ export interface AccountResponse {
 	autoPauseOnOverageEnabled?: boolean;
 	peakHoursPauseEnabled?: boolean;
 	/**
+	 * Runtime-only, server-computed: whether this account's provider supports
+	 * the peak-hours pause toggle at all. TokenHarbor's support depends on its
+	 * endpoint host, so the dashboard cannot derive it from the provider alone.
+	 */
+	peakHoursPauseSupported?: boolean;
+	/**
+	 * Runtime-only: the model ids the account's TokenHarbor listing marks as
+	 * peak-priced. `null` when no listing has been fetched yet.
+	 */
+	peakPricedModels?: string[] | null;
+	nightWindowEnabled?: boolean;
+	/**
 	 * Runtime-only, server-computed peak-hours state (not persisted). `null` for
 	 * providers without a peak concept.
 	 */
@@ -714,6 +728,7 @@ export interface AccountResponse {
 	crossRegionMode?: string | null; // Cross-region inference mode for Bedrock accounts
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
+	planMonthlyUsd?: number | null; // Actual monthly subscription price in USD; null = unset
 	sessionStats: SessionStats | null;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 	lastManualReauthAt: number | null;
@@ -755,6 +770,8 @@ export interface AccountListItem {
 		| "zai"
 		| "minimax"
 		| "deepseek"
+		| "sailresearch"
+		| "opencode-go"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "nanogpt"
@@ -786,6 +803,7 @@ export interface AddAccountOptions {
 		| "zai"
 		| "minimax"
 		| "deepseek"
+		| "opencode-go"
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "bedrock"
@@ -811,6 +829,14 @@ function toNumOrNull(v: unknown): number | null {
 /** A nullable integer column where 0 is a real value, not "unset". */
 function msOrNull(v: unknown): number | null {
 	if (v === null || v === undefined) return null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
+}
+
+// `toNumOrNull` collapses 0 to null, which is wrong for a price: $0/month is a
+// real answer (a free plan) and has to round-trip distinctly from "unset".
+function toPriceOrNull(v: unknown): number | null {
+	if (v == null) return null;
 	const n = Number(v);
 	return Number.isFinite(n) ? n : null;
 }
@@ -844,6 +870,7 @@ export function toAccount(row: AccountRow): Account {
 		auto_refresh_enabled: !!row.auto_refresh_enabled,
 		auto_pause_on_overage_enabled: !!row.auto_pause_on_overage_enabled,
 		peak_hours_pause_enabled: !!row.peak_hours_pause_enabled,
+		night_window_enabled: !!row.night_window_enabled,
 		usage_pause_five_hour_threshold: toNumOrNull(
 			row.usage_pause_five_hour_threshold,
 		),
@@ -866,6 +893,7 @@ export function toAccount(row: AccountRow): Account {
 		cross_region_mode: row.cross_region_mode || null,
 		model_fallbacks: row.model_fallbacks || null,
 		billing_type: row.billing_type || null,
+		plan_monthly_usd: toPriceOrNull(row.plan_monthly_usd),
 		pause_reason: row.pause_reason || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
 		last_manual_reauth_at: toNumOrNull(row.last_manual_reauth_at),
