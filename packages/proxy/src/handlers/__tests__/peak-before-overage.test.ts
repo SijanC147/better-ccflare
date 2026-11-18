@@ -34,6 +34,10 @@ import {
 	getComboSlotInfo,
 	selectAccountsForRequest,
 } from "../account-selector";
+import {
+	markModelCooling,
+	resetModelCooldownsForTests,
+} from "../model-cooldown";
 import type { ProxyContext } from "../proxy-types";
 
 // 2026-09-23 02:00 UTC is outside the "14:00–00:00 UTC" off-peak window.
@@ -205,6 +209,7 @@ describe("a peak-priced plan account comes before overage (SB23-12677)", () => {
 		clearTokenHarborPeakCacheForTests();
 		setUseExtraUsage(false);
 		usageCache.clear();
+		resetModelCooldownsForTests();
 	});
 
 	it("pool: a peak-priced TokenHarbor plan account is selected before an Anthropic overage account", async () => {
@@ -233,6 +238,22 @@ describe("a peak-priced plan account comes before overage (SB23-12677)", () => {
 			MODEL,
 		);
 		expect(ids(ordered)).toEqual(["th-flat", "th-peak", "over"]);
+	});
+
+	it("pool: a cooling flat plan account gives way to the peak plan account, then overage", async () => {
+		const over = anthropicOnOverage("over", 0);
+		const peak = tokenHarbor("th-peak", 1);
+		const flat = tokenHarbor("th-flat", 2);
+		await seedListing(peak, [MODEL], originalFetch);
+		await seedListing(flat, ["deepseek-v4-pro"], originalFetch);
+		markModelCooling("th-flat", MODEL, WED_PEAK_MS + 60_000, WED_PEAK_MS);
+
+		const ordered = await selectAccountsForRequest(
+			meta(),
+			ctxFor([over, peak, flat]),
+			MODEL,
+		);
+		expect(ids(ordered)).toEqual(["th-peak", "over"]);
 	});
 
 	it("ladder: non-peak plan, then peak plan, then overage, slots index-aligned", async () => {

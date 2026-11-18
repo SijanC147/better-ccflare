@@ -256,7 +256,7 @@ export function peakHoursPauseTitle(account: {
 		models && models.length > 0
 			? `the models this account lists as peak-priced (${models.join(", ")})`
 			: "the models this account lists as peak-priced";
-	return `Skip this account for ${which} during their peak hours, when those models cost full price. Flat-priced models keep using this account. The window and model list come from the account's own /v1/models listing.`;
+	return `Try this account for ${which} only after flat-priced plan accounts during their peak hours, when those models cost full price, and still before any account on overage. Flat-priced models keep using this account. The window and model list come from the account's own /v1/models listing.`;
 }
 
 /**

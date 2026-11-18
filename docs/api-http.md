@@ -469,7 +469,7 @@ curl -X POST http://localhost:8080/api/accounts/uuid-here/usage-pause-thresholds
 Turn the peak-hours behaviour on or off for an account. What it means depends on the account's provider:
 
 - **Zai / DeepSeek** — the whole account is paused during the provider's peak pricing window and resumed when it ends.
-- **TokenHarbor** — the account is never paused. Only the models the account's own `/v1/models` listing marks as peak-priced are skipped during their peak window, so flat-priced models keep routing to it. Accepted only when the account's endpoint is TokenHarbor's host.
+- **TokenHarbor** — the account is never paused. Only the models the account's own `/v1/models` listing marks as peak-priced are tried after flat-priced plan accounts, and before any overage account, during their peak window, so flat-priced models keep routing to it. Accepted only when the account's endpoint is TokenHarbor's host.
 
 Any other account gets `400`. `enabled` is `0` or `1`; disabling also lifts any peak-hours pause immediately rather than waiting for the scheduler.
 
