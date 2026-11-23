@@ -79,6 +79,8 @@ interface AccountListItemProps {
 	account: Account;
 	isPrimary?: boolean | undefined;
 	compact?: boolean | undefined;
+	/** Drain-soonest strategies rank by usage reset; priority is only a tie-break (auto-fallback still uses it). */
+	drainSoonestStrategy?: boolean | undefined;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
@@ -110,6 +112,7 @@ export function AccountListItem({
 	account,
 	isPrimary = false,
 	compact = false,
+	drainSoonestStrategy = false,
 	onPauseToggle,
 	onForceResetRateLimit,
 	onRefreshUsage,
@@ -243,8 +246,16 @@ export function AccountListItem({
 							Primary
 						</span>
 					)}
-					<span className="px-2 py-0.5 text-xs font-medium bg-secondary text-secondary-foreground rounded-full">
+					<span
+						className="px-2 py-0.5 text-xs font-medium bg-secondary text-secondary-foreground rounded-full"
+						title={
+							drainSoonestStrategy
+								? "Drain-soonest strategies rank by usage-window reset time; priority is only the tie-break. Exception: auto-fallback reactivation picks its account by priority."
+								: undefined
+						}
+					>
 						Priority: {account.priority}
+						{drainSoonestStrategy && " (tie-break)"}
 					</span>
 					<OAuthTokenStatusWithBoundary
 						accountName={account.name}
