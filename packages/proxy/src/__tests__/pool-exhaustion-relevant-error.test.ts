@@ -546,7 +546,8 @@ describe("CCFLARE_POOL_EXHAUSTED_STATUS=429 does not replace the native replay (
 	});
 
 	afterEach(() => {
-		if (previous === undefined) delete process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
+		if (previous === undefined)
+			delete process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
 		else process.env.CCFLARE_POOL_EXHAUSTED_STATUS = previous;
 		collector?.mockRestore();
 		refusalCollector?.mockRestore();

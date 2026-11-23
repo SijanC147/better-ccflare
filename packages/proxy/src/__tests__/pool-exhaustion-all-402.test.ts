@@ -278,7 +278,8 @@ describe("CCFLARE_POOL_EXHAUSTED_STATUS=429 does not replace the all-402 replay 
 	});
 
 	afterEach(() => {
-		if (previous === undefined) delete process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
+		if (previous === undefined)
+			delete process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
 		else process.env.CCFLARE_POOL_EXHAUSTED_STATUS = previous;
 		collector?.mockRestore();
 		refusalCollector?.mockRestore();
@@ -296,7 +297,9 @@ describe("CCFLARE_POOL_EXHAUSTED_STATUS=429 does not replace the all-402 replay 
 		expect(seen).toEqual([MODEL, MODEL]);
 		expect(response.status).toBe(402);
 		expect(response.headers.get("x-better-ccflare-pool-status")).toBeNull();
-		expect(response.headers.get("anthropic-ratelimit-unified-status")).toBeNull();
+		expect(
+			response.headers.get("anthropic-ratelimit-unified-status"),
+		).toBeNull();
 		expect(await response.text()).toBe(BILLING_BODY);
 	});
 });

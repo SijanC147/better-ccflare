@@ -54,10 +54,6 @@ const baseAccount: Account = {
 	rateLimitedAt: null,
 	sessionInfo: "No active session",
 	priority: 1,
-	usagePauseFiveHourThreshold: null,
-	usagePauseWeeklyThreshold: null,
-	usagePauseFiveHourEnabled: false,
-	usagePauseWeeklyEnabled: false,
 	autoFallbackEnabled: true,
 	autoRefreshEnabled: true,
 	customEndpoint: null,
@@ -107,7 +103,6 @@ function renderAccount(
 			onPlanPriceChange={() => {}}
 			onAnthropicReauth={() => {}}
 			onRequestTransformerChange={onRequestTransformerChange}
-			onPlanPriceChange={() => {}}
 			drainSoonestStrategy={drainSoonestStrategy}
 		/>,
 	);
