@@ -523,3 +523,60 @@ describe("pool exhaustion returns the requested model's error (SB23-10878)", () 
 		]);
 	});
 });
+
+describe("CCFLARE_POOL_EXHAUSTED_STATUS=429 does not replace the native replay (SB23-13649)", () => {
+	let collector: ReturnType<typeof spyOn> | null = null;
+	let refusalCollector: ReturnType<typeof spyOn> | null = null;
+	const previous = process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
+	beforeEach(() => {
+		process.env.CCFLARE_POOL_EXHAUSTED_STATUS = "429";
+		const fake = {
+			handleStart: mock((_message: { responseStatus: number }) => {}),
+			handleChunk: mock(() => {}),
+			handleEnd: mock((_message: { error?: string }) => Promise.resolve()),
+		} as unknown as usageCollectorModule.UsageCollector;
+		collector = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue(fake);
+		refusalCollector = spyOn(
+			usageCollectorModule,
+			"tryGetUsageCollector",
+		).mockReturnValue(fake);
+	});
+
+	afterEach(() => {
+		if (previous === undefined) delete process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
+		else process.env.CCFLARE_POOL_EXHAUSTED_STATUS = previous;
+		collector?.mockRestore();
+		refusalCollector?.mockRestore();
+		fetchSlot.fetch = originalFetch;
+		usageCache.clear();
+		clearFamilyExhaustionCache();
+		resetRateLimitProbeGatesForTests();
+		resetModelCooldownsForTests();
+	});
+
+	it("six windowless 429s then META's 402: the client gets the native 429, not the pool refusal", async () => {
+		const ctx = makeContext([...anthropicAccounts(), metaAccount()]);
+		const calls = installFetch(() => windowless429(), metaBilling402);
+
+		const response = await send(ctx);
+		const body = (await response.json()) as {
+			type: string;
+			error: { type: string; code?: string; message: string };
+		};
+
+		expect(calls.hosts).toEqual([...Array(6).fill("anthropic"), "meta"]);
+		expect(calls.unknown).toEqual([]);
+		expect(response.status).toBe(429);
+		expect(response.headers.get("x-better-ccflare-pool-status")).toBeNull();
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(body.error.code).toBeUndefined();
+		expect(body.error.message).toBe(
+			`Every account that serves ${MODEL} refused this request; the last answered 429 (anthropic). ` +
+				`A meta account that maps the request to ${META_MODEL} answered 402, ` +
+				"which is not forwarded because it is not about the requested model.",
+		);
+	});
+});

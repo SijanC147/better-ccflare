@@ -5,12 +5,13 @@ fork from **tombii/better-ccflare**. Maintained by the `/sync-upstream` slash co
 Newest entries first. Do not hand-edit the `last-sync-sha` marker — `/sync-upstream`
 owns it for idempotency.
 
-<!-- last-sync-sha: 9c444e45b9ae682a57131bba2c280254f1660b87 -->
+<!-- last-sync-sha: 132fd644d623accedac82b40120ed23672299443 -->
 
 ## Sync History
 
 | Date | Upstream Branch | SHA Range | Commits | Conflicts | Strategy | Verification | PR |
 |------|-----------------|-----------|---------|-----------|----------|--------------|----|
+| 2026-11-23 | main | `9c444e45..132fd644` | 5 (non-merge) | 4 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-13649 |
 | 2026-11-18 | main | `55e69473..9c444e45` | 111 (non-merge) | 68 files (66 UU, 2 DU) | merge --no-ff | see the entry below | see the PR for SB23-12667 |
 | 2026-11-08 | main | `15cff50e..55e69473` | 124 (95 non-merge) | 20 files (all UU) | merge --no-ff | see the entry below | see the PR for SB23-11280 |
 | 2026-10-30 | main | `ba82474c..15cff50e` | 88 (71 non-merge) | 34 files (33 UU, 1 DU) | merge --no-ff | see the entry below | see the PR for SB23-10879 |
@@ -27,6 +28,42 @@ owns it for idempotency.
 ---
 
 <!-- New sync entries are appended below this line, newest first. -->
+
+## 2026-11-23: `9c444e45..132fd644` (5 upstream commits)
+
+**Strategy:** `merge --no-ff` by hand (lane BTCF-13649, SB23-13649). **Conflicts:** 4 paths, all content
+(UU). Hextap files untouched. Manifests kept at the fork's 3.49.0; upstream's `version` (3.6.12) not adopted.
+
+### Upstream features arriving
+
+- **Configurable pool-exhausted status** (`e5c0bc86`): `CCFLARE_POOL_EXHAUSTED_STATUS=429` answers the
+  empty-selection pool refusal as `rate_limit_error` / `code: pool_exhausted` with
+  `anthropic-ratelimit-unified-status`, `anthropic-ratelimit-unified-reset` and `x-should-retry`. Default
+  stays 503. Environment variable only, read per request; no config key. The auto-refresh scheduler treats
+  that 429 as a local refusal by `error.code`.
+- **Dashboard**: the Priority badge reads "Priority: N (tie-break)" with a tooltip under the drain-soonest
+  strategies (`c73aa5c0`, `f9a14abc`).
+- `CLAUDE_CLI_VERSION` 2.1.330, `CODEX_VERSION` 0.171.0.
+
+### Resolutions
+
+- `package.json`, `apps/cli/package.json`: kept the fork's version and scripts.
+- `AccountList.tsx`, `AccountListItem.tsx`: kept the fork's card (toolbar, compact grid, three rows) and
+  added upstream's `drainSoonestStrategy` prop and tooltip on the fork's Priority badge.
+
+### How the 429 setting meets the fork's terminal paths
+
+- The setting changes only `createPoolExhaustedResponse(..., "pool_exhausted")`, called when selection
+  returns no account at all (`proxy.ts` near 1417). Nothing was attempted there, so no native failure exists
+  to replay.
+- The all-accounts-failed terminal (step 11) never calls it. `#316`'s native replay
+  (`createRelevantExhaustionResponse`) and `#323`'s all-402 replay (`createAll402ExhaustionResponse`) still
+  run first and win; the generic fallthrough is still `ServiceUnavailableError`, a 503 the setting does not
+  touch.
+- `#326`'s plan, peak plan, then overage order is a selection order; an overage account still selectable
+  keeps the pool non-empty, so the refusal is reached only when nothing is selectable, as before.
+- Pinned by `pool-exhaustion-all-402.test.ts` and `pool-exhaustion-relevant-error.test.ts`, each with the
+  setting at 429.
 
 ## 2026-11-18: `55e69473..9c444e45` (111 upstream commits)
 

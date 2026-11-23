@@ -255,3 +255,48 @@ describe("an all-402 pool replays the native 402 (SB23-11281)", () => {
 		expect(await response.text()).toBe(BILLING_BODY);
 	});
 });
+
+describe("CCFLARE_POOL_EXHAUSTED_STATUS=429 does not replace the all-402 replay (SB23-13649)", () => {
+	let collector: ReturnType<typeof spyOn> | null = null;
+	let refusalCollector: ReturnType<typeof spyOn> | null = null;
+	const previous = process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
+	beforeEach(() => {
+		process.env.CCFLARE_POOL_EXHAUSTED_STATUS = "429";
+		const fake = {
+			handleStart: mock(() => {}),
+			handleChunk: mock(() => {}),
+			handleEnd: mock(() => Promise.resolve()),
+		} as unknown as usageCollectorModule.UsageCollector;
+		collector = spyOn(
+			usageCollectorModule,
+			"getUsageCollector",
+		).mockReturnValue(fake);
+		refusalCollector = spyOn(
+			usageCollectorModule,
+			"tryGetUsageCollector",
+		).mockReturnValue(fake);
+	});
+
+	afterEach(() => {
+		if (previous === undefined) delete process.env.CCFLARE_POOL_EXHAUSTED_STATUS;
+		else process.env.CCFLARE_POOL_EXHAUSTED_STATUS = previous;
+		collector?.mockRestore();
+		refusalCollector?.mockRestore();
+		fetchSlot.fetch = originalFetch;
+		usageCache.clear();
+		clearFamilyExhaustionCache();
+		resetRateLimitProbeGatesForTests();
+	});
+
+	it("two out-of-credit accounts: the client still gets the native 402, not the pool 429", async () => {
+		const seen = install402();
+		const response = await send(
+			makeContext([nativeMeta("M1", 0), nativeMeta("M2", 1)]),
+		);
+		expect(seen).toEqual([MODEL, MODEL]);
+		expect(response.status).toBe(402);
+		expect(response.headers.get("x-better-ccflare-pool-status")).toBeNull();
+		expect(response.headers.get("anthropic-ratelimit-unified-status")).toBeNull();
+		expect(await response.text()).toBe(BILLING_BODY);
+	});
+});
